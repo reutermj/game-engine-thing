@@ -1,2 +1,9 @@
+# Bazel's convenience symlinks into the output base.
 /bazel-*
+
+# Per-developer Bazel flags, picked up by the try-import in .bazelrc.
 /user.bazelrc
+
+# Cargo output. No build produces it, but running cargo to regenerate
+# Cargo.lock (docs/runbooks/001-regenerate-cargo-lock.md) can.
+/target/

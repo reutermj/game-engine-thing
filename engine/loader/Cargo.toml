@@ -2,6 +2,10 @@
 name = "engine"
 version = "0.0.0"
 edition = "2024"
+# Keep in step with the toolchain version in MODULE.bazel. Cargo resolves
+# crate versions against this, and without it against the host's rustc,
+# which is not what Bazel builds with.
+rust-version = "1.98"
 publish = false
 
 [[bin]]

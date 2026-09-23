@@ -6,12 +6,15 @@ cr.h-style: the loader owns each mod's state, so it survives code swaps.
 
 ## Try it
 
+Nothing needs to be installed: `./bazel` fetches a pinned bazelisk, which
+fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
+
 ```sh
-bazel run //game                  # terminal 1: engine + bootstrap + counter
+./bazel run //game                  # terminal 1: engine + bootstrap + counter
 # edit mods/counter/lib.rs, then:
-bazel run //mods/counter          # terminal 2: rebuild and hot-reload
-bazel run //mods/hello            # load a mod the running game didn't ship with
-bazel run //engine/modctl -- list # or: unload <name>, quit
+./bazel run //mods/counter          # terminal 2: rebuild and hot-reload
+./bazel run //mods/hello            # load a mod the running game didn't ship with
+./bazel run //engine/modctl -- list # or: unload <name>, quit
 ```
 
 ## Layout
@@ -25,7 +28,7 @@ bazel run //engine/modctl -- list # or: unload <name>, quit
 
 ## How reload works
 
-1. `bazel run //mods/foo` builds `libfoo.so`, then runs `modctl`, which sends
+1. `./bazel run //mods/foo` builds `libfoo.so`, then runs `modctl`, which sends
    `load foo <path>` to `$XDG_RUNTIME_DIR/game-engine-thing/control.sock`.
 2. Between frames, the engine copies the `.so` to a unique path, `dlopen`s it and
    checks its `ModInfo`. A bad build leaves the old code running.
@@ -35,3 +38,12 @@ bazel run //engine/modctl -- list # or: unload <name>, quit
 
 Mod `static`s don't survive a reload; put anything that should persist in the mod
 struct. A panicking mod is disabled until it's reloaded.
+
+## Docs
+
+- [docs/architecture/](docs/architecture/): the design, including the open
+  questions deliberately deferred until hot reload was proven
+- [docs/lore/](docs/lore/): non-obvious things that cost real effort to work out
+- [docs/runbooks/](docs/runbooks/): recurring maintenance procedures
+- [CLAUDE.md](CLAUDE.md): conventions for working in the repo (for agents,
+  and humans too)

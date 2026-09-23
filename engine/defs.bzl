@@ -91,8 +91,9 @@ def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwar
         # RUNPATH a dynamically linked C++/unwind runtime would need.
         cc_runtime_linkage = "static",
         # Bind every symbol at dlopen time so a build with unresolved symbols is
-        # rejected while the previous build is still running. rustc's full RELRO
-        # default already does this; pin it so the loader can rely on it.
+        # rejected while the previous build is still running. The llvm toolchain
+        # already links with -z now; pin it so the loader can rely on it. See
+        # docs/lore/mods-are-linked-bind-now.md.
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
         visibility = ["//visibility:private"],
         **kwargs

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Runs Bazel through a pinned bazelisk, so a fresh checkout needs nothing
+# installed: `./bazel run //game`. Bazelisk then fetches the Bazel version in
+# .bazelversion.
+#
+# The binary is downloaded on first use and checked against the sha256 below,
+# rather than committed: vendoring every platform's binary costs ~46 MB of
+# history per bump. `./bazel --update-bazelisk` rewrites the pins below to the
+# latest release.
+set -euo pipefail
+
+version=v1.29.0
+platforms=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+
+if [[ "${1:-}" == "--update-bazelisk" ]]; then
+  release="https://github.com/bazelbuild/bazelisk/releases"
+  # /releases/latest redirects to /releases/tag/<version>.
+  latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$release/latest")"
+  latest="${latest##*/}"
+  # Pin the sha256 the release publishes, not a hash of whatever we downloaded.
+  # Fetch every one before editing, so a failed request can't leave the new
+  # version paired with old checksums.
+  edits=(-e "s/^version=.*/version=$latest/")
+  for p in "${platforms[@]}"; do
+    sum="$(curl -fsSL "$release/download/$latest/bazelisk-$p.sha256" | cut -d' ' -f1)"
+    [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "bazel: bad sha256 for $p: $sum" >&2; exit 1; }
+    edits+=(-e "s/platform=$p sha256=[0-9a-f]*/platform=$p sha256=$sum/")
+  done
+  script="${BASH_SOURCE[0]}"
+  sed -i.bak "${edits[@]}" "$script"
+  rm -f "$script.bak"
+  echo "bazel: pinned bazelisk $latest (was $version)"
+  exit 0
+fi
+
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)   platform=linux-amd64 sha256=5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992 ;;
+  Linux-aarch64)  platform=linux-arm64 sha256=e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010 ;;
+  Darwin-x86_64)  platform=darwin-amd64 sha256=16c3d7aa15323a9fb69f56c7ec5733ed18bedb786680d0ba13bb12a3c8083007 ;;
+  Darwin-arm64)   platform=darwin-arm64 sha256=cee851f726789227d5561004e9904a52be45c3efb56f8b38b6993d6adbaa0409 ;;
+  *) echo "bazel: unsupported platform $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/game-engine-thing/bazelisk"
+bin="$cache/bazelisk-$version-$platform"
+
+if [[ ! -x "$bin" ]]; then
+  mkdir -p "$cache"
+  tmp="$(mktemp "$cache/download.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  echo "bazel: downloading bazelisk $version for $platform" >&2
+  curl -fsSL -o "$tmp" \
+    "https://github.com/bazelbuild/bazelisk/releases/download/$version/bazelisk-$platform"
+  # shasum exists on both Linux and macOS; sha256sum is Linux-only.
+  actual="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  if [[ "$actual" != "$sha256" ]]; then
+    echo "bazel: checksum mismatch for bazelisk-$platform: got $actual, want $sha256" >&2
+    exit 1
+  fi
+  chmod +x "$tmp"
+  # Rename last, so an interrupted download is never mistaken for a good binary.
+  mv "$tmp" "$bin"
+  trap - EXIT
+fi
+
+exec "$bin" "$@"

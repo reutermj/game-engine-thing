@@ -80,6 +80,8 @@ impl Engine {
                 info.api_version
             ));
         }
+        // A zero-sized mod still gets a real allocation: `alloc_zeroed` with a
+        // zero-size layout is undefined behavior.
         let state_layout = Layout::from_size_align(info.state_size.max(1), info.state_align)
             .map_err(|e| format!("{name}: bad state layout: {e}"))?;
 
@@ -181,9 +183,10 @@ impl Engine {
         Some(m.call(Op::STEP))
     }
 
-    /// Copies the library to a unique path before opening it. The Bazel output is
-    /// overwritten in place by the next build, and `dlopen` would hand back the
-    /// already-loaded image for a path it has seen.
+    /// Copies the library to a unique file before opening it. `dlopen` hands back
+    /// the already-loaded image for a path, or an inode, it has seen, so opening
+    /// the Bazel output again (or a link to it) would reload nothing. See
+    /// docs/lore/dlopen-returns-the-loaded-image-for-a-file-it-has-seen.md.
     fn open_staged(&self, name: &str, path: &Path) -> Result<Library, String> {
         std::fs::create_dir_all(&self.staging_dir)
             .map_err(|e| format!("creating {}: {e}", self.staging_dir.display()))?;
