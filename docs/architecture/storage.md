@@ -57,6 +57,150 @@ Decided 2026-09-23: typed structural parameters replace commands in
 non-exclusive systems. Free-form `cx.commands()` is left to exclusive
 systems, and to code outside a frame (hooks, message handlers).
 
+### What a change is visible to
+
+Decided 2026-09-23, the sequential frame's rules:
+
+- **Not to the system that made it**, even later in its own loop. It lands
+  in the apply node, after the system returns.
+- **To every system after it in the plan, the same frame**, in this phase or
+  a later one, in any mod: each such system's dependencies include the apply
+  node. Systems before it in the plan see it next frame.
+- **Filters count as touching the component.** `Without<Burning>` reads
+  `Burning`'s membership, so it orders after the apply like any reader. Only
+  systems that can't observe the change skip the wait.
+- **An insert on an entity that has the component replaces the value**; one
+  on an entity that has died is dropped.
+
+"After in the plan" includes the tie-break (load order), which a hot load
+can change. A system that relies on another's changes in the same frame
+should say `.after(..)`. Flagging reliance on the tie-break is a job for a
+game-side linter, not the engine.
+
+## Walkthrough: walkers that catch fire
+
+What a game writes, and what the engine does with it. Walkers that step
+into lava start burning; a second system burns them down and puts them out.
+
+### The components
+
+```rust
+// A table component: stored in archetype tables, in pages.
+engine_api::component! {
+    #[derive(Debug, Default, Copy)]
+    pub struct Health: "game::Health" { pub hp: f32 }
+}
+
+// Comes and goes often, so it's sparse: adding or removing it doesn't move
+// the entity to another table.
+engine_api::component! {
+    #[derive(Debug, Default, Copy)]
+    pub struct Burning: "game::Burning", storage = sparse {
+        pub dps: f32,
+        pub left: f32,
+    }
+}
+```
+
+### The systems
+
+```rust
+impl Hazards {
+    /// Sets walkers standing in lava on fire.
+    fn ignite(
+        &mut self, _: &mut (), cx: &mut Cx,
+        lava: Query<&Lava>,
+        walkers: Query<(&Position, &Health), Without<Burning>>,
+        burn: Inserts<Burning>,
+    ) {
+        let pools: Vec<Rect> = lava.iter(cx).map(|(_, l)| l.area).collect();
+        for (e, (pos, _)) in walkers.iter(cx) {
+            if pools.iter().any(|area| area.contains(pos)) {
+                burn.insert(e, Burning { dps: 5.0, left: 3.0 });
+            }
+        }
+    }
+
+    /// Burns them down, and puts them out when the fire runs out.
+    fn burn(
+        &mut self, _: &mut (), cx: &mut Cx,
+        clocks: Query<&Clock>,
+        burning: Query<(&mut Health, &mut Burning)>,
+        out: Removes<Burning>,
+    ) {
+        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
+        for (e, (health, fire)) in burning.iter(cx) {
+            health.hp -= fire.dps * dt;
+            fire.left -= dt;
+            if fire.left <= 0.0 {
+                out.remove(e);
+            }
+        }
+    }
+}
+
+impl Mod for Hazards {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("ignite", Self::ignite);
+        s.add("burn", Self::burn).after("hazards::ignite");
+    }
+}
+```
+
+In the mod's code:
+
+- **`burn.insert` works inside the query loop.** `Inserts<Burning>` is a
+  handle to this system's own buffer, not to the world, so it needs no `cx`
+  (which the loop is borrowing) and no lock (only this system writes it).
+- **The types say what can change.** `burn.insert(e, Health { .. })` doesn't
+  compile, and neither does writing through `Query<&Health>`. A change the
+  parameters don't declare needs an exclusive system.
+- **The declaration is the signature.** `ignite` reads `Lava`, `Position`
+  and `Health` and inserts `Burning`; `burn` reads `Clock`, writes `Health`
+  and `Burning`, and removes `Burning`.
+
+### The frame
+
+With `hazards::ignite`, `hazards::burn` and `render::draw_health` (reads
+`Health`) in `update`, and `physics::integrate` (writes `Position`) in
+`simulate`, the frame's graph is:
+
+```
+ignite ──► apply(insert Burning) ──► burn ──► apply(remove Burning)
+   │                                   │
+   │                                   └──► draw_health   (reads Health, which burn writes)
+   └──► physics::integrate                  (writes Position, which ignite reads)
+```
+
+- **The apply node touches only `Burning`'s sparse set.** No entity changes
+  table, so no `Position` or `Health` page is involved, and nothing using
+  only other components waits for it: `physics::integrate` doesn't.
+- **`burn` waits for it**, being later in the plan and touching `Burning`,
+  so it sees this frame's fires. Had `burn` come first in the plan, it would
+  see them next frame.
+- **No phase boundary is involved.** A `late` system touching only `Sprite`
+  runs as soon as its own dependencies are done, even while `burn` is.
+
+### If `Burning` were a table component
+
+Then an insert moves the entity from the `(Position, Health)` table to
+`(Position, Health, Burning)`. The apply node's footprint is the pages
+holding those rows in both tables, and the entities' locations, which
+overlaps `physics::integrate`'s writes to `Position` in those tables: one of
+them waits for the other, in plan order, and the frame is less parallel.
+That is why a component that's added and removed often should be sparse,
+and why the choice is the component's.
+
+### Iterating
+
+`walkers.iter(cx)` walks every page of every table matching `(Position,
+Health)`, skipping entities in `Burning`'s sparse set. Each page hands the
+mod plain `&[Position]` and `&[Health]` slices, in its own code, instead of a
+host call per entity. Data parallelism (step 3) adds a page-level form that
+hands whole pages to workers.
+
 ## Archetype tables in pages
 
 - A **table** holds every entity with exactly one set of table-stored
