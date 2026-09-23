@@ -39,7 +39,7 @@ three homes, by how long it has to live:
 |---|---|---|
 | one build | closures, trait objects, caches, crate objects | the mod's `Transient` |
 | across reloads | the mod's own game state | the mod's state (`mod_state!`) |
-| the process | windows, devices, threads | registered resources, service mods (get-y5t) |
+| the process | windows, devices, threads | registered resources, resident mods (get-y5t) |
 
 **The state** is the `Mod` type itself, declared with `mod_state!`. The loader
 allocates it, makes it from the build's `Default` on first load, and hands it
