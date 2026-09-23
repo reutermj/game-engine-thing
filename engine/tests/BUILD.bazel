@@ -1,0 +1,106 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_game", "engine_mod")
+
+# Test mods live here, apart from the demo mods in //mods, so editing a demo
+# never changes what a test proves.
+
+rust_library(
+    name = "probe",
+    srcs = ["probe.rs"],
+    crate_name = "test_probe",
+    deps = ["//engine/api"],
+)
+
+engine_mod(
+    name = "driver",
+    srcs = ["mods/driver.rs"],
+    crate_root = "mods/driver.rs",
+)
+
+# Builds of the one mod `counter`. See mods/counter.rs.
+COUNTER_BUILDS = [
+    "v1",
+    "v2",
+    "v3",
+    "panic",
+]
+
+[engine_mod(
+    name = "counter_" + build,
+    srcs = ["mods/counter.rs"],
+    crate_features = [build],
+    crate_root = "mods/counter.rs",
+    mod_name = "counter",
+    deps = [":probe"],
+) for build in COUNTER_BUILDS]
+
+[engine_mod(
+    name = "mover_" + build,
+    srcs = ["mods/mover.rs"],
+    crate_features = [build],
+    crate_root = "mods/mover.rs",
+    mod_name = "mover",
+) for build in [
+    "v1",
+    "v2",
+]]
+
+engine_mod(
+    name = "no_entry",
+    srcs = ["mods/no_entry.rs"],
+    crate_root = "mods/no_entry.rs",
+)
+
+engine_mod(
+    name = "wrong_api",
+    srcs = ["mods/wrong_api.rs"],
+    crate_root = "mods/wrong_api.rs",
+)
+
+TEST_MODS = {
+    "DRIVER": ":driver",
+    "MOVER_V1": ":mover_v1",
+    "MOVER_V2": ":mover_v2",
+    "NO_ENTRY": ":no_entry",
+    "WRONG_API": ":wrong_api",
+} | {
+    "COUNTER_" + build.upper(): ":counter_" + build
+    for build in COUNTER_BUILDS
+}
+
+rust_test(
+    name = "reload_test",
+    srcs = ["reload_test.rs"],
+    data = TEST_MODS.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_MODS.items()},
+    deps = [
+        ":probe",
+        "//engine/api",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+# The real bootstrap mod (with frame pacing) and one test mod, as a game.
+engine_game(
+    name = "test_game",
+    bootstrap = "//mods/bootstrap",
+    mods = [":counter_v1"],
+)
+
+E2E_DATA = {
+    "COUNTER_V2": ":counter_v2",
+    "ENGINE": "//engine/loader:engine",
+    # The engine_game target's output is its manifest.
+    "MANIFEST": ":test_game",
+    "MODCTL": "//engine/modctl",
+}
+
+rust_test(
+    name = "e2e_test",
+    srcs = ["e2e_test.rs"],
+    data = E2E_DATA.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in E2E_DATA.items()},
+    deps = ["@rules_rust//rust/runfiles"],
+)

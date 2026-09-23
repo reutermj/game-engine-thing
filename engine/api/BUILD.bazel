@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "api",
@@ -9,4 +10,9 @@ rust_library(
     crate_name = "engine_api",
     crate_root = "lib.rs",
     visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "api_test",
+    crate = ":api",
 )

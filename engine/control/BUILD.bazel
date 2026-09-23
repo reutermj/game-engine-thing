@@ -1,8 +1,14 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "control",
     srcs = ["lib.rs"],
     crate_name = "engine_control",
     visibility = ["//engine:__subpackages__"],
+)
+
+rust_test(
+    name = "control_test",
+    crate = ":control",
 )

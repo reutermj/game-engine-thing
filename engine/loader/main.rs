@@ -8,19 +8,14 @@
 //! The loop lives here rather than inside the bootstrap mod so that the
 //! bootstrap mod can be reloaded too: code can't be swapped while it's on the stack.
 
-mod control_server;
-mod engine;
-mod world;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use engine_api::Status;
+use engine_loader::control_server::ControlServer;
+use engine_loader::engine::Engine;
 use runfiles::Runfiles;
-
-use crate::control_server::ControlServer;
-use crate::engine::Engine;
 
 /// A mod listed in the manifest written by the `engine_game` rule.
 struct Entry {

@@ -230,3 +230,125 @@ macro_rules! export_mod {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    struct Tracked {
+        steps: u32,
+    }
+
+    impl Default for Tracked {
+        fn default() -> Self {
+            Tracked { steps: 40 }
+        }
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Mod for Tracked {
+        fn step(&mut self, _cx: &mut Cx) -> Status {
+            self.steps += 1;
+            if self.steps > 41 {
+                panic!("second step panics");
+            }
+            Status::OK
+        }
+    }
+
+    /// A context whose state is zeroed memory, as the loader provides it.
+    /// No host: nothing here calls back into one.
+    fn fresh_context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
+        unsafe { std::ptr::write_bytes(state.as_mut_ptr(), 0, 1) };
+        ModContext {
+            host: std::ptr::null(),
+            name: "t".as_ptr(),
+            name_len: 1,
+            generation: 0,
+            loaded_at: 1,
+            state: state.as_mut_ptr() as *mut c_void,
+            state_fresh: true,
+        }
+    }
+
+    #[test]
+    fn dispatch_initializes_fresh_state_steps_catches_panics_and_drops_on_close() {
+        let mut state = std::mem::MaybeUninit::<Tracked>::uninit();
+        let mut ctx = fresh_context(&mut state);
+        let dispatch = |ctx: &mut ModContext, op| unsafe { __dispatch::<Tracked>(ctx, op) };
+
+        assert_eq!(dispatch(&mut ctx, Op::LOAD), Status::OK);
+        assert!(!ctx.state_fresh, "LOAD must mark the state initialized");
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 40, "initialized from Default, not zero");
+
+        assert_eq!(dispatch(&mut ctx, Op::STEP), Status::OK);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 41);
+        assert_eq!(dispatch(&mut ctx, Op::STEP), Status::ERROR, "a panic must become ERROR, not unwind");
+        assert_eq!(dispatch(&mut ctx, Op(77)), Status::ERROR, "unknown ops are errors");
+
+        // A reload's LOAD sees live state and must not reinitialize it.
+        assert_eq!(dispatch(&mut ctx, Op::LOAD), Status::OK);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 42);
+
+        let before = DROPS.load(Ordering::SeqCst);
+        assert_eq!(dispatch(&mut ctx, Op::CLOSE), Status::OK);
+        assert_eq!(DROPS.load(Ordering::SeqCst), before + 1, "CLOSE must drop the state");
+    }
+
+    component! {
+        #[derive(Default)]
+        struct Mixed: "test::Mixed" {
+            a: u8,
+            b: f64,
+            c: Entity,
+            d: bool,
+        }
+    }
+
+    #[test]
+    fn component_macro_records_every_field_where_the_compiler_put_it() {
+        let fields: Vec<(String, FieldKind, usize)> = Mixed::FIELDS
+            .iter()
+            .map(|f| {
+                let name = unsafe { std::slice::from_raw_parts(f.name, f.name_len) };
+                (String::from_utf8(name.to_vec()).unwrap(), f.kind, f.offset)
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("a".into(), FieldKind::U8, std::mem::offset_of!(Mixed, a)),
+                ("b".into(), FieldKind::F64, std::mem::offset_of!(Mixed, b)),
+                ("c".into(), FieldKind::ENTITY, std::mem::offset_of!(Mixed, c)),
+                ("d".into(), FieldKind::BOOL, std::mem::offset_of!(Mixed, d)),
+            ]
+        );
+        // Rust reorders fields; the schema must follow the real layout, which
+        // is only true if these aren't simply declaration order.
+        let offsets: Vec<usize> = fields.iter().map(|f| f.2).collect();
+        assert_ne!(offsets, [0, 1, 9, 17], "{offsets:?}");
+        assert_eq!(Mixed::NAME, "test::Mixed");
+        assert_eq!(Mixed::VERSION, 0);
+    }
+
+    component! {
+        #[derive(Default)]
+        struct Versioned: "test::Versioned", version = 3 {
+            a: u32,
+        }
+    }
+
+    #[test]
+    fn component_macro_passes_the_version_through() {
+        assert_eq!(Versioned::VERSION, 3);
+    }
+}

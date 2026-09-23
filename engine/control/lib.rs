@@ -60,7 +60,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `$ENGINE_SOCKET`, else a per-user path under `$XDG_RUNTIME_DIR` or `/tmp`.
+/// `$ENGINE_SOCKET`, else `control.sock` in [`runtime_dir`].
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("ENGINE_SOCKET") {
         return path.into();
@@ -68,8 +68,14 @@ pub fn socket_path() -> PathBuf {
     runtime_dir().join("control.sock")
 }
 
-/// Per-user scratch directory for the socket and copies of loaded libraries.
+/// Scratch directory for the socket and copies of loaded libraries:
+/// `$ENGINE_RUNTIME_DIR`, else a per-user directory under `$XDG_RUNTIME_DIR` or
+/// `/tmp`. Tests set the override so they stay inside their sandbox and can
+/// run in parallel.
 pub fn runtime_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("ENGINE_RUNTIME_DIR") {
+        return dir.into();
+    }
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) => PathBuf::from(dir).join("game-engine-thing"),
         None => std::env::temp_dir().join(format!("game-engine-thing-{}", uid())),
@@ -90,4 +96,39 @@ pub fn send(request: &Request) -> io::Result<String> {
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_request_survives_a_round_trip() {
+        let requests = [
+            Request::Load { name: "counter".into(), path: "/tmp/a b/libcounter.so".into() },
+            Request::Unload { name: "counter".into() },
+            Request::List,
+            Request::Quit,
+        ];
+        for request in requests {
+            let line = request.to_line();
+            assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "{line:?}");
+            assert_eq!(Request::parse(&line), Ok(request));
+        }
+    }
+
+    #[test]
+    fn a_load_path_is_the_rest_of_the_line() {
+        assert_eq!(
+            Request::parse("load counter /with  two  spaces/lib.so\r\n"),
+            Ok(Request::Load { name: "counter".into(), path: "/with  two  spaces/lib.so".into() })
+        );
+    }
+
+    #[test]
+    fn malformed_requests_are_rejected() {
+        for line in ["", "load", "load counter", "unload", "unload two words", "reload counter", "LIST"] {
+            assert!(Request::parse(line).is_err(), "{line:?} parsed");
+        }
+    }
 }

@@ -40,7 +40,9 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
     API over it. Separate from `lib.rs` because it is a second contract: how
     mods share data, not how a mod is loaded.
-- `engine/loader/` — the engine binary.
+- `engine/loader/` — the engine: a library (`lib.rs`) with everything but
+  the manifest and the loop, so tests can drive an `Engine` directly, and
+  the binary (`main.rs`) around it.
   - `engine.rs` — the mod list, state memory and host callbacks. The one
     file where mod code is called, so it owns the rule that mods run only
     while the list is shared-borrowed.
@@ -50,7 +52,6 @@ changing the ABI, the reload sequence or the Bazel rules.
     [docs/architecture/ecs.md](docs/architecture/ecs.md).
   - `control_server.rs` — serves the control socket. Separate because it is
     polled between frames, and that timing is what makes a reload safe.
-  - `main.rs` — manifest reading and the trampoline loop.
 - `engine/control/` — the control protocol and socket path. Its own crate
   because both the engine and `modctl` speak it; neither should import the
   other.
@@ -64,6 +65,9 @@ changing the ABI, the reload sequence or the Bazel rules.
   across reloads), `hello` (loaded live, not in the manifest), and the ECS
   demo: `spawner` creates entities, `physics` is a stateless system,
   `reporter` prints positions.
+- `engine/tests/` — integration and e2e tests, and the test mods they load.
+  The test mods are separate from `mods/` so editing a demo never changes
+  what a test proves. See the testing conventions below.
 - `game/` — the `engine_game` target listing the mods loaded at startup.
   - `components/` — the game's components. A library, not a mod: each mod
     that uses a component links this crate, and the world matches them by
@@ -87,11 +91,36 @@ changing the ABI, the reload sequence or the Bazel rules.
   `cc_runtime_linkage`, which the mods depend on, appears only in the
   patched `rules_rust` source (see
   [lore](docs/lore/rust-shared-libraries-link-the-cxx-runtime-dynamically.md)).
-- **Verify a reload end to end, not just the build.** A mod change is done
-  when `./bazel run //game` is running, `./bazel run //mods/<name>` reloads
-  it, and the log shows the state carried over (or reset, if its layout
-  changed). There are no automated tests yet; until there are, say which of
-  these you ran and which you didn't.
+- **Tests come in three tiers, and each proves something the others
+  can't.** Run them all with `./bazel test //...`. Fix a bug at the lowest
+  tier that can fail on it.
+  - *Unit tests* (`//engine/api:api_test`, `//engine/loader:loader_test`,
+    `//engine/control:control_test`) cover pure logic: the world store,
+    migration, the `component!` schema, `__dispatch`, the protocol. They
+    are the cheap place to pin edge cases and negatives.
+  - *Integration tests* (`//engine/tests:reload_test`) load real mod
+    libraries into a real `Engine` and step exact frame counts: no process,
+    socket or sleeping. The only tier that exercises staging, `dlopen` and
+    the state handoff.
+  - *End-to-end tests* (`//engine/tests:e2e_test`) run the engine binary
+    and drive it with `modctl`, the only tier that covers the manifest,
+    runfiles and the socket. Keep them few; they are the slowest and the
+    only ones that can be timing-sensitive.
+  - `bazel run` itself as the reload trigger is untested, since Bazel
+    doesn't run inside `bazel test`. After changing the rules or `modctl`,
+    run `./bazel run //game` and `./bazel run //mods/<name>` by hand and say
+    that you did.
+- **A reload test needs two different builds.** Load `counter_v1`, then
+  `counter_v2`, and assert on which one's code ran. Reloading the same build
+  passes even when reloading does nothing, because `dlopen` hands back the
+  image it already has.
+- **Green has to be earned.** For each new test, make the edit that should
+  break it and watch it fail; for a change to tested code, do the same for
+  the tests that claim to cover it. Each tier was checked this way when it
+  was written, and every surviving break exposed a test that couldn't see
+  what it claimed to (a panicking mod that panicked on every step looked the
+  same disabled or not). Check a new e2e test with `--runs_per_test=50`
+  before trusting it.
 - **Comments explain why, not what.** A "what" comment is a second copy of
   the code: it can only be redundant or wrong, and it turns wrong the
   moment the line it describes changes. Spend the comment on what the code
@@ -116,8 +145,8 @@ changing the ABI, the reload sequence or the Bazel rules.
     *(History: ...)* in a comment. Date it and say what was removed and why.
   - **A comment stating a checkable claim is a test that hasn't been
     written yet.** "Linked with `-z now`, so a missing symbol fails here" is
-    an assertion about behavior. Pin it when a test tier exists; until then,
-    re-check it when the thing it names changes. Prose naming an identifier
+    an assertion about behavior, and the integration tests are where it
+    gets pinned. Prose naming an identifier
     is a reference nothing checks, so re-grep after a rename.
 
 ## When you learn something non-obvious

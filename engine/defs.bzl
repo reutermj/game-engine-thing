@@ -75,7 +75,9 @@ def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwar
 
     Args:
       name: Target name. `bazel run` on it (re)loads the mod into the running engine.
-      srcs: Rust sources; the crate root is `lib.rs`.
+      srcs: Rust sources. The crate root is `lib.rs` unless `crate_root` is
+        passed, which lets one source file build several variants of a mod
+        (with different `crate_features`), as the tests do.
       deps: Extra Rust deps. `//engine/api` is always included.
       mod_name: Name the engine uses for the mod. Defaults to `name`.
       visibility: Visibility of the mod target.
@@ -84,7 +86,7 @@ def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwar
     rust_shared_library(
         name = name + "_lib",
         crate_name = name.replace("-", "_"),
-        crate_root = "lib.rs",
+        crate_root = kwargs.pop("crate_root", "lib.rs"),
         srcs = srcs,
         deps = deps + ["//engine/api"],
         # The engine copies each .so before dlopen, which breaks the $ORIGIN

@@ -1,14 +1,38 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
-rust_binary(
-    name = "engine",
-    srcs = glob(["*.rs"]),
-    crate_root = "main.rs",
-    visibility = ["//visibility:public"],
+rust_library(
+    name = "loader",
+    srcs = [
+        "control_server.rs",
+        "engine.rs",
+        "lib.rs",
+        "world.rs",
+    ],
+    crate_name = "engine_loader",
+    visibility = ["//engine:__subpackages__"],
     deps = [
         "//engine/api",
         "//engine/control",
         "@crates//:libloading",
+    ],
+)
+
+rust_binary(
+    name = "engine",
+    srcs = ["main.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":loader",
+        "//engine/api",
+        "//engine/control",
         "@rules_rust//rust/runfiles",
     ],
+)
+
+# Unit tests: the modules' own #[cfg(test)] tests, over pure logic.
+rust_test(
+    name = "loader_test",
+    crate = ":loader",
 )

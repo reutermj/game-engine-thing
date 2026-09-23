@@ -29,6 +29,14 @@ impl Entity {
     pub const DEAD: Entity = Entity { index: u32::MAX, generation: u32::MAX };
 }
 
+/// `DEAD`: a component's `Entity` field defaults to referring to nothing,
+/// which is also what a migration gives a newly added one.
+impl Default for Entity {
+    fn default() -> Self {
+        Entity::DEAD
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ComponentId(pub u32);
@@ -55,6 +63,22 @@ pub struct ComponentDesc {
     /// `size` bytes of this build's `Default`, the starting point of every
     /// migrated value: fields the old layout lacks keep these bytes.
     pub default: *const u8,
+}
+
+impl ComponentDesc {
+    /// `T`'s desc. Borrows `default`, which must outlive the desc's use.
+    pub fn of<T: Component>(default: &T) -> ComponentDesc {
+        ComponentDesc {
+            name: T::NAME.as_ptr(),
+            name_len: T::NAME.len(),
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            version: T::VERSION,
+            fields: T::FIELDS.as_ptr(),
+            field_count: T::FIELDS.len(),
+            default: default as *const T as *const u8,
+        }
+    }
 }
 
 /// The kinds of field the loader can migrate. A plain integer for the same
@@ -240,17 +264,7 @@ impl<'a> World<'a> {
 
     fn id<T: Component>(&self) -> ComponentId {
         let default = T::default();
-        let desc = ComponentDesc {
-            name: T::NAME.as_ptr(),
-            name_len: T::NAME.len(),
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            version: T::VERSION,
-            fields: T::FIELDS.as_ptr(),
-            field_count: T::FIELDS.len(),
-            default: &default as *const T as *const u8,
-        };
-        unsafe { (self.api().register)(self.ctx, &desc) }
+        unsafe { (self.api().register)(self.ctx, &ComponentDesc::of(&default)) }
     }
 
     pub fn spawn(&mut self) -> Entity {
