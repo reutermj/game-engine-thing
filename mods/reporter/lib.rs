@@ -3,13 +3,17 @@
 use engine_api::{Cx, Mod, Status, export_mod};
 use transform::Position;
 
-#[derive(Default)]
-struct Reporter {
-    frames: u64,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Reporter {
+        frames: u64,
+    }
 }
 
 impl Mod for Reporter {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         self.frames += 1;
         if self.frames % 60 != 0 {
             return Status::OK;

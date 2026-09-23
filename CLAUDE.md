@@ -36,8 +36,11 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/api/` — the ABI between loader and mods. Its own crate because
   it is the only code linked into both sides: everything in it is
   `#[repr(C)]`, and changing a type's shape means bumping `API_VERSION`.
-  Also holds the safe `Mod` trait and `export_mod!`, so a mod never touches
-  the raw ABI.
+  Also holds the safe `Mod` trait, `mod_state!` and `export_mod!`, so a mod
+  never touches the raw ABI. A mod's state is carried across reloads and so
+  follows the component rule (only `FieldType` fields); anything else it
+  keeps goes in its `Transient`, which each build makes for itself. See
+  [docs/architecture/hot-reload.md](docs/architecture/hot-reload.md#who-owns-state).
   - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
     API over it. Separate from `lib.rs` because it is a second contract: how
     mods share data, not how a mod is loaded.

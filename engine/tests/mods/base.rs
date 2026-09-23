@@ -10,15 +10,19 @@ const BUILD: &str = "v1b";
 #[cfg(feature = "v2")]
 const BUILD: &str = "v2";
 
-#[derive(Default)]
-struct Base;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Base {}
+}
 
 impl Mod for Base {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!("base {BUILD}"));
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         cx.world().query::<base::Shared>().count();
         Status::OK
     }

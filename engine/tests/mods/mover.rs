@@ -30,13 +30,17 @@ impl Default for Pos {
     }
 }
 
-#[derive(Default)]
-struct Mover {
-    spawned: bool,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Mover {
+        spawned: bool,
+    }
 }
 
 impl Mod for Mover {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         if !self.spawned {
             let e = world.spawn();
@@ -50,7 +54,7 @@ impl Mod for Mover {
         world.query::<Pos>().count();
     }
 
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         Status::OK
     }
 }

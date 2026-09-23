@@ -28,11 +28,13 @@ fn map() -> Vec<&'static str> {
     MAP_TEXT.lines().collect()
 }
 
-#[derive(Default)]
-struct Level {
-    /// Hash of the map these entities were built from; 0 before the first build.
-    built: u64,
-    entities: Vec<Entity>,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Level {
+        /// Hash of the map these entities were built from; 0 before the first build.
+        built: u64,
+        entities: Vec<Entity>,
+    }
 }
 
 fn map_hash() -> u64 {
@@ -87,7 +89,9 @@ impl Level {
 }
 
 impl Mod for Level {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let hash = map_hash();
         if hash == self.built {
             return;
@@ -112,11 +116,11 @@ impl Mod for Level {
         cx.log(format!("{BUILT} a {}x{} level", info.width, info.height));
     }
 
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         Status::OK
     }
 
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         self.clear(&mut cx.world());
     }
 }

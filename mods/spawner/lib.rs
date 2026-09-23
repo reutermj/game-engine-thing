@@ -5,15 +5,19 @@ use engine_api::{Cx, Entity, Mod, Status, export_mod};
 use physics::Velocity;
 use transform::Position;
 
-#[derive(Default)]
-struct Spawner {
-    /// Empty until the first load. Mod state survives reloads, so a reload
-    /// sees these and doesn't spawn again.
-    spawned: Vec<Entity>,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Spawner {
+        /// Empty until the first load. Mod state survives reloads, so a reload
+        /// sees these and doesn't spawn again.
+        spawned: Vec<Entity>,
+    }
 }
 
 impl Mod for Spawner {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         if !self.spawned.is_empty() {
             return;
         }
@@ -28,13 +32,13 @@ impl Mod for Spawner {
         cx.log(format!("spawned {n} entities"));
     }
 
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         Status::OK
     }
 
     /// Only on unload for good (or a state reset): the entities are this mod's
     /// to clean up.
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         for e in self.spawned.drain(..) {
             world.despawn(e);

@@ -18,8 +18,10 @@ use platformer::{
 /// Keeps a box that is flush against a tile from counting as inside it.
 const EPSILON: f32 = 1e-4;
 
-#[derive(Default)]
-struct Core;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Core {}
+}
 
 /// The level's tiles by cell, rebuilt each frame. Rebuilding is cheap at this
 /// size, and it means a level reload needs no notification.
@@ -89,7 +91,9 @@ fn respawn(p: &mut Player, info: &LevelInfo) {
 }
 
 impl Mod for Core {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         let mut world = cx.world();
         let Some(Clock { dt, .. }) = clock::now(&mut world) else {
             return Status::OK;

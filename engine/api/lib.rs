@@ -7,8 +7,15 @@
 //!   before the loader commits to a new build.
 //! - `engine_mod_main(ctx, op) -> Status`: the single entry point, cr.h style.
 //!
-//! The loader owns each mod's state memory, so it survives a reload. Mod code,
-//! including its `static`s, does not: every reload is a fresh `dlopen`.
+//! A mod's data has two lifetimes. Its state (the [`Mod`] type itself, declared
+//! with [`mod_state!`]) is owned by the loader and carried across reloads, so
+//! it may only hold data that can't point into a build's code, the same rule
+//! components follow. Its transient part ([`Mod::Transient`]) is made by every
+//! build on load and dropped by the same build before it's swapped out, so it
+//! may hold anything: closures, trait objects, crate objects. What's too
+//! expensive to rebuild on every load belongs to a longer-lived owner (see
+//! get-y5t). Mod code, including its `static`s, never survives a reload: every
+//! reload is a fresh `dlopen`.
 //!
 //! Mods normally don't touch any of this directly; they implement [`Mod`] and
 //! call [`export_mod!`].
@@ -25,7 +32,7 @@ pub use ecs::{
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = 7;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -40,14 +47,17 @@ pub type MainFn = unsafe extern "C" fn(ctx: *mut ModContext, op: Op) -> Status;
 pub struct Op(pub u32);
 
 impl Op {
-    /// Code was just mapped in, on first load or after a reload.
+    /// Code was just mapped in, on first load or after a reload. The state is
+    /// live (the loader made it from `Default` if it's new); the build makes its
+    /// transient part.
     pub const LOAD: Op = Op(0);
     /// Run one tick.
     pub const STEP: Op = Op(1);
-    /// Code is about to be swapped for a new build. State is kept.
+    /// Code is about to be swapped for a new build. The build drops its
+    /// transient part; the state is kept (or migrated) for the next build.
     pub const UNLOAD: Op = Op(2);
     /// State is about to be freed: the mod is being removed, or the new build's
-    /// state layout doesn't match. Drop anything the state owns.
+    /// state can't take it over. The build drops its transient part and state.
     pub const CLOSE: Op = Op(3);
     /// Handle the text in `ModContext::message`, sent over the control
     /// socket, and reply through `Host::reply`.
@@ -82,30 +92,30 @@ impl Status {
     pub const REFUSED: Status = Status(2);
 }
 
+/// What a build says about itself. Pointers point into the library; the
+/// loader copies what it keeps.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ModInfo {
     pub api_version: u32,
-    /// Bump when the state's meaning changes without its size or alignment changing.
+    /// The state's layout and schema, as for a component: the loader carries
+    /// the state to the next build unchanged, migrates it field by field, or,
+    /// if the version changed or there's no schema, has the old build drop it.
     pub state_version: u32,
     pub state_size: usize,
     pub state_align: usize,
+    pub state_fields: *const FieldDesc,
+    pub state_field_count: usize,
+    pub state_drop: Option<DropFn>,
+    pub state_default: DefaultFn,
     /// Digest of this build's interface (hex; empty if it has none), computed
-    /// by Bazel. Points into the library; the loader copies it.
+    /// by Bazel.
     pub interface: *const u8,
     pub interface_len: usize,
     /// The interfaces this build compiled against, as `name:digest` pairs
-    /// separated by commas. Points into the library; the loader copies it.
+    /// separated by commas.
     pub deps: *const u8,
     pub deps_len: usize,
-}
-
-impl ModInfo {
-    /// Whether state written by a build with `self` can be handed to a build with `other`.
-    pub fn state_compatible(&self, other: &ModInfo) -> bool {
-        (self.state_version, self.state_size, self.state_align)
-            == (other.state_version, other.state_size, other.state_align)
-    }
 }
 
 /// Services the loader provides to mods.
@@ -133,11 +143,13 @@ pub struct ModContext {
     /// Set by the loader on every load from one counter shared by all mods, so
     /// the world can tell a newer build's component layout from a stale one.
     pub loaded_at: u64,
-    /// Loader-owned memory sized and aligned per the mod's `ModInfo`.
+    /// Loader-owned memory sized and aligned per the mod's `ModInfo`, holding a
+    /// live value.
     pub state: *mut c_void,
-    /// Set by the loader when `state` is zeroed memory rather than a live value.
-    /// The mod initializes it during `Op::LOAD` and clears the flag.
-    pub state_fresh: bool,
+    /// The running build's transient part, owned by that build: set in its
+    /// `LOAD`, taken in its `UNLOAD` or `CLOSE`. Null between builds; the
+    /// loader never looks behind it.
+    pub transient: *mut c_void,
     /// The message being handled; only set during `Op::MESSAGE`.
     pub message: *const u8,
     pub message_len: usize,
@@ -183,25 +195,42 @@ impl Cx<'_> {
     }
 }
 
-/// A mod is its own state: the loader keeps the value alive across reloads, and
-/// each new build keeps running against it.
+/// A mod's state: the data the loader carries from one build to the next.
+/// Normally implemented by [`mod_state!`].
 ///
-/// Changing the type's size or alignment, or [`Mod::STATE_VERSION`], makes the
-/// loader drop the old value (via the old build's `close`) and start from
-/// `Default` instead of reinterpreting incompatible memory.
-pub trait Mod: Default + 'static {
-    const STATE_VERSION: u32 = 0;
+/// # Safety
+///
+/// The same rule as [`Component`]: the value outlives the build that made it,
+/// so it must hold nothing that points into a mod's image (no references,
+/// function pointers, trait objects, closures or `&'static str`). `FIELDS`, if
+/// not empty, must describe every field exactly. Anything that doesn't fit
+/// belongs in [`Mod::Transient`].
+pub unsafe trait ModState: Default + 'static {
+    /// Bump when a field's meaning changes, whether or not the layout does.
+    /// A version change resets the state rather than migrating it.
+    const VERSION: u32 = 0;
+    const FIELDS: &'static [FieldDesc] = &[];
+}
+
+/// A mod. The type is its state (see [`ModState`]), carried across reloads;
+/// `Transient` is everything else, rebuilt by every build.
+pub trait Mod: ModState {
+    /// This build's own data: made (from `Default`) before every `load`, and
+    /// dropped by this build after its `unload` or `close`, while its code is
+    /// still mapped. It may hold anything, including closures and trait
+    /// objects, and it never reaches another build. `()` if there's nothing.
+    type Transient: Default + 'static;
 
     /// Called after every load, including reloads (`cx.generation() > 0`).
-    fn load(&mut self, _cx: &mut Cx) {}
-    fn step(&mut self, cx: &mut Cx) -> Status;
+    fn load(&mut self, _transient: &mut Self::Transient, _cx: &mut Cx) {}
+    fn step(&mut self, transient: &mut Self::Transient, cx: &mut Cx) -> Status;
     /// Called before this build is swapped out.
-    fn unload(&mut self, _cx: &mut Cx) {}
+    fn unload(&mut self, _transient: &mut Self::Transient, _cx: &mut Cx) {}
     /// Called before the state is dropped.
-    fn close(&mut self, _cx: &mut Cx) {}
+    fn close(&mut self, _transient: &mut Self::Transient, _cx: &mut Cx) {}
     /// Handles text sent with `modctl send <mod> <text>`. `Ok` is the reply;
     /// `Err` declines the message, with the reason as the reply.
-    fn message(&mut self, cx: &mut Cx, _message: &str) -> Result<String, String> {
+    fn message(&mut self, _transient: &mut Self::Transient, cx: &mut Cx, _message: &str) -> Result<String, String> {
         Err(format!("{} doesn't take messages", cx.name()))
     }
 }
@@ -210,9 +239,13 @@ pub trait Mod: Default + 'static {
 pub fn __info<T: Mod>(interface: &'static str, deps: &'static str) -> ModInfo {
     ModInfo {
         api_version: API_VERSION,
-        state_version: T::STATE_VERSION,
+        state_version: T::VERSION,
         state_size: size_of::<T>(),
         state_align: align_of::<T>(),
+        state_fields: T::FIELDS.as_ptr(),
+        state_field_count: T::FIELDS.len(),
+        state_drop: __drop_fn::<T>(),
+        state_default: __write_default::<T>,
         interface: interface.as_ptr(),
         interface_len: interface.len(),
         deps: deps.as_ptr(),
@@ -220,14 +253,37 @@ pub fn __info<T: Mod>(interface: &'static str, deps: &'static str) -> ModInfo {
     }
 }
 
-/// A mod with nothing to run, for one that only declares components:
-/// `export_mod!(engine_api::Inert);`.
-#[derive(Default)]
-pub struct Inert;
+mod_state! {
+    /// A mod with nothing to run, for one that only declares components:
+    /// `export_mod!(engine_api::Inert);`.
+    #[derive(Default)]
+    pub struct Inert {}
+}
 
 impl Mod for Inert {
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         Status::OK
+    }
+}
+
+/// The running build's transient part, made if there's none yet (a `LOAD`
+/// that panicked before making it).
+unsafe fn transient<T: Mod>(slot: *mut *mut c_void) -> *mut T::Transient {
+    unsafe {
+        if (*slot).is_null() {
+            *slot = Box::into_raw(Box::<T::Transient>::default()) as *mut c_void;
+        }
+        *slot as *mut T::Transient
+    }
+}
+
+/// Takes the running build's transient part, to drop it.
+unsafe fn take_transient<T: Mod>(slot: *mut *mut c_void) -> Box<T::Transient> {
+    unsafe {
+        let ptr = std::mem::replace(&mut *slot, std::ptr::null_mut());
+        if ptr.is_null() { Box::default() } else { Box::from_raw(ptr as *mut T::Transient) }
     }
 }
 
@@ -235,35 +291,43 @@ impl Mod for Inert {
 pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
     // Unwinding across `extern "C"` aborts the process; turn panics into errors instead.
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        let ctx = &mut *ctx;
-        let state = ctx.state as *mut T;
-        if op == Op::LOAD && ctx.state_fresh {
-            state.write(T::default());
-            ctx.state_fresh = false;
-        }
-        let state = &mut *state;
-        let mut cx = Cx { raw: ctx };
+        let state = &mut *((*ctx).state as *mut T);
+        // Reached through a raw pointer, and before `cx` borrows the context.
+        let slot: *mut *mut c_void = &raw mut (*ctx).transient;
         match op {
-            Op::LOAD => state.load(&mut cx),
-            Op::STEP => return state.step(&mut cx),
-            Op::UNLOAD => state.unload(&mut cx),
-            Op::CLOSE => {
-                state.close(&mut cx);
-                std::ptr::drop_in_place(state);
+            Op::LOAD | Op::STEP | Op::MESSAGE => {
+                let transient = &mut *transient::<T>(slot);
+                let mut cx = Cx { raw: &mut *ctx };
+                match op {
+                    Op::LOAD => state.load(transient, &mut cx),
+                    Op::STEP => return state.step(transient, &mut cx),
+                    _ => {
+                        let message = std::slice::from_raw_parts(cx.raw.message, cx.raw.message_len);
+                        let message = std::str::from_utf8(message).unwrap_or("");
+                        return match state.message(transient, &mut cx, message) {
+                            Ok(reply) => {
+                                cx.reply(&reply);
+                                Status::OK
+                            }
+                            Err(reason) => {
+                                cx.reply(&reason);
+                                Status::REFUSED
+                            }
+                        };
+                    }
+                }
             }
-            Op::MESSAGE => {
-                let message = std::slice::from_raw_parts(cx.raw.message, cx.raw.message_len);
-                let message = std::str::from_utf8(message).unwrap_or("");
-                return match state.message(&mut cx, message) {
-                    Ok(reply) => {
-                        cx.reply(&reply);
-                        Status::OK
-                    }
-                    Err(reason) => {
-                        cx.reply(&reason);
-                        Status::REFUSED
-                    }
-                };
+            Op::UNLOAD | Op::CLOSE => {
+                // Dropped here, by this build, whatever happens.
+                let mut transient = take_transient::<T>(slot);
+                let mut cx = Cx { raw: &mut *ctx };
+                if op == Op::UNLOAD {
+                    state.unload(&mut transient, &mut cx);
+                } else {
+                    state.close(&mut transient, &mut cx);
+                    drop(transient);
+                    std::ptr::drop_in_place(state);
+                }
             }
             _ => return Status::ERROR,
         }
@@ -311,10 +375,14 @@ mod tests {
 
     use super::*;
 
-    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    static STATE_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static TRANSIENTS_MADE: AtomicUsize = AtomicUsize::new(0);
+    static TRANSIENT_DROPS: AtomicUsize = AtomicUsize::new(0);
 
-    struct Tracked {
-        steps: u32,
+    mod_state! {
+        struct Tracked {
+            steps: u32,
+        }
     }
 
     impl Default for Tracked {
@@ -325,13 +393,31 @@ mod tests {
 
     impl Drop for Tracked {
         fn drop(&mut self) {
-            DROPS.fetch_add(1, Ordering::SeqCst);
+            STATE_DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Stands in for what state can't hold: a closure.
+    struct Scratch(Box<dyn Fn() -> u32>);
+
+    impl Default for Scratch {
+        fn default() -> Self {
+            TRANSIENTS_MADE.fetch_add(1, Ordering::SeqCst);
+            Scratch(Box::new(|| 7))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            TRANSIENT_DROPS.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     impl Mod for Tracked {
-        fn step(&mut self, _cx: &mut Cx) -> Status {
-            self.steps += 1;
+        type Transient = Scratch;
+
+        fn step(&mut self, scratch: &mut Scratch, _cx: &mut Cx) -> Status {
+            self.steps += (scratch.0)() - 6;
             if self.steps > 41 {
                 panic!("second step panics");
             }
@@ -339,10 +425,10 @@ mod tests {
         }
     }
 
-    /// A context whose state is zeroed memory, as the loader provides it.
-    /// No host: nothing here calls back into one.
-    fn fresh_context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
-        unsafe { std::ptr::write_bytes(state.as_mut_ptr(), 0, 1) };
+    /// A context with a live state, as the loader provides it. No host:
+    /// nothing here calls back into one.
+    fn context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
+        unsafe { (__info::<Tracked>("", "").state_default)(state.as_mut_ptr() as *mut u8) };
         ModContext {
             host: std::ptr::null(),
             name: "t".as_ptr(),
@@ -350,38 +436,55 @@ mod tests {
             generation: 0,
             loaded_at: 1,
             state: state.as_mut_ptr() as *mut c_void,
-            state_fresh: true,
+            transient: std::ptr::null_mut(),
             message: std::ptr::null(),
             message_len: 0,
         }
     }
 
     #[test]
-    fn dispatch_initializes_fresh_state_steps_catches_panics_and_drops_on_close() {
+    fn dispatch_rebuilds_the_transient_part_per_build_and_drops_the_state_on_close() {
         let mut state = std::mem::MaybeUninit::<Tracked>::uninit();
-        let mut ctx = fresh_context(&mut state);
+        let mut ctx = context(&mut state);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 40, "made from Default by the loader");
         let dispatch = |ctx: &mut ModContext, op| unsafe { __dispatch::<Tracked>(ctx, op) };
+        let (made, dropped) = (TRANSIENTS_MADE.load(Ordering::SeqCst), TRANSIENT_DROPS.load(Ordering::SeqCst));
 
         assert_eq!(dispatch(&mut ctx, Op::LOAD), Status::OK);
-        assert!(!ctx.state_fresh, "LOAD must mark the state initialized");
-        assert_eq!(unsafe { state.assume_init_ref() }.steps, 40, "initialized from Default, not zero");
-
+        assert!(!ctx.transient.is_null(), "LOAD makes the transient part");
         assert_eq!(dispatch(&mut ctx, Op::STEP), Status::OK);
-        assert_eq!(unsafe { state.assume_init_ref() }.steps, 41);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 41, "the step used the transient closure");
         assert_eq!(dispatch(&mut ctx, Op::STEP), Status::ERROR, "a panic must become ERROR, not unwind");
         assert_eq!(dispatch(&mut ctx, Op(77)), Status::ERROR, "unknown ops are errors");
+        assert_eq!(TRANSIENTS_MADE.load(Ordering::SeqCst), made + 1, "one per build, not per step");
 
-        // A reload's LOAD sees live state and must not reinitialize it.
+        // A reload: this build drops its transient part and leaves the state.
+        assert_eq!(dispatch(&mut ctx, Op::UNLOAD), Status::OK);
+        assert!(ctx.transient.is_null());
+        assert_eq!(TRANSIENT_DROPS.load(Ordering::SeqCst), dropped + 1);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 42, "the state stays");
+        // The next build makes its own.
         assert_eq!(dispatch(&mut ctx, Op::LOAD), Status::OK);
-        assert_eq!(unsafe { state.assume_init_ref() }.steps, 42);
+        assert_eq!(TRANSIENTS_MADE.load(Ordering::SeqCst), made + 2);
 
-        let before = DROPS.load(Ordering::SeqCst);
+        let state_drops = STATE_DROPS.load(Ordering::SeqCst);
         assert_eq!(dispatch(&mut ctx, Op::CLOSE), Status::OK);
-        assert_eq!(DROPS.load(Ordering::SeqCst), before + 1, "CLOSE must drop the state");
+        assert_eq!(STATE_DROPS.load(Ordering::SeqCst), state_drops + 1, "CLOSE must drop the state");
+        assert_eq!(TRANSIENT_DROPS.load(Ordering::SeqCst), dropped + 2, "and the transient part");
+        assert!(ctx.transient.is_null());
+    }
+
+    #[test]
+    fn mod_state_records_its_schema() {
+        let info = __info::<Tracked>("", "");
+        assert_eq!(info.state_field_count, 1);
+        assert!(info.state_drop.is_some(), "Tracked has a Drop impl");
+        let field = unsafe { &*info.state_fields };
+        assert_eq!((field.kind, field.offset), (FieldKind::U32, std::mem::offset_of!(Tracked, steps)));
     }
 
     component! {
-        #[derive(Default, Copy)]
+        #[derive(Default)]
         struct Mixed: "test::Mixed" {
             a: u8,
             b: f64,
@@ -417,7 +520,7 @@ mod tests {
     }
 
     component! {
-        #[derive(Default, Copy)]
+        #[derive(Default)]
         struct Versioned: "test::Versioned", version = 3 {
             a: u32,
         }

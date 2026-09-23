@@ -9,15 +9,19 @@ use engine_api::{Cx, Mod, Status, export_mod};
 use platformer::{PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
-#[derive(Default)]
-struct Walkers;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Walkers {}
+}
 
 fn overlaps(p: &Player, w: &Walker) -> bool {
     p.x < w.x + 1.0 && w.x < p.x + PLAYER_WIDTH && p.y < w.y + 1.0 && w.y < p.y + PLAYER_HEIGHT
 }
 
 impl Mod for Walkers {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         let mut world = cx.world();
         let Some(Clock { dt, .. }) = clock::now(&mut world) else {
             return Status::OK;

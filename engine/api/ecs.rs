@@ -238,6 +238,17 @@ scalar_field_types! {
 // The std containers are laid out however this rustc lays them out; that is
 // sound because every mod and the loader come from one toolchain, which the
 // loader checks at load time.
+// Plain data: seconds and nanoseconds, no pointers.
+unsafe impl FieldType for std::time::Instant {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Instant", &[]);
+}
+
+unsafe impl FieldType for std::time::Duration {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Duration", &[]);
+}
+
 unsafe impl FieldType for String {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("String", &[]);
@@ -314,6 +325,48 @@ macro_rules! component {
         // the mod, and `FIELDS` is generated from the struct itself.
         unsafe impl $crate::Component for $name {
             const NAME: &'static str = $id;
+            $(const VERSION: u32 = $version;)?
+            const FIELDS: &'static [$crate::FieldDesc] = &[
+                $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*
+            ];
+        }
+    };
+}
+
+/// Declares a mod's state: the data the loader carries from one build to the
+/// next, so it follows the same rule as a component's fields (every field a
+/// [`FieldType`]) and migrates the same way when its layout changes. Anything
+/// that doesn't fit (a closure, a trait object, a crate's handle) goes in
+/// [`Mod::Transient`](crate::Mod::Transient), which each build makes for itself.
+///
+/// ```ignore
+/// engine_api::mod_state! {
+///     #[derive(Default)]
+///     struct Counter {
+///         frames: u64,
+///         count: u64,
+///     }
+/// }
+/// ```
+///
+/// Bump the version (`struct Counter, version = 1 { ... }`) when a field's
+/// meaning changes, to reset the state instead of migrating it.
+#[macro_export]
+macro_rules! mod_state {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident $(, version = $version:literal)? {
+            $($(#[$fmeta:meta])* $fvis:vis $field:ident : $ty:ty),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $($(#[$fmeta])* $fvis $field: $ty),*
+        }
+
+        // SAFETY: every field is a `FieldType`, which rules out pointers into
+        // the mod, and `FIELDS` is generated from the struct itself.
+        unsafe impl $crate::ModState for $name {
             $(const VERSION: u32 = $version;)?
             const FIELDS: &'static [$crate::FieldDesc] = &[
                 $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*

@@ -2,11 +2,15 @@
 
 use engine_api::{Cx, Mod, Status, export_mod};
 
-#[derive(Default)]
-struct Driver;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Driver {}
+}
 
 impl Mod for Driver {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         cx.step_mods()
     }
 }

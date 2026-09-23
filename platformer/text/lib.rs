@@ -16,8 +16,10 @@ use walkers::Walker;
 
 const HELP: &str = "commands: left | right | stop | jump | show | state";
 
-#[derive(Default)]
-struct Text;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Text {}
+}
 
 fn with_input(world: &mut World, f: impl FnOnce(&mut Input)) -> Result<(), String> {
     let input = world.query2::<Input, Player>().next().map(|(_, input, _)| input);
@@ -115,11 +117,13 @@ fn describe(s: &Snapshot) -> String {
 }
 
 impl Mod for Text {
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         Status::OK
     }
 
-    fn message(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut world = cx.world();
         match message.trim() {
             "left" => with_input(&mut world, |i| i.dir = -1.0).map(|()| "running left".into()),

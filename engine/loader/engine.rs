@@ -12,11 +12,12 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use engine_api::{
-    API_VERSION, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, Status,
-    WorldApi,
+    API_VERSION, DefaultFn, DropFn, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op,
+    Status, WorldApi,
 };
 use libloading::Library;
 
+use crate::schema::{self, Field};
 use crate::world::{self, Keepalive, WorldStorage};
 
 pub struct Engine {
@@ -46,7 +47,10 @@ struct Loaded {
     /// `ctx.name` points into this.
     name: Box<str>,
     ctx: *mut ModContext,
-    state_layout: Layout,
+    /// The running build's state schema, and the address ranges its library
+    /// occupies, for noticing state that points into it.
+    state: StateSchema,
+    image: Vec<(usize, usize)>,
     info: ModInfo,
     main: MainFn,
     /// Shared with the world, which keeps a build's library mapped while
@@ -68,18 +72,29 @@ struct Opened {
     path: PathBuf,
     content: u64,
     lib: Library,
+    image: Vec<(usize, usize)>,
     info: ModInfo,
     main: MainFn,
-    state_layout: Layout,
+    state: StateSchema,
     interface: String,
     deps: Vec<(String, String)>,
+}
+
+/// A build's state layout and schema, copied out of its `ModInfo`. `drops`
+/// and `default` are that build's code.
+struct StateSchema {
+    layout: Layout,
+    version: u32,
+    fields: Vec<Field>,
+    drops: Vec<Option<DropFn>>,
+    default: DefaultFn,
 }
 
 impl Drop for Loaded {
     fn drop(&mut self) {
         unsafe {
             let ctx = Box::from_raw(self.ctx);
-            std::alloc::dealloc(ctx.state as *mut u8, self.state_layout);
+            std::alloc::dealloc(ctx.state as *mut u8, self.state.layout);
         }
     }
 }
@@ -150,21 +165,39 @@ impl Engine {
         self.check_links(&mods, &opened)?;
         let opened = in_dependency_order(opened)?;
 
-        // Retire the builds being replaced, dependents before what they depend on.
-        let mut resets = Vec::new();
+        // Retire the builds being replaced, dependents before what they depend
+        // on, and hand each one's state to its successor: as is, migrated, or
+        // dropped by the old build and started over.
+        let mut notes = Vec::new();
         for o in opened.iter().rev() {
             let Some(m) = mods.iter_mut().find(|m| *m.name == *o.name) else { continue };
-            if m.info.state_compatible(&o.info) {
+            let (old, new) = (&m.state, &o.state);
+            let same = (old.layout, old.version, &old.fields) == (new.layout, new.version, &new.fields);
+            let migrate = !same && old.version == new.version && !old.fields.is_empty() && !new.fields.is_empty();
+            let note = if same || migrate {
                 m.call(Op::UNLOAD);
-            } else {
-                m.close_state();
-                unsafe {
-                    std::alloc::dealloc((*m.ctx).state as *mut u8, m.state_layout);
-                    (*m.ctx).state = alloc_state(o.state_layout);
-                    (*m.ctx).state_fresh = true;
+                if m.state_points_into_its_build() {
+                    eprintln!(
+                        "[engine] {}'s state holds pointers into the build being replaced (a closure, a \
+                         trait object, a &'static str?); it is reset instead of carried over. Keep such \
+                         things in the mod's Transient.",
+                        m.name
+                    );
+                    m.call(Op::CLOSE);
+                    m.fresh_state(new);
+                    Some("state held pointers into the old build, so it was reset".to_string())
+                } else if migrate {
+                    Some(format!("state migrated: {}", m.migrate_state(new)))
+                } else {
+                    None
                 }
-                m.state_layout = o.state_layout;
-                resets.push(o.name.clone());
+            } else {
+                m.call(Op::CLOSE);
+                m.fresh_state(new);
+                Some("state layout changed so state was reset".to_string())
+            };
+            if let Some(note) = note {
+                notes.push((o.name.clone(), note));
             }
         }
 
@@ -184,15 +217,14 @@ impl Engine {
                     m.lib = Rc::new(o.lib);
                     self.libs.borrow_mut().insert(m.ctx as usize, m.lib.clone());
                     (m.main, m.info, m.source, m.content) = (o.main, o.info, o.path, o.content);
-                    (m.interface, m.deps) = (o.interface, o.deps);
+                    (m.interface, m.deps, m.state, m.image) = (o.interface, o.deps, o.state, o.image);
                     m.failed.set(false);
                     m.call(Op::LOAD);
-                    let reset = if resets.contains(&o.name) {
-                        ", state layout changed so state was reset"
-                    } else {
-                        ""
+                    let note = match notes.iter().find(|(name, _)| *name == o.name) {
+                        Some((_, note)) => format!(", {note}"),
+                        None => String::new(),
                     };
-                    report.push(format!("reloaded {} (generation {generation}{reset})", o.name));
+                    report.push(format!("reloaded {} (generation {generation}{note})", o.name));
                 }
                 None => {
                     let name: Box<str> = o.name.as_str().into();
@@ -202,8 +234,8 @@ impl Engine {
                         name_len: name.len(),
                         generation: 0,
                         loaded_at,
-                        state: alloc_state(o.state_layout),
-                        state_fresh: true,
+                        state: new_state(&o.state),
+                        transient: std::ptr::null_mut(),
                         message: std::ptr::null(),
                         message_len: 0,
                     }));
@@ -212,7 +244,8 @@ impl Engine {
                     mods.push(Loaded {
                         name,
                         ctx,
-                        state_layout: o.state_layout,
+                        state: o.state,
+                        image: o.image,
                         info: o.info,
                         main: o.main,
                         lib,
@@ -235,7 +268,7 @@ impl Engine {
     /// of its mod code.
     fn open(&self, name: &str, path: &Path, content: u64) -> Result<Opened, String> {
         self.check_rustc(name, path)?;
-        let lib = self.open_staged(name, path).map_err(|e| format!("{name}: {e}"))?;
+        let (lib, image) = self.open_staged(name, path).map_err(|e| format!("{name}: {e}"))?;
         let info = unsafe {
             let info_fn = *lib.get::<InfoFn>(INFO_SYMBOL).map_err(|e| format!("{name}: {}", describe(e)))?;
             info_fn()
@@ -251,8 +284,13 @@ impl Engine {
         let main = unsafe { *lib.get::<MainFn>(MAIN_SYMBOL).map_err(|e| format!("{name}: {}", describe(e)))? };
         // A zero-sized mod still gets a real allocation: `alloc_zeroed` with a
         // zero-size layout is undefined behavior.
-        let state_layout = Layout::from_size_align(info.state_size.max(1), info.state_align)
+        let layout = Layout::from_size_align(info.state_size.max(1), info.state_align)
             .map_err(|e| format!("{name}: bad state layout: {e}"))?;
+        let (fields, drops) = unsafe {
+            schema::read_fields(info.state_fields, info.state_field_count, info.state_size, info.state_align)
+        }
+        .ok_or_else(|| format!("{name}: its state's schema doesn't describe its layout"))?;
+        let state = StateSchema { layout, version: info.state_version, fields, drops, default: info.state_default };
         let interface = unsafe { copy_str(info.interface, info.interface_len) };
         let deps = unsafe { copy_str(info.deps, info.deps_len) };
         let deps = deps
@@ -263,7 +301,7 @@ impl Engine {
                 Ok((dep.to_string(), digest.to_string()))
             })
             .collect::<Result<_, String>>()?;
-        Ok(Opened { name: name.into(), path: path.into(), content, lib, info, main, state_layout, interface, deps })
+        Ok(Opened { name: name.into(), path: path.into(), content, lib, image, info, main, state, interface, deps })
     }
 
     /// Checks that after swapping in `opened`, every mod runs against the
@@ -442,7 +480,7 @@ impl Engine {
     /// the already-loaded image for a path, or an inode, it has seen, so opening
     /// the Bazel output again (or a link to it) would reload nothing. See
     /// docs/lore/dlopen-returns-the-loaded-image-for-a-file-it-has-seen.md.
-    fn open_staged(&self, name: &str, path: &Path) -> Result<Library, String> {
+    fn open_staged(&self, name: &str, path: &Path) -> Result<(Library, Vec<(usize, usize)>), String> {
         std::fs::create_dir_all(&self.staging_dir)
             .map_err(|e| format!("creating {}: {e}", self.staging_dir.display()))?;
         let n = self.staged_count.get();
@@ -454,9 +492,11 @@ impl Engine {
         // `engine_mod` links with `-z now`, so a missing symbol fails here, while
         // the old build is still running.
         let lib = unsafe { Library::new(&staged) }.map_err(describe);
+        // Read while the file still has its name: the maps name it by path.
+        let image = std::fs::canonicalize(&staged).map(|path| mapped_ranges(&path)).unwrap_or_default();
         // The mapping outlives the file, so nothing is left behind to clean up.
         let _ = std::fs::remove_file(&staged);
-        lib
+        Ok((lib?, image))
     }
 }
 
@@ -473,11 +513,50 @@ impl Loaded {
         status
     }
 
-    /// Lets the current build drop its state, if the state was ever initialized.
+    /// Lets the current build drop its transient part and its state.
     fn close_state(&self) {
-        if unsafe { !(*self.ctx).state_fresh } {
-            self.call(Op::CLOSE);
+        self.call(Op::CLOSE);
+    }
+
+    /// Replaces the (already dropped) state with `new`'s `Default`.
+    fn fresh_state(&mut self, new: &StateSchema) {
+        unsafe {
+            std::alloc::dealloc((*self.ctx).state as *mut u8, self.state.layout);
+            (*self.ctx).state = new_state(new);
         }
+        self.state.layout = new.layout;
+    }
+
+    /// Moves the state into `new`'s layout, field by field, dropping what
+    /// doesn't carry over with the old build's code. Returns the report.
+    fn migrate_state(&mut self, new: &StateSchema) -> String {
+        let old = &self.state;
+        unsafe {
+            let to = alloc_state(new.layout);
+            schema::migrate(
+                ((*self.ctx).state as *mut u8, &old.fields, &old.drops),
+                (to as *mut u8, &new.fields, &new.drops, new.default),
+            );
+            std::alloc::dealloc((*self.ctx).state as *mut u8, old.layout);
+            (*self.ctx).state = to;
+        }
+        let report = schema::report(&self.state.fields, &new.fields);
+        self.state.layout = new.layout;
+        report
+    }
+
+    /// Whether any pointer-sized word of the state holds an address inside
+    /// this build's library: a vtable, a function, a string literal. A shallow
+    /// net for state that bypassed `mod_state!` (an `unsafe impl ModState`);
+    /// it can't see pointers behind other pointers, and an integer can happen
+    /// to look like an address.
+    fn state_points_into_its_build(&self) -> bool {
+        let word = size_of::<usize>();
+        let state = unsafe { (*self.ctx).state as *const u8 };
+        (0..self.state.layout.size() / word).any(|i| {
+            let value = unsafe { (state.add(i * word) as *const usize).read_unaligned() };
+            self.image.iter().any(|&(start, end)| (start..end).contains(&value))
+        })
     }
 }
 
@@ -555,6 +634,32 @@ fn describe(e: libloading::Error) -> String {
         Some(source) => format!("{e}: {source}"),
         None => e.to_string(),
     }
+}
+
+/// A new state value: `schema`'s `Default`, in memory the loader owns.
+fn new_state(schema: &StateSchema) -> *mut c_void {
+    let state = alloc_state(schema.layout);
+    unsafe { (schema.default)(state as *mut u8) };
+    state
+}
+
+/// The address ranges `/proc/self/maps` shows `path` mapped at.
+fn mapped_ranges(path: &Path) -> Vec<(usize, usize)> {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else { return Vec::new() };
+    let path = path.to_string_lossy();
+    maps.lines()
+        .filter_map(|line| {
+            // start-end perms offset dev inode      path
+            let mut parts = line.splitn(6, ' ');
+            let range = parts.next()?;
+            parts.nth(3)?;
+            if parts.next()?.trim_start() != path {
+                return None;
+            }
+            let (start, end) = range.split_once('-')?;
+            Some((usize::from_str_radix(start, 16).ok()?, usize::from_str_radix(end, 16).ok()?))
+        })
+        .collect()
 }
 
 fn alloc_state(layout: Layout) -> *mut c_void {

@@ -3,17 +3,21 @@
 
 use engine_api::{Cx, Mod, Status, export_mod};
 
-#[derive(Default)]
-struct Hello {
-    frames: u64,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Hello {
+        frames: u64,
+    }
 }
 
 impl Mod for Hello {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log("hello! loaded live");
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         self.frames += 1;
         if self.frames % 120 == 0 {
             cx.log(format!("still here after {} frames", self.frames));
@@ -21,7 +25,7 @@ impl Mod for Hello {
         Status::OK
     }
 
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log("goodbye");
     }
 }

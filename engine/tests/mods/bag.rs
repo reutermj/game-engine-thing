@@ -29,13 +29,17 @@ const BUILD: &str = "v2";
 #[cfg(feature = "v3")]
 const BUILD: &str = "v3";
 
-#[derive(Default)]
-struct BagMod {
-    steps: u32,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct BagMod {
+        steps: u32,
+    }
 }
 
 impl Mod for BagMod {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         if world.query::<Bag>().next().is_none() {
             let e = world.spawn();
@@ -43,7 +47,7 @@ impl Mod for BagMod {
         }
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         self.steps += 1;
         for (_, bag) in cx.world().query::<Bag>() {
             bag.words.push(format!("{BUILD}-{}", self.steps));

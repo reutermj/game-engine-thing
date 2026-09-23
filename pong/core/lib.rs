@@ -21,8 +21,10 @@ const SPIN: f32 = 3.0;
 const SPEEDUP: f32 = 1.05;
 const MAX_SPEED: f32 = 40.0;
 
-#[derive(Default)]
-struct Core;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Core {}
+}
 
 fn set_up(world: &mut World) {
     if world.query::<Ball>().next().is_some() {
@@ -66,11 +68,13 @@ fn hit(ball: &mut Ball, before_x: f32, paddle: &Paddle) {
 }
 
 impl Mod for Core {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         set_up(&mut cx.world());
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         let mut world = cx.world();
         let Some(Clock { dt, .. }) = clock::now(&mut world) else {
             return Status::OK;

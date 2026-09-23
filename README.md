@@ -65,11 +65,13 @@ level is `platformer/level/map.txt`: edit it and
 2. Between frames, the engine copies the `.so` to a unique path, `dlopen`s it and
    checks its `ModInfo`. A bad build leaves the old code running.
 3. The old build gets `UNLOAD`, the new one gets `LOAD` with the same state
-   memory. If the state's size, alignment or `STATE_VERSION` changed, the old
-   build gets `CLOSE` instead and the new one starts from `Default`.
+   memory, migrated field by field if its layout changed. If its version changed,
+   the old build gets `CLOSE` instead and the new one starts from `Default`.
 
-Mod `static`s don't survive a reload; put anything that should persist in the mod
-struct. A panicking mod is disabled until it's reloaded.
+A mod's state (declared with `mod_state!`) survives reloads, so it may only hold
+plain data, as components do. Closures, trait objects and crate objects go in the
+mod's `Transient`, which every build makes for itself. Mod `static`s don't survive
+a reload. A panicking mod is disabled until it's reloaded.
 
 ## Docs
 

@@ -23,6 +23,7 @@ COUNTER_BUILDS = [
     "v1",
     "v2",
     "v3",
+    "v4",
     "panic",
 ]
 
@@ -84,6 +85,22 @@ COUNTER_BUILDS = [
     "v3",
 ]]
 
+# Builds of `greeter`, whose state points into its own library: the case the
+# restriction on mod state exists for. See mods/greeter.rs.
+[engine_mod(
+    name = "greeter_" + variant + build,
+    srcs = ["mods/greeter.rs"],
+    crate_features = [build] + features,
+    crate_root = "mods/greeter.rs",
+    mod_name = "greeter",
+) for build in [
+    "v1",
+    "v2",
+] for variant, features in [
+    ("", []),
+    ("right_", ["right"]),
+]]
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -97,6 +114,10 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "GREETER_V1": ":greeter_v1",
+    "GREETER_V2": ":greeter_v2",
+    "GREETER_RIGHT_V1": ":greeter_right_v1",
+    "GREETER_RIGHT_V2": ":greeter_right_v2",
     "BAG_V1": ":bag_v1",
     "BAG_V2": ":bag_v2",
     "BAG_V3": ":bag_v3",

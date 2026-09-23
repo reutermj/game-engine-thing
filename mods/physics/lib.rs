@@ -9,11 +9,15 @@ use transform::Position;
 /// The bootstrap mod's frame rate.
 const DT: f32 = 1.0 / 60.0;
 
-#[derive(Default)]
-struct Physics;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Physics {}
+}
 
 impl Mod for Physics {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         for (_, velocity, position) in cx.world().query2::<Velocity, Position>() {
             position.x += velocity.x * DT;
             position.y += velocity.y * DT;

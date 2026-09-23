@@ -3,18 +3,22 @@
 
 use engine_api::{Cx, Mod, Status, export_mod};
 
-#[derive(Default)]
-struct Counter {
-    frames: u64,
-    count: u64,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Counter {
+        frames: u64,
+        count: u64,
+    }
 }
 
 impl Mod for Counter {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!("loaded (generation {}), count is {}", cx.generation(), self.count));
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         self.frames += 1;
         if self.frames % 60 == 0 {
             self.count += 1;

@@ -435,3 +435,46 @@ mod heap {
         assert!(err.contains("restart the engine"), "{err}");
     }
 }
+
+/// State that points into its own build, carried across a reload: get-y5t.5.
+mod state_pointing_into_its_build {
+    use super::{engine, load, probe, step};
+
+    #[test]
+    fn done_right_the_closure_is_rebuilt_and_the_state_kept() {
+        let e = engine("greeter_right");
+        load(&e, "greeter", "GREETER_RIGHT_V1");
+        step(&e, 2);
+        assert_eq!(e.send("greeter", "hi").as_deref(), Ok("hello! (2 greetings, word hello)"));
+        assert_eq!(load(&e, "greeter", "GREETER_RIGHT_V2"), "reloaded greeter (generation 1)");
+        step(&e, 1);
+        // v2's closure (rebuilt in its load), v1's count.
+        assert_eq!(e.send("greeter", "hi").as_deref(), Ok("bonjour! (3 greetings, word bonjour)"));
+    }
+
+    #[test]
+    fn done_wrong_the_state_is_reset_instead_of_crashing() {
+        let e = engine("greeter_wrong");
+        load(&e, "greeter", "GREETER_V1");
+        step(&e, 2);
+        let reply = load(&e, "greeter", "GREETER_V2");
+        assert_eq!(reply, "reloaded greeter (generation 1, state held pointers into the old build, so it was reset)");
+        step(&e, 1);
+        assert_eq!(e.send("greeter", "hi").as_deref(), Ok("bonjour! (1 greetings, word bonjour)"));
+    }
+
+    #[test]
+    fn a_state_that_gains_a_field_is_migrated_not_reset() {
+        let e = engine("state_migrate");
+        load(&e, "counter", "COUNTER_V1");
+        step(&e, 3);
+        let reply = load(&e, "counter", "COUNTER_V4");
+        assert_eq!(
+            reply,
+            "reloaded counter (generation 1, state migrated: kept total, kept probe, added grown (default))"
+        );
+        step(&e, 1);
+        // v1's total and probe, then one of v4's steps of 10.
+        assert_eq!((probe(&e).value, probe(&e).build), (13, 5));
+    }
+}

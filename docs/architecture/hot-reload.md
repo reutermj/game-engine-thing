@@ -31,29 +31,55 @@ but its types don't depend on it.
 
 ## Who owns state
 
-There are two kinds. Data shared between mods, or that belongs to the game
-rather than to one mod, lives in the world as components (see
-[ecs.md](ecs.md)). This section is about the other kind: a mod's own state.
+Data shared between mods, or that belongs to the game rather than to one mod,
+lives in the world as components (see [ecs.md](ecs.md)). A mod's own data has
+three homes, by how long it has to live:
 
-The loader allocates each mod's state (zeroed, sized and aligned per
-`ModInfo`) and passes it in `ModContext`. The mod type *is* the state: the
-`Mod` value lives in that memory, initialized from `Default` the first time
-the mod is loaded. Because the memory belongs to the loader, it outlives any
-one build of the mod.
+| lifetime | holds | where |
+|---|---|---|
+| one build | closures, trait objects, caches, crate objects | the mod's `Transient` |
+| across reloads | the mod's own game state | the mod's state (`mod_state!`) |
+| the process | windows, devices, threads | registered resources, service mods (get-y5t) |
 
-What survives a reload is exactly the state struct. A mod's `static`s do not,
-since every reload maps a fresh copy of the library. Heap allocations the
-state points to do survive, because every mod and the loader share the same
-system allocator, and every build comes from the same rustc (checked at load;
-see [ecs.md](ecs.md#one-compiler-per-session)), so std types keep their layout.
+**The state** is the `Mod` type itself, declared with `mod_state!`. The loader
+allocates it, makes it from the build's `Default` on first load, and hands it
+to every later build. So it follows the rule components do: every field must
+be a `FieldType`, which rules out anything pointing into a build's code (a
+closure, a trait object, a function pointer, a `&'static str`). A reload would
+unmap that code and leave the next build calling through a dangling pointer.
+Heap data is fine: every mod and the loader share one allocator, and every
+build comes from the same rustc (checked at load; see
+[ecs.md](ecs.md#one-compiler-per-session)), so std types keep their layout.
 
-The loader decides whether the old state can be handed to the new build by
-comparing size, alignment and `Mod::STATE_VERSION`. A mod bumps
-`STATE_VERSION` when a field's meaning changes but the layout doesn't.
+**The transient part** (`Mod::Transient`) is everything else. Each build makes
+its own, from `Default`, before its `load`, and drops it itself after its
+`unload` or `close`, while its code is still mapped. It never reaches another
+build, so it may hold anything, and a reload replaces it with the new build's:
+a closure there runs the new code, which one kept in the state never could.
+Most mods need none (`type Transient = ();`).
 
-**Open question:** migration. An incompatible layout currently resets the
-state (the old build drops it, the new build starts from `Default`). A
-migrate hook that sees the old state would let a layout change keep data.
+A mod's `static`s survive nothing: every reload maps a fresh copy of the
+library.
+
+When a build replaces another, the loader hands the state over by the same
+rules a component migrates by:
+
+- **Same layout and schema:** carried over as is.
+- **Changed layout, same version, both with a schema:** migrated field by
+  field (kept, converted, dropped with the old build's code, or added from the
+  new build's `Default`), as in [ecs.md](ecs.md#layout-changes).
+- **A version bump** (`mod_state! { struct S, version = 1 { .. } }`) **or no
+  schema:** the old build drops its state (`CLOSE`) and the new one starts
+  from `Default`.
+
+**A net for state that bypassed the rule.** `mod_state!` enforces it, but a
+hand-written `unsafe impl ModState` can hold anything. Before carrying state
+over, the loader scans it for pointer-sized values inside the old build's
+mapped image; if it finds one, it has the old build drop the state and the
+new one start over, with a warning, instead of crashing. The scan is shallow
+(a pointer inside a `Vec`'s buffer is invisible to it) and could in principle
+be fooled by an integer that looks like an address, so it's a mitigation, not
+a guarantee.
 
 **Open question:** `thread_local!` in mods. glibc won't unmap a library
 while a thread still has TLS destructors registered in it, and for the main
@@ -84,13 +110,13 @@ Then, for the batch as a whole:
    interfaces it was built against (see [mod-deps.md](mod-deps.md)). Any
    failure in steps 2–4 refuses the whole batch and leaves every running
    build untouched.
-5. **Retire the old builds**, dependents first. If a mod's state is
-   compatible, send the old build `UNLOAD`. Otherwise send it `CLOSE` so it
-   drops its own state (only the old code knows how), then allocate fresh
-   zeroed state.
+5. **Retire the old builds**, dependents first. If a mod's state can be
+   carried over or migrated, send the old build `UNLOAD` (it drops its
+   transient part), then move or migrate the state. Otherwise send it `CLOSE`
+   so it drops its transient part and state (only the old code knows how),
+   and make the new build's `Default`.
 6. **Swap**, dependencies first. Drop the old library, bump `generation`,
-   and send the new build `LOAD`. A fresh state is initialized from
-   `Default` as part of that `LOAD`.
+   and send the new build `LOAD`, which makes its transient part.
 
 A mod that returns `Status::ERROR` (including a caught panic) is marked
 failed and not stepped again until a reload clears it.

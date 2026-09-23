@@ -8,15 +8,19 @@ use engine_api::{Cx, Entity, Mod, Status, export_mod};
 
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
-#[derive(Default)]
-struct Bootstrap {
-    frame: u64,
-    next_frame: Option<Instant>,
-    clock: Option<Entity>,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Bootstrap {
+        frame: u64,
+        next_frame: Option<Instant>,
+        clock: Option<Entity>,
+    }
 }
 
 impl Mod for Bootstrap {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!(
             "loaded (generation {}), frame loop at frame {}",
             cx.generation(),
@@ -24,7 +28,7 @@ impl Mod for Bootstrap {
         ));
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         self.frame += 1;
         let clock = Clock { frame: self.frame, dt: FRAME.as_secs_f32() };
         let mut world = cx.world();
@@ -44,7 +48,7 @@ impl Mod for Bootstrap {
         Status::OK
     }
 
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         if let Some(e) = self.clock.take() {
             cx.world().despawn(e);
         }

@@ -16,9 +16,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use engine_api::{Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, FieldKind, ModContext};
+use engine_api::{Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, ModContext};
 
 use crate::engine::{engine_of, name_of};
+use crate::schema::{self, Field};
 
 const EMPTY: u32 = u32::MAX;
 
@@ -222,59 +223,24 @@ impl WorldStorage {
 }
 
 impl Storage {
-    /// Rewrites every value into the new layout, matching fields by name:
-    /// each starts as the new build's `Default`, then takes every old field
-    /// that carries over, and every old field that doesn't is dropped with the
-    /// old build's code. Returns what happened to each field, for the log.
+    /// Rewrites every value into the new layout (see `schema::migrate`).
+    /// Returns what happened to each field, for the log.
     fn migrate(&mut self, size: usize, align: usize, fields: &[Field], code: &Code) -> String {
         let mut data = Values::new(size, align);
         for slot in 0..self.entities.len() {
             data.push_uninit();
-            let (old, new) = (self.data.at(slot), data.at(slot));
-            let mut carried = vec![false; self.fields.len()];
+            let (old, new) = (&self.fields[..], &self.code.field_drops[..]);
             unsafe {
-                (code.default)(new);
-                for (f, drop_new) in fields.iter().zip(&code.field_drops) {
-                    let Some(i) = self.fields.iter().position(|o| o.name == f.name) else { continue };
-                    let o = &self.fields[i];
-                    if !carries(o, f) {
-                        continue;
-                    }
-                    // The default's field is overwritten, so drop it first.
-                    if let Some(drop) = drop_new {
-                        drop(new.add(f.offset));
-                    }
-                    convert(o.kind, old.add(o.offset), o.size, f.kind, new.add(f.offset));
-                    carried[i] = true;
-                }
-                for ((o, drop_old), carried) in self.fields.iter().zip(&self.code.field_drops).zip(carried) {
-                    if let (false, Some(drop)) = (carried, drop_old) {
-                        drop(old.add(o.offset));
-                    }
-                }
-            }
+                schema::migrate(
+                    (self.data.at(slot), old, new),
+                    (data.at(slot), fields, &code.field_drops, code.default),
+                )
+            };
         }
         // Every old value has been moved out or dropped, field by field, so
         // the old buffer is freed without dropping anything.
         self.data = data;
-
-        let mut report = Vec::new();
-        for f in fields {
-            report.push(match self.fields.iter().find(|o| o.name == f.name) {
-                Some(o) if carries(o, f) && o.kind == f.kind => format!("kept {}", f.name),
-                Some(o) if carries(o, f) => {
-                    format!("converted {} {} -> {}", f.name, kind_name(o.kind), kind_name(f.kind))
-                }
-                Some(o) => format!("reset {} ({} -> {} can't convert)", f.name, o.describe(), f.describe()),
-                None => format!("added {} (default)", f.name),
-            });
-        }
-        for o in &self.fields {
-            if !fields.iter().any(|f| f.name == o.name) {
-                report.push(format!("dropped {}", o.name));
-            }
-        }
-        report.join(", ")
+        schema::report(&self.fields, fields)
     }
 
     /// Drops every value.
@@ -347,161 +313,10 @@ impl Drop for Storage {
     }
 }
 
-/// A field of a component's schema, copied out of the mod's `FieldDesc`
-/// because that points into the mod's memory. Its drop function is kept in
-/// `Code`, with the build it belongs to.
-#[derive(PartialEq, Debug)]
-struct Field {
-    name: String,
-    kind: FieldKind,
-    offset: usize,
-    size: usize,
-    fingerprint: u64,
-}
-
-impl Field {
-    fn describe(&self) -> String {
-        if self.kind == FieldKind::OPAQUE {
-            format!("type {:016x}", self.fingerprint)
-        } else {
-            kind_name(self.kind).into()
-        }
-    }
-}
-
-/// Whether a value in field `o` can become one in field `f`: moved, if they
-/// have the same type, or converted between numeric kinds.
-fn carries(o: &Field, f: &Field) -> bool {
-    if o.kind == FieldKind::OPAQUE || f.kind == FieldKind::OPAQUE {
-        o.kind == f.kind && o.fingerprint == f.fingerprint && o.size == f.size
-    } else {
-        o.kind == f.kind || (is_numeric(o.kind) && is_numeric(f.kind))
-    }
-}
-
 /// The desc's fields and their drop functions, or `None` if the desc doesn't
 /// describe a valid layout.
 fn read_fields(desc: &ComponentDesc) -> Option<(Vec<Field>, Vec<Option<DropFn>>)> {
-    if !desc.align.is_power_of_two() || desc.size % desc.align != 0 {
-        return None;
-    }
-    let descs = match desc.field_count {
-        0 => &[][..],
-        n => unsafe { std::slice::from_raw_parts(desc.fields, n) },
-    };
-    descs
-        .iter()
-        .map(|f| {
-            // A scalar's size is fixed by its kind; anything else is opaque.
-            if f.kind != FieldKind::OPAQUE && kind_size(f.kind)? != f.size {
-                return None;
-            }
-            if f.offset.checked_add(f.size)? > desc.size {
-                return None;
-            }
-            let name = unsafe { std::slice::from_raw_parts(f.name, f.name_len) };
-            let name = String::from_utf8(name.to_vec()).ok()?;
-            let field = Field { name, kind: f.kind, offset: f.offset, size: f.size, fingerprint: f.fingerprint };
-            Some((field, f.drop))
-        })
-        .collect::<Option<Vec<_>>>()
-        .map(|pairs| pairs.into_iter().unzip())
-}
-
-fn kind_size(kind: FieldKind) -> Option<usize> {
-    Some(match kind {
-        FieldKind::U8 | FieldKind::I8 | FieldKind::BOOL => 1,
-        FieldKind::U16 | FieldKind::I16 => 2,
-        FieldKind::U32 | FieldKind::I32 | FieldKind::F32 => 4,
-        FieldKind::U64 | FieldKind::I64 | FieldKind::F64 | FieldKind::ENTITY => 8,
-        _ => return None,
-    })
-}
-
-fn kind_name(kind: FieldKind) -> &'static str {
-    match kind {
-        FieldKind::U8 => "u8",
-        FieldKind::U16 => "u16",
-        FieldKind::U32 => "u32",
-        FieldKind::U64 => "u64",
-        FieldKind::I8 => "i8",
-        FieldKind::I16 => "i16",
-        FieldKind::I32 => "i32",
-        FieldKind::I64 => "i64",
-        FieldKind::F32 => "f32",
-        FieldKind::F64 => "f64",
-        FieldKind::BOOL => "bool",
-        FieldKind::ENTITY => "Entity",
-        FieldKind::OPAQUE => "opaque",
-        _ => "?",
-    }
-}
-
-fn is_numeric(kind: FieldKind) -> bool {
-    !matches!(kind, FieldKind::BOOL | FieldKind::ENTITY | FieldKind::OPAQUE)
-}
-
-/// A numeric value wide enough to hold any numeric field exactly.
-enum Num {
-    Int(i128),
-    Float(f64),
-}
-
-/// Moves one field from the old layout into the new: byte for byte when the
-/// kinds match (`size` bytes; the caller has checked an opaque field's type),
-/// and between numeric kinds with `as` semantics (floats saturate into
-/// integers, integers wrap into narrower ones). Leaves `dst` untouched, so
-/// holding the default, when the kinds can't convert.
-///
-/// # Safety
-/// `src` and `dst` must point to fields of the given kinds; both may be
-/// unaligned.
-unsafe fn convert(from: FieldKind, src: *const u8, size: usize, to: FieldKind, dst: *mut u8) {
-    if from == to {
-        unsafe { std::ptr::copy_nonoverlapping(src, dst, size) };
-        return;
-    }
-    if !is_numeric(from) || !is_numeric(to) {
-        return;
-    }
-    let value = unsafe {
-        match from {
-            FieldKind::U8 => Num::Int(src.read() as i128),
-            FieldKind::U16 => Num::Int((src as *const u16).read_unaligned() as i128),
-            FieldKind::U32 => Num::Int((src as *const u32).read_unaligned() as i128),
-            FieldKind::U64 => Num::Int((src as *const u64).read_unaligned() as i128),
-            FieldKind::I8 => Num::Int((src as *const i8).read() as i128),
-            FieldKind::I16 => Num::Int((src as *const i16).read_unaligned() as i128),
-            FieldKind::I32 => Num::Int((src as *const i32).read_unaligned() as i128),
-            FieldKind::I64 => Num::Int((src as *const i64).read_unaligned() as i128),
-            FieldKind::F32 => Num::Float((src as *const f32).read_unaligned() as f64),
-            FieldKind::F64 => Num::Float((src as *const f64).read_unaligned()),
-            _ => return,
-        }
-    };
-    macro_rules! write {
-        ($ty:ty) => {
-            unsafe {
-                (dst as *mut $ty).write_unaligned(match value {
-                    Num::Int(v) => v as $ty,
-                    Num::Float(v) => v as $ty,
-                })
-            }
-        };
-    }
-    match to {
-        FieldKind::U8 => write!(u8),
-        FieldKind::U16 => write!(u16),
-        FieldKind::U32 => write!(u32),
-        FieldKind::U64 => write!(u64),
-        FieldKind::I8 => write!(i8),
-        FieldKind::I16 => write!(i16),
-        FieldKind::I32 => write!(i32),
-        FieldKind::I64 => write!(i64),
-        FieldKind::F32 => write!(f32),
-        FieldKind::F64 => write!(f64),
-        _ => {}
-    }
+    unsafe { schema::read_fields(desc.fields, desc.field_count, desc.size, desc.align) }
 }
 
 /// Packed, aligned bytes for one component's values. `Vec<u8>` can't be used:
@@ -852,7 +667,8 @@ mod tests {
 
     #[test]
     fn numeric_conversion_follows_as_semantics() {
-        use super::{FieldKind as K, convert};
+        use crate::schema::convert;
+        use engine_api::FieldKind as K;
         fn run<A: Copy, B: Copy + Default>(from: K, value: A, to: K) -> B {
             let mut out = B::default();
             unsafe {

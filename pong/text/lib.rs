@@ -12,8 +12,10 @@ use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, WIDTH};
 
 const HELP: &str = "commands: up | down | stay | show | state";
 
-#[derive(Default)]
-struct Text;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Text {}
+}
 
 fn set_intent(world: &mut World, intent: f32) -> Result<(), String> {
     let mut found = false;
@@ -75,11 +77,13 @@ fn describe(s: &Snapshot) -> String {
 }
 
 impl Mod for Text {
-    fn step(&mut self, _cx: &mut Cx) -> engine_api::Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> engine_api::Status {
         engine_api::Status::OK
     }
 
-    fn message(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut world = cx.world();
         match message.trim() {
             "up" => set_intent(&mut world, -1.0).map(|()| "moving up".into()),

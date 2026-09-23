@@ -4,4 +4,5 @@
 
 pub mod control_server;
 pub mod engine;
+mod schema;
 pub mod world;

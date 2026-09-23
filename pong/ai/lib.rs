@@ -10,11 +10,15 @@ const EFFORT: f32 = 0.8;
 /// How far off the ball it tolerates before moving, in cells.
 const SLACK: f32 = 0.5;
 
-#[derive(Default)]
-struct Ai;
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Ai {}
+}
 
 impl Mod for Ai {
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    type Transient = ();
+
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         let mut world = cx.world();
         let Some(ball) = world.query::<Ball>().next().map(|(_, b)| *b) else {
             return Status::OK;

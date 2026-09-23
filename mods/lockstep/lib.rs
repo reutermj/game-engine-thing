@@ -14,10 +14,12 @@ const DT: f32 = 1.0 / 60.0;
 /// Most frames one request may run, so a typo can't hang the engine.
 const MAX_STEPS: u64 = 100_000;
 
-#[derive(Default)]
-struct Lockstep {
-    frame: u64,
-    clock: Option<Entity>,
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Lockstep {
+        frame: u64,
+        clock: Option<Entity>,
+    }
 }
 
 impl Lockstep {
@@ -31,14 +33,16 @@ impl Lockstep {
 }
 
 impl Mod for Lockstep {
+    type Transient = ();
+
     /// Called by the loader's loop between requests: nothing to do, and a
     /// short sleep so an idle engine doesn't spin a core.
-    fn step(&mut self, _cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
         std::thread::sleep(std::time::Duration::from_millis(2));
         Status::OK
     }
 
-    fn message(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut words = message.split_whitespace();
         match (words.next(), words.next(), words.next()) {
             (Some("step"), n, None) => {
@@ -59,7 +63,7 @@ impl Mod for Lockstep {
         }
     }
 
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         if let Some(e) = self.clock.take() {
             cx.world().despawn(e);
         }

@@ -13,6 +13,8 @@ const BUILD: (u32, u64) = (1, 1);
 const BUILD: (u32, u64) = (2, 100);
 #[cfg(feature = "v3")]
 const BUILD: (u32, u64) = (3, 1000);
+#[cfg(feature = "v4")]
+const BUILD: (u32, u64) = (5, 10);
 // Panics on its first step only, and counts like v1 after that, so a loader
 // that kept stepping a failed mod would visibly move the total.
 #[cfg(feature = "panic")]
@@ -22,13 +24,38 @@ const BUILD: (u32, u64) = (4, 1);
 static LOADS: AtomicU32 = AtomicU32::new(0);
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Default)]
-struct Counter {
-    total: u64,
-    probe: Option<Entity>,
-    /// Only in v3, to give it an incompatible state layout.
-    #[cfg(feature = "v3")]
-    _grown: [u64; 4],
+#[cfg(not(any(feature = "v3", feature = "v4")))]
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Counter {
+        total: u64,
+        probe: Option<Entity>,
+    }
+}
+
+// v3 declares that its state means something else (version 1), so the loader
+// has v1 drop its state and v3 start over.
+#[cfg(feature = "v3")]
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Counter, version = 1 {
+        total: u64,
+        probe: Option<Entity>,
+        #[allow(dead_code)]
+        grown: [u64; 4],
+    }
+}
+
+// v4 only adds a field, so the loader migrates the state and keeps the rest.
+#[cfg(feature = "v4")]
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Counter {
+        total: u64,
+        probe: Option<Entity>,
+        #[allow(dead_code)]
+        grown: [u64; 4],
+    }
 }
 
 impl Counter {
@@ -43,7 +70,9 @@ impl Counter {
 }
 
 impl Mod for Counter {
-    fn load(&mut self, cx: &mut Cx) {
+    type Transient = ();
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
         LOADS.fetch_add(1, Ordering::Relaxed);
         if self.probe.is_none() {
             self.probe = Some(cx.world().spawn());
@@ -51,7 +80,7 @@ impl Mod for Counter {
         self.write_probe(cx);
     }
 
-    fn step(&mut self, cx: &mut Cx) -> Status {
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         if cfg!(feature = "panic") && !PANICKED.swap(true, Ordering::Relaxed) {
             panic!("this build of counter panics on its first step");
         }
@@ -61,7 +90,7 @@ impl Mod for Counter {
     }
 
     /// `get` replies with the total; `add <n>` adds to it.
-    fn message(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         match message.split_once(' ') {
             None if message == "get" => Ok(self.total.to_string()),
             Some(("add", n)) => {
@@ -74,7 +103,7 @@ impl Mod for Counter {
     }
 
     /// The state is going away, so the entity it tracks would be orphaned.
-    fn close(&mut self, cx: &mut Cx) {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
         if let Some(e) = self.probe.take() {
             cx.world().despawn(e);
         }
