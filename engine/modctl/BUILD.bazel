@@ -1,0 +1,13 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+# `bazel run //engine/modctl -- list` talks to a running engine directly.
+# Every engine_mod target is a symlink to this binary with the mod baked in.
+rust_binary(
+    name = "modctl",
+    srcs = ["main.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/control",
+        "@rules_rust//rust/runfiles",
+    ],
+)

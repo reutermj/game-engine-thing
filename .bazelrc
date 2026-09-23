@@ -1,0 +1,9 @@
+# Keep the build hermetic: never pick up a C/C++ toolchain from the host.
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
+
+try-import %workspace%/user.bazelrc
+
+# rustc surfaces clang's "unused --unwindlib" note from the hermetic linker as a warning.
+common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker_messages
+

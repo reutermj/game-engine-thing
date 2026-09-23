@@ -1,0 +1,8 @@
+load("//engine:defs.bzl", "engine_game")
+
+# `bazel run //game` starts the engine with these mods loaded.
+engine_game(
+    name = "game",
+    bootstrap = "//mods/bootstrap",
+    mods = ["//mods/counter"],
+)
