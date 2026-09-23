@@ -1,0 +1,14 @@
+load("//engine:defs.bzl", "engine_mod")
+
+# Enemies that patrol their platform, hurt the player on contact, and die
+# when stomped. Placed by the level mod.
+engine_mod(
+    name = "walkers",
+    srcs = ["lib.rs"],
+    interface = ["components.rs"],
+    mod_deps = [
+        "//mods/clock",
+        "//platformer/core",
+    ],
+    visibility = ["//visibility:public"],
+)

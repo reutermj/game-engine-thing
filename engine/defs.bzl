@@ -165,6 +165,9 @@ def engine_mod(
       **kwargs: Passed to the underlying `rust_shared_library`.
     """
     mod_name = mod_name or name
+    # Every target this macro declares is part of the mod, so all of them
+    # share its testonly-ness.
+    testonly = kwargs.pop("testonly", False)
     dep_labels = [native.package_relative_label(d) for d in mod_deps]
     interface_deps = [dep.same_package_label(dep.name + "_interface") for dep in dep_labels]
 
@@ -175,6 +178,7 @@ def engine_mod(
             crate_root = interface[0],
             srcs = interface,
             deps = interface_deps + ["//engine/api"],
+            testonly = testonly,
             visibility = visibility,
         )
     _mod_links(
@@ -182,6 +186,7 @@ def engine_mod(
         srcs = interface,
         deps = [dep.same_package_label(dep.name + "_links") for dep in dep_labels],
         mod_name = mod_name,
+        testonly = testonly,
         visibility = visibility,
     )
     rust_shared_library(
@@ -202,6 +207,7 @@ def engine_mod(
         # already links with -z now; pin it so the loader can rely on it. See
         # docs/lore/mods-are-linked-bind-now.md.
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
+        testonly = testonly,
         visibility = ["//visibility:private"],
         **kwargs
     )
@@ -210,6 +216,7 @@ def engine_mod(
         library = ":" + name + "_lib",
         mod_deps = mod_deps,
         mod_name = mod_name,
+        testonly = testonly,
         visibility = visibility,
     )
 

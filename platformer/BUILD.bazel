@@ -1,0 +1,36 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_game")
+
+# A platformer for a player that takes turns, on the lockstep bootstrap.
+#
+#   ./bazel run //platformer                                         # the engine
+#   bazel-bin/engine/modctl/modctl send platformer_text right        # run, jump, ...
+#   bazel-bin/engine/modctl/modctl send lockstep step 20             # advance time
+#   bazel-bin/engine/modctl/modctl send platformer_text show         # look
+engine_game(
+    name = "platformer",
+    bootstrap = "//mods/lockstep",
+    mods = [
+        "//platformer/level",
+        "//platformer/text",
+    ],
+)
+
+TEST_DATA = {
+    "LEVEL_ALT_CODE": "//platformer/level:level_alt_code",
+    "LEVEL_ALT_MAP": "//platformer/level:level_alt_map",
+    # The game target's output is its manifest; its runfiles have every mod.
+    "MANIFEST": ":platformer",
+}
+
+rust_test(
+    name = "platformer_test",
+    srcs = ["platformer_test.rs"],
+    data = TEST_DATA.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()},
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)

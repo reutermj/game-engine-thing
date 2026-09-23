@@ -39,6 +39,11 @@ $M send lockstep step 30                                  # run 30 frames
 $M send pong_text state                                   # exact positions
 ```
 
+The platformer works the same way (`./bazel run //platformer`, then
+`$M send platformer_text left | right | stop | jump | show | state`), and its
+level is `platformer/level/map.txt`: edit it and
+`./bazel run //platformer/level` swaps the new level in while you play.
+
 ## Layout
 
 - `engine/api`: the C ABI (`Mod` trait + `export_mod!`, and the ECS `World`) shared
@@ -73,6 +78,6 @@ struct. A panicking mod is disabled until it's reloaded.
 - [docs/lore/](docs/lore/): non-obvious things that cost real effort to work out
 - [docs/runbooks/](docs/runbooks/): recurring maintenance procedures
 - [docs/retrospectives/](docs/retrospectives/): what building on the engine
-  showed, starting with pong
+  showed: pong, then the platformer
 - [CLAUDE.md](CLAUDE.md): conventions for working in the repo (for agents,
   and humans too)

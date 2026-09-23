@@ -78,6 +78,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   what a test proves. See the testing conventions below.
 - `game/` — the `engine_game` target listing the mods loaded at startup,
   and its `reload` target.
+- `platformer/` — the second game: `core` (the player and the rules, mod
+  `platformer`), `walkers` (enemies), `level` (the map, `map.txt`, rebuilt
+  live when it changes), `text`, and `platformer_test`, which replays routes
+  an agent played.
 - `pong/` — the first real game: `core` (the rules, mod `pong`), `ai`,
   `text` (commands and drawing over messages), the game target on the
   lockstep bootstrap, and `pong_test`, which plays it through messages.

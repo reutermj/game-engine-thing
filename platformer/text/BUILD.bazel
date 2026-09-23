@@ -1,0 +1,13 @@
+load("//engine:defs.bzl", "engine_mod")
+
+engine_mod(
+    name = "text",
+    srcs = ["lib.rs"],
+    mod_deps = [
+        "//mods/clock",
+        "//platformer/core",
+        "//platformer/walkers",
+    ],
+    mod_name = "platformer_text",
+    visibility = ["//visibility:public"],
+)

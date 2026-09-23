@@ -1,0 +1,36 @@
+load("//engine:defs.bzl", "engine_mod")
+
+# The level. Edit map.txt and `./bazel run //platformer/level` to swap it in
+# live.
+engine_mod(
+    name = "level",
+    srcs = ["lib.rs"],
+    compile_data = ["map.txt"],
+    mod_deps = [
+        "//platformer/core",
+        "//platformer/walkers",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Test builds of the same mod: one with another map, and one with the same map
+# and different code. See //platformer:platformer_test.
+[engine_mod(
+    name = "level_" + variant,
+    testonly = True,
+    srcs = ["lib.rs"],
+    compile_data = [
+        "map.txt",
+        "test_alt_map.txt",
+    ],
+    crate_features = ["test_" + variant],
+    mod_deps = [
+        "//platformer/core",
+        "//platformer/walkers",
+    ],
+    mod_name = "level",
+    visibility = ["//platformer:__pkg__"],
+) for variant in [
+    "alt_map",
+    "alt_code",
+]]
