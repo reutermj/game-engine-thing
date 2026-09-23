@@ -23,7 +23,7 @@ pub use ecs::{
 };
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 5;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -47,6 +47,9 @@ impl Op {
     /// State is about to be freed: the mod is being removed, or the new build's
     /// state layout doesn't match. Drop anything the state owns.
     pub const CLOSE: Op = Op(3);
+    /// Handle the text in `ModContext::message`, sent over the control
+    /// socket, and reply through `Host::reply`.
+    pub const MESSAGE: Op = Op(4);
 }
 
 impl std::fmt::Debug for Op {
@@ -56,6 +59,7 @@ impl std::fmt::Debug for Op {
             Op::STEP => f.write_str("STEP"),
             Op::UNLOAD => f.write_str("UNLOAD"),
             Op::CLOSE => f.write_str("CLOSE"),
+            Op::MESSAGE => f.write_str("MESSAGE"),
             Op(n) => write!(f, "Op({n})"),
         }
     }
@@ -71,6 +75,9 @@ impl Status {
     pub const QUIT: Status = Status(1);
     /// The mod failed (e.g. panicked). The loader stops stepping it until it's reloaded.
     pub const ERROR: Status = Status(-1);
+    /// The mod declined a message (unknown command, bad argument); the reply
+    /// says why. Unlike `ERROR`, the mod carries on.
+    pub const REFUSED: Status = Status(2);
 }
 
 #[repr(C)]
@@ -107,6 +114,8 @@ pub struct Host {
     /// Steps every loaded mod except the caller, in load order. Meant for the
     /// bootstrap mod, which owns the frame loop.
     pub step_mods: unsafe extern "C" fn(ctx: *const ModContext) -> Status,
+    /// Appends to the reply to the message being handled.
+    pub reply: unsafe extern "C" fn(ctx: *const ModContext, msg: *const u8, len: usize),
     /// The entity/component store every mod shares. See [`World`].
     pub world: WorldApi,
 }
@@ -127,6 +136,9 @@ pub struct ModContext {
     /// Set by the loader when `state` is zeroed memory rather than a live value.
     /// The mod initializes it during `Op::LOAD` and clears the flag.
     pub state_fresh: bool,
+    /// The message being handled; only set during `Op::MESSAGE`.
+    pub message: *const u8,
+    pub message_len: usize,
 }
 
 /// Safe view of a [`ModContext`] handed to [`Mod`] callbacks.
@@ -158,6 +170,10 @@ impl Cx<'_> {
         unsafe { ((*self.raw.host).step_mods)(self.raw) }
     }
 
+    fn reply(&self, text: &str) {
+        unsafe { ((*self.raw.host).reply)(self.raw, text.as_ptr(), text.len()) }
+    }
+
     /// The shared world. Borrows the context mutably, so log after a query
     /// rather than inside it.
     pub fn world(&mut self) -> World<'_> {
@@ -181,6 +197,11 @@ pub trait Mod: Default + 'static {
     fn unload(&mut self, _cx: &mut Cx) {}
     /// Called before the state is dropped.
     fn close(&mut self, _cx: &mut Cx) {}
+    /// Handles text sent with `modctl send <mod> <text>`. `Ok` is the reply;
+    /// `Err` declines the message, with the reason as the reply.
+    fn message(&mut self, cx: &mut Cx, _message: &str) -> Result<String, String> {
+        Err(format!("{} doesn't take messages", cx.name()))
+    }
 }
 
 #[doc(hidden)]
@@ -227,6 +248,20 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
             Op::CLOSE => {
                 state.close(&mut cx);
                 std::ptr::drop_in_place(state);
+            }
+            Op::MESSAGE => {
+                let message = std::slice::from_raw_parts(cx.raw.message, cx.raw.message_len);
+                let message = std::str::from_utf8(message).unwrap_or("");
+                return match state.message(&mut cx, message) {
+                    Ok(reply) => {
+                        cx.reply(&reply);
+                        Status::OK
+                    }
+                    Err(reason) => {
+                        cx.reply(&reason);
+                        Status::REFUSED
+                    }
+                };
             }
             _ => return Status::ERROR,
         }
@@ -314,6 +349,8 @@ mod tests {
             loaded_at: 1,
             state: state.as_mut_ptr() as *mut c_void,
             state_fresh: true,
+            message: std::ptr::null(),
+            message_len: 0,
         }
     }
 

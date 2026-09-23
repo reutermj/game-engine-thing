@@ -10,6 +10,7 @@
 //!   batch                load or reload several mods at once, all or nothing:
 //!   <name> <path>        one line per mod, after the `batch` line
 //!   unload <name>        close and unload a mod
+//!   send <name> <text>   deliver text to a mod; its reply is the reply
 //!   list                 print loaded mods
 //!   quit                 shut the engine down
 
@@ -23,6 +24,7 @@ pub enum Request {
     Load { name: String, path: PathBuf },
     Batch { mods: Vec<(String, PathBuf)> },
     Unload { name: String },
+    Send { name: String, message: String },
     List,
     Quit,
 }
@@ -60,6 +62,11 @@ impl Request {
                 validate_name(rest)?;
                 Ok(Request::Unload { name: rest.into() })
             }
+            "send" => {
+                let (name, message) = rest.split_once(' ').unwrap_or((rest, ""));
+                validate_name(name)?;
+                Ok(Request::Send { name: name.into(), message: message.into() })
+            }
             "list" => Ok(Request::List),
             "quit" => Ok(Request::Quit),
             _ => Err(format!("unknown command {cmd:?}")),
@@ -75,6 +82,7 @@ impl Request {
                 format!("batch\n{lines}")
             }
             Request::Unload { name } => format!("unload {name}\n"),
+            Request::Send { name, message } => format!("send {name} {message}\n"),
             Request::List => "list\n".into(),
             Request::Quit => "quit\n".into(),
         }
@@ -181,6 +189,8 @@ mod tests {
             },
             Request::Batch { mods: vec![] },
             Request::Unload { name: "counter".into() },
+            Request::Send { name: "pong_text".into(), message: "up".into() },
+            Request::Send { name: "lockstep".into(), message: "step 10".into() },
             Request::List,
             Request::Quit,
         ];

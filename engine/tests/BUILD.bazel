@@ -84,6 +84,10 @@ engine_mod(
 )
 
 TEST_MODS = {
+    # The real ones: the lockstep bootstrap is what exercises a message
+    # handler that steps other mods.
+    "CLOCK": "//mods/clock",
+    "LOCKSTEP": "//mods/lockstep",
     "BASE_V1": ":base_v1",
     "BASE_V1B": ":base_v1b",
     "BASE_V2": ":base_v2",

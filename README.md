@@ -24,6 +24,21 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 ./bazel test //...                  # unit, integration and end-to-end tests
 ```
 
+## Play pong
+
+Pong runs on the lockstep bootstrap: time only moves when you step it, so
+it's playable turn by turn (by an agent, say) and every game is
+reproducible.
+
+```sh
+./bazel run //pong                                        # terminal 1
+M=bazel-bin/engine/modctl/modctl                          # terminal 2
+$M send pong_text show                                    # draw the court
+$M send pong_text down                                    # up | down | stay
+$M send lockstep step 30                                  # run 30 frames
+$M send pong_text state                                   # exact positions
+```
+
 ## Layout
 
 - `engine/api`: the C ABI (`Mod` trait + `export_mod!`, and the ECS `World`) shared
@@ -57,5 +72,7 @@ struct. A panicking mod is disabled until it's reloaded.
   questions deliberately deferred until hot reload was proven
 - [docs/lore/](docs/lore/): non-obvious things that cost real effort to work out
 - [docs/runbooks/](docs/runbooks/): recurring maintenance procedures
+- [docs/retrospectives/](docs/retrospectives/): what building on the engine
+  showed, starting with pong
 - [CLAUDE.md](CLAUDE.md): conventions for working in the repo (for agents,
   and humans too)

@@ -1,8 +1,9 @@
 load("//engine:defs.bzl", "engine_mod")
 
 engine_mod(
-    name = "bootstrap",
+    name = "ai",
     srcs = ["lib.rs"],
-    mod_deps = ["//mods/clock"],
+    mod_deps = ["//pong/core"],
+    mod_name = "pong_ai",
     visibility = ["//visibility:public"],
 )

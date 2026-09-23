@@ -30,6 +30,8 @@ pub struct Engine {
     /// Source of `ModContext::loaded_at`.
     load_count: Cell<u64>,
     reload_hint: RefCell<Option<String>>,
+    /// The reply to the message being delivered, built up by `host_reply`.
+    reply: RefCell<String>,
 }
 
 struct Loaded {
@@ -79,6 +81,7 @@ impl Engine {
                 userdata: std::ptr::null_mut(),
                 log: host_log,
                 step_mods: host_step_mods,
+                reply: host_reply,
                 world: WorldApi {
                     register: world::register,
                     spawn: world::spawn,
@@ -97,6 +100,7 @@ impl Engine {
             world: RefCell::new(WorldStorage::default()),
             load_count: Cell::new(0),
             reload_hint: RefCell::new(None),
+            reply: RefCell::new(String::new()),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
         engine
@@ -186,6 +190,8 @@ impl Engine {
                         loaded_at,
                         state: alloc_state(o.state_layout),
                         state_fresh: true,
+                        message: std::ptr::null(),
+                        message_len: 0,
                     }));
                     mods.push(Loaded {
                         name,
@@ -291,6 +297,35 @@ impl Engine {
             ));
         }
         if problems.is_empty() { Ok(()) } else { Err(problems.join("; ")) }
+    }
+
+    /// Delivers `message` to the mod `name` and returns its reply. `Err` if the
+    /// mod declined it (the reply says why), or failed handling it.
+    ///
+    /// The mod list is only shared-borrowed, so a handler may step other mods:
+    /// that is how a bootstrap mod can advance time on request.
+    pub fn send(&self, name: &str, message: &str) -> Result<String, String> {
+        let mods = self.mods.try_borrow().map_err(|_| "the mods are being modified".to_string())?;
+        let m = mods.iter().find(|m| &*m.name == name).ok_or_else(|| format!("{name} is not loaded"))?;
+        if m.failed.get() {
+            return Err(format!("{name} has failed; reload it first"));
+        }
+        self.reply.borrow_mut().clear();
+        unsafe {
+            (*m.ctx).message = message.as_ptr();
+            (*m.ctx).message_len = message.len();
+        }
+        let status = m.call(Op::MESSAGE);
+        unsafe {
+            (*m.ctx).message = std::ptr::null();
+            (*m.ctx).message_len = 0;
+        }
+        let reply = std::mem::take(&mut *self.reply.borrow_mut());
+        match status {
+            Status::OK => Ok(reply),
+            Status::REFUSED => Err(reply),
+            _ => Err(format!("{name} failed handling the message")),
+        }
     }
 
     /// The label the user runs to reload the whole game, named in errors.
@@ -473,6 +508,15 @@ unsafe extern "C" fn host_log(ctx: *const ModContext, msg: *const u8, len: usize
     let msg = unsafe { std::slice::from_raw_parts(msg, len) };
     let name = unsafe { name_of(ctx) };
     println!("[{name}] {}", String::from_utf8_lossy(msg));
+}
+
+unsafe extern "C" fn host_reply(ctx: *const ModContext, msg: *const u8, len: usize) {
+    let engine = unsafe { engine_of(ctx) };
+    let msg = unsafe { std::slice::from_raw_parts(msg, len) };
+    // Can't fail: nothing else holds the buffer while a mod runs.
+    if let Ok(mut reply) = engine.reply.try_borrow_mut() {
+        reply.push_str(&String::from_utf8_lossy(msg));
+    }
 }
 
 unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {

@@ -120,6 +120,7 @@ load <name> <path>   ok loaded <name> | ok reloaded <name> (generation N) | ok <
 batch                the same per mod, joined with "; " (all or nothing)
 <name> <path>        ...one line per mod after `batch`
 unload <name>        ok unloaded <name>
+send <name> <text>   ok <the mod's reply> | err <why the mod declined>
 list                 ok <count> mod(s) loaded, then one line per mod
 quit                 ok quitting
 ```

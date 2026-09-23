@@ -60,6 +60,19 @@ impl Mod for Counter {
         Status::OK
     }
 
+    /// `get` replies with the total; `add <n>` adds to it.
+    fn message(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
+        match message.split_once(' ') {
+            None if message == "get" => Ok(self.total.to_string()),
+            Some(("add", n)) => {
+                self.total += n.parse::<u64>().map_err(|e| format!("{n:?}: {e}"))?;
+                self.write_probe(cx);
+                Ok(self.total.to_string())
+            }
+            _ => Err(format!("counter doesn't understand {message:?}")),
+        }
+    }
+
     /// The state is going away, so the entity it tracks would be orphaned.
     fn close(&mut self, cx: &mut Cx) {
         if let Some(e) = self.probe.take() {

@@ -67,8 +67,9 @@ changing the ABI, the reload sequence or the Bazel rules.
   interface, so the engine can check at load time what each build was
   compiled against. See
   [docs/architecture/mod-deps.md](docs/architecture/mod-deps.md).
-- `mods/` — `bootstrap` (owns the frame loop), `counter` (per-mod state
-  across reloads), `hello` (loaded live, not in the manifest), and the ECS
+- `mods/` — `bootstrap` (owns the frame loop in real time), `lockstep` (a
+  bootstrap that runs frames only when sent `step N`), `clock` (declares the
+  `Clock` both bootstraps publish), `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
   demo: `transform` declares `Position` and runs nothing, `physics` declares
   `Velocity` and moves things, `spawner` creates entities, `reporter` prints
   positions. Their `mod_deps` are the dependency example.
@@ -77,11 +78,16 @@ changing the ABI, the reload sequence or the Bazel rules.
   what a test proves. See the testing conventions below.
 - `game/` — the `engine_game` target listing the mods loaded at startup,
   and its `reload` target.
+- `pong/` — the first real game: `core` (the rules, mod `pong`), `ai`,
+  `text` (commands and drawing over messages), the game target on the
+  lockstep bootstrap, and `pong_test`, which plays it through messages.
 - `bazel` — runs a pinned, checksummed bazelisk so a fresh checkout needs no
   host Bazel. Always invoke Bazel as `./bazel`.
 - `docs/architecture/` — design docs, one per area. Living documents.
 - `docs/lore/` — non-obvious discoveries that cost real effort. See below.
 - `docs/runbooks/` — recurring repo-maintenance procedures.
+- `docs/retrospectives/` — what a piece of work showed about the design,
+  kept as evidence. Read the latest before redesigning a part it covers.
 
 ## Working conventions
 

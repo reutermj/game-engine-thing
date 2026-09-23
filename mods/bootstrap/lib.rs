@@ -1,8 +1,10 @@
-//! Owns the frame loop: paces frames at a fixed rate and steps every other mod.
+//! Owns the frame loop in real time: paces frames at a fixed rate, publishes
+//! the `Clock`, and steps every other mod.
 
 use std::time::{Duration, Instant};
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use clock::Clock;
+use engine_api::{Cx, Entity, Mod, Status, export_mod};
 
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
@@ -10,6 +12,7 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 struct Bootstrap {
     frame: u64,
     next_frame: Option<Instant>,
+    clock: Option<Entity>,
 }
 
 impl Mod for Bootstrap {
@@ -22,8 +25,12 @@ impl Mod for Bootstrap {
     }
 
     fn step(&mut self, cx: &mut Cx) -> Status {
-        cx.step_mods();
         self.frame += 1;
+        let clock = Clock { frame: self.frame, dt: FRAME.as_secs_f32() };
+        let mut world = cx.world();
+        let entity = *self.clock.get_or_insert_with(|| world.spawn());
+        world.insert(entity, clock);
+        cx.step_mods();
 
         let next = self.next_frame.unwrap_or_else(Instant::now) + FRAME;
         let now = Instant::now();
@@ -35,6 +42,12 @@ impl Mod for Bootstrap {
             self.next_frame = Some(now);
         }
         Status::OK
+    }
+
+    fn close(&mut self, cx: &mut Cx) {
+        if let Some(e) = self.clock.take() {
+            cx.world().despawn(e);
+        }
     }
 }
 

@@ -11,7 +11,8 @@ rust_library(
         "world.rs",
     ],
     crate_name = "engine_loader",
-    visibility = ["//engine:__subpackages__"],
+    # Public so a game can test itself against a real Engine (//pong:pong_test).
+    visibility = ["//visibility:public"],
     deps = [
         "//engine/api",
         "//engine/control",

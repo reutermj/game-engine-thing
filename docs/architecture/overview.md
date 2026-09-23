@@ -24,6 +24,17 @@ trampoline, each bootstrap step returns before the next socket poll, so a
 reload always happens when no mod code is running. The bootstrap mod ends the
 program by returning `Status::QUIT`.
 
+Time is published as data: the bootstrap writes a `Clock` component (from
+`mods/clock`) before each frame, and systems read `dt` from it. That lets a
+game swap the real-time bootstrap for `mods/lockstep`, which runs frames only
+when sent `step N` (see `modctl send`), without changing any system. Pong
+does, so it can be played turn by turn.
+
+**Open question:** what the bootstrap should own. It currently owns time
+policy, publishing the clock and scheduling, and changing only the first
+means replacing all three. See
+[the pong retrospective](../retrospectives/2026-09-23-pong.md#the-bootstrap-mod).
+
 **Open question:** ordering. `step_mods` steps mods in load order; a real
 engine needs phases (input before simulation before rendering). Whether the
 bootstrap mod should get per-mod stepping, or mods should declare a phase, is

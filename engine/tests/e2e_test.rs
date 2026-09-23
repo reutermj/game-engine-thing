@@ -151,6 +151,13 @@ fn a_game_starts_hot_reloads_a_mod_and_quits() {
     assert!(!second.status.success(), "{}", describe(&second));
     assert!(String::from_utf8_lossy(&second.stderr).contains("already listening"), "{}", describe(&second));
 
+    // A message and its reply, round trip over the socket.
+    let get = modctl(&runtime, &["send", "counter", "get"], &[]);
+    assert!(get.status.success(), "{}", describe(&get));
+    let declined = modctl(&runtime, &["send", "counter", "jump"], &[]);
+    assert!(!declined.status.success(), "{}", describe(&declined));
+    assert!(stdout(&declined).contains("doesn't understand"), "{}", describe(&declined));
+
     let quit = modctl(&runtime, &["quit"], &[]);
     assert!(quit.status.success(), "{}", describe(&quit));
     let output = engine.wait();
@@ -226,7 +233,7 @@ fn a_game_reload_reloads_only_the_mods_that_changed() {
     assert!(reload.status.success(), "{}", describe(&reload));
     assert_eq!(
         stdout(&reload).trim(),
-        "reloaded counter (generation 1); bootstrap unchanged; base unchanged; user unchanged"
+        "reloaded counter (generation 1); clock unchanged; bootstrap unchanged; base unchanged; user unchanged"
     );
 
     // A per-mod reload that would strand a dependent is refused, naming the

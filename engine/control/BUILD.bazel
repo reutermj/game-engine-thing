@@ -5,7 +5,7 @@ rust_library(
     name = "control",
     srcs = ["lib.rs"],
     crate_name = "engine_control",
-    visibility = ["//engine:__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = ["@rules_rust//rust/runfiles"],
 )
 

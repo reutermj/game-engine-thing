@@ -295,3 +295,50 @@ mod deps {
         assert!(e.unload("base").is_ok());
     }
 }
+
+/// Text sent to a mod with `modctl send`.
+mod messages {
+    use super::{engine, load, probe, step};
+
+    #[test]
+    fn a_mod_replies_to_a_message_and_can_act_on_it() {
+        let e = engine("messages");
+        load(&e, "counter", "COUNTER_V1");
+        step(&e, 2);
+        assert_eq!(e.send("counter", "get").as_deref(), Ok("2"));
+        assert_eq!(e.send("counter", "add 40").as_deref(), Ok("42"));
+        assert_eq!(probe(&e).value, 42, "the handler's change reached the world");
+    }
+
+    #[test]
+    fn a_declined_message_is_an_error_carrying_the_mods_reason() {
+        let e = engine("declined");
+        load(&e, "counter", "COUNTER_V1");
+        assert_eq!(e.send("counter", "jump").unwrap_err(), "counter doesn't understand \"jump\"");
+        assert!(e.send("counter", "add x").unwrap_err().contains("\"x\""));
+        // Declining isn't failing: the mod keeps running.
+        assert!(!e.list().contains("[failed]"), "{}", e.list());
+        step(&e, 1);
+        assert_eq!(probe(&e).value, 1);
+    }
+
+    #[test]
+    fn a_mod_without_a_handler_or_not_loaded_refuses() {
+        let e = engine("no_handler");
+        assert_eq!(e.send("driver", "hi").unwrap_err(), "driver doesn't take messages");
+        assert_eq!(e.send("nobody", "hi").unwrap_err(), "nobody is not loaded");
+    }
+
+    #[test]
+    fn a_message_handler_can_step_the_other_mods() {
+        // What the lockstep bootstrap does. The driver can't take messages,
+        // so this uses the real one.
+        let e = engine("handler_steps");
+        load(&e, "counter", "COUNTER_V1");
+        load(&e, "clock", "CLOCK");
+        load(&e, "lockstep", "LOCKSTEP");
+        assert_eq!(e.send("lockstep", "step 5").as_deref(), Ok("frame 5"));
+        assert_eq!(probe(&e).value, 5);
+        assert!(e.send("lockstep", "step many").is_err());
+    }
+}

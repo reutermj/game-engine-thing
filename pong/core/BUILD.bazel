@@ -1,0 +1,12 @@
+load("//engine:defs.bzl", "engine_mod")
+
+# The court, the ball, the paddles and the rules. Paddles move by their
+# `intent`; which mod sets it (a player, an AI) is up to other mods.
+engine_mod(
+    name = "core",
+    srcs = ["lib.rs"],
+    interface = ["components.rs"],
+    mod_deps = ["//mods/clock"],
+    mod_name = "pong",
+    visibility = ["//visibility:public"],
+)

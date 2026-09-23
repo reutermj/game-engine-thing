@@ -1,8 +1,12 @@
 load("//engine:defs.bzl", "engine_mod")
 
 engine_mod(
-    name = "bootstrap",
+    name = "text",
     srcs = ["lib.rs"],
-    mod_deps = ["//mods/clock"],
+    mod_deps = [
+        "//mods/clock",
+        "//pong/core",
+    ],
+    mod_name = "pong_text",
     visibility = ["//visibility:public"],
 )

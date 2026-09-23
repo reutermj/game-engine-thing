@@ -78,15 +78,21 @@ fn serve(stream: UnixStream, engine: &Engine, quit: &mut bool) -> io::Result<()>
     let mut text = String::new();
     (&stream).read_to_string(&mut text)?;
 
-    let result = Request::parse(&text).and_then(|request| {
+    let request = Request::parse(&text);
+    // Messages aren't logged, request or reply: a game played over messages
+    // would flood the log.
+    let quiet = matches!(request, Ok(Request::Send { .. }));
+    let result = request.and_then(|request| {
         match &request {
             Request::Batch { mods } => println!("[engine] batch of {} mod(s)", mods.len()),
+            Request::Send { .. } => {}
             other => println!("[engine] {}", other.encode().trim_end()),
         }
         match request {
             Request::Load { name, path } => engine.load(&name, &path),
             Request::Batch { mods } => engine.load_batch(&mods),
             Request::Unload { name } => engine.unload(&name),
+            Request::Send { name, message } => engine.send(&name, &message),
             Request::List => Ok(engine.list()),
             Request::Quit => {
                 *quit = true;
@@ -96,11 +102,15 @@ fn serve(stream: UnixStream, engine: &Engine, quit: &mut bool) -> io::Result<()>
     });
     let reply = match result {
         Ok(msg) => {
-            println!("[engine] {}", msg.lines().next().unwrap_or(""));
+            if !quiet {
+                println!("[engine] {}", msg.lines().next().unwrap_or(""));
+            }
             format!("ok {msg}\n")
         }
         Err(msg) => {
-            eprintln!("[engine] error: {msg}");
+            if !quiet {
+                eprintln!("[engine] error: {msg}");
+            }
             format!("err {msg}\n")
         }
     };
