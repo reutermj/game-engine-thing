@@ -16,6 +16,8 @@ monolithic design doc.
   the engine knows, and why interface changes reload through the game
 - [scheduling.md](scheduling.md) — systems, phases and their order, checked
   access, commands and events, and the steps toward multithreading
+- [storage.md](storage.md) — *draft:* archetype tables in pages, sparse
+  sets, and structural change and events without stop-the-world points
 
 ## Conventions
 

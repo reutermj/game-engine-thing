@@ -193,8 +193,10 @@ The four steps, of which this document is the first:
 
 1. **Systems, phases, access and commands**, on one thread. The ABI change,
    and the one that gets more expensive with every mod.
-2. **System parallelism.** Systems whose access doesn't conflict run at the
-   same time. The loader claims a system's access atomically when it's run
+2. **System parallelism.** On hold for the storage redesign in
+   [storage.md](storage.md), which replaces phase-boundary application of
+   commands and events with dependency edges. Systems whose access doesn't
+   conflict run at the same time. The loader claims a system's access atomically when it's run
    (`run_system`) and refuses a conflicting one, so a scheduler can't cause
    a data race, only a refusal.
 3. **Data parallelism.** `par_for_each` over a query's chunks, with a
