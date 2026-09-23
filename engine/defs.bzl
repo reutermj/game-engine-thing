@@ -1,15 +1,28 @@
 """Rules for building engine mods and the games that bundle them.
 
-    engine_mod(name = "counter", srcs = ["lib.rs"])
+    engine_mod(
+        name = "physics",
+        srcs = ["lib.rs"],
+        interface = ["components.rs"],
+        mod_deps = ["//mods/transform"],
+    )
 
-builds `libcounter.so`. `bazel run //mods/counter` sends it to the running
+builds `libphysics_mod.so`. `bazel run //mods/physics` sends it to the running
 engine, which loads it, or hot-reloads it if it's already running.
+
+A mod's `interface` is what other mods may use (its components); `mod_deps`
+are the mods whose interfaces this one uses. Other mods depend on the
+interface, never the implementation, so Bazel rebuilds a dependent only when
+the interface it compiled against changes. See docs/architecture/mod-deps.md.
 
     engine_game(name = "game", bootstrap = "//mods/bootstrap", mods = [...])
 
-writes a manifest of the baked-in mods; `bazel run //game` starts the engine with it.
+writes the manifest of mods loaded at startup; `bazel run //game` starts the
+engine with it, and `bazel run //game:reload` reloads every mod whose build
+changed, in one batch.
 """
 
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
 
 EngineModInfo = provider(
@@ -17,6 +30,16 @@ EngineModInfo = provider(
     fields = {
         "mod_name": "Name the engine knows the mod by. Reloads are matched by name.",
         "library": "The mod's shared library File.",
+        "closure": "depset of struct(mod_name, library) for this mod and every " +
+                   "mod it depends on, postorder: dependencies first.",
+    },
+)
+
+ModLinksInfo = provider(
+    doc = "A mod's interface digest, for mods that depend on it.",
+    fields = {
+        "mod_name": "The mod's name.",
+        "digest": "File holding the interface digest; empty if it has no interface.",
     },
 )
 
@@ -36,6 +59,44 @@ def _launcher(ctx, executable_attr):
     )
     return exe, executable_attr[DefaultInfo].default_runfiles
 
+def _mod_links_impl(ctx):
+    env = ctx.actions.declare_file(ctx.label.name + ".env")
+    digest = ctx.actions.declare_file(ctx.label.name + ".digest")
+    args = ctx.actions.args()
+    args.add("--out-env", env)
+    args.add("--out-digest", digest)
+
+    # Sorted, so the digest doesn't depend on the order srcs were listed in.
+    for src in sorted(ctx.files.srcs, key = lambda f: f.short_path):
+        args.add("--src", src)
+    for dep in ctx.attr.deps:
+        args.add("--dep", "%s=%s" % (dep[ModLinksInfo].mod_name, dep[ModLinksInfo].digest.path))
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = ctx.files.srcs + [dep[ModLinksInfo].digest for dep in ctx.attr.deps],
+        outputs = [env, digest],
+        mnemonic = "ModLinks",
+    )
+    return [
+        DefaultInfo(files = depset([env])),
+        ModLinksInfo(mod_name = ctx.attr.mod_name, digest = digest),
+    ]
+
+_mod_links = rule(
+    implementation = _mod_links_impl,
+    attrs = {
+        "deps": attr.label_list(providers = [ModLinksInfo]),
+        "mod_name": attr.string(mandatory = True),
+        "srcs": attr.label_list(allow_files = [".rs"]),
+        "_tool": attr.label(
+            default = "//engine/tools:mod_links",
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
 def _engine_mod_impl(ctx):
     libraries = [f for f in ctx.files.library if f.extension == "so"]
     if len(libraries) != 1:
@@ -43,6 +104,11 @@ def _engine_mod_impl(ctx):
     library = libraries[0]
 
     exe, modctl_runfiles = _launcher(ctx, ctx.attr._modctl)
+    closure = depset(
+        [struct(mod_name = ctx.attr.mod_name, library = library)],
+        transitive = [dep[EngineModInfo].closure for dep in ctx.attr.mod_deps],
+        order = "postorder",
+    )
     return [
         DefaultInfo(
             executable = exe,
@@ -53,7 +119,7 @@ def _engine_mod_impl(ctx):
             "ENGINE_MOD_NAME": ctx.attr.mod_name,
             "ENGINE_MOD_RLOCATION": _rlocationpath(ctx, library),
         }),
-        EngineModInfo(mod_name = ctx.attr.mod_name, library = library),
+        EngineModInfo(mod_name = ctx.attr.mod_name, library = library, closure = closure),
     ]
 
 _engine_mod = rule(
@@ -61,6 +127,7 @@ _engine_mod = rule(
     executable = True,
     attrs = {
         "library": attr.label(mandatory = True),
+        "mod_deps": attr.label_list(providers = [EngineModInfo]),
         "mod_name": attr.string(mandatory = True),
         "_modctl": attr.label(
             default = "//engine/modctl",
@@ -70,25 +137,63 @@ _engine_mod = rule(
     },
 )
 
-def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwargs):
+def engine_mod(
+        name,
+        srcs,
+        interface = [],
+        mod_deps = [],
+        deps = [],
+        mod_name = None,
+        visibility = None,
+        **kwargs):
     """A hot-reloadable mod.
 
     Args:
       name: Target name. `bazel run` on it (re)loads the mod into the running engine.
-      srcs: Rust sources. The crate root is `lib.rs` unless `crate_root` is
-        passed, which lets one source file build several variants of a mod
-        (with different `crate_features`), as the tests do.
+      srcs: The implementation's Rust sources. The crate root is `lib.rs` unless
+        `crate_root` is passed, which lets one source file build several
+        variants of a mod (with different `crate_features`), as the tests do.
+      interface: Rust sources other mods may depend on: the components this mod
+        declares. The first file is the crate root, and the crate is named after
+        the mod, so dependents write `use physics::Velocity`.
+      mod_deps: `engine_mod` targets whose interfaces this mod uses. The engine
+        loads them first and refuses to strand this mod by reloading one of them
+        with a different interface.
       deps: Extra Rust deps. `//engine/api` is always included.
       mod_name: Name the engine uses for the mod. Defaults to `name`.
-      visibility: Visibility of the mod target.
+      visibility: Visibility of the mod target and its interface.
       **kwargs: Passed to the underlying `rust_shared_library`.
     """
+    mod_name = mod_name or name
+    dep_labels = [native.package_relative_label(d) for d in mod_deps]
+    interface_deps = [dep.same_package_label(dep.name + "_interface") for dep in dep_labels]
+
+    if interface:
+        rust_library(
+            name = name + "_interface",
+            crate_name = mod_name.replace("-", "_"),
+            crate_root = interface[0],
+            srcs = interface,
+            deps = interface_deps + ["//engine/api"],
+            visibility = visibility,
+        )
+    _mod_links(
+        name = name + "_links",
+        srcs = interface,
+        deps = [dep.same_package_label(dep.name + "_links") for dep in dep_labels],
+        mod_name = mod_name,
+        visibility = visibility,
+    )
     rust_shared_library(
         name = name + "_lib",
-        crate_name = name.replace("-", "_"),
+        # Not the mod's name: that is the interface crate's, and the
+        # implementation links it.
+        crate_name = name.replace("-", "_") + "_mod",
         crate_root = kwargs.pop("crate_root", "lib.rs"),
         srcs = srcs,
-        deps = deps + ["//engine/api"],
+        deps = deps + interface_deps + ([":" + name + "_interface"] if interface else []) + ["//engine/api"],
+        # Bakes the interface digests into the library; see engine/tools/mod_links.rs.
+        rustc_env_files = [":" + name + "_links"],
         # The engine copies each .so before dlopen, which breaks the $ORIGIN
         # RUNPATH a dynamically linked C++/unwind runtime would need.
         cc_runtime_linkage = "static",
@@ -103,46 +208,56 @@ def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwar
     _engine_mod(
         name = name,
         library = ":" + name + "_lib",
-        mod_name = mod_name or name,
+        mod_deps = mod_deps,
+        mod_name = mod_name,
         visibility = visibility,
     )
 
+GameInfo = provider(
+    doc = "A game's manifest and everything it names.",
+    fields = {
+        "manifest": "The manifest File.",
+        "runfiles": "runfiles with the manifest and every mod library.",
+    },
+)
+
 def _engine_game_impl(ctx):
     bootstrap = ctx.attr.bootstrap[EngineModInfo]
-    mods = [m[EngineModInfo] for m in ctx.attr.mods]
 
-    lines = ["bootstrap %s %s" % (bootstrap.mod_name, _rlocationpath(ctx, bootstrap.library))]
-    lines += ["mod %s %s" % (m.mod_name, _rlocationpath(ctx, m.library)) for m in mods]
+    # Dependencies first, and each mod once, including dependencies the game
+    # didn't list.
+    closure = depset(
+        transitive = [bootstrap.closure] + [m[EngineModInfo].closure for m in ctx.attr.mods],
+        order = "postorder",
+    ).to_list()
+    lines = ["reload %s" % ctx.attr.reload_label]
+    for m in closure:
+        kind = "bootstrap" if m.mod_name == bootstrap.mod_name else "mod"
+        lines.append("%s %s %s" % (kind, m.mod_name, _rlocationpath(ctx, m.library)))
     manifest = ctx.actions.declare_file(ctx.label.name + ".manifest")
     ctx.actions.write(manifest, "\n".join(lines) + "\n")
 
+    game_runfiles = ctx.runfiles(files = [manifest] + [m.library for m in closure])
     exe, engine_runfiles = _launcher(ctx, ctx.attr._engine)
-    libraries = [bootstrap.library] + [m.library for m in mods]
     return [
         DefaultInfo(
             executable = exe,
             files = depset([manifest]),
-            runfiles = ctx.runfiles(files = [manifest] + libraries).merge(engine_runfiles),
+            runfiles = game_runfiles.merge(engine_runfiles),
         ),
         RunEnvironmentInfo(environment = {
             "ENGINE_MANIFEST": _rlocationpath(ctx, manifest),
         }),
+        GameInfo(manifest = manifest, runfiles = game_runfiles),
     ]
 
-engine_game = rule(
+_engine_game = rule(
     implementation = _engine_game_impl,
     executable = True,
-    doc = "The engine plus a baked-in list of mods loaded at startup.",
     attrs = {
-        "bootstrap": attr.label(
-            mandatory = True,
-            providers = [EngineModInfo],
-            doc = "The mod that owns the frame loop and steps the others.",
-        ),
-        "mods": attr.label_list(
-            providers = [EngineModInfo],
-            doc = "Mods loaded after the bootstrap mod, in order.",
-        ),
+        "bootstrap": attr.label(mandatory = True, providers = [EngineModInfo]),
+        "mods": attr.label_list(providers = [EngineModInfo]),
+        "reload_label": attr.string(mandatory = True),
         "_engine": attr.label(
             default = "//engine/loader:engine",
             executable = True,
@@ -150,3 +265,56 @@ engine_game = rule(
         ),
     },
 )
+
+def _engine_game_reload_impl(ctx):
+    game = ctx.attr.game[GameInfo]
+    exe, modctl_runfiles = _launcher(ctx, ctx.attr._modctl)
+    return [
+        DefaultInfo(executable = exe, runfiles = game.runfiles.merge(modctl_runfiles)),
+        RunEnvironmentInfo(environment = {
+            "ENGINE_BATCH_MANIFEST": _rlocationpath(ctx, game.manifest),
+        }),
+    ]
+
+_engine_game_reload = rule(
+    implementation = _engine_game_reload_impl,
+    executable = True,
+    attrs = {
+        "game": attr.label(mandatory = True, providers = [GameInfo]),
+        "_modctl": attr.label(
+            default = "//engine/modctl",
+            executable = True,
+            cfg = "target",
+        ),
+    },
+)
+
+def engine_game(name, bootstrap, mods = [], visibility = None):
+    """The engine plus the mods loaded at startup, and a target to reload them.
+
+    Args:
+      name: `bazel run` on it starts the engine.
+      bootstrap: The mod that owns the frame loop and steps the others.
+      mods: Mods to load. Their `mod_deps` are included too, and every mod is
+        loaded after the mods it depends on.
+      visibility: Visibility of both targets.
+
+    Also declares a reload target: `bazel run` on it sends every mod's current
+    build to the running engine as one batch, and the engine reloads the ones
+    that changed. It is named `reload` when `name` matches the package
+    (`//game:reload`), and `<name>_reload` otherwise.
+    """
+    package = native.package_name().split("/")[-1]
+    reload = "reload" if name == package else name + "_reload"
+    _engine_game(
+        name = name,
+        bootstrap = bootstrap,
+        mods = mods,
+        reload_label = "//%s:%s" % (native.package_name(), reload),
+        visibility = visibility,
+    )
+    _engine_game_reload(
+        name = reload,
+        game = ":" + name,
+        visibility = visibility,
+    )

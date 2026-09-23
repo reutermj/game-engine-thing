@@ -62,24 +62,34 @@ reload. Whether to ban, lint or accept it is undecided.
 
 ## The reload sequence
 
-On `load <name> <path>` for a mod that is already running:
+Every load is a batch: `load <name> <path>` is a batch of one, and a game
+reload sends every mod in the game. For each mod in the batch:
 
-1. **Stage.** Copy the library to a unique path under
+1. **Skip it if unchanged.** A library whose contents match the running
+   build's is left alone, so a batch reloads only what an edit affected.
+2. **Stage.** Copy the library to a unique path under
    `$XDG_RUNTIME_DIR/game-engine-thing/libs/`. `dlopen` returns the already
    loaded image for a path, or a file, it has seen, so reloading from the
    Bazel output path would silently change nothing (see
    [lore](../lore/dlopen-returns-the-loaded-image-for-a-file-it-has-seen.md)).
    The copy is deleted right after `dlopen`; the mapping doesn't need it.
-2. **Open and validate the new build** while the old one keeps running:
+3. **Open and validate the new build** while the old one keeps running:
    `dlopen`, resolve both symbols, check `API_VERSION`. Mods are linked with
-   `-z now`, so unresolved symbols fail here too. Any failure leaves the old
+   `-z now`, so unresolved symbols fail here too.
+
+Then, for the batch as a whole:
+
+4. **Check dependencies.** Every mod must end up running against the
+   interfaces it was built against (see [mod-deps.md](mod-deps.md)). Any
+   failure in steps 2–4 refuses the whole batch and leaves every running
    build untouched.
-3. **Retire the old build.** If the state is compatible, send the old build
-   `UNLOAD`. Otherwise send it `CLOSE` so it drops its own state (only the
-   old code knows how), then allocate fresh zeroed state.
-4. **Swap.** Drop the old library, bump `generation`, and send the new build
-   `LOAD`. A fresh state is initialized from `Default` as part of that
-   `LOAD`.
+5. **Retire the old builds**, dependents first. If a mod's state is
+   compatible, send the old build `UNLOAD`. Otherwise send it `CLOSE` so it
+   drops its own state (only the old code knows how), then allocate fresh
+   zeroed state.
+6. **Swap**, dependencies first. Drop the old library, bump `generation`,
+   and send the new build `LOAD`. A fresh state is initialized from
+   `Default` as part of that `LOAD`.
 
 A mod that returns `Status::ERROR` (including a caught panic) is marked
 failed and not stepped again until a reload clears it.
@@ -101,11 +111,14 @@ would unwind through `extern "C"`.
 ## The control protocol
 
 The engine listens on a Unix domain socket (`$XDG_RUNTIME_DIR/game-engine-thing/control.sock`,
-or `$ENGINE_SOCKET`). One request line per connection; the reply runs to
-EOF and its first word is `ok` or `err`:
+or `$ENGINE_SOCKET`). One request per connection, ended by the client
+shutting down its side; the reply runs to EOF and its first word is `ok` or
+`err`:
 
 ```
-load <name> <path>   ok loaded <name> | ok reloaded <name> (generation N) | err <why>
+load <name> <path>   ok loaded <name> | ok reloaded <name> (generation N) | ok <name> unchanged | err <why>
+batch                the same per mod, joined with "; " (all or nothing)
+<name> <path>        ...one line per mod after `batch`
 unload <name>        ok unloaded <name>
 list                 ok <count> mod(s) loaded, then one line per mod
 quit                 ok quitting
@@ -113,8 +126,9 @@ quit                 ok quitting
 
 The path is the rest of the line, so it may contain spaces. `modctl` is the
 client; `engine_mod` targets are `modctl` with `ENGINE_MOD_NAME` and
-`ENGINE_MOD_RLOCATION` set, and it resolves the runfiles path to an absolute
-one before sending, since the engine's working directory is not the client's.
+`ENGINE_MOD_RLOCATION` set, and a game's reload target is `modctl` with
+`ENGINE_BATCH_MANIFEST`. It resolves runfiles paths to absolute ones before
+sending, since the engine's working directory is not the client's.
 
 ## How a mod is built
 

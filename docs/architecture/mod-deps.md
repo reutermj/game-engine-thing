@@ -1,0 +1,136 @@
+# Mod dependencies
+
+How one mod uses another mod's components, and how reloads stay consistent
+when those components change. The code is in `engine/defs.bzl` (the
+`interface`/`mod_deps` attributes and the game reload target),
+`engine/tools/mod_links.rs` (the interface digest), and `load_batch` in
+`engine/loader/engine.rs`.
+
+## Interface and implementation
+
+A mod is two crates:
+
+- **Its interface**: the components it declares, which other mods may use.
+  `engine_mod(interface = ["components.rs"])` builds it as a library named
+  after the mod, so a dependent writes `use physics::Velocity`.
+- **Its implementation**: its systems, the shared library the engine loads.
+
+A dependent names the mods it uses in `mod_deps` and compiles against their
+interfaces, never their implementations. That split is what makes Bazel do
+the propagation work. Editing `physics/lib.rs` rebuilds only `physics`; every
+dependent's inputs are unchanged, so its library is byte-for-byte the same.
+Editing `physics/components.rs` rebuilds `physics` and every mod that
+compiled against its interface.
+
+A mod that only declares components, such as `mods/transform`, has an
+implementation of one line: `engine_api::export_mod!(engine_api::Inert);`.
+
+Component names are namespaced by the declaring mod
+(`"physics::Velocity"`) by convention. The engine doesn't enforce it.
+
+## How the engine knows a mod's dependencies
+
+Bazel knows the dependency graph; the running engine has only libraries. So
+each library carries its part of the graph:
+
+1. For every mod, a build action (`engine/tools/mod_links.rs`) computes an
+   **interface digest**: a hash of the interface's source files and of the
+   digests of the interfaces it depends on. A mod without an interface has
+   an empty digest.
+2. The same action writes the mod's digest and its dependencies'
+   (`name:digest` pairs) into an environment file, which `engine_mod` passes
+   to rustc with `rustc_env_files`.
+3. `export_mod!` reads them with `option_env!` and returns them in `ModInfo`.
+
+The engine therefore knows, for every loaded build, which interface it
+provides and exactly which interfaces it was compiled against, with nothing
+declared twice. The digest is computed from sources, so a comment-only edit
+to an interface counts as an interface change. That errs toward a game
+reload that wasn't strictly needed rather than a dependent reading a layout
+it wasn't built for.
+
+## What the engine enforces
+
+After any load, every mod must run against the interfaces it was built
+against. Concretely:
+
+- **A mod's dependencies must be loaded.** Loading `spawner` without
+  `physics` is refused.
+- **Each dependency must have the interface digest the dependent recorded.**
+  Loading a `spawner` built against a different `physics` interface than the
+  running one is refused.
+- **A reload may not strand a running dependent.** Reloading `physics` alone
+  with a changed interface, while `spawner` still runs against the old one,
+  is refused, and the error names the game's reload target:
+
+  ```
+  physics's interface changed, and spawner was built against the old one;
+  reload them together with `./bazel run //game:reload`
+  ```
+
+- **A mod with dependents can't be unloaded.**
+
+These checks run before anything changes, so a refused load leaves the
+running builds untouched.
+
+The component-level layout check from [ecs.md](ecs.md) (newest build wins;
+older builds cut off) remains as a fallback for libraries built without
+`engine_mod`, which record no dependencies.
+
+## Two ways to reload
+
+- **`./bazel run //mods/<name>`** reloads one mod. It is the fast path for an
+  implementation change, and the only way to live-load a mod that isn't in
+  the game.
+- **`./bazel run //game:reload`** sends every mod in the game as one batch.
+  Bazel rebuilds only what the edit affected, and the engine skips every
+  library whose contents match the running one, so only the affected mods
+  reload: for an interface change to `physics`, that is `physics` and
+  whatever compiled against it, and nothing else.
+
+A batch is atomic. Every changed build is opened and checked first, and if
+any fails, nothing is swapped. Otherwise the old builds are retired
+dependents-first and the new ones loaded dependencies-first, so no mod runs
+between two layouts. Component migration then happens once, on the first
+access by the new builds.
+
+`engine_game` also loads a game's mods in dependency order, and includes
+dependencies the game didn't list.
+
+The per-mod command can't do the game's job because Bazel's graph only
+points one way: `//mods/physics` knows what `physics` depends on, but not
+what depends on `physics`. Only a target above every mod, the game, sees
+which mods an interface change reaches.
+
+### Alternatives that were considered
+
+Decided 2026-09-23. The per-mod command could instead:
+
+- **escalate on its own**, with `modctl` invoking Bazel to build the stranded
+  dependents and sending a batch. One command in every case, at the cost of
+  a Bazel-run binary running Bazel, and `modctl` depending on the workspace.
+  Still possible later on top of the batch machinery.
+- **accept the reload and strand the dependents**, cutting them off from the
+  changed components until each is reloaded. The running game is partially
+  broken between commands, and nothing says when it's whole again.
+- **not exist for mods in a game**: always reload through the game. Always
+  correct, but loses the direct per-mod command.
+
+## Open questions
+
+**Open question:** services. Interfaces carry only components, so mods share
+data but can't call each other. A mod exposing functions (a renderer's draw
+calls) would need an interface of function pointers, resolved again after the
+provider reloads.
+
+**Open question:** partial use. A dependent that reads one field of
+`Velocity` is still rebuilt when another field changes. The world could
+project each mod's own view of a component instead, at the cost of copying
+on access.
+
+**Open question:** a mod in several games. The error names the reload target
+of the game the engine was started with, which is the only one it knows.
+
+**Open question:** removing a mod from a game. A game reload loads and
+reloads, but never unloads a running mod the game no longer lists (or one
+loaded live, like `hello`).

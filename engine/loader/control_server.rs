@@ -1,7 +1,7 @@
 //! Serves the control socket. Polled from the main loop between frames, so
 //! requests are handled at a point where no mod code is running.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -74,13 +74,18 @@ impl Drop for ControlServer {
 fn serve(stream: UnixStream, engine: &Engine, quit: &mut bool) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line)?;
+    // Clients shut down their side after writing, so EOF ends the request.
+    let mut text = String::new();
+    (&stream).read_to_string(&mut text)?;
 
-    let result = Request::parse(&line).and_then(|request| {
-        println!("[engine] {}", request.to_line().trim_end());
+    let result = Request::parse(&text).and_then(|request| {
+        match &request {
+            Request::Batch { mods } => println!("[engine] batch of {} mod(s)", mods.len()),
+            other => println!("[engine] {}", other.encode().trim_end()),
+        }
         match request {
             Request::Load { name, path } => engine.load(&name, &path),
+            Request::Batch { mods } => engine.load_batch(&mods),
             Request::Unload { name } => engine.unload(&name),
             Request::List => Ok(engine.list()),
             Request::Quit => {

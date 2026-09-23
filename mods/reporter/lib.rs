@@ -1,7 +1,7 @@
 //! Prints every position once a second, so a reload elsewhere is visible here.
 
 use engine_api::{Cx, Mod, Status, export_mod};
-use game_components::Position;
+use transform::Position;
 
 #[derive(Default)]
 struct Reporter {

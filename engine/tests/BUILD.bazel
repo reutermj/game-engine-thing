@@ -46,6 +46,31 @@ COUNTER_BUILDS = [
     "v2",
 ]]
 
+# Builds of `base`, and of `user`, which depends on it. See mods/base.rs.
+[engine_mod(
+    name = "base_" + build,
+    srcs = ["mods/base.rs"],
+    crate_features = [build],
+    crate_root = "mods/base.rs",
+    interface = ["mods/base_interface_%s.rs" % interface],
+    mod_name = "base",
+) for build, interface in [
+    ("v1", "v1"),
+    ("v1b", "v1"),
+    ("v2", "v2"),
+]]
+
+[engine_mod(
+    name = "user_" + build,
+    srcs = ["mods/user.rs"],
+    crate_root = "mods/user.rs",
+    mod_deps = [":base_" + build],
+    mod_name = "user",
+) for build in [
+    "v1",
+    "v2",
+]]
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -59,6 +84,11 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "BASE_V1": ":base_v1",
+    "BASE_V1B": ":base_v1b",
+    "BASE_V2": ":base_v2",
+    "USER_V1": ":user_v1",
+    "USER_V2": ":user_v2",
     "DRIVER": ":driver",
     "MOVER_V1": ":mover_v1",
     "MOVER_V2": ":mover_v2",
@@ -82,15 +112,32 @@ rust_test(
     ],
 )
 
-# The real bootstrap mod (with frame pacing) and one test mod, as a game.
+# The real bootstrap mod (with frame pacing) and test mods, as a game. `base`
+# isn't listed: it comes in as `user`'s dependency.
 engine_game(
     name = "test_game",
     bootstrap = "//mods/bootstrap",
-    mods = [":counter_v1"],
+    mods = [
+        ":counter_v1",
+        ":user_v1",
+    ],
+)
+
+# The same game with counter_v2: its manifest is what the reload target of
+# test_game would send after counter's source changed to v2.
+engine_game(
+    name = "test_game_v2",
+    bootstrap = "//mods/bootstrap",
+    mods = [
+        ":counter_v2",
+        ":user_v1",
+    ],
 )
 
 E2E_DATA = {
+    "BASE_V2": ":base_v2",
     "COUNTER_V2": ":counter_v2",
+    "MANIFEST_V2": ":test_game_v2",
     "ENGINE": "//engine/loader:engine",
     # The engine_game target's output is its manifest.
     "MANIFEST": ":test_game",

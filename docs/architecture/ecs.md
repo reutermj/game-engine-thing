@@ -65,8 +65,8 @@ proc-macro crate; the price is its fixed `struct Name: "id" { ... }` syntax.
 
 The name is the identity, not the Rust type. `TypeId` can differ between
 builds, and two mods compiled separately each have their own copy of the
-type. Components shared by several mods are defined once in
-`game/components` and linked into each.
+type. A component shared by several mods is declared in one mod's interface
+and used by the others through `mod_deps` (see [mod-deps.md](mod-deps.md)).
 
 The trait requires `Copy` and `Default`, and its safety contract requires
 plain data. A component's value outlives the build that wrote it, so it can't
@@ -136,9 +136,12 @@ nothing to match fields by.
 
 **An older build** (still built against the previous layout) gets
 `ComponentId::INVALID`, which makes every operation on that component a no-op,
-with one warning per build. It works again once it is reloaded. Changing a
-component shared by several mods therefore means reloading each of them.
-Until then, the ones not yet reloaded simply don't see it.
+with one warning per build. It works again once it is reloaded. For mods
+built with `engine_mod` this doesn't arise: the engine refuses a reload that
+would leave a dependent on the old layout, and a game reload swaps the
+component's owner and its dependents together (see
+[mod-deps.md](mod-deps.md)). The check remains for libraries that record no
+dependencies.
 
 **Open question:** renames. A rename is indistinguishable from a removal
 plus an addition. An attribute naming the old field
@@ -152,8 +155,3 @@ values, and a hook for it would sit beside the version bump.
 schema has only scalar kinds, so `component!` rejects them, and a component
 that needs one has to be implemented by hand, without a schema. Nesting
 schemas would handle both.
-
-**Open question:** reloading everything that uses a component. A layout
-change leaves every mod not yet reloaded cut off from the component. A target
-that reloads all of a game's mods at once (`./bazel run //game:reload`)
-would make a shared change one command.

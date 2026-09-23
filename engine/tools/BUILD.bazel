@@ -1,0 +1,14 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# Run by engine_mod at build time; see engine/defs.bzl.
+rust_binary(
+    name = "mod_links",
+    srcs = ["mod_links.rs"],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "mod_links_test",
+    crate = ":mod_links",
+)

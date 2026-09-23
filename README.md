@@ -15,6 +15,8 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 ./bazel run //game                  # terminal 1: engine + the mods in game/BUILD.bazel
 # edit mods/physics/lib.rs (say, add gravity), then:
 ./bazel run //mods/physics          # terminal 2: rebuild and hot-reload; entities keep moving
+# edit mods/physics/components.rs, which spawner also uses, then:
+./bazel run //game:reload           # reloads physics and spawner together, nothing else
 # edit mods/counter/lib.rs, then:
 ./bazel run //mods/counter          # per-mod state carries over too
 ./bazel run //mods/hello            # load a mod the running game didn't ship with
@@ -32,8 +34,9 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it
 - `engine/defs.bzl`: `engine_mod` and `engine_game`
 - `mods/*`: `bootstrap` (frame loop), `counter` (per-mod state), `hello` (live
-  load), `spawner`/`physics`/`reporter` (ECS demo)
-- `game/components`: the components those mods share
+  load), `transform`/`physics`/`spawner`/`reporter` (ECS demo, and mods that
+  depend on each other's components)
+- `engine/tools`: build-time tooling for `engine_mod`
 
 ## How reload works
 

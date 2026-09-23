@@ -3,7 +3,8 @@
 //! their positions and move by the new rule.
 
 use engine_api::{Cx, Mod, Status, export_mod};
-use game_components::{Position, Velocity};
+use physics::Velocity;
+use transform::Position;
 
 /// The bootstrap mod's frame rate.
 const DT: f32 = 1.0 / 60.0;

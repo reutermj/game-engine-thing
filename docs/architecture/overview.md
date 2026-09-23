@@ -50,11 +50,14 @@ This works because `bazel run` releases the Bazel server before it executes
 the binary: the engine started by the first `bazel run` doesn't block the
 second one from building.
 
-**Open question:** communication between mods. Mods currently share nothing
-but host services. A renderer mod that a game mod calls into needs some form
-of interface lookup, and reloading the provider then affects its consumers.
-The likely shape is a registry of C-ABI vtables in the loader, re-fetched
-after a provider reloads, but nothing is built yet.
+Mods share data through the world, and a mod can depend on another mod's
+components: see [mod-deps.md](mod-deps.md), which also covers
+`./bazel run //game:reload` for changes that reach several mods.
+
+**Open question:** calls between mods. A renderer mod that a game mod calls
+into needs an interface of functions, not just components, and reloading the
+provider then affects its consumers. The likely shape is a registry of C-ABI
+vtables in the loader, re-fetched after a provider reloads.
 
 **Open question:** distribution. Whether mods will ever be built outside this
 workspace or shipped to players decides whether the ABI must be stable

@@ -23,9 +23,10 @@ Three invariants, each of which a plausible change would break:
   `rules_rs` (see
   [runbooks/001](docs/runbooks/001-regenerate-cargo-lock.md)).
 - **`bazel run` is the reload trigger.** `bazel run //mods/<name>` builds the
-  mod and tells the running engine to load or reload it. A workflow that
-  needs a second tool to reload something is a gap in the rules, not the
-  way to do it.
+  mod and tells the running engine to load or reload it; `bazel run
+  //game:reload` does the same for every mod an interface change reached. A
+  workflow that needs a second tool to reload something is a gap in the
+  rules, not the way to do it.
 
 Full design in [docs/architecture/](docs/architecture/). Read it before
 changing the ABI, the reload sequence or the Bazel rules.
@@ -58,20 +59,24 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/modctl/` — the client. Every `engine_mod` target is a symlink to
   this binary with the mod's name and library baked in through
   `RunEnvironmentInfo`, which is what makes `bazel run //mods/x` a reload.
-- `engine/defs.bzl` — `engine_mod` and `engine_game`. If a mod needs a new
-  build setting (a link flag, a runtime linkage), it goes here, so every mod
-  gets it.
+- `engine/defs.bzl` — `engine_mod` (with its `interface` and `mod_deps`)
+  and `engine_game` (with its reload target). If a mod needs a new build
+  setting (a link flag, a runtime linkage), it goes here, so every mod gets
+  it.
+- `engine/tools/mod_links.rs` — the build action that digests a mod's
+  interface, so the engine can check at load time what each build was
+  compiled against. See
+  [docs/architecture/mod-deps.md](docs/architecture/mod-deps.md).
 - `mods/` — `bootstrap` (owns the frame loop), `counter` (per-mod state
   across reloads), `hello` (loaded live, not in the manifest), and the ECS
-  demo: `spawner` creates entities, `physics` is a stateless system,
-  `reporter` prints positions.
+  demo: `transform` declares `Position` and runs nothing, `physics` declares
+  `Velocity` and moves things, `spawner` creates entities, `reporter` prints
+  positions. Their `mod_deps` are the dependency example.
 - `engine/tests/` — integration and e2e tests, and the test mods they load.
   The test mods are separate from `mods/` so editing a demo never changes
   what a test proves. See the testing conventions below.
-- `game/` — the `engine_game` target listing the mods loaded at startup.
-  - `components/` — the game's components. A library, not a mod: each mod
-    that uses a component links this crate, and the world matches them by
-    `Component::NAME`.
+- `game/` — the `engine_game` target listing the mods loaded at startup,
+  and its `reload` target.
 - `bazel` — runs a pinned, checksummed bazelisk so a fresh checkout needs no
   host Bazel. Always invoke Bazel as `./bazel`.
 - `docs/architecture/` — design docs, one per area. Living documents.

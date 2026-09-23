@@ -1,6 +1,8 @@
 load("//engine:defs.bzl", "engine_game")
 
-# `bazel run //game` starts the engine with these mods loaded.
+# `bazel run //game` starts the engine with these mods, plus the mods they
+# depend on (transform), and `bazel run //game:reload` reloads whichever of
+# them changed.
 engine_game(
     name = "game",
     bootstrap = "//mods/bootstrap",

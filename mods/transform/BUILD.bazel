@@ -1,9 +1,9 @@
 load("//engine:defs.bzl", "engine_mod")
 
+# Declares components and runs nothing: other mods depend on its interface.
 engine_mod(
-    name = "physics",
+    name = "transform",
     srcs = ["lib.rs"],
     interface = ["components.rs"],
-    mod_deps = ["//mods/transform"],
     visibility = ["//visibility:public"],
 )

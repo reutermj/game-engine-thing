@@ -2,7 +2,8 @@
 //! this mod (or any other) leaves them where they are.
 
 use engine_api::{Cx, Entity, Mod, Status, export_mod};
-use game_components::{Position, Velocity};
+use physics::Velocity;
+use transform::Position;
 
 #[derive(Default)]
 struct Spawner {

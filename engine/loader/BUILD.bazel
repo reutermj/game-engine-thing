@@ -27,7 +27,6 @@ rust_binary(
         ":loader",
         "//engine/api",
         "//engine/control",
-        "@rules_rust//rust/runfiles",
     ],
 )
 

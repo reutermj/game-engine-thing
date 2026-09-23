@@ -74,14 +74,34 @@ fn reload_keeps_state_and_runs_the_new_code() {
 }
 
 #[test]
-fn every_load_maps_a_fresh_copy_of_the_library() {
-    // Reloading the *same* file: without staging, dlopen would hand back the
-    // image already mapped and the mod's statics would carry over.
-    let e = engine("fresh_copy");
-    load(&e, "counter", "COUNTER_V1");
+fn a_new_build_at_the_same_path_is_loaded_fresh() {
+    // What Bazel does to bazel-bin: a new build replaces the file at the path
+    // the engine already loaded from. Without staging, dlopen would hand back
+    // the image already mapped, v1's code would keep running and its statics
+    // would carry over.
+    let e = engine("same_path");
+    let path = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join("libcounter.so");
+    std::fs::copy(lib("COUNTER_V1"), &path).unwrap();
+    e.load("counter", &path).unwrap();
     assert_eq!(probe(&e).loads_seen_by_statics, 1);
-    load(&e, "counter", "COUNTER_V1");
+
+    // Replaced, not overwritten, as Bazel does (and the copy is read-only).
+    std::fs::remove_file(&path).unwrap();
+    std::fs::copy(lib("COUNTER_V2"), &path).unwrap();
+    assert_eq!(e.load("counter", &path).as_deref(), Ok("reloaded counter (generation 1)"));
+    step(&e, 1);
+    assert_eq!(probe(&e).build, 2, "v1's image was reused");
     assert_eq!(probe(&e).loads_seen_by_statics, 1, "statics survived the reload");
+}
+
+#[test]
+fn an_unchanged_build_is_not_reloaded() {
+    let e = engine("unchanged");
+    load(&e, "counter", "COUNTER_V1");
+    step(&e, 2);
+    assert_eq!(load(&e, "counter", "COUNTER_V1"), "counter unchanged");
+    assert!(e.list().contains("counter gen 0"), "{}", e.list());
+    assert_eq!(probe(&e).value, 2);
 }
 
 #[test]
@@ -173,5 +193,105 @@ mod migration {
         // One entity, spawned by v1 and never respawned: its fields carried
         // over by name, `y` widened, and `z` from v2's `Default`.
         assert_eq!(values, [Pos { y: 2.5, x: 1.5, z: 7.0 }]);
+    }
+}
+
+/// Mods that depend on another mod's interface: `user` on `base`.
+mod deps {
+    use super::{engine, lib, load};
+
+    #[test]
+    fn a_mod_needs_its_dependencies_loaded() {
+        let e = engine("needs_deps");
+        let err = e.load("user", &lib("USER_V1")).unwrap_err();
+        assert_eq!(err, "user depends on base, which isn't loaded");
+    }
+
+    #[test]
+    fn an_implementation_change_reloads_alone() {
+        let e = engine("impl_change");
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        // Same interface as v1, so user is still built against the running one.
+        assert_eq!(load(&e, "base", "BASE_V1B"), "reloaded base (generation 1)");
+        assert!(e.list().contains("user gen 0"), "{}", e.list());
+    }
+
+    #[test]
+    fn an_interface_change_that_would_strand_a_dependent_is_rejected() {
+        let e = engine("strand");
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        let err = e.load("base", &lib("BASE_V2")).unwrap_err();
+        assert!(
+            err.contains("base's interface changed, and user was built against the old one"),
+            "{err}"
+        );
+        assert!(e.list().contains("base gen 0"), "nothing may change:\n{}", e.list());
+    }
+
+    #[test]
+    fn the_rejection_names_the_game_reload_target() {
+        let e = engine("hint");
+        e.set_reload_hint(Some("//game:reload".into()));
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        let err = e.load("base", &lib("BASE_V2")).unwrap_err();
+        assert!(err.contains("`./bazel run //game:reload`"), "{err}");
+    }
+
+    #[test]
+    fn a_dependent_built_against_another_interface_is_rejected() {
+        let e = engine("wrong_interface");
+        load(&e, "base", "BASE_V1");
+        let err = e.load("user", &lib("USER_V2")).unwrap_err();
+        assert_eq!(err, "user was built against a different interface of base than the running one");
+    }
+
+    #[test]
+    fn a_batch_reloads_a_dependency_with_its_dependents() {
+        let e = engine("batch");
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        // Listed dependent-first: the engine orders the batch itself.
+        let msg = e.load_batch(&[("user".into(), lib("USER_V2")), ("base".into(), lib("BASE_V2"))]);
+        assert_eq!(msg.as_deref(), Ok("reloaded base (generation 1); reloaded user (generation 1)"));
+    }
+
+    #[test]
+    fn a_batch_with_one_bad_build_changes_nothing() {
+        let e = engine("atomic");
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        let garbage = std::path::PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join("bad.so");
+        std::fs::write(&garbage, "not an ELF file").unwrap();
+        let err = e
+            .load_batch(&[
+                ("base".into(), lib("BASE_V2")),
+                ("user".into(), lib("USER_V2")),
+                ("broken".into(), garbage),
+            ])
+            .unwrap_err();
+        assert!(err.contains("broken: dlopen failed"), "{err}");
+        let list = e.list();
+        assert!(list.contains("base gen 0") && list.contains("user gen 0") && !list.contains("broken"), "{list}");
+    }
+
+    #[test]
+    fn a_batch_loads_dependencies_first_and_skips_unchanged_builds() {
+        let e = engine("order");
+        let batch = [("user".into(), lib("USER_V1")), ("base".into(), lib("BASE_V1"))];
+        assert_eq!(e.load_batch(&batch).as_deref(), Ok("loaded base; loaded user"));
+        assert_eq!(e.load_batch(&batch).as_deref(), Ok("user unchanged; base unchanged"));
+    }
+
+    #[test]
+    fn a_mod_with_dependents_cannot_be_unloaded() {
+        let e = engine("unload_deps");
+        load(&e, "base", "BASE_V1");
+        load(&e, "user", "USER_V1");
+        assert_eq!(e.unload("base").unwrap_err(), "base is needed by user; unload them first");
+        assert!(e.unload("user").is_ok());
+        assert!(e.unload("base").is_ok());
     }
 }

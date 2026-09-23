@@ -130,6 +130,9 @@ fn a_game_starts_hot_reloads_a_mod_and_quits() {
     let list = wait_until_listening(&mut engine, &runtime);
     assert!(list.contains("bootstrap gen 0 [bootstrap]"), "{list}");
     assert!(list.contains("counter gen 0"), "{list}");
+    // Not listed by the game, but loaded as user's dependency, and first.
+    let (base, user) = (list.find("  base gen 0").expect(&list), list.find("  user gen 0").expect(&list));
+    assert!(base < user, "{list}");
 
     // Exactly what `./bazel run //mods/counter` runs: modctl with no
     // arguments, told which mod and library through its environment.
@@ -207,6 +210,35 @@ fn a_failed_load_is_reported_to_modctl_and_keeps_the_engine_running() {
 
     let list = stdout(&modctl(&runtime, &["list"], &[]));
     assert!(list.contains("counter gen 0"), "the old build must still be loaded:\n{list}");
+    assert!(modctl(&runtime, &["quit"], &[]).status.success());
+    assert!(engine.wait().status.success());
+}
+
+#[test]
+fn a_game_reload_reloads_only_the_mods_that_changed() {
+    let runtime = runtime_dir("game_reload");
+    let mut engine = Engine::start(&runtime);
+    wait_until_listening(&mut engine, &runtime);
+
+    // What `./bazel run //engine/tests:test_game_reload` runs, after counter's
+    // source changed from v1 to v2 (test_game_v2's manifest is that state).
+    let reload = modctl(&runtime, &[], &[("ENGINE_BATCH_MANIFEST", &rlocation("MANIFEST_V2"))]);
+    assert!(reload.status.success(), "{}", describe(&reload));
+    assert_eq!(
+        stdout(&reload).trim(),
+        "reloaded counter (generation 1); bootstrap unchanged; base unchanged; user unchanged"
+    );
+
+    // A per-mod reload that would strand a dependent is refused, naming the
+    // game's reload target, which only the manifest could have told it.
+    let strand = modctl(
+        &runtime,
+        &[],
+        &[("ENGINE_MOD_NAME", "base"), ("ENGINE_MOD_RLOCATION", &rlocation("BASE_V2"))],
+    );
+    assert!(!strand.status.success(), "{}", describe(&strand));
+    assert!(stdout(&strand).contains("`./bazel run //engine/tests:test_game_reload`"), "{}", describe(&strand));
+
     assert!(modctl(&runtime, &["quit"], &[]).status.success());
     assert!(engine.wait().status.success());
 }

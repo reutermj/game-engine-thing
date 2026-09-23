@@ -6,4 +6,5 @@ try-import %workspace%/user.bazelrc
 
 # rustc surfaces clang's "unused --unwindlib" note from the hermetic linker as a warning.
 common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker_messages
+common --@rules_rust//rust/settings:extra_exec_rustc_flag=-Alinker_messages
 

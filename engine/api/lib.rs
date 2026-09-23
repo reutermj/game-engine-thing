@@ -23,7 +23,7 @@ pub use ecs::{
 };
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 3;
+pub const API_VERSION: u32 = 4;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -81,6 +81,14 @@ pub struct ModInfo {
     pub state_version: u32,
     pub state_size: usize,
     pub state_align: usize,
+    /// Digest of this build's interface (hex; empty if it has none), computed
+    /// by Bazel. Points into the library; the loader copies it.
+    pub interface: *const u8,
+    pub interface_len: usize,
+    /// The interfaces this build compiled against, as `name:digest` pairs
+    /// separated by commas. Points into the library; the loader copies it.
+    pub deps: *const u8,
+    pub deps_len: usize,
 }
 
 impl ModInfo {
@@ -176,12 +184,27 @@ pub trait Mod: Default + 'static {
 }
 
 #[doc(hidden)]
-pub fn __info<T: Mod>() -> ModInfo {
+pub fn __info<T: Mod>(interface: &'static str, deps: &'static str) -> ModInfo {
     ModInfo {
         api_version: API_VERSION,
         state_version: T::STATE_VERSION,
         state_size: size_of::<T>(),
         state_align: align_of::<T>(),
+        interface: interface.as_ptr(),
+        interface_len: interface.len(),
+        deps: deps.as_ptr(),
+        deps_len: deps.len(),
+    }
+}
+
+/// A mod with nothing to run, for one that only declares components:
+/// `export_mod!(engine_api::Inert);`.
+#[derive(Default)]
+pub struct Inert;
+
+impl Mod for Inert {
+    fn step(&mut self, _cx: &mut Cx) -> Status {
+        Status::OK
     }
 }
 
@@ -213,12 +236,26 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
 }
 
 /// Exports `ty` (a [`Mod`]) as this dynamic library's mod.
+///
+/// Also records the interface digests `engine_mod` computed for this build
+/// (`ENGINE_INTERFACE_DIGEST`, `ENGINE_MOD_DEPS`, set at compile time), so the
+/// loader knows what the build depends on. A library built without
+/// `engine_mod` records none.
 #[macro_export]
 macro_rules! export_mod {
     ($ty:ty) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn engine_mod_info() -> $crate::ModInfo {
-            $crate::__info::<$ty>()
+            $crate::__info::<$ty>(
+                match option_env!("ENGINE_INTERFACE_DIGEST") {
+                    Some(digest) => digest,
+                    None => "",
+                },
+                match option_env!("ENGINE_MOD_DEPS") {
+                    Some(deps) => deps,
+                    None => "",
+                },
+            )
         }
 
         #[unsafe(no_mangle)]

@@ -2,7 +2,9 @@
 //!
 //! With no arguments it loads the mod named by `ENGINE_MOD_NAME`, from the
 //! library at runfiles path `ENGINE_MOD_RLOCATION`. `engine_mod` targets set
-//! both, which is what makes `bazel run //mods/<name>` a hot reload.
+//! both, which is what makes `bazel run //mods/<name>` a hot reload. With
+//! `ENGINE_BATCH_MANIFEST` instead, it sends every mod in that game manifest as
+//! one batch; that is `bazel run //game:reload`.
 //!
 //! Otherwise the arguments are a request: `list`, `unload <name>`,
 //! `load <name> <path>` or `quit`.
@@ -44,12 +46,19 @@ fn request_from_args(args: &[String]) -> Result<Request, String> {
     Ok(request)
 }
 
+/// What a game's reload target sends: every mod in the game's manifest, as
+/// one batch. The engine reloads only the ones that changed.
+fn request_from_manifest(rlocation: &str) -> Result<Request, String> {
+    let manifest = engine_control::read_manifest(rlocation)?;
+    Ok(Request::Batch { mods: manifest.mods })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let request = if args.is_empty() {
-        request_from_env()
-    } else {
-        request_from_args(&args)
+    let request = match std::env::var("ENGINE_BATCH_MANIFEST") {
+        Ok(manifest) if args.is_empty() => request_from_manifest(&manifest),
+        _ if args.is_empty() => request_from_env(),
+        _ => request_from_args(&args),
     };
     let request = match request {
         Ok(request) => request,

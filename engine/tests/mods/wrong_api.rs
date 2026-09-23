@@ -5,7 +5,16 @@ use engine_api::{API_VERSION, ModContext, ModInfo, Op, Status};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_mod_info() -> ModInfo {
-    ModInfo { api_version: API_VERSION + 1, state_version: 0, state_size: 0, state_align: 1 }
+    ModInfo {
+        api_version: API_VERSION + 1,
+        state_version: 0,
+        state_size: 0,
+        state_align: 1,
+        interface: std::ptr::null(),
+        interface_len: 0,
+        deps: std::ptr::null(),
+        deps_len: 0,
+    }
 }
 
 #[unsafe(no_mangle)]
