@@ -64,6 +64,8 @@ struct Loaded {
     deps: Vec<(String, String)>,
     /// The services this build provides.
     services: Vec<Service>,
+    /// Loaded once and never swapped: `engine_mod(resident = True)`.
+    resident: bool,
     /// Set when the mod returned `Status::ERROR` (e.g. it panicked). Cleared by a reload.
     failed: Cell<bool>,
     /// Set while any of the mod's code is on the stack (a hook, a message, a
@@ -91,6 +93,7 @@ struct Opened {
     interface: String,
     deps: Vec<(String, String)>,
     services: Vec<Service>,
+    resident: bool,
 }
 
 /// A build's state layout and schema, copied out of its `ModInfo`. `drops`
@@ -151,6 +154,12 @@ impl Engine {
     /// Loads `path` as mod `name`, or hot-reloads it if `name` is already loaded.
     /// A batch of one: see [`Engine::load_batch`].
     pub fn load(&self, name: &str, path: &Path) -> Result<String, String> {
+        // Asked for by name, so refuse rather than skip as a batch does.
+        if let Some(m) = self.mods.borrow().iter().find(|m| &*m.name == name && m.resident) {
+            if m.content != content_hash(path)? {
+                return Err(resident_note(name));
+            }
+        }
         self.load_batch(&[(name.to_string(), path.to_path_buf())])
     }
 
@@ -166,6 +175,7 @@ impl Engine {
         let mut mods = self.mods.borrow_mut();
         let mut opened = Vec::new();
         let mut unchanged = Vec::new();
+        let mut kept = Vec::new();
         for (i, (name, path)) in batch.iter().enumerate() {
             if batch[..i].iter().any(|(n, _)| n == name) {
                 return Err(format!("{name} is in the batch twice"));
@@ -173,6 +183,12 @@ impl Engine {
             let content = content_hash(path)?;
             if mods.iter().any(|m| &*m.name == name && m.content == content) {
                 unchanged.push(name.as_str());
+                continue;
+            }
+            // A resident mod keeps its build for the session; the rest of the
+            // batch still goes ahead, checked against the build that stays.
+            if mods.iter().any(|m| &*m.name == name && m.resident) {
+                kept.push(resident_note(name));
                 continue;
             }
             opened.push(self.open(name, path, content)?);
@@ -235,6 +251,7 @@ impl Engine {
                     (m.main, m.info, m.source, m.content) = (o.main, o.info, o.path, o.content);
                     (m.interface, m.deps, m.state, m.image) = (o.interface, o.deps, o.state, o.image);
                     m.services = o.services;
+                    m.resident = o.resident;
                     m.failed.set(false);
                     to_load.push(m.ctx);
                     let note = match notes.iter().find(|(name, _)| *name == o.name) {
@@ -271,6 +288,7 @@ impl Engine {
                         interface: o.interface,
                         deps: o.deps,
                         services: o.services,
+                        resident: o.resident,
                         failed: Cell::new(false),
                         running: Cell::new(false),
                     });
@@ -288,6 +306,7 @@ impl Engine {
                 m.call(Op::LOAD);
             }
         }
+        report.extend(kept);
         report.extend(unchanged.iter().map(|name| format!("{name} unchanged")));
         Ok(report.join("; "))
     }
@@ -330,7 +349,21 @@ impl Engine {
             })
             .collect::<Result<_, String>>()?;
         let services = unsafe { read_services(&info) }.map_err(|e| format!("{name}: {e}"))?;
-        Ok(Opened { name: name.into(), path: path.into(), content, lib, image, info, main, state, interface, deps, services })
+        let resident = info.resident;
+        Ok(Opened {
+            name: name.into(),
+            path: path.into(),
+            content,
+            lib,
+            image,
+            info,
+            main,
+            state,
+            interface,
+            deps,
+            services,
+            resident,
+        })
     }
 
     /// Checks that after swapping in `opened`, every mod runs against the
@@ -344,11 +377,24 @@ impl Engine {
             .map(|m| (&*m.name, m.interface.as_str(), m.deps.as_slice(), false))
             .collect();
         after.extend(opened.iter().map(|o| (o.name.as_str(), o.interface.as_str(), o.deps.as_slice(), true)));
+        // Residency after the batch, which a new build may change.
+        let resident_after = |name: &str| match opened.iter().find(|o| o.name == name) {
+            Some(o) => o.resident,
+            None => mods.iter().any(|m| &*m.name == name && m.resident),
+        };
 
+        let is_resident = |name: &str| mods.iter().any(|m| &*m.name == name && m.resident);
         let mut problems = Vec::new();
         // Dependency -> running dependents it would leave on its old interface.
         let mut stranded: Vec<(&str, Vec<&str>)> = Vec::new();
         for &(name, _, deps, in_batch) in &after {
+            // engine_mod enforces this at build time; this is the backstop for
+            // libraries built otherwise.
+            if resident_after(name) {
+                for (dep, _) in deps.iter().filter(|(dep, _)| !resident_after(dep)) {
+                    problems.push(format!("{name} is resident, so everything it depends on must be too; {dep} isn't"));
+                }
+            }
             for (dep, digest) in deps {
                 match after.iter().find(|a| a.0 == dep) {
                     None => problems.push(format!("{name} depends on {dep}, which isn't loaded")),
@@ -359,8 +405,15 @@ impl Engine {
                                 None => stranded.push((dep, vec![name])),
                             }
                         } else {
+                            // A resident dependency's running build is the one
+                            // that stays, so only a restart can bring these together.
+                            let restart = if !dep_in_batch && is_resident(dep) {
+                                format!("; {}", resident_note(dep))
+                            } else {
+                                String::new()
+                            };
                             problems.push(format!(
-                                "{name} was built against a different interface of {dep} than the {} one",
+                                "{name} was built against a different interface of {dep} than the {} one{restart}",
                                 if dep_in_batch { "new" } else { "running" }
                             ));
                         }
@@ -370,6 +423,8 @@ impl Engine {
             }
         }
         for (dep, names) in stranded {
+            // A dependent is never resident here: a resident mod depends only
+            // on resident mods, which aren't swapped.
             let how = match self.reload_hint.borrow().as_deref() {
                 Some(label) => format!("reload them together with `./bazel run {label}`"),
                 None => "reload them in the same batch".to_string(),
@@ -462,6 +517,9 @@ impl Engine {
             .iter()
             .position(|m| &*m.name == name)
             .ok_or_else(|| format!("{name} is not loaded"))?;
+        if mods[index].resident {
+            return Err(format!("{name} is resident: it unloads when the engine exits"));
+        }
         let dependents: Vec<&str> =
             mods.iter().filter(|m| m.deps.iter().any(|(d, _)| d == name)).map(|m| &*m.name).collect();
         if !dependents.is_empty() {
@@ -497,6 +555,7 @@ impl Engine {
         for m in mods.iter() {
             let bootstrap = if self.bootstrap.as_deref() == Some(&*m.name) { " [bootstrap]" } else { "" };
             let failed = if m.failed.get() { " [failed]" } else { "" };
+            let failed = if m.resident { format!(" [resident]{failed}") } else { failed.to_string() };
             let generation = unsafe { (*m.ctx).generation };
             let needs: Vec<&str> = m.deps.iter().map(|(d, _)| d.as_str()).collect();
             let needs = if needs.is_empty() { String::new() } else { format!(" needs {}", needs.join(",")) };
@@ -543,6 +602,15 @@ impl Engine {
         // The mapping outlives the file, so nothing is left behind to clean up.
         let _ = std::fs::remove_file(&staged);
         Ok((lib?, image))
+    }
+}
+
+/// Closes every mod, so each build drops its transient part and state while
+/// its code is still mapped. Without it, a resident mod's threads would
+/// outlive its library.
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -606,6 +674,10 @@ impl Loaded {
             self.image.iter().any(|&(start, end)| (start..end).contains(&value))
         })
     }
+}
+
+fn resident_note(name: &str) -> String {
+    format!("{name} is resident: restart the engine to load its new build")
 }
 
 /// Orders builds so each comes after the builds in the same batch it depends

@@ -66,8 +66,8 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/modctl/` — the client. Every `engine_mod` target is a symlink to
   this binary with the mod's name and library baked in through
   `RunEnvironmentInfo`, which is what makes `bazel run //mods/x` a reload.
-- `engine/defs.bzl` — `engine_mod` (with its `interface` and `mod_deps`)
-  and `engine_game` (with its reload target). If a mod needs a new build
+- `engine/defs.bzl` — `engine_mod` (with its `interface`, `mod_deps` and
+  `resident`) and `engine_game` (with its reload target). If a mod needs a new build
   setting (a link flag, a runtime linkage), it goes here, so every mod gets
   it.
 - `engine/tools/mod_links.rs` — the build action that digests a mod's

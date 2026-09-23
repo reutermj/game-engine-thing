@@ -20,6 +20,7 @@ pub extern "C" fn engine_mod_info() -> ModInfo {
         deps_len: 0,
         services: std::ptr::null(),
         service_count: 0,
+        resident: false,
     }
 }
 

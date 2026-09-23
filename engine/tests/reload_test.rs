@@ -549,3 +549,124 @@ mod calls {
         assert_eq!(err, "calc2 and calc both provide calc::Calc");
     }
 }
+
+/// Resident mods: loaded once, never swapped (get-y5t.7). `vault` is resident
+/// and owns a thread; `teller` calls it.
+mod resident {
+    use std::time::{Duration, Instant};
+
+    use super::{engine, lib, load};
+
+    fn with_vault(test: &str) -> Box<engine_loader::engine::Engine> {
+        let e = engine(test);
+        load(&e, "vault", "VAULT_V1");
+        load(&e, "teller", "TELLER");
+        e
+    }
+
+    fn ask(e: &engine_loader::engine::Engine, what: &str) -> String {
+        e.send("teller", what).unwrap_or_else(|err| panic!("{what}: {err}"))
+    }
+
+    fn ticks(e: &engine_loader::engine::Engine) -> u64 {
+        ask(e, "ticks").parse().unwrap()
+    }
+
+    /// Waits for vault's thread to count past `past`.
+    fn ticks_past(e: &engine_loader::engine::Engine, past: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = ticks(e);
+            if now > past {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "vault's thread stopped at {now}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_new_build_of_a_resident_mod_is_refused() {
+        let e = with_vault("resident_refuse");
+        let err = e.load("vault", &lib("VAULT_V2")).unwrap_err();
+        assert_eq!(err, "vault is resident: restart the engine to load its new build");
+        assert!(e.list().contains("vault gen 0 [resident]"), "{}", e.list());
+        assert_eq!(ask(&e, "build"), "v1");
+        // Loading the build it already has is fine.
+        assert_eq!(load(&e, "vault", "VAULT_V1"), "vault unchanged");
+    }
+
+    #[test]
+    fn a_game_reload_keeps_the_resident_build_and_reloads_the_rest() {
+        let e = with_vault("resident_batch");
+        let reply = e.load_batch(&[("vault".into(), lib("VAULT_V2")), ("counter".into(), lib("COUNTER_V1"))]);
+        assert_eq!(
+            reply.as_deref(),
+            Ok("loaded counter; vault is resident: restart the engine to load its new build")
+        );
+        assert_eq!(ask(&e, "build"), "v1");
+    }
+
+    #[test]
+    fn its_transient_part_and_thread_last_the_session() {
+        let e = with_vault("resident_thread");
+        let first = ticks_past(&e, 0);
+        // Other mods coming and going don't touch it.
+        load(&e, "counter", "COUNTER_V1");
+        load(&e, "counter", "COUNTER_V2");
+        assert_eq!(ask(&e, "made"), "1", "one transient part for the session");
+        ticks_past(&e, first);
+    }
+
+    /// Threads in this process whose name is `name`.
+    fn threads_named(name: &str) -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+            .filter(|comm| comm.trim_end() == name)
+            .count()
+    }
+
+    #[test]
+    fn dropping_the_engine_stops_a_resident_mods_thread() {
+        // Its own name, so no other test's vault thread is counted.
+        let e = engine("resident_shutdown");
+        load(&e, "vault_solo", "VAULT_V1");
+        // A thread names itself once it starts, and its /proc entry can
+        // linger briefly after it has been joined, so both checks wait.
+        let wait_for = |count: usize, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while threads_named("tick-vault_solo") != count {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for(1, "vault's thread never started");
+        // Dropping the engine closes vault, whose transient part stops and
+        // joins the thread; otherwise it would keep running this library's
+        // code after the engine is gone.
+        drop(e);
+        wait_for(0, "vault's thread outlived the engine");
+    }
+
+    #[test]
+    fn a_resident_mod_cant_be_unloaded() {
+        let e = with_vault("resident_unload");
+        e.unload("teller").unwrap();
+        assert_eq!(e.unload("vault").unwrap_err(), "vault is resident: it unloads when the engine exits");
+    }
+
+    #[test]
+    fn a_resident_mod_may_depend_only_on_resident_mods() {
+        // user_resident's dependency, base, is loaded here as the reloadable
+        // base_v1: same interface, so only residency is wrong.
+        let e = engine("resident_on_reloadable");
+        load(&e, "base", "BASE_V1");
+        let err = e.load("user", &lib("USER_RESIDENT")).unwrap_err();
+        assert_eq!(err, "user is resident, so everything it depends on must be too; base isn't");
+
+        let e = engine("resident_on_resident");
+        load(&e, "base", "BASE_RESIDENT");
+        assert_eq!(load(&e, "user", "USER_RESIDENT"), "loaded user");
+    }
+}

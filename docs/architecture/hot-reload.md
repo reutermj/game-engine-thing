@@ -81,11 +81,54 @@ new one start over, with a warning, instead of crashing. The scan is shallow
 be fooled by an integer that looks like an address, so it's a mitigation, not
 a guarantee.
 
+## Resident mods
+
+`engine_mod(resident = True)` makes a mod **resident**: loaded once, and its
+build never swapped for the rest of the session. Its code therefore stays
+mapped until the engine exits, and so does its transient part, which it makes
+once at load and drops at shutdown. That is what makes a resident mod the
+place for things that point into their own code and can't be rebuilt on every
+reload: windows, devices, and threads (the test mod `vault` owns one). Other
+mods reach them through the resident mod's services, holding plain handles.
+
+A new build of a resident mod takes a restart:
+
+- **A per-mod reload** of a changed resident build is refused: "vault is
+  resident: restart the engine to load its new build".
+- **A game reload** keeps the resident build, reloads everything else that
+  changed, and says which resident builds it kept. Other mods' new builds are
+  checked against the resident build that stays, so one compiled against a
+  resident mod's new interface is refused with the same advice.
+- **Unloading a resident mod** is refused. It is closed when the engine
+  shuts down, after the mods loaded after it, so it outlives what uses it.
+
+**A resident mod may depend only on resident mods.** Residency flows
+downward: resident mods form the stable base (a platform layer owning the
+window and GPU), and reloadable mods sit on top, depending on them. If a
+resident mod could depend on a reloadable one, that mod's interface would be
+frozen too, since its resident dependent could never be rebuilt against a new
+one, and "reloadable" would silently stop meaning it. `engine_mod` fails the
+build for a resident mod with a non-resident dependency, and the loader
+refuses one built some other way. Where a resident layer needs something
+from gameplay, gameplay leaves it in the world (or, later, as an event:
+get-7yi) and the resident layer reads it.
+
+A resident mod is otherwise an ordinary mod: its state follows the same rules,
+it provides and calls services, and `list` marks it `[resident]`.
+
+Dropping an `Engine` closes every mod, whether or not `shutdown` was called,
+so a resident mod's threads are stopped while its code is still mapped.
+
 **Open question:** `thread_local!` in mods. glibc won't unmap a library
 while a thread still has TLS destructors registered in it, and for the main
 thread that means until exit: `dlclose` quietly keeps the old image. Reload
 still works, because each load uses a fresh path, but memory grows with every
-reload. Whether to ban, lint or accept it is undecided.
+reload. This happens without any `thread_local!` of a mod's own: a mod that
+spawns a std thread stays mapped after the engine drops it (see
+[lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)), so a
+reloadable mod that spawns threads leaks its image on every reload. Resident
+mods are the right home for threads anyway; whether to also lint or warn is
+undecided.
 
 ## The reload sequence
 

@@ -38,7 +38,7 @@ pub use ecs::{
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 8;
+pub const API_VERSION: u32 = 9;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -125,6 +125,8 @@ pub struct ModInfo {
     /// The services this build provides (`export_mod!(.., provides = [..])`).
     pub services: *const ServiceDesc,
     pub service_count: usize,
+    /// Built with `engine_mod(resident = True)`: loaded once, never swapped.
+    pub resident: bool,
 }
 
 /// Services the loader provides to mods.
@@ -257,7 +259,12 @@ pub trait Mod: ModState {
 }
 
 #[doc(hidden)]
-pub fn __info<T: Mod>(interface: &'static str, deps: &'static str, services: &'static [ServiceDesc]) -> ModInfo {
+pub fn __info<T: Mod>(
+    interface: &'static str,
+    deps: &'static str,
+    services: &'static [ServiceDesc],
+    resident: bool,
+) -> ModInfo {
     ModInfo {
         api_version: API_VERSION,
         state_version: T::VERSION,
@@ -273,6 +280,7 @@ pub fn __info<T: Mod>(interface: &'static str, deps: &'static str, services: &'s
         deps_len: deps.len(),
         services: services.as_ptr(),
         service_count: services.len(),
+        resident,
     }
 }
 
@@ -383,6 +391,8 @@ macro_rules! export_mod {
                     None => "",
                 },
                 SERVICES,
+                // Read here, where the mod compiles, like the digests above.
+                option_env!("ENGINE_MOD_RESIDENT").is_some(),
             )
         }
 
@@ -455,7 +465,7 @@ mod tests {
     /// A context with a live state, as the loader provides it. No host:
     /// nothing here calls back into one.
     fn context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
-        unsafe { (__info::<Tracked>("", "", &[]).state_default)(state.as_mut_ptr() as *mut u8) };
+        unsafe { (__info::<Tracked>("", "", &[], false).state_default)(state.as_mut_ptr() as *mut u8) };
         ModContext {
             host: std::ptr::null(),
             name: "t".as_ptr(),
@@ -503,7 +513,7 @@ mod tests {
 
     #[test]
     fn mod_state_records_its_schema() {
-        let info = __info::<Tracked>("", "", &[]);
+        let info = __info::<Tracked>("", "", &[], false);
         assert_eq!(info.state_field_count, 1);
         assert!(info.state_drop.is_some(), "Tracked has a Drop impl");
         let field = unsafe { &*info.state_fields };

@@ -122,6 +122,51 @@ engine_mod(
     mod_deps = [":calc_v1"],
 )
 
+# Builds of `vault`, a resident mod that owns a thread, and `teller`, which
+# calls it. See mods/vault.rs.
+[engine_mod(
+    name = "vault_" + build,
+    srcs = ["mods/vault.rs"],
+    crate_features = [build],
+    crate_root = "mods/vault.rs",
+    interface = ["mods/vault_interface.rs"],
+    mod_name = "vault",
+    resident = True,
+) for build in [
+    "v1",
+    "v2",
+]]
+
+engine_mod(
+    name = "teller",
+    srcs = ["mods/teller.rs"],
+    crate_root = "mods/teller.rs",
+    mod_deps = [":vault_v1"],
+)
+
+# Resident builds of `base` and `user`. A resident mod's mod_deps must be
+# resident too, so user_resident depends on base_resident, whose interface is
+# base_v1's: loading it against the reloadable base_v1 is what the loader's
+# own check refuses.
+engine_mod(
+    name = "base_resident",
+    srcs = ["mods/base.rs"],
+    crate_features = ["v1"],
+    crate_root = "mods/base.rs",
+    interface = ["mods/base_interface_v1.rs"],
+    mod_name = "base",
+    resident = True,
+)
+
+engine_mod(
+    name = "user_resident",
+    srcs = ["mods/user.rs"],
+    crate_root = "mods/user.rs",
+    mod_deps = [":base_resident"],
+    mod_name = "user",
+    resident = True,
+)
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -135,6 +180,11 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "VAULT_V1": ":vault_v1",
+    "VAULT_V2": ":vault_v2",
+    "TELLER": ":teller",
+    "BASE_RESIDENT": ":base_resident",
+    "USER_RESIDENT": ":user_resident",
     "CALC_V1": ":calc_v1",
     "CALC_V2": ":calc_v2",
     "CALLER": ":caller",

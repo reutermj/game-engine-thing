@@ -30,6 +30,7 @@ EngineModInfo = provider(
     fields = {
         "mod_name": "Name the engine knows the mod by. Reloads are matched by name.",
         "library": "The mod's shared library File.",
+        "resident": "Whether the mod is resident: loaded once, never swapped.",
         "closure": "depset of struct(mod_name, library) for this mod and every " +
                    "mod it depends on, postorder: dependencies first.",
     },
@@ -48,6 +49,12 @@ def _rlocationpath(ctx, file):
     if file.short_path.startswith("../"):
         return file.short_path[3:]
     return ctx.workspace_name + "/" + file.short_path
+
+def _pretty(label):
+    """`//pkg:name` for this repository's labels, rather than `@@//pkg:name`."""
+    if label.repo_name == "":
+        return "//%s:%s" % (label.package, label.name)
+    return str(label)
 
 def _launcher(ctx, executable_attr):
     """Makes the target's executable a symlink to another binary, keeping its runfiles."""
@@ -103,6 +110,16 @@ def _engine_mod_impl(ctx):
         fail("expected exactly one .so from %s, got %s" % (ctx.attr.library.label, libraries))
     library = libraries[0]
 
+    # Residency flows downward: a resident mod can't be swapped, so a mod it
+    # depends on couldn't change its interface without a restart either. Making
+    # that explicit keeps "reloadable" meaning reloadable.
+    if ctx.attr.resident:
+        for dep in ctx.attr.mod_deps:
+            if not dep[EngineModInfo].resident:
+                fail(("%s is resident, so its mod_deps must be too, but %s isn't. Make it " +
+                      "resident, or reach it without depending on it (events, the world).") %
+                     (_pretty(ctx.label), _pretty(dep.label)))
+
     exe, modctl_runfiles = _launcher(ctx, ctx.attr._modctl)
     closure = depset(
         [struct(mod_name = ctx.attr.mod_name, library = library)],
@@ -119,7 +136,12 @@ def _engine_mod_impl(ctx):
             "ENGINE_MOD_NAME": ctx.attr.mod_name,
             "ENGINE_MOD_RLOCATION": _rlocationpath(ctx, library),
         }),
-        EngineModInfo(mod_name = ctx.attr.mod_name, library = library, closure = closure),
+        EngineModInfo(
+            mod_name = ctx.attr.mod_name,
+            library = library,
+            closure = closure,
+            resident = ctx.attr.resident,
+        ),
     ]
 
 _engine_mod = rule(
@@ -129,6 +151,7 @@ _engine_mod = rule(
         "library": attr.label(mandatory = True),
         "mod_deps": attr.label_list(providers = [EngineModInfo]),
         "mod_name": attr.string(mandatory = True),
+        "resident": attr.bool(default = False),
         "_modctl": attr.label(
             default = "//engine/modctl",
             executable = True,
@@ -144,9 +167,10 @@ def engine_mod(
         mod_deps = [],
         deps = [],
         mod_name = None,
+        resident = False,
         visibility = None,
         **kwargs):
-    """A hot-reloadable mod.
+    """A hot-reloadable mod, or a resident one.
 
     Args:
       name: Target name. `bazel run` on it (re)loads the mod into the running engine.
@@ -161,6 +185,10 @@ def engine_mod(
         with a different interface.
       deps: Extra Rust deps. `//engine/api` is always included.
       mod_name: Name the engine uses for the mod. Defaults to `name`.
+      resident: Load the mod once and never swap it: its code stays mapped for
+        the session, so its transient part may own windows, devices and
+        threads. A new build takes a restart, and every mod in `mod_deps` must
+        be resident too. See docs/architecture/hot-reload.md, "Resident mods".
       visibility: Visibility of the mod target and its interface.
       **kwargs: Passed to the underlying `rust_shared_library`.
     """
@@ -199,6 +227,7 @@ def engine_mod(
         deps = deps + interface_deps + ([":" + name + "_interface"] if interface else []) + ["//engine/api"],
         # Bakes the interface digests into the library; see engine/tools/mod_links.rs.
         rustc_env_files = [":" + name + "_links"],
+        rustc_env = kwargs.pop("rustc_env", {}) | ({"ENGINE_MOD_RESIDENT": "1"} if resident else {}),
         # The engine copies each .so before dlopen, which breaks the $ORIGIN
         # RUNPATH a dynamically linked C++/unwind runtime would need.
         cc_runtime_linkage = "static",
@@ -216,6 +245,7 @@ def engine_mod(
         library = ":" + name + "_lib",
         mod_deps = mod_deps,
         mod_name = mod_name,
+        resident = resident,
         testonly = testonly,
         visibility = visibility,
     )
