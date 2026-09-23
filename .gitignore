@@ -7,3 +7,10 @@
 # Cargo output. No build produces it, but running cargo to regenerate
 # Cargo.lock (docs/runbooks/001-regenerate-cargo-lock.md) can.
 /target/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
