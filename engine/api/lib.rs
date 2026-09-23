@@ -18,12 +18,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod ecs;
 pub use ecs::{
-    Column, Component, ComponentDesc, ComponentId, Entity, FieldDesc, FieldKind, FieldType, World,
-    WorldApi,
+    Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, FieldDesc, FieldKind,
+    FieldType, World, WorldApi,
 };
+#[doc(hidden)]
+pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -379,7 +381,7 @@ mod tests {
     }
 
     component! {
-        #[derive(Default)]
+        #[derive(Default, Copy)]
         struct Mixed: "test::Mixed" {
             a: u8,
             b: f64,
@@ -415,7 +417,7 @@ mod tests {
     }
 
     component! {
-        #[derive(Default)]
+        #[derive(Default, Copy)]
         struct Versioned: "test::Versioned", version = 3 {
             a: u32,
         }

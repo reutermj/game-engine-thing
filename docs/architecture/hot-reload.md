@@ -44,7 +44,8 @@ one build of the mod.
 What survives a reload is exactly the state struct. A mod's `static`s do not,
 since every reload maps a fresh copy of the library. Heap allocations the
 state points to do survive, because every mod and the loader share the same
-system allocator.
+system allocator, and every build comes from the same rustc (checked at load;
+see [ecs.md](ecs.md#one-compiler-per-session)), so std types keep their layout.
 
 The loader decides whether the old state can be handed to the new build by
 comparing size, alignment and `Mod::STATE_VERSION`. A mod bumps

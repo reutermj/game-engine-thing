@@ -5,7 +5,7 @@
 use engine_api::component;
 
 component! {
-    #[derive(Debug, Default, PartialEq)]
+    #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Probe: "test::Probe" {
         /// The mod's running total, from its `Mod` state.
         pub value: u64,

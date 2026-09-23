@@ -5,7 +5,9 @@
 //! never swaps out code that is on the stack.
 
 use std::alloc::Layout;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,7 @@ use engine_api::{
 };
 use libloading::Library;
 
-use crate::world::{self, WorldStorage};
+use crate::world::{self, Keepalive, WorldStorage};
 
 pub struct Engine {
     host: Host,
@@ -32,6 +34,12 @@ pub struct Engine {
     reload_hint: RefCell<Option<String>>,
     /// The reply to the message being delivered, built up by `host_reply`.
     reply: RefCell<String>,
+    /// Each loaded mod's current library, by `ModContext` address, for
+    /// `library_of`. Separate from `mods` because it is read while `mods` is
+    /// borrowed for a load.
+    libs: RefCell<HashMap<usize, Rc<Library>>>,
+    /// The rustc this engine was built with, which every mod must match.
+    rustc: OnceCell<Option<String>>,
 }
 
 struct Loaded {
@@ -41,7 +49,9 @@ struct Loaded {
     state_layout: Layout,
     info: ModInfo,
     main: MainFn,
-    lib: Library,
+    /// Shared with the world, which keeps a build's library mapped while
+    /// component values still need its code; see `world.rs`.
+    lib: Rc<Library>,
     source: PathBuf,
     /// Hash of the library file, to recognize an unchanged build.
     content: u64,
@@ -101,6 +111,8 @@ impl Engine {
             load_count: Cell::new(0),
             reload_hint: RefCell::new(None),
             reply: RefCell::new(String::new()),
+            libs: RefCell::new(HashMap::new()),
+            rustc: OnceCell::new(),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
         engine
@@ -167,8 +179,10 @@ impl Engine {
                         (*m.ctx).loaded_at = loaded_at;
                         (*m.ctx).generation
                     };
-                    // Dropping the old library here unmaps the previous build.
-                    m.lib = o.lib;
+                    // Releasing the old library unmaps the previous build, unless
+                    // the world still needs its code.
+                    m.lib = Rc::new(o.lib);
+                    self.libs.borrow_mut().insert(m.ctx as usize, m.lib.clone());
                     (m.main, m.info, m.source, m.content) = (o.main, o.info, o.path, o.content);
                     (m.interface, m.deps) = (o.interface, o.deps);
                     m.failed.set(false);
@@ -193,13 +207,15 @@ impl Engine {
                         message: std::ptr::null(),
                         message_len: 0,
                     }));
+                    let lib = Rc::new(o.lib);
+                    self.libs.borrow_mut().insert(ctx as usize, lib.clone());
                     mods.push(Loaded {
                         name,
                         ctx,
                         state_layout: o.state_layout,
                         info: o.info,
                         main: o.main,
-                        lib: o.lib,
+                        lib,
                         source: o.path,
                         content: o.content,
                         interface: o.interface,
@@ -218,6 +234,7 @@ impl Engine {
     /// Opens a build and reads what it says about itself, without running any
     /// of its mod code.
     fn open(&self, name: &str, path: &Path, content: u64) -> Result<Opened, String> {
+        self.check_rustc(name, path)?;
         let lib = self.open_staged(name, path).map_err(|e| format!("{name}: {e}"))?;
         let info = unsafe {
             let info_fn = *lib.get::<InfoFn>(INFO_SYMBOL).map_err(|e| format!("{name}: {}", describe(e)))?;
@@ -328,6 +345,28 @@ impl Engine {
         }
     }
 
+    /// The library of the mod whose context this is, for the world to keep
+    /// mapped while it holds that build's code.
+    pub(crate) fn library_of(&self, ctx: *const ModContext) -> Option<Keepalive> {
+        let lib = self.libs.borrow().get(&(ctx as usize)).cloned()?;
+        Some(lib as Keepalive)
+    }
+
+    /// Refuses a build from another rustc than the engine's. Components hold
+    /// std types (`Vec`, `String`), whose layout is only the same between
+    /// builds of one compiler, and every build's code touches every other's
+    /// values. A library with no rustc version recorded (not Rust) passes.
+    fn check_rustc(&self, name: &str, path: &Path) -> Result<(), String> {
+        let ours = self.rustc.get_or_init(|| rustc_version(Path::new("/proc/self/exe")));
+        let theirs = rustc_version(path);
+        match (ours, theirs) {
+            (Some(ours), Some(theirs)) if *ours != theirs => Err(format!(
+                "{name} was built by {theirs}, the engine by {ours}; restart the engine to switch compilers"
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// The label the user runs to reload the whole game, named in errors.
     pub fn set_reload_hint(&self, label: Option<String>) {
         *self.reload_hint.borrow_mut() = label;
@@ -346,6 +385,7 @@ impl Engine {
         }
         let m = mods.remove(index);
         m.close_state();
+        self.libs.borrow_mut().remove(&(m.ctx as usize));
         Ok(format!("unloaded {name}"))
     }
 
@@ -457,6 +497,38 @@ fn in_dependency_order(mut pending: Vec<Opened>) -> Result<Vec<Opened>, String> 
         ordered.push(pending.remove(ready));
     }
     Ok(ordered)
+}
+
+/// The `rustc version ...` line from an ELF file's `.comment` section, where
+/// rustc records itself in everything it compiles. `None` if the file isn't
+/// 64-bit ELF or has no such line.
+fn rustc_version(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize);
+    let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize);
+    let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize);
+    // 64-bit, little-endian ELF.
+    if bytes.get(..6)? != b"\x7fELF\x02\x01" {
+        return None;
+    }
+    let (sections, entry_size, count, names) = (u64_at(0x28)?, u16_at(0x3a)?, u16_at(0x3c)?, u16_at(0x3e)?);
+    let section = |i: usize| -> Option<(usize, usize, usize)> {
+        let at = sections + i * entry_size;
+        Some((u32_at(at)?, u64_at(at + 0x18)?, u64_at(at + 0x20)?))
+    };
+    let (_, names_at, _) = section(names)?;
+    let comment = (0..count).find_map(|i| {
+        let (name, at, size) = section(i)?;
+        let name = bytes.get(names_at + name..)?.split(|&b| b == 0).next()?;
+        (name == b".comment").then_some((at, size))
+    })?;
+    let (at, size) = comment;
+    bytes
+        .get(at..at + size)?
+        .split(|&b| b == 0)
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .find(|s| s.starts_with("rustc version"))
+        .map(str::to_string)
 }
 
 fn content_hash(path: &Path) -> Result<u64, String> {

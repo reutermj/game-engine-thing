@@ -1,5 +1,7 @@
 //! The world: an entity/component store owned by the loader and shared by
-//! every mod.
+//! every mod. Components may hold heap data (`String`, `Vec`, ...): each
+//! registration carries the code to drop and default them, and the loader
+//! keeps that code's library mapped for as long as values need it.
 //!
 //! This is what makes reloads cheap to write for. Systems are mod code and get
 //! swapped freely; components are data in the loader and never see a reload.
@@ -47,8 +49,15 @@ impl ComponentId {
     pub const INVALID: ComponentId = ComponentId(u32::MAX);
 }
 
-/// What a mod believes a component looks like. Components are matched by
-/// name, and a mismatch in anything else is a layout change.
+/// Frees the value (or field) at the pointer in place. Compiled into each
+/// mod, so the loader can drop data whose type only mods know.
+pub type DropFn = unsafe extern "C" fn(value: *mut u8);
+/// Writes a `Default` value to the (uninitialized) pointer.
+pub type DefaultFn = unsafe extern "C" fn(out: *mut u8);
+
+/// What a mod believes a component looks like, and the code to manage its
+/// values. Components are matched by name, and a mismatch in anything else is
+/// a layout change.
 #[repr(C)]
 pub struct ComponentDesc {
     pub name: *const u8,
@@ -60,14 +69,15 @@ pub struct ComponentDesc {
     /// layout. Empty means no schema, and a layout change clears the values.
     pub fields: *const FieldDesc,
     pub field_count: usize,
-    /// `size` bytes of this build's `Default`, the starting point of every
-    /// migrated value: fields the old layout lacks keep these bytes.
-    pub default: *const u8,
+    /// Drops a whole value; `None` if the type has nothing to drop.
+    pub drop: Option<DropFn>,
+    /// Makes this build's `Default`: the starting point of every migrated
+    /// value, so fields the old layout lacks get their default.
+    pub default: DefaultFn,
 }
 
 impl ComponentDesc {
-    /// `T`'s desc. Borrows `default`, which must outlive the desc's use.
-    pub fn of<T: Component>(default: &T) -> ComponentDesc {
+    pub fn of<T: Component>() -> ComponentDesc {
         ComponentDesc {
             name: T::NAME.as_ptr(),
             name_len: T::NAME.len(),
@@ -76,9 +86,28 @@ impl ComponentDesc {
             version: T::VERSION,
             fields: T::FIELDS.as_ptr(),
             field_count: T::FIELDS.len(),
-            default: default as *const T as *const u8,
+            drop: __drop_fn::<T>(),
+            default: __write_default::<T>,
         }
     }
+}
+
+#[doc(hidden)]
+pub const fn __drop_fn<T>() -> Option<DropFn> {
+    if std::mem::needs_drop::<T>() { Some(__drop::<T>) } else { None }
+}
+
+#[doc(hidden)]
+pub unsafe extern "C" fn __drop<T>(value: *mut u8) {
+    // A panicking drop leaks rather than unwinding into the loader.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        std::ptr::drop_in_place(value as *mut T)
+    }));
+}
+
+#[doc(hidden)]
+pub unsafe extern "C" fn __write_default<T: Default>(out: *mut u8) {
+    unsafe { (out as *mut T).write(T::default()) }
 }
 
 /// The kinds of field the loader can migrate. A plain integer for the same
@@ -100,6 +129,9 @@ impl FieldKind {
     pub const F64: FieldKind = FieldKind(9);
     pub const BOOL: FieldKind = FieldKind(10);
     pub const ENTITY: FieldKind = FieldKind(11);
+    /// Anything else (`String`, `Vec<T>`, a nested struct): the loader can't
+    /// convert it, only move it into a field with the same `fingerprint`.
+    pub const OPAQUE: FieldKind = FieldKind(12);
 }
 
 /// One field of a component's schema. Built at compile time by
@@ -112,11 +144,25 @@ pub struct FieldDesc {
     pub name_len: usize,
     pub kind: FieldKind,
     pub offset: usize,
+    pub size: usize,
+    /// The field type's layout, recursively: equal fingerprints mean a value
+    /// of one can be moved into the other byte for byte.
+    pub fingerprint: u64,
+    /// Drops just this field; `None` if it has nothing to drop.
+    pub drop: Option<DropFn>,
 }
 
 impl FieldDesc {
-    pub const fn new(name: &'static str, kind: FieldKind, offset: usize) -> FieldDesc {
-        FieldDesc { name: name.as_ptr(), name_len: name.len(), kind, offset }
+    pub const fn new<T: FieldType>(name: &'static str, offset: usize) -> FieldDesc {
+        FieldDesc {
+            name: name.as_ptr(),
+            name_len: name.len(),
+            kind: T::KIND,
+            offset,
+            size: size_of::<T>(),
+            fingerprint: T::FINGERPRINT,
+            drop: __drop_fn::<T>(),
+        }
     }
 }
 
@@ -124,22 +170,107 @@ impl FieldDesc {
 ///
 /// # Safety
 ///
-/// `KIND` must describe the type's in-memory representation exactly: the
-/// loader reads and writes the field's bytes as that kind.
-pub unsafe trait FieldType: Copy {
+/// A scalar `KIND` must describe the type's representation exactly: the
+/// loader reads and writes the field's bytes as that kind. `FINGERPRINT` must
+/// differ between any two types whose values can't be moved into each other
+/// byte for byte. And the type must hold nothing that points into a mod's
+/// image (code, statics, string literals): values outlive the build that made
+/// them. Heap memory is fine, since every mod and the loader share one
+/// allocator.
+pub unsafe trait FieldType: Clone + 'static {
     const KIND: FieldKind;
+    const FINGERPRINT: u64;
 }
 
-macro_rules! field_types {
-    ($($ty:ty => $kind:ident),* $(,)?) => {
-        $(unsafe impl FieldType for $ty { const KIND: FieldKind = FieldKind::$kind; })*
+#[doc(hidden)]
+pub const fn __fnv(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut i = 0;
+    while i < bytes.len() {
+        hash = (hash ^ bytes[i] as u64).wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
+const FNV_START: u64 = 0xcbf29ce484222325;
+
+/// A fingerprint built from a name and the fingerprints it's made of.
+#[doc(hidden)]
+pub const fn __fingerprint(name: &str, parts: &[u64]) -> u64 {
+    let mut hash = __fnv(FNV_START, name.as_bytes());
+    let mut i = 0;
+    while i < parts.len() {
+        hash = __fnv(hash, &parts[i].to_le_bytes());
+        i += 1;
+    }
+    hash
+}
+
+/// A struct's fingerprint: each field's name, offset and fingerprint.
+#[doc(hidden)]
+pub const fn __fingerprint_struct(fields: &[(&str, usize, u64)]) -> u64 {
+    let mut hash = FNV_START;
+    let mut i = 0;
+    while i < fields.len() {
+        hash = __fnv(hash, fields[i].0.as_bytes());
+        hash = __fnv(hash, &(fields[i].1 as u64).to_le_bytes());
+        hash = __fnv(hash, &fields[i].2.to_le_bytes());
+        i += 1;
+    }
+    hash
+}
+
+macro_rules! scalar_field_types {
+    ($($ty:ident => $kind:ident),* $(,)?) => {
+        $(unsafe impl FieldType for $ty {
+            const KIND: FieldKind = FieldKind::$kind;
+            const FINGERPRINT: u64 = __fingerprint(stringify!($ty), &[]);
+        })*
     };
 }
 
-field_types! {
+scalar_field_types! {
     u8 => U8, u16 => U16, u32 => U32, u64 => U64,
     i8 => I8, i16 => I16, i32 => I32, i64 => I64,
     f32 => F32, f64 => F64, bool => BOOL, Entity => ENTITY,
+}
+
+// The std containers are laid out however this rustc lays them out; that is
+// sound because every mod and the loader come from one toolchain, which the
+// loader checks at load time.
+unsafe impl FieldType for String {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("String", &[]);
+}
+
+unsafe impl<T: FieldType> FieldType for Vec<T> {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Vec", &[T::FINGERPRINT]);
+}
+
+unsafe impl<T: FieldType> FieldType for Option<T> {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Option", &[T::FINGERPRINT]);
+}
+
+unsafe impl<T: FieldType> FieldType for Box<T> {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Box", &[T::FINGERPRINT]);
+}
+
+unsafe impl<T: FieldType, const N: usize> FieldType for [T; N] {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("Array", &[T::FINGERPRINT, N as u64]);
+}
+
+unsafe impl<K: FieldType + Eq + std::hash::Hash, V: FieldType> FieldType for std::collections::HashMap<K, V> {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("HashMap", &[K::FINGERPRINT, V::FINGERPRINT]);
+}
+
+unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BTreeMap<K, V> {
+    const KIND: FieldKind = FieldKind::OPAQUE;
+    const FINGERPRINT: u64 = __fingerprint("BTreeMap", &[K::FINGERPRINT, V::FINGERPRINT]);
 }
 
 /// Declares a component whose values survive layout changes.
@@ -147,17 +278,20 @@ field_types! {
 /// ```ignore
 /// engine_api::component! {
 ///     #[derive(Debug, Default)]
-///     pub struct Position: "game::Position" {
-///         pub x: f32,
-///         pub y: f32,
+///     pub struct Inventory: "rpg::Inventory" {
+///         pub items: Vec<Item>,
+///         pub owner: String,
 ///     }
 /// }
 /// ```
 ///
-/// Adds `Clone` and `Copy`, and implements [`Component`] with a schema, so
-/// adding, removing, reordering or retyping (between numeric kinds) a field
-/// keeps every value's other fields. New fields take their value from the
-/// type's `Default`. Every field must be a [`FieldType`].
+/// Adds `Clone` (add `Copy` yourself if every field is), and implements
+/// [`Component`] with a schema, so adding, removing, reordering or retyping
+/// (between numeric kinds) a field keeps every value's other fields. New
+/// fields take their value from the type's `Default`; a field whose non-scalar
+/// type changed (`Vec<u32>` to `Vec<u64>`) is reset to it. Every field must be
+/// a [`FieldType`]: scalars, `Entity`, `String`, `Vec`, `Option`, `Box`,
+/// arrays, `HashMap`, `BTreeMap`, and structs declared with [`field_struct!`].
 ///
 /// When a change keeps the layout valid but not the meaning (a field now in
 /// different units, say), bump the version so values are cleared instead:
@@ -171,22 +305,52 @@ macro_rules! component {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         $vis struct $name {
             $($(#[$fmeta])* $fvis $field: $ty),*
         }
 
-        // SAFETY: every field is a `FieldType`, and those are plain data.
+        // SAFETY: every field is a `FieldType`, which rules out pointers into
+        // the mod, and `FIELDS` is generated from the struct itself.
         unsafe impl $crate::Component for $name {
             const NAME: &'static str = $id;
             $(const VERSION: u32 = $version;)?
             const FIELDS: &'static [$crate::FieldDesc] = &[
-                $($crate::FieldDesc::new(
-                    stringify!($field),
-                    <$ty as $crate::FieldType>::KIND,
-                    ::std::mem::offset_of!($name, $field),
-                )),*
+                $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*
             ];
+        }
+    };
+}
+
+/// Declares a struct that can be a component's field (or a `Vec`'s element,
+/// and so on): `Vec<Item>` in a component needs `Item` declared this way. Its
+/// fingerprint covers its fields, so changing `Item` counts as changing the
+/// type of every field that holds one.
+#[macro_export]
+macro_rules! field_struct {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $($(#[$fmeta:meta])* $fvis:vis $field:ident : $ty:ty),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone)]
+        $vis struct $name {
+            $($(#[$fmeta])* $fvis $field: $ty),*
+        }
+
+        // SAFETY: every field is a `FieldType`, and the fingerprint covers
+        // each one's name, offset and fingerprint.
+        unsafe impl $crate::FieldType for $name {
+            const KIND: $crate::FieldKind = $crate::FieldKind::OPAQUE;
+            const FINGERPRINT: u64 = $crate::__fingerprint_struct(&[
+                $((
+                    stringify!($field),
+                    ::std::mem::offset_of!($name, $field),
+                    <$ty as $crate::FieldType>::FINGERPRINT,
+                )),*
+            ]);
         }
     };
 }
@@ -207,15 +371,17 @@ pub struct WorldApi {
     pub register:
         unsafe extern "C" fn(ctx: *const ModContext, desc: *const ComponentDesc) -> ComponentId,
     pub spawn: unsafe extern "C" fn(ctx: *const ModContext) -> Entity,
-    /// Also removes all of the entity's components.
+    /// Also removes (and drops) all of the entity's components.
     pub despawn: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity) -> bool,
-    /// Copies `size` bytes from `value`, replacing any existing value.
+    /// Moves the value at `value` into the world, dropping any existing one.
+    /// On `true` the world owns it; on `false` the caller still does.
     pub insert: unsafe extern "C" fn(
         ctx: *const ModContext,
         entity: Entity,
         id: ComponentId,
         value: *const u8,
     ) -> bool,
+    /// Drops the entity's value.
     pub remove: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId) -> bool,
     /// Null if the entity is dead or lacks the component.
     pub get: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId) -> *mut u8,
@@ -227,13 +393,12 @@ pub struct WorldApi {
 ///
 /// # Safety
 ///
-/// The value is copied into loader memory and outlives the build that wrote
-/// it, so it must be plain data: no references, raw pointers or function
-/// pointers into a mod (a `&'static str` or `fn` points into code a reload
-/// unmaps), and nothing whose meaning depends on a mod's statics. `Copy`
-/// rules out drop glue, which would also be code in an unmapped library.
-/// `FIELDS`, if not empty, must describe every field exactly.
-pub unsafe trait Component: Copy + Default + 'static {
+/// Values move into loader memory and outlive the build that wrote them, so a
+/// component must hold nothing that points into a mod's image: no references,
+/// function pointers or trait objects (their vtables are in the mod), and no
+/// `&'static str` (the string is in the mod). Heap data is fine. `FIELDS`, if
+/// not empty, must describe every field exactly.
+pub unsafe trait Component: Default + 'static {
     /// Stable identity across builds and mods. Two mods that name the same
     /// component share its storage.
     const NAME: &'static str;
@@ -263,8 +428,7 @@ impl<'a> World<'a> {
     }
 
     fn id<T: Component>(&self) -> ComponentId {
-        let default = T::default();
-        unsafe { (self.api().register)(self.ctx, &ComponentDesc::of(&default)) }
+        unsafe { (self.api().register)(self.ctx, &ComponentDesc::of::<T>()) }
     }
 
     pub fn spawn(&mut self) -> Entity {
@@ -275,9 +439,16 @@ impl<'a> World<'a> {
         unsafe { (self.api().despawn)(self.ctx, entity) }
     }
 
+    /// Moves `value` into the world, replacing (and dropping) any existing one.
+    /// If the entity is dead or the component unusable, `value` is dropped here.
     pub fn insert<T: Component>(&mut self, entity: Entity, value: T) -> bool {
         let id = self.id::<T>();
-        unsafe { (self.api().insert)(self.ctx, entity, id, &value as *const T as *const u8) }
+        let value = std::mem::ManuallyDrop::new(value);
+        let moved = unsafe { (self.api().insert)(self.ctx, entity, id, &*value as *const T as *const u8) };
+        if !moved {
+            drop(std::mem::ManuallyDrop::into_inner(value));
+        }
+        moved
     }
 
     pub fn remove<T: Component>(&mut self, entity: Entity) -> bool {

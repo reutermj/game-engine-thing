@@ -14,7 +14,7 @@ pub const PADDLE_SPEED: f32 = 16.0;
 pub const SERVE_SPEED: f32 = 16.0;
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Ball: "pong::Ball" {
         pub x: f32,
         pub y: f32,
@@ -24,7 +24,7 @@ component! {
 }
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Paddle: "pong::Paddle" {
         /// The paddle's face column (`LEFT_FACE` or `RIGHT_FACE`).
         pub face: f32,
@@ -38,18 +38,18 @@ component! {
 
 component! {
     /// Marks the paddle `pong_text` controls: the left one.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Player: "pong::Player" {}
 }
 
 component! {
     /// Marks the paddle `pong_ai` controls: the right one.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Opponent: "pong::Opponent" {}
 }
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Score: "pong::Score" {
         pub left: u32,
         pub right: u32,

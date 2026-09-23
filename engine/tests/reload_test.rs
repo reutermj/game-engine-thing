@@ -173,7 +173,7 @@ mod migration {
 
     // Mirrors `test::Pos` as built by mover_v2.
     component! {
-        #[derive(Debug, Default, PartialEq)]
+        #[derive(Debug, Default, PartialEq, Copy)]
         pub struct Pos: "test::Pos" {
             pub y: f64,
             pub x: f32,
@@ -340,5 +340,98 @@ mod messages {
         assert_eq!(e.send("lockstep", "step 5").as_deref(), Ok("frame 5"));
         assert_eq!(probe(&e).value, 5);
         assert!(e.send("lockstep", "step many").is_err());
+    }
+}
+
+/// Components holding heap data (`Vec<String>`), across real builds: the
+/// buffers are allocated by one library's code and grown, migrated and freed
+/// by another's.
+mod heap {
+    use super::{engine, lib, load, step};
+
+    mod v1 {
+        engine_api::component! {
+            #[derive(Default)]
+            pub struct Bag: "test::Bag" {
+                pub words: Vec<String>,
+            }
+        }
+    }
+
+    mod v3 {
+        engine_api::component! {
+            #[derive(Default)]
+            pub struct Bag: "test::Bag" {
+                pub note: String,
+                pub words: Vec<String>,
+            }
+        }
+    }
+
+    fn words(e: &engine_loader::engine::Engine) -> Vec<String> {
+        let world = e.world().borrow();
+        let bags = world.values::<v1::Bag>().expect("test::Bag with v1's layout");
+        assert_eq!(bags.len(), 1);
+        bags.into_iter().next().unwrap().1.words
+    }
+
+    #[test]
+    fn heap_data_written_by_one_build_is_grown_by_the_next() {
+        let e = engine("heap_reload");
+        load(&e, "bag", "BAG_V1");
+        step(&e, 2);
+        assert_eq!(load(&e, "bag", "BAG_V2"), "reloaded bag (generation 1)");
+        step(&e, 2);
+        assert_eq!(words(&e), ["v1-1", "v1-2", "v2-3", "v2-4"]);
+    }
+
+    #[test]
+    fn heap_data_outlives_its_mod_and_is_freed_with_its_code() {
+        let e = engine("heap_unload");
+        load(&e, "bag", "BAG_V1");
+        step(&e, 2);
+        e.unload("bag").unwrap();
+        // v1 is gone, but the world kept its library for the values' sake.
+        assert_eq!(words(&e), ["v1-1", "v1-2"]);
+        // Dropping the engine drops the values with v1's code; if the library
+        // had been unmapped, this would crash the test binary.
+        drop(e);
+
+        // And a later build picks the values up where v1 left them.
+        let e = engine("heap_unload_then_load");
+        load(&e, "bag", "BAG_V1");
+        step(&e, 1);
+        e.unload("bag").unwrap();
+        load(&e, "bag", "BAG_V2");
+        step(&e, 1);
+        assert_eq!(words(&e), ["v1-1", "v2-1"]);
+    }
+
+    #[test]
+    fn heap_fields_migrate_between_real_builds() {
+        let e = engine("heap_migrate");
+        load(&e, "bag", "BAG_V1");
+        step(&e, 2);
+        load(&e, "bag", "BAG_V3");
+        step(&e, 1);
+        let world = e.world().borrow();
+        let bags = world.values::<v3::Bag>().expect("test::Bag with v3's layout");
+        let bag = &bags[0].1;
+        assert_eq!(bag.words, ["v1-1", "v1-2", "v3-3"], "the Vec<String> moved intact");
+        assert_eq!(bag.note, "3 words");
+    }
+
+    #[test]
+    fn a_build_from_another_rustc_is_refused() {
+        let e = engine("rustc");
+        // The same library, claiming a different compiler in its `.comment`.
+        let mut bytes = std::fs::read(lib("BAG_V1")).unwrap();
+        let at = bytes.windows(14).position(|w| w == b"rustc version ").expect("rustc's .comment line");
+        bytes[at + 14..at + 18].copy_from_slice(b"0.0.");
+        let path = std::path::PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join("other_rustc.so");
+        std::fs::write(&path, bytes).unwrap();
+        let err = e.load("bag", &path).unwrap_err();
+        assert!(err.starts_with("bag was built by rustc version 0.0."), "{err}");
+        assert!(err.contains("restart the engine"), "{err}");
     }
 }

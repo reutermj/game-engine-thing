@@ -49,36 +49,79 @@ a schema:
 ```rust
 component! {
     #[derive(Debug, Default)]
-    pub struct Position: "game::Position" {
-        pub x: f32,
-        pub y: f32,
+    pub struct Inventory: "rpg::Inventory" {
+        pub owner: String,
+        pub items: Vec<Item>,
+        pub gold: u32,
+    }
+}
+
+field_struct! {
+    #[derive(Debug)]
+    pub struct Item {
+        pub name: String,
+        pub weight: f32,
     }
 }
 ```
 
-The macro adds `Clone` and `Copy` and implements `Component`, recording each
-field's name, kind and offset (`offset_of!`) in `Component::FIELDS`. Every
-field must be a `FieldType`: the integer and float types, `bool` and
-`Entity`. It is a `macro_rules!` macro rather than a derive, so it needs no
-proc-macro crate; the price is its fixed `struct Name: "id" { ... }` syntax.
-`Component` can still be implemented by hand, with no schema.
+The macro adds `Clone` (add `Copy` yourself if every field is) and implements
+`Component`, recording each field's name, kind, offset, size, layout
+fingerprint and drop function in `Component::FIELDS`. Every field must be a
+`FieldType`: the integer and float types, `bool`, `Entity`, `String`, `Vec`,
+`Option`, `Box`, arrays, `HashMap`, `BTreeMap`, and structs declared with
+`field_struct!`. It is a `macro_rules!` macro rather than a derive, so it
+needs no proc-macro crate; the price is its fixed `struct Name: "id" { ... }`
+syntax. `Component` can still be implemented by hand, with no schema.
 
 The name is the identity, not the Rust type. `TypeId` can differ between
 builds, and two mods compiled separately each have their own copy of the
 type. A component shared by several mods is declared in one mod's interface
 and used by the others through `mod_deps` (see [mod-deps.md](mod-deps.md)).
 
-The trait requires `Copy` and `Default`, and its safety contract requires
-plain data. A component's value outlives the build that wrote it, so it can't
-hold a reference, raw pointer or function pointer into a mod (a `&'static str`
-or `fn` points into a library a reload unmaps). `Copy` also rules out drop
-glue, which would be code in an unmapped library. The type system can't check
-the pointer rule, which is why the trait is `unsafe`; `component!` makes it
-safe by accepting only `FieldType` fields.
+A component's value outlives the build that wrote it, so it can't hold
+anything that points into a mod's image: a reference, a function pointer, a
+trait object (its vtable is in the mod) or a `&'static str` (its bytes are).
+Heap memory is fine: every mod and the loader share libc's allocator. The type
+system can't check the image rule, which is why `Component` and `FieldType`
+are `unsafe` traits; `component!` makes a component safe by accepting only
+`FieldType` fields, and `FieldType` is implemented only for types that obey
+it.
 
-**Open question:** components that own heap data (`Vec`, `String`). They need
-a drop that doesn't live in a mod, perhaps by keeping the allocation in loader
-memory. Today such data goes in `Mod` state.
+### Heap data and whose code runs
+
+The loader moves values around as bytes, but freeing a `String` or making a
+`Default` takes code, and only mods have it. So every registration hands the
+loader that code: a drop function for the whole value, one per field, and a
+`Default` constructor, all compiled into the registering build. The world
+keeps the newest registered build's functions, and a reference to that
+build's library, which keeps it mapped: an older build's library is unmapped
+once a newer build has taken over every component it provided code for,
+normally on that build's first access. Values therefore survive their mod
+being reloaded or even unloaded, and are dropped with valid code when they're
+removed, despawned, cleared or the world goes away. (`dlclose` really does
+unmap a mod whose code nothing holds; see
+[lore](../lore/dlclose-unmaps-a-mod-nothing-holds.md).)
+
+`World::insert` moves the value in: the world owns it from then on and drops
+the value it replaces. A value the world refuses (dead entity, stale layout)
+is dropped by the caller.
+
+### One compiler per session
+
+`String`, `Vec` and `HashMap` have no guaranteed layout; Rust only keeps it
+the same between builds of one compiler. Since a value written by one build is
+used by others' code, every mod and the loader in one running engine must come
+from the same rustc. The loader enforces it: rustc records its version in the
+`.comment` section of everything it compiles, and a mod whose version differs
+from the engine's is refused ("restart the engine to switch compilers"). The
+workspace pins one toolchain, so this only matters when it changes while an
+engine is running.
+
+**Open question:** mods built outside this workspace would need the game's
+exact rustc. Only components holding std types strictly need it (scalar
+fields have fixed layouts), so the check could be narrowed to those, or
+engine-owned `#[repr(C)]` containers could lift it.
 
 ## Storage
 
@@ -113,17 +156,26 @@ that is the one the developer just changed. "More recently" means
 all mods.
 
 **A newer build migrates the values** to its layout. Each registration
-carries the build's `Default` value along with the schema, and the loader
-rebuilds every value from it, matching fields by name:
+carries the build's `Default` constructor along with the schema, and the
+loader rebuilds every value from it, matching fields by name:
 
 | change | result |
 |---|---|
 | field added | takes the new build's `Default` (not zero) |
-| field removed | dropped |
+| field removed | dropped, with the old build's drop code |
 | fields reordered | kept (matched by name, not offset) |
 | numeric type changed (`f32` to `f64`, `i32` to `u8`) | converted with `as` semantics |
+| non-scalar field, same type (`Vec<String>`) | moved as is: the heap buffer carries over |
+| non-scalar type changed (`Vec<u32>` to `Vec<u64>`, or an `Item` inside gained a field) | old value dropped, reset to the default |
 | type changed across kinds (`f32` to `bool`) | reset to the default |
 | field renamed | dropped and re-added as a default |
+
+"Same type" is decided by a layout fingerprint `component!` computes for each
+field type, recursively: `Vec<Item>` covers `Item`'s own fields, so changing
+`Item` changes every field that holds one, and its values are never moved
+under a layout they weren't built for. Each migrated value starts as a fresh
+`Default` from the new build, so a default that owns heap memory isn't
+shared between values.
 
 The loader logs what happened, e.g.
 `migrated 3 value(s) of game::Position to physics's layout: kept x, kept y, added z (default)`.

@@ -5,7 +5,7 @@
 use engine_api::component;
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Position: "transform::Position" {
         pub x: f32,
         pub y: f32,

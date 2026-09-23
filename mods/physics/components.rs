@@ -4,7 +4,7 @@ use engine_api::component;
 
 component! {
     /// Units per second.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Velocity: "physics::Velocity" {
         pub x: f32,
         pub y: f32,

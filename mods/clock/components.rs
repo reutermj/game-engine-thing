@@ -6,7 +6,7 @@
 use engine_api::{World, component};
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Clock: "clock::Clock" {
         /// Frames run so far, including this one.
         pub frame: u64,

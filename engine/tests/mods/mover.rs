@@ -5,7 +5,7 @@ use engine_api::{Cx, Mod, Status, component, export_mod};
 
 #[cfg(feature = "v1")]
 component! {
-    #[derive(Default)]
+    #[derive(Default, Copy)]
     pub struct Pos: "test::Pos" {
         pub x: f32,
         pub y: f32,
@@ -15,6 +15,7 @@ component! {
 // Reordered, `y` widened, `z` added with a non-zero default.
 #[cfg(feature = "v2")]
 component! {
+    #[derive(Copy)]
     pub struct Pos: "test::Pos" {
         pub y: f64,
         pub x: f32,

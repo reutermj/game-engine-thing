@@ -71,6 +71,19 @@ COUNTER_BUILDS = [
     "v2",
 ]]
 
+# Builds of `bag`, which keeps heap data in the world. See mods/bag.rs.
+[engine_mod(
+    name = "bag_" + build,
+    srcs = ["mods/bag.rs"],
+    crate_features = [build],
+    crate_root = "mods/bag.rs",
+    mod_name = "bag",
+) for build in [
+    "v1",
+    "v2",
+    "v3",
+]]
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -84,6 +97,9 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "BAG_V1": ":bag_v1",
+    "BAG_V2": ":bag_v2",
+    "BAG_V3": ":bag_v3",
     # The real ones: the lockstep bootstrap is what exercises a message
     # handler that steps other mods.
     "CLOCK": "//mods/clock",

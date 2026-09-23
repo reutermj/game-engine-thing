@@ -1,21 +1,29 @@
 //! The world behind `Host::world`: entities and component storage that outlive
 //! every mod build.
 //!
-//! Components are untyped here: the loader knows each one's name, size and
-//! alignment and nothing else, so no code from a mod is ever stored and a
-//! reload can't leave the world pointing into an unmapped library. Storage is a
-//! sparse set per component: values packed densely for queries, plus an
-//! entity-index-to-slot map for lookups.
+//! The loader knows each component by its layout and schema, never its Rust
+//! type. What it can't do with bytes alone (drop a `String`, make a `Default`)
+//! it does with code the registering build handed over, and it keeps that
+//! build's library mapped for as long as values may need it: until a newer
+//! build registers the component, or the world is dropped. So values survive
+//! their mod being reloaded or unloaded. Storage is a sparse set per
+//! component: values packed densely for queries, plus an entity-index-to-slot
+//! map for lookups.
 
 use std::alloc::Layout;
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use engine_api::{Column, Component, ComponentDesc, ComponentId, Entity, FieldKind, ModContext};
+use engine_api::{Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, FieldKind, ModContext};
 
 use crate::engine::{engine_of, name_of};
 
 const EMPTY: u32 = u32::MAX;
+
+/// Keeps mapped the library a build's code lives in. The world only holds it.
+pub type Keepalive = Rc<dyn Any>;
 
 #[derive(Default)]
 pub struct WorldStorage {
@@ -26,6 +34,22 @@ pub struct WorldStorage {
     free: Vec<u32>,
 }
 
+/// The code that manages one component's values: the newest registered
+/// build's, which has the storage's current layout.
+struct Code {
+    /// `ModContext::loaded_at` of that build. A build loaded later replaces
+    /// this code (and, with another layout, the layout); one loaded earlier
+    /// with another layout is stale.
+    loaded_at: u64,
+    drop: Option<DropFn>,
+    default: DefaultFn,
+    /// Parallel to `Storage::fields`.
+    field_drops: Vec<Option<DropFn>>,
+    /// The library the functions above are in. `None` only in unit tests,
+    /// where they are in the test binary.
+    _library: Option<Keepalive>,
+}
+
 struct Storage {
     name: String,
     size: usize,
@@ -34,9 +58,7 @@ struct Storage {
     /// Empty when the component has no schema, which makes a layout change
     /// clear its values instead of migrating them.
     fields: Vec<Field>,
-    /// `loaded_at` of the build that set the current layout. A build loaded
-    /// later with a different layout replaces it; one loaded earlier is stale.
-    layout_from: u64,
+    code: Code,
     /// Builds already told they're stale, so the warning isn't per frame.
     warned: HashSet<(String, u64)>,
     entities: Vec<Entity>,
@@ -54,26 +76,19 @@ impl WorldStorage {
         format!("world: {entities} entities; {}", components.join(", "))
     }
 
-    /// Every value of `T`, for code running in the loader's own process
-    /// (tests, and later tooling); mods go through `WorldApi`. `None` if `T`
-    /// isn't registered or doesn't match the stored layout exactly, so a
-    /// caller can't misread a layout it wasn't built for.
-    pub fn values<T: Component>(&self) -> Option<Vec<(Entity, T)>> {
+    /// A clone of every value of `T`, for code running in the loader's own
+    /// process (tests, and later tooling); mods go through `WorldApi`. `None`
+    /// if `T` isn't registered or doesn't match the stored layout exactly, so
+    /// a caller can't misread a layout it wasn't built for.
+    pub fn values<T: Component + Clone>(&self) -> Option<Vec<(Entity, T)>> {
         let s = &self.components[*self.by_name.get(T::NAME)? as usize];
-        let fields: Vec<(&str, FieldKind, usize)> = T::FIELDS
-            .iter()
-            .map(|f| unsafe {
-                let name = std::slice::from_raw_parts(f.name, f.name_len);
-                (std::str::from_utf8_unchecked(name), f.kind, f.offset)
-            })
-            .collect();
-        let stored: Vec<(&str, FieldKind, usize)> =
-            s.fields.iter().map(|f| (f.name.as_str(), f.kind, f.offset)).collect();
-        if (s.size, s.align, s.version) != (size_of::<T>(), align_of::<T>(), T::VERSION) || fields != stored {
+        let desc = ComponentDesc::of::<T>();
+        let (fields, _) = read_fields(&desc)?;
+        if (s.size, s.align, s.version) != (desc.size, desc.align, desc.version) || fields != s.fields {
             return None;
         }
         let values = (0..s.entities.len())
-            .map(|slot| (s.entities[slot], unsafe { (s.data.at(slot) as *const T).read() }))
+            .map(|slot| (s.entities[slot], unsafe { (*(s.data.at(slot) as *const T)).clone() }))
             .collect();
         Some(values)
     }
@@ -83,16 +98,31 @@ impl WorldStorage {
         i < self.alive.len() && self.alive[i] && self.generations[i] == e.generation
     }
 
-    fn register(&mut self, desc: &ComponentDesc, mod_name: &str, loaded_at: u64) -> ComponentId {
+    /// `library` is only called when this build's code will be kept, which is
+    /// rarely: registration runs on every typed access.
+    fn register(
+        &mut self,
+        desc: &ComponentDesc,
+        mod_name: &str,
+        loaded_at: u64,
+        library: impl FnOnce() -> Option<Keepalive>,
+    ) -> ComponentId {
         let name = unsafe {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(desc.name, desc.name_len))
         };
         // Rust types always pass; this guards against a hand-written desc,
         // since a bad layout or an out-of-bounds field would panic or corrupt
         // memory later, inside an extern "C" fn.
-        let Some(fields) = read_fields(desc) else {
+        let Some((fields, field_drops)) = read_fields(desc) else {
             eprintln!("[engine] {mod_name}: component {name} has an invalid layout");
             return ComponentId::INVALID;
+        };
+        let code = |field_drops| Code {
+            loaded_at,
+            drop: desc.drop,
+            default: desc.default,
+            field_drops,
+            _library: library(),
         };
         let Some(&id) = self.by_name.get(name) else {
             let id = self.components.len() as u32;
@@ -102,7 +132,7 @@ impl WorldStorage {
                 align: desc.align,
                 version: desc.version,
                 fields,
-                layout_from: loaded_at,
+                code: code(field_drops),
                 warned: HashSet::new(),
                 entities: Vec::new(),
                 data: Values::new(desc.size, desc.align),
@@ -113,18 +143,32 @@ impl WorldStorage {
         };
 
         let s = &mut self.components[id as usize];
-        if (s.size, s.align, s.version) == (desc.size, desc.align, desc.version) && s.fields == fields {
+        let same_layout =
+            (s.size, s.align, s.version) == (desc.size, desc.align, desc.version) && s.fields == fields;
+        if loaded_at <= s.code.loaded_at && !same_layout {
+            if s.warned.insert((mod_name.into(), loaded_at)) {
+                eprintln!(
+                    "[engine] {mod_name} was built with an older layout of {name}; \
+                     its access to {name} is disabled until it's reloaded"
+                );
+            }
+            return ComponentId::INVALID;
+        }
+        if loaded_at <= s.code.loaded_at {
             return ComponentId(id);
         }
-        if loaded_at > s.layout_from {
+        // A newer build than the one whose code the storage holds. With the
+        // same layout, it takes over the code, and the older build's library
+        // can be unmapped once nothing else holds it.
+        let code = code(field_drops);
+        if !same_layout {
             // The newest build is the one the developer just changed, so it
             // wins. Its schema says where each surviving field now lives; a
             // version bump says the old values mean something else, so they
             // go.
             let migrate = s.version == desc.version && !s.fields.is_empty() && !fields.is_empty();
             if migrate {
-                let default = unsafe { std::slice::from_raw_parts(desc.default, desc.size) };
-                let report = s.migrate(desc.size, desc.align, &fields, default);
+                let report = s.migrate(desc.size, desc.align, &fields, &code);
                 println!(
                     "[engine] migrated {} value(s) of {name} to {mod_name}'s layout: {report}",
                     s.entities.len()
@@ -135,22 +179,13 @@ impl WorldStorage {
                     "[engine] component {name} changed layout in {mod_name} and {why}; cleared {} value(s)",
                     s.entities.len()
                 );
-                for e in s.entities.drain(..) {
-                    s.slots[e.index as usize] = EMPTY;
-                }
+                s.clear();
                 s.data = Values::new(desc.size, desc.align);
             }
             (s.size, s.align, s.version, s.fields) = (desc.size, desc.align, desc.version, fields);
-            s.layout_from = loaded_at;
-            return ComponentId(id);
         }
-        if s.warned.insert((mod_name.into(), loaded_at)) {
-            eprintln!(
-                "[engine] {mod_name} was built with an older layout of {name}; \
-                 its access to {name} is disabled until it's reloaded"
-            );
-        }
-        ComponentId::INVALID
+        s.code = code;
+        ComponentId(id)
     }
 
     fn spawn(&mut self) -> Entity {
@@ -187,37 +222,50 @@ impl WorldStorage {
 }
 
 impl Storage {
-    /// Rewrites every value into the new layout, matching fields by name.
-    /// Returns what happened to each field, for the log.
-    fn migrate(&mut self, size: usize, align: usize, fields: &[Field], default: &[u8]) -> String {
+    /// Rewrites every value into the new layout, matching fields by name:
+    /// each starts as the new build's `Default`, then takes every old field
+    /// that carries over, and every old field that doesn't is dropped with the
+    /// old build's code. Returns what happened to each field, for the log.
+    fn migrate(&mut self, size: usize, align: usize, fields: &[Field], code: &Code) -> String {
         let mut data = Values::new(size, align);
         for slot in 0..self.entities.len() {
             data.push_uninit();
             let (old, new) = (self.data.at(slot), data.at(slot));
+            let mut carried = vec![false; self.fields.len()];
             unsafe {
-                std::ptr::copy_nonoverlapping(default.as_ptr(), new, size);
-                for f in fields {
-                    if let Some(o) = self.fields.iter().find(|o| o.name == f.name) {
-                        convert(o.kind, old.add(o.offset), f.kind, new.add(f.offset));
+                (code.default)(new);
+                for (f, drop_new) in fields.iter().zip(&code.field_drops) {
+                    let Some(i) = self.fields.iter().position(|o| o.name == f.name) else { continue };
+                    let o = &self.fields[i];
+                    if !carries(o, f) {
+                        continue;
+                    }
+                    // The default's field is overwritten, so drop it first.
+                    if let Some(drop) = drop_new {
+                        drop(new.add(f.offset));
+                    }
+                    convert(o.kind, old.add(o.offset), o.size, f.kind, new.add(f.offset));
+                    carried[i] = true;
+                }
+                for ((o, drop_old), carried) in self.fields.iter().zip(&self.code.field_drops).zip(carried) {
+                    if let (false, Some(drop)) = (carried, drop_old) {
+                        drop(old.add(o.offset));
                     }
                 }
             }
         }
+        // Every old value has been moved out or dropped, field by field, so
+        // the old buffer is freed without dropping anything.
         self.data = data;
 
         let mut report = Vec::new();
         for f in fields {
             report.push(match self.fields.iter().find(|o| o.name == f.name) {
-                Some(o) if o.kind == f.kind => format!("kept {}", f.name),
-                Some(o) if is_numeric(o.kind) && is_numeric(f.kind) => {
+                Some(o) if carries(o, f) && o.kind == f.kind => format!("kept {}", f.name),
+                Some(o) if carries(o, f) => {
                     format!("converted {} {} -> {}", f.name, kind_name(o.kind), kind_name(f.kind))
                 }
-                Some(o) => format!(
-                    "reset {} ({} -> {} can't convert)",
-                    f.name,
-                    kind_name(o.kind),
-                    kind_name(f.kind)
-                ),
+                Some(o) => format!("reset {} ({} -> {} can't convert)", f.name, o.describe(), f.describe()),
                 None => format!("added {} (default)", f.name),
             });
         }
@@ -229,6 +277,19 @@ impl Storage {
         report.join(", ")
     }
 
+    /// Drops every value.
+    fn clear(&mut self) {
+        for slot in 0..self.entities.len() {
+            if let Some(drop) = self.code.drop {
+                unsafe { drop(self.data.at(slot)) };
+            }
+        }
+        for e in self.entities.drain(..) {
+            self.slots[e.index as usize] = EMPTY;
+        }
+        self.data.len = 0;
+    }
+
     fn slot(&self, e: Entity) -> Option<usize> {
         match self.slots.get(e.index as usize) {
             Some(&slot) if slot != EMPTY => Some(slot as usize),
@@ -236,9 +297,15 @@ impl Storage {
         }
     }
 
+    /// Moves the value at `value` in, dropping the one it replaces.
     fn insert(&mut self, e: Entity, value: *const u8) {
         let slot = match self.slot(e) {
-            Some(slot) => slot,
+            Some(slot) => {
+                if let Some(drop) = self.code.drop {
+                    unsafe { drop(self.data.at(slot)) };
+                }
+                slot
+            }
             None => {
                 let slot = self.entities.len();
                 self.entities.push(e);
@@ -255,6 +322,9 @@ impl Storage {
 
     fn remove(&mut self, e: Entity) -> bool {
         let Some(slot) = self.slot(e) else { return false };
+        if let Some(drop) = self.code.drop {
+            unsafe { drop(self.data.at(slot)) };
+        }
         let last = self.entities.len() - 1;
         if slot != last {
             let moved = self.entities[last];
@@ -269,17 +339,49 @@ impl Storage {
     }
 }
 
+impl Drop for Storage {
+    /// Drops the values while `code`'s library is still mapped: fields drop
+    /// after this body runs.
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// A field of a component's schema, copied out of the mod's `FieldDesc`
-/// because that points into the mod's memory.
-#[derive(PartialEq)]
+/// because that points into the mod's memory. Its drop function is kept in
+/// `Code`, with the build it belongs to.
+#[derive(PartialEq, Debug)]
 struct Field {
     name: String,
     kind: FieldKind,
     offset: usize,
+    size: usize,
+    fingerprint: u64,
 }
 
-/// The desc's fields, or `None` if the desc doesn't describe a valid layout.
-fn read_fields(desc: &ComponentDesc) -> Option<Vec<Field>> {
+impl Field {
+    fn describe(&self) -> String {
+        if self.kind == FieldKind::OPAQUE {
+            format!("type {:016x}", self.fingerprint)
+        } else {
+            kind_name(self.kind).into()
+        }
+    }
+}
+
+/// Whether a value in field `o` can become one in field `f`: moved, if they
+/// have the same type, or converted between numeric kinds.
+fn carries(o: &Field, f: &Field) -> bool {
+    if o.kind == FieldKind::OPAQUE || f.kind == FieldKind::OPAQUE {
+        o.kind == f.kind && o.fingerprint == f.fingerprint && o.size == f.size
+    } else {
+        o.kind == f.kind || (is_numeric(o.kind) && is_numeric(f.kind))
+    }
+}
+
+/// The desc's fields and their drop functions, or `None` if the desc doesn't
+/// describe a valid layout.
+fn read_fields(desc: &ComponentDesc) -> Option<(Vec<Field>, Vec<Option<DropFn>>)> {
     if !desc.align.is_power_of_two() || desc.size % desc.align != 0 {
         return None;
     }
@@ -290,14 +392,20 @@ fn read_fields(desc: &ComponentDesc) -> Option<Vec<Field>> {
     descs
         .iter()
         .map(|f| {
-            let size = kind_size(f.kind)?;
-            if f.offset.checked_add(size)? > desc.size {
+            // A scalar's size is fixed by its kind; anything else is opaque.
+            if f.kind != FieldKind::OPAQUE && kind_size(f.kind)? != f.size {
+                return None;
+            }
+            if f.offset.checked_add(f.size)? > desc.size {
                 return None;
             }
             let name = unsafe { std::slice::from_raw_parts(f.name, f.name_len) };
-            Some(Field { name: String::from_utf8(name.to_vec()).ok()?, kind: f.kind, offset: f.offset })
+            let name = String::from_utf8(name.to_vec()).ok()?;
+            let field = Field { name, kind: f.kind, offset: f.offset, size: f.size, fingerprint: f.fingerprint };
+            Some((field, f.drop))
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()
+        .map(|pairs| pairs.into_iter().unzip())
 }
 
 fn kind_size(kind: FieldKind) -> Option<usize> {
@@ -324,12 +432,13 @@ fn kind_name(kind: FieldKind) -> &'static str {
         FieldKind::F64 => "f64",
         FieldKind::BOOL => "bool",
         FieldKind::ENTITY => "Entity",
+        FieldKind::OPAQUE => "opaque",
         _ => "?",
     }
 }
 
 fn is_numeric(kind: FieldKind) -> bool {
-    !matches!(kind, FieldKind::BOOL | FieldKind::ENTITY)
+    !matches!(kind, FieldKind::BOOL | FieldKind::ENTITY | FieldKind::OPAQUE)
 }
 
 /// A numeric value wide enough to hold any numeric field exactly.
@@ -338,17 +447,17 @@ enum Num {
     Float(f64),
 }
 
-/// Copies one field from the old layout into the new, converting between
-/// numeric kinds with `as` semantics (floats saturate into integers, integers
-/// wrap into narrower ones). Leaves `dst` untouched, so holding the default,
-/// when the kinds can't convert.
+/// Moves one field from the old layout into the new: byte for byte when the
+/// kinds match (`size` bytes; the caller has checked an opaque field's type),
+/// and between numeric kinds with `as` semantics (floats saturate into
+/// integers, integers wrap into narrower ones). Leaves `dst` untouched, so
+/// holding the default, when the kinds can't convert.
 ///
 /// # Safety
 /// `src` and `dst` must point to fields of the given kinds; both may be
 /// unaligned.
-unsafe fn convert(from: FieldKind, src: *const u8, to: FieldKind, dst: *mut u8) {
+unsafe fn convert(from: FieldKind, src: *const u8, size: usize, to: FieldKind, dst: *mut u8) {
     if from == to {
-        let size = kind_size(from).unwrap_or(0);
         unsafe { std::ptr::copy_nonoverlapping(src, dst, size) };
         return;
     }
@@ -462,7 +571,8 @@ fn with_world<R>(ctx: *const ModContext, fallback: R, f: impl FnOnce(&mut WorldS
 
 pub unsafe extern "C" fn register(ctx: *const ModContext, desc: *const ComponentDesc) -> ComponentId {
     let (name, loaded_at) = unsafe { (name_of(ctx), (*ctx).loaded_at) };
-    with_world(ctx, ComponentId::INVALID, |w| w.register(unsafe { &*desc }, name, loaded_at))
+    let library = || unsafe { engine_of(ctx) }.library_of(ctx);
+    with_world(ctx, ComponentId::INVALID, |w| w.register(unsafe { &*desc }, name, loaded_at, library))
 }
 
 pub unsafe extern "C" fn spawn(ctx: *const ModContext) -> Entity {
@@ -513,7 +623,7 @@ mod tests {
     // kind that can't convert, and adds `z` with a non-zero default.
     mod v1 {
         engine_api::component! {
-            #[derive(Debug, Default, PartialEq)]
+            #[derive(Debug, Default, PartialEq, Copy)]
             pub struct Pos: "test::Pos" {
                 pub x: f32,
                 pub y: f32,
@@ -525,7 +635,7 @@ mod tests {
 
     mod v2 {
         engine_api::component! {
-            #[derive(Debug, PartialEq)]
+            #[derive(Debug, PartialEq, Copy)]
             pub struct Pos: "test::Pos" {
                 pub y: f64,
                 pub x: f32,
@@ -544,7 +654,7 @@ mod tests {
     /// v1 with a version bump: same fields, different meaning.
     mod v1_bumped {
         engine_api::component! {
-            #[derive(Debug, Default, PartialEq)]
+            #[derive(Debug, Default, PartialEq, Copy)]
             pub struct Pos: "test::Pos", version = 1 {
                 pub x: f32,
                 pub y: f32,
@@ -555,22 +665,32 @@ mod tests {
     }
 
     component! {
-        #[derive(Debug, Default, PartialEq)]
+        #[derive(Debug, Default, PartialEq, Copy)]
         struct Tag: "test::Tag" {}
     }
 
-    fn register<T: Component>(w: &mut WorldStorage, loaded_at: u64) -> ComponentId {
-        let default = T::default();
-        w.register(&ComponentDesc::of(&default), "test", loaded_at)
+    mod u64x1 {
+        engine_api::component! {
+            #[derive(Default)]
+            pub struct Wide: "test::Wide" {
+                pub x: u64,
+            }
+        }
     }
 
+    fn register<T: Component>(w: &mut WorldStorage, loaded_at: u64) -> ComponentId {
+        w.register(&ComponentDesc::of::<T>(), "test", loaded_at, || None)
+    }
+
+    /// Moves `value` in, as `World::insert` does.
     fn insert<T: Component>(w: &mut WorldStorage, e: Entity, value: T, loaded_at: u64) {
         let id = register::<T>(w, loaded_at);
         let s = w.storage(e, id).expect("entity is alive and the component registered");
-        s.insert(e, &value as *const T as *const u8);
+        let value = std::mem::ManuallyDrop::new(value);
+        s.insert(e, &*value as *const T as *const u8);
     }
 
-    fn values<T: Component>(w: &WorldStorage) -> Vec<(Entity, T)> {
+    fn values<T: Component + Clone>(w: &WorldStorage) -> Vec<(Entity, T)> {
         w.values::<T>().unwrap_or_else(|| panic!("{} isn't stored with this layout", T::NAME))
     }
 
@@ -735,7 +855,9 @@ mod tests {
         use super::{FieldKind as K, convert};
         fn run<A: Copy, B: Copy + Default>(from: K, value: A, to: K) -> B {
             let mut out = B::default();
-            unsafe { convert(from, &value as *const A as *const u8, to, &mut out as *mut B as *mut u8) };
+            unsafe {
+                convert(from, &value as *const A as *const u8, size_of::<A>(), to, &mut out as *mut B as *mut u8)
+            };
             out
         }
         assert_eq!(run::<f32, f64>(K::F32, 2.5, K::F64), 2.5);
@@ -754,29 +876,233 @@ mod tests {
     fn a_desc_that_does_not_describe_its_type_is_rejected() {
         use engine_api::{FieldDesc, FieldKind};
         let mut w = WorldStorage::default();
-        let default = 0u64;
         let good = || ComponentDesc {
             name: "test::Bad".as_ptr(),
             name_len: "test::Bad".len(),
-            size: 8,
-            align: 8,
-            version: 0,
             fields: std::ptr::null(),
             field_count: 0,
-            default: &default as *const u64 as *const u8,
+            ..ComponentDesc::of::<u64x1::Wide>()
         };
-        let out_of_bounds = [FieldDesc::new("x", FieldKind::U64, 4)];
-        let unknown_kind = [FieldDesc::new("x", FieldKind(99), 0)];
+        let field = |kind, offset, size| FieldDesc { kind, offset, size, ..FieldDesc::new::<u64>("x", 0) };
+        let out_of_bounds = [field(FieldKind::U64, 4, 8)];
+        let unknown_kind = [field(FieldKind(99), 0, 8)];
+        let wrong_size = [field(FieldKind::U32, 0, 8)];
+        let opaque_out_of_bounds = [field(FieldKind::OPAQUE, 0, 16)];
         let cases = [
             ComponentDesc { align: 3, ..good() },
             ComponentDesc { size: 12, ..good() },
             ComponentDesc { fields: out_of_bounds.as_ptr(), field_count: 1, ..good() },
             ComponentDesc { fields: unknown_kind.as_ptr(), field_count: 1, ..good() },
+            ComponentDesc { fields: wrong_size.as_ptr(), field_count: 1, ..good() },
+            ComponentDesc { fields: opaque_out_of_bounds.as_ptr(), field_count: 1, ..good() },
         ];
         for desc in cases {
-            assert_eq!(w.register(&desc, "test", 1), ComponentId::INVALID);
+            assert_eq!(w.register(&desc, "test", 1, || None), ComponentId::INVALID);
         }
         assert!(w.components.is_empty(), "nothing should have been registered");
-        assert_ne!(w.register(&good(), "test", 1), ComponentId::INVALID);
+        assert_ne!(w.register(&good(), "test", 1, || None), ComponentId::INVALID);
+    }
+
+    // Heap-owning components. `Tracked` counts its drops, so tests can check
+    // that every value is dropped exactly once, by whichever path.
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Clone, Default)]
+    struct Tracked(Rc<Cell<u32>>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    // SAFETY: an `Rc` to heap memory; nothing in the test binary's image.
+    unsafe impl engine_api::FieldType for Tracked {
+        const KIND: engine_api::FieldKind = engine_api::FieldKind::OPAQUE;
+        const FINGERPRINT: u64 = engine_api::__fingerprint("Tracked", &[]);
+    }
+
+    component! {
+        #[derive(Default)]
+        struct Owner: "test::Owner" {
+            name: String,
+            tracked: Tracked,
+        }
+    }
+
+    fn owner(name: &str, drops: &Rc<Cell<u32>>) -> Owner {
+        Owner { name: name.into(), tracked: Tracked(drops.clone()) }
+    }
+
+    #[test]
+    fn every_heap_value_is_dropped_exactly_once() {
+        let drops = Rc::new(Cell::new(0));
+        let mut w = WorldStorage::default();
+        let es: Vec<Entity> = (0..4).map(|_| w.spawn()).collect();
+        for &e in &es {
+            insert(&mut w, e, owner("x", &drops), 1);
+        }
+        insert(&mut w, es[0], owner("replacement", &drops), 1);
+        assert_eq!(drops.get(), 1, "replacing drops the old value");
+        let id = register::<Owner>(&mut w, 1);
+        w.storage(es[1], id).unwrap().remove(es[1]);
+        assert_eq!(drops.get(), 2, "remove drops");
+        w.despawn(es[2]);
+        assert_eq!(drops.get(), 3, "despawn drops");
+
+        // The two left have their own heap data, intact.
+        let mut names: Vec<String> = values::<Owner>(&w).into_iter().map(|(_, o)| o.name).collect();
+        names.sort();
+        assert_eq!(names, ["replacement", "x"]);
+        // `values` clones, and the clones drop when the test drops them.
+        let dropped = drops.get();
+
+        drop(w);
+        assert_eq!(drops.get(), dropped + 2, "the world drops what's left");
+    }
+
+    #[test]
+    fn a_version_bump_drops_the_old_values() {
+        mod bumped {
+            engine_api::component! {
+                #[derive(Default)]
+                pub struct Owner: "test::Owner", version = 1 {
+                    pub name: String,
+                    pub tracked: super::Tracked,
+                }
+            }
+        }
+        let drops = Rc::new(Cell::new(0));
+        let mut w = WorldStorage::default();
+        for _ in 0..3 {
+            let e = w.spawn();
+            insert(&mut w, e, owner("x", &drops), 1);
+        }
+        register::<bumped::Owner>(&mut w, 2);
+        assert_eq!(drops.get(), 3);
+        assert_eq!(values::<bumped::Owner>(&w).len(), 0);
+    }
+
+    mod heap_v1 {
+        engine_api::field_struct! {
+            #[derive(Debug, PartialEq)]
+            pub struct Item {
+                pub id: u32,
+            }
+        }
+
+        engine_api::component! {
+            #[derive(Default)]
+            pub struct Bag: "test::Bag" {
+                pub label: String,
+                pub counts: Vec<u32>,
+                pub items: Vec<Item>,
+                pub gone: super::Tracked,
+            }
+        }
+    }
+
+    // Reordered; `counts` retyped to Vec<u64> (can't convert); `Item` gained
+    // a field (so `items` is a different type); `gone` removed; `extra` added
+    // with a default that owns heap memory.
+    mod heap_v2 {
+        engine_api::field_struct! {
+            #[derive(Debug, PartialEq)]
+            pub struct Item {
+                pub id: u32,
+                pub weight: u32,
+            }
+        }
+
+        engine_api::component! {
+            pub struct Bag: "test::Bag" {
+                pub extra: Vec<u8>,
+                pub counts: Vec<u64>,
+                pub items: Vec<Item>,
+                pub label: String,
+            }
+        }
+
+        impl Default for Bag {
+            fn default() -> Self {
+                Bag { extra: vec![1, 2, 3], counts: vec![], items: vec![], label: String::new() }
+            }
+        }
+    }
+
+    #[test]
+    fn heap_fields_move_intact_and_changed_ones_drop_and_reset() {
+        let drops = Rc::new(Cell::new(0));
+        let mut w = WorldStorage::default();
+        let es: Vec<Entity> = (0..2).map(|_| w.spawn()).collect();
+        for (i, &e) in es.iter().enumerate() {
+            let bag = heap_v1::Bag {
+                label: format!("bag {i}"),
+                counts: vec![7; 3],
+                items: vec![heap_v1::Item { id: i as u32 }],
+                gone: Tracked(drops.clone()),
+            };
+            insert(&mut w, e, bag, 1);
+        }
+
+        register::<heap_v2::Bag>(&mut w, 2);
+        assert_eq!(drops.get(), 2, "the removed field was dropped, once per value");
+        let mut got = values::<heap_v2::Bag>(&w);
+        let labels: Vec<&str> = got.iter().map(|(_, b)| b.label.as_str()).collect();
+        assert_eq!(labels, ["bag 0", "bag 1"], "an unchanged heap field moves intact");
+        for (_, bag) in &got {
+            assert!(bag.counts.is_empty(), "Vec<u32> -> Vec<u64> can't convert, so it resets");
+            assert!(bag.items.is_empty(), "Item changed, so Vec<Item> is a new type and resets");
+            assert_eq!(bag.extra, [1, 2, 3], "a new field comes from the new Default");
+        }
+
+        // Each value got its own default, not a copy of one buffer: changing
+        // one leaves the other alone (and dropping both doesn't free twice).
+        let id = register::<heap_v2::Bag>(&mut w, 2);
+        let s = w.storage(es[0], id).unwrap();
+        let slot = s.slot(es[0]).unwrap();
+        unsafe { (*(s.data.at(slot) as *mut heap_v2::Bag)).extra.push(4) };
+        got = values::<heap_v2::Bag>(&w);
+        assert_eq!(got[0].1.extra, [1, 2, 3, 4]);
+        assert_eq!(got[1].1.extra, [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_nested_struct_change_changes_the_fingerprint() {
+        use engine_api::FieldType;
+        assert_ne!(heap_v1::Item::FINGERPRINT, heap_v2::Item::FINGERPRINT);
+        assert_ne!(<Vec<heap_v1::Item>>::FINGERPRINT, <Vec<heap_v2::Item>>::FINGERPRINT);
+        assert_ne!(<Vec<u32>>::FINGERPRINT, <Vec<u64>>::FINGERPRINT);
+        assert_ne!(<Vec<u32>>::FINGERPRINT, <Option<u32>>::FINGERPRINT);
+        assert_eq!(<Vec<heap_v1::Item>>::FINGERPRINT, <Vec<heap_v1::Item>>::FINGERPRINT);
+    }
+
+    #[test]
+    fn the_newest_builds_library_is_kept_and_older_ones_released() {
+        let mut w = WorldStorage::default();
+        let e = w.spawn();
+        let (older, newer): (Rc<()>, Rc<()>) = (Rc::new(()), Rc::new(()));
+        let keep = |lib: &Rc<()>| {
+            let lib = lib.clone();
+            move || Some(lib as super::Keepalive)
+        };
+        let desc = ComponentDesc::of::<Owner>();
+        w.register(&desc, "a", 1, keep(&older));
+        let drops = Rc::new(Cell::new(0));
+        insert(&mut w, e, owner("x", &drops), 1);
+        assert_eq!(Rc::strong_count(&older), 2, "the world holds the build it has code from");
+
+        // The same build again, or an older one, changes nothing.
+        w.register(&desc, "a", 1, keep(&newer));
+        assert_eq!(Rc::strong_count(&newer), 1);
+
+        // A newer build takes over the code; the older library is released.
+        w.register(&desc, "a", 2, keep(&newer));
+        assert_eq!((Rc::strong_count(&older), Rc::strong_count(&newer)), (1, 2));
+        drop(w);
+        assert_eq!(Rc::strong_count(&newer), 1, "dropping the world releases it");
+        assert_eq!(drops.get(), 1, "after dropping the value with its code");
     }
 }

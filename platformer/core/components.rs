@@ -20,7 +20,7 @@ pub const SPIKE: u8 = 1;
 pub const GOAL: u8 = 2;
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Tile: "platformer::Tile" {
         pub x: i32,
         pub y: i32,
@@ -29,7 +29,7 @@ component! {
 }
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Coin: "platformer::Coin" {
         pub x: i32,
         pub y: i32,
@@ -38,7 +38,7 @@ component! {
 
 component! {
     /// The level's size and where the player starts. One per level.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct LevelInfo: "platformer::LevelInfo" {
         pub width: i32,
         pub height: i32,
@@ -48,7 +48,7 @@ component! {
 }
 
 component! {
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Player: "platformer::Player" {
         pub x: f32,
         pub y: f32,
@@ -68,7 +68,7 @@ component! {
 component! {
     /// What the player is asking for, on the player's entity. Set by whoever
     /// controls the player; read by the rules each frame.
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Copy)]
     pub struct Input: "platformer::Input" {
         /// -1 runs left, 1 right, 0 stands. Held until changed.
         pub dir: f32,
