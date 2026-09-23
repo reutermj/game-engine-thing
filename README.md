@@ -21,7 +21,7 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 # edit mods/counter/lib.rs, then:
 ./bazel run //mods/counter          # per-mod state carries over too
 ./bazel run //mods/hello            # load a mod the running game didn't ship with
-./bazel run //engine/modctl -- list # or: unload <name>, quit
+./bazel run //engine/modctl -- list # or: schedule, unload <name>, quit
 ./bazel test //...                  # unit, integration and end-to-end tests
 ```
 

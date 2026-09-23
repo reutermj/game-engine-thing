@@ -1,7 +1,7 @@
 //! Two builds of the mod `mover`, each with its own definition of the
 //! component `test::Pos`, to test migration between them.
 
-use engine_api::{Cx, Mod, Status, component, export_mod};
+use engine_api::{Cx, Mod, component, export_mod};
 
 #[cfg(feature = "v1")]
 component! {
@@ -54,9 +54,6 @@ impl Mod for Mover {
         world.query::<Pos>().count();
     }
 
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
-    }
 }
 
 export_mod!(Mover);

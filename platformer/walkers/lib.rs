@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, Systems, export_mod, phase};
 use platformer::{PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
@@ -26,13 +26,11 @@ enum Meeting {
     Hurt,
 }
 
-impl Mod for Walkers {
-    type Transient = ();
-
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+impl Walkers {
+    fn walk(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         let Some(Clock { dt, .. }) = clock::now(&mut world) else {
-            return Status::OK;
+            return;
         };
         let solid: HashSet<(i32, i32)> =
             world.query::<Tile>().filter(|(_, t)| t.kind == SOLID).map(|(_, t)| (t.x, t.y)).collect();
@@ -78,8 +76,16 @@ impl Mod for Walkers {
         if let Err(e) = result {
             cx.log(format!("couldn't reach the rules: {e}"));
         }
-        Status::OK
     }
+}
+
+impl Mod for Walkers {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("walk", Self::walk).phase(phase::SIMULATE).after("platformer::play").exclusive();
+    }
+
 }
 
 export_mod!(Walkers);

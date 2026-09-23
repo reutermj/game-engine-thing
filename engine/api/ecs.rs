@@ -479,10 +479,39 @@ pub struct WorldApi {
     ) -> bool,
     /// Drops the entity's value.
     pub remove: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId) -> bool,
-    /// Null if the entity is dead or lacks the component.
-    pub get: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId) -> *mut u8,
+    /// Null if the entity is dead or lacks the component. `write` says
+    /// whether the caller will write through it, which a running system must
+    /// have declared.
+    pub get: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId, write: bool) -> *mut u8,
     /// Valid until the next `insert`, `remove` or `despawn`.
-    pub column: unsafe extern "C" fn(ctx: *const ModContext, id: ComponentId) -> Column,
+    pub column: unsafe extern "C" fn(ctx: *const ModContext, id: ComponentId, write: bool) -> Column,
+    /// Queues moving the value at `value` onto `entity`, applied at the end
+    /// of the phase. On `true` the world owns it; on `false` the caller does.
+    pub defer_insert: unsafe extern "C" fn(
+        ctx: *const ModContext,
+        entity: Entity,
+        id: ComponentId,
+        value: *const u8,
+    ) -> bool,
+    pub defer_remove: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity, id: ComponentId),
+    pub defer_despawn: unsafe extern "C" fn(ctx: *const ModContext, entity: Entity),
+    /// Like `register`, for an event type. Events have their own ids.
+    pub register_event:
+        unsafe extern "C" fn(ctx: *const ModContext, desc: *const ComponentDesc) -> ComponentId,
+    /// Moves the event at `value` into the world, visible from the next
+    /// phase boundary. On `false` the caller still owns it.
+    pub send_event: unsafe extern "C" fn(ctx: *const ModContext, id: ComponentId, value: *const u8) -> bool,
+    /// The events the running system hasn't read yet, marking them read.
+    /// Valid until the end of the phase. Empty outside a system.
+    pub read_events: unsafe extern "C" fn(ctx: *const ModContext, id: ComponentId) -> EventSlice,
+}
+
+/// Events of one type, packed.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EventSlice {
+    pub data: *const u8,
+    pub len: usize,
 }
 
 /// A component type. Normally implemented by [`component!`].
@@ -554,12 +583,12 @@ impl<'a> World<'a> {
 
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         let id = self.id::<T>();
-        unsafe { ((self.api().get)(self.ctx, entity, id) as *const T).as_ref() }
+        unsafe { ((self.api().get)(self.ctx, entity, id, false) as *const T).as_ref() }
     }
 
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
         let id = self.id::<T>();
-        unsafe { ((self.api().get)(self.ctx, entity, id) as *mut T).as_mut() }
+        unsafe { ((self.api().get)(self.ctx, entity, id, true) as *mut T).as_mut() }
     }
 
     /// Every entity with a `T`.
@@ -578,7 +607,7 @@ impl<'a> World<'a> {
         let (entities, values) = unsafe { self.column::<A>() };
         let (ctx, get, b) = (self.ctx, self.api().get, self.id::<B>());
         entities.iter().copied().zip(values.iter_mut()).filter_map(move |(e, a)| {
-            let b = unsafe { (get(ctx, e, b) as *mut B).as_mut()? };
+            let b = unsafe { (get(ctx, e, b, true) as *mut B).as_mut()? };
             Some((e, a, b))
         })
     }
@@ -588,7 +617,7 @@ impl<'a> World<'a> {
     /// long as they use them, which every public caller does.
     unsafe fn column<T: Component>(&self) -> (&'a [Entity], &'a mut [T]) {
         let id = self.id::<T>();
-        let column = unsafe { (self.api().column)(self.ctx, id) };
+        let column = unsafe { (self.api().column)(self.ctx, id, true) };
         if column.len == 0 {
             return (&[], &mut []);
         }

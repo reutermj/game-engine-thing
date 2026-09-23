@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use engine_api::{Cx, Mod, Pumped, Status, export_mod};
+use engine_api::{Bootstrap, Cx, Mod, Pumped, Status, export_mod};
 
 /// The fake OS: an event queue, fed by `EventLoop::run` and by whatever
 /// injects input (here, messages).
@@ -76,7 +76,19 @@ impl FakeOs {
 impl Mod for FakeOs {
     type Transient = ();
 
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+    /// A message delivered directly (`Engine::send`), not through the pump.
+    /// `pump` pumps from here, which the loader refuses: a delivery is under
+    /// way.
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
+        match message {
+            "pump" => Ok(format!("{:?}", cx.pump_loader(Duration::ZERO, |_, _| Err(String::new())))),
+            _ => Err(format!("fake_os doesn't understand {message:?} outside its loop")),
+        }
+    }
+}
+
+impl Bootstrap for FakeOs {
+    fn run(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         let mut status = Status::QUIT;
         os::run(|queue, event| match event {
             os::Event::Resized(w, h) => {
@@ -102,16 +114,6 @@ impl Mod for FakeOs {
         });
         status
     }
-
-    /// A message delivered directly (`Engine::send`), not through the pump.
-    /// `pump` pumps from here, which the loader refuses: a delivery is under
-    /// way.
-    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
-        match message {
-            "pump" => Ok(format!("{:?}", cx.pump_loader(Duration::ZERO, |_, _| Err(String::new())))),
-            _ => Err(format!("fake_os doesn't understand {message:?} outside its loop")),
-        }
-    }
 }
 
-export_mod!(FakeOs);
+export_mod!(FakeOs, bootstrap);

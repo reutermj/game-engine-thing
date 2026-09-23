@@ -132,7 +132,7 @@ engine_api::service! {
 }
 
 // platformer's implementation: a service method runs as the mod, with its
-// state, transient part and Cx, like its `step`
+// state, transient part and Cx, like its systems
 impl platformer::Rules for Core {
     fn hurt(&mut self, _: &mut (), cx: &mut Cx) { ... }
     fn bounce(&mut self, _: &mut (), cx: &mut Cx, speed: f32) { ... }
@@ -178,7 +178,7 @@ on the stack (the caller itself, or a mod that called the caller) would give
 it a second `&mut` to its own state, so the loader refuses it
 (`CallErrorKind::Reentrant`). `mod_deps` has no cycles, so this mostly stops a
 mod calling itself; a provider that needs to reach back to its callers should
-leave data or an event for them (get-7yi).
+leave data or an [event](scheduling.md#events) for them.
 
 **One provider per service.** A load that would give a service a second
 provider is refused.

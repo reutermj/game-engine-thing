@@ -7,12 +7,12 @@
 //! inputs and the frames between them.
 //!
 //! Like every bootstrap it's resident and runs the whole session in one
-//! `step`: here, blocked in the loader's pump until a request arrives.
+//! `run`: here, blocked in the loader's pump until a request arrives.
 
 use clock::Clock;
 use std::time::Duration;
 
-use engine_api::{Cx, Entity, Mod, Pumped, Status, export_mod};
+use engine_api::{Bootstrap, Cx, Entity, Mod, Pumped, Status, export_mod};
 
 /// Each frame covers the same time as one of the real-time bootstrap's.
 const DT: f32 = 1.0 / 60.0;
@@ -61,21 +61,6 @@ impl Lockstep {
 impl Mod for Lockstep {
     type Transient = ();
 
-    /// The session: serve the loader's requests as they come, running frames
-    /// when a message asks for them.
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        loop {
-            match cx.pump_loader(Duration::from_secs(1), |cx, message| self.handle(cx, message)) {
-                Pumped::Continue => {}
-                Pumped::Quit => return Status::QUIT,
-                Pumped::Refused => {
-                    cx.log("the loader refused to pump; is this build resident?");
-                    return Status::ERROR;
-                }
-            }
-        }
-    }
-
     /// A message delivered directly, as a test driving an `Engine` does.
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         self.handle(cx, message)
@@ -88,4 +73,21 @@ impl Mod for Lockstep {
     }
 }
 
-export_mod!(Lockstep);
+impl Bootstrap for Lockstep {
+    /// The session: serve the loader's requests as they come, running frames
+    /// when a message asks for them.
+    fn run(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+        loop {
+            match cx.pump_loader(Duration::from_secs(1), |cx, message| self.handle(cx, message)) {
+                Pumped::Continue => {}
+                Pumped::Quit => return Status::QUIT,
+                Pumped::Refused => {
+                    cx.log("the loader refused to pump; is this build resident?");
+                    return Status::ERROR;
+                }
+            }
+        }
+    }
+}
+
+export_mod!(Lockstep, bootstrap);

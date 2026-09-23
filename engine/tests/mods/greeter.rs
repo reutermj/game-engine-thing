@@ -7,7 +7,7 @@
 //! catch. With `right`, the state holds just the count and the closure is in
 //! the transient part, which each build makes for itself.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, Systems, export_mod};
 
 #[cfg(feature = "v1")]
 const WORD: &str = "hello";
@@ -36,9 +36,8 @@ mod greeter {
             self.greet = Some(Box::new(|| format!("{WORD}!")));
         }
 
-        fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-            self.greetings += 1;
-            Status::OK
+        fn systems(s: &mut Systems<Self>) {
+            s.add("count", |greeter: &mut Self, _: &mut (), _: &mut Cx| greeter.greetings += 1);
         }
 
         fn message(&mut self, _: &mut (), _cx: &mut Cx, _message: &str) -> Result<String, String> {
@@ -71,9 +70,8 @@ mod greeter {
             hooks.greet = Some(Box::new(|| format!("{WORD}!")));
         }
 
-        fn step(&mut self, _: &mut Hooks, _cx: &mut Cx) -> Status {
-            self.greetings += 1;
-            Status::OK
+        fn systems(s: &mut Systems<Self>) {
+            s.add("count", |greeter: &mut Self, _: &mut Hooks, _: &mut Cx| greeter.greetings += 1);
         }
 
         fn message(&mut self, hooks: &mut Hooks, _cx: &mut Cx, _message: &str) -> Result<String, String> {

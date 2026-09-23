@@ -6,7 +6,7 @@
 //! `ENGINE_BATCH_MANIFEST` instead, it sends every mod in that game manifest as
 //! one batch; that is `bazel run //game:reload`.
 //!
-//! Otherwise the arguments are a request: `list`, `unload <name>`,
+//! Otherwise the arguments are a request: `list`, `schedule`, `unload <name>`,
 //! `load <name> <path>` or `quit`.
 
 use std::path::Path;
@@ -17,7 +17,7 @@ use runfiles::Runfiles;
 
 fn request_from_env() -> Result<Request, String> {
     let name = std::env::var("ENGINE_MOD_NAME")
-        .map_err(|_| "usage: modctl list | load <name> <path> | unload <name> | quit")?;
+        .map_err(|_| "usage: modctl list | schedule | load <name> <path> | unload <name> | quit")?;
     let rlocation = std::env::var("ENGINE_MOD_RLOCATION")
         .map_err(|_| "ENGINE_MOD_RLOCATION is not set")?;
     let runfiles = Runfiles::create().map_err(|e| format!("finding runfiles: {e}"))?;

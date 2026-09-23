@@ -3,7 +3,7 @@
 //! field. Tests heap data crossing builds: allocated by one library's code,
 //! grown and freed by another's.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, Query, Systems, export_mod};
 
 #[cfg(not(feature = "v3"))]
 engine_api::component! {
@@ -36,8 +36,25 @@ engine_api::mod_state! {
     }
 }
 
+impl BagMod {
+    fn fill(&mut self, _: &mut (), cx: &mut Cx, bags: Query<&mut Bag>) {
+        self.steps += 1;
+        for (_, bag) in bags.iter(cx) {
+            bag.words.push(format!("{BUILD}-{}", self.steps));
+            #[cfg(feature = "v3")]
+            {
+                bag.note = format!("{} words", bag.words.len());
+            }
+        }
+    }
+}
+
 impl Mod for BagMod {
     type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("fill", Self::fill);
+    }
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
@@ -47,17 +64,6 @@ impl Mod for BagMod {
         }
     }
 
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        self.steps += 1;
-        for (_, bag) in cx.world().query::<Bag>() {
-            bag.words.push(format!("{BUILD}-{}", self.steps));
-            #[cfg(feature = "v3")]
-            {
-                bag.note = format!("{} words", bag.words.len());
-            }
-        }
-        Status::OK
-    }
 }
 
 export_mod!(BagMod);

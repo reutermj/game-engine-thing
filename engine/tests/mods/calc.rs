@@ -2,7 +2,7 @@
 //! interface and differ in `apply`, so reloading between them is an
 //! implementation-only change its callers don't notice.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, export_mod};
 
 #[cfg(feature = "v1")]
 const BUILD: &str = "v1";
@@ -19,9 +19,6 @@ engine_api::mod_state! {
 impl Mod for CalcMod {
     type Transient = ();
 
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
-    }
 }
 
 impl calc::Calc for CalcMod {

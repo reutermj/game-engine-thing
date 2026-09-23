@@ -2,7 +2,7 @@
 //! to the middle while it's going away. Slower than the ball can get, so it
 //! can be beaten with angled hits.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, Query, Systems, export_mod};
 use pong::{Ball, HEIGHT, Opponent, Paddle};
 
 /// Fraction of full paddle speed the AI uses.
@@ -15,20 +15,24 @@ engine_api::mod_state! {
     struct Ai {}
 }
 
-impl Mod for Ai {
-    type Transient = ();
-
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        let mut world = cx.world();
-        let Some(ball) = world.query::<Ball>().next().map(|(_, b)| *b) else {
-            return Status::OK;
-        };
+impl Ai {
+    fn think(&mut self, _: &mut (), cx: &mut Cx, balls: Query<&Ball>, paddles: Query<(&Opponent, &mut Paddle)>) {
+        let Some(ball) = balls.iter(cx).next().map(|(_, b)| *b) else { return };
         let target = if ball.vx > 0.0 { ball.y } else { HEIGHT / 2.0 };
-        for (_, _, paddle) in world.query2::<Opponent, Paddle>() {
+        for (_, (_, paddle)) in paddles.iter(cx) {
             let off = target - paddle.y;
             paddle.intent = if off.abs() < SLACK { 0.0 } else { off.signum() * EFFORT };
         }
-        Status::OK
+    }
+}
+
+impl Mod for Ai {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        // In `update`, so the paddle moves on this frame's decision in
+        // `simulate`, not the last frame's.
+        s.add("think", Self::think);
     }
 }
 

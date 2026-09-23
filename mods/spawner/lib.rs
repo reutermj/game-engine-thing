@@ -1,7 +1,7 @@
 //! Spawns a few moving entities, once. They live in the world, so reloading
 //! this mod (or any other) leaves them where they are.
 
-use engine_api::{Cx, Entity, Mod, Status, export_mod};
+use engine_api::{Cx, Entity, Mod, export_mod};
 use physics::Velocity;
 use transform::Position;
 
@@ -30,10 +30,6 @@ impl Mod for Spawner {
         }
         let n = self.spawned.len();
         cx.log(format!("spawned {n} entities"));
-    }
-
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
     }
 
     /// Only on unload for good (or a state reset): the entities are this mod's

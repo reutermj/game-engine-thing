@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Status, World, export_mod};
+use engine_api::{Cx, Mod, Systems, World, export_mod, phase};
 use platformer::{
     Coin, GOAL, GRAVITY, Input, JUMP_SPEED, LevelInfo, MAX_FALL, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
     RUN_SPEED, SOLID, SPIKE, Tile,
@@ -99,23 +99,21 @@ fn with_player(cx: &mut Cx, change: impl FnOnce(&mut Player, &LevelInfo)) {
     }
 }
 
-impl Mod for Core {
-    type Transient = ();
-
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+impl Core {
+    fn play(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         let Some(Clock { dt, .. }) = clock::now(&mut world) else {
-            return Status::OK;
+            return;
         };
         let Some(info) = world.query::<LevelInfo>().next().map(|(_, i)| *i) else {
-            return Status::OK;
+            return;
         };
         let player = world.query2::<Input, Player>().next().map(|(e, i, p)| (e, *i, *p));
         let Some((entity, mut input, mut p)) = player else {
             let e = world.spawn();
             world.insert(e, Player { x: info.spawn_x, y: info.spawn_y, ..Default::default() });
             world.insert(e, Input::default());
-            return Status::OK;
+            return;
         };
 
         let tiles = Tiles::read(&mut world, info.width);
@@ -140,8 +138,16 @@ impl Mod for Core {
 
         world.insert(entity, input);
         world.insert(entity, p);
-        Status::OK
     }
+}
+
+impl Mod for Core {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("play", Self::play).phase(phase::SIMULATE).exclusive();
+    }
+
 }
 
 impl platformer::Rules for Core {

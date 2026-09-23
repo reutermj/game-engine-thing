@@ -1,15 +1,16 @@
-//! Pong's rules as a system: moves the paddles by their intent, moves and
-//! bounces the ball, and scores.
+//! Pong's rules, as two systems: `steer` applies the player's input in the
+//! `input` phase, and `play` moves the paddles by their intent, moves and
+//! bounces the ball, and scores, in `simulate`.
 //!
 //! Setup is keyed on the world, not on this mod's state: if there's no ball,
 //! the court is set up. A reload, or a state reset, then never sets up a second
 //! court.
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Status, World, export_mod};
+use engine_api::{Cx, EventReader, Mod, Query, Systems, World, export_mod, phase};
 use pong::{
     Ball, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
-    SERVE_SPEED, Score, WIDTH,
+    SERVE_SPEED, Score, Steer, WIDTH,
 };
 
 /// Vertical speed of each serve, as a fraction of `SERVE_SPEED`, in turn.
@@ -67,31 +68,34 @@ fn hit(ball: &mut Ball, before_x: f32, paddle: &Paddle) {
     }
 }
 
-impl Mod for Core {
-    type Transient = ();
-
-    fn load(&mut self, _: &mut (), cx: &mut Cx) {
-        set_up(&mut cx.world());
+impl Core {
+    fn steer(&mut self, _: &mut (), cx: &mut Cx, steers: EventReader<Steer>, players: Query<(&Player, &mut Paddle)>) {
+        let Some(intent) = steers.read(cx).last().map(|s| s.intent) else { return };
+        for (_, (_, paddle)) in players.iter(cx) {
+            paddle.intent = intent;
+        }
     }
 
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        let mut world = cx.world();
-        let Some(Clock { dt, .. }) = clock::now(&mut world) else {
-            return Status::OK;
-        };
+    fn play(
+        &mut self,
+        _: &mut (),
+        cx: &mut Cx,
+        clocks: Query<&Clock>,
+        paddles: Query<&mut Paddle>,
+        balls: Query<&mut Ball>,
+        scores: Query<&mut Score>,
+    ) {
+        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
 
-        let mut paddles = Vec::new();
-        for (_, paddle) in world.query::<Paddle>() {
+        let mut moved = Vec::new();
+        for (_, paddle) in paddles.iter(cx) {
             let half = PADDLE_HEIGHT / 2.0;
             paddle.y = (paddle.y + paddle.intent.clamp(-1.0, 1.0) * PADDLE_SPEED * dt).clamp(half, HEIGHT - half);
-            paddles.push(*paddle);
+            moved.push(*paddle);
         }
-        let Some((score_entity, mut score)) = world.query::<Score>().next().map(|(e, s)| (e, *s)) else {
-            return Status::OK;
-        };
+        let Some(mut score) = scores.iter(cx).next().map(|(_, s)| *s) else { return };
 
-        let mut scored = false;
-        for (_, ball) in world.query::<Ball>() {
+        for (_, ball) in balls.iter(cx) {
             let before_x = ball.x;
             ball.x += ball.vx * dt;
             ball.y += ball.vy * dt;
@@ -102,7 +106,7 @@ impl Mod for Core {
                 ball.y = 2.0 * HEIGHT - ball.y;
                 ball.vy = -ball.vy;
             }
-            for paddle in &paddles {
+            for paddle in &moved {
                 hit(ball, before_x, paddle);
             }
             // Past a paddle and out: a point, and a serve to whoever lost it.
@@ -117,14 +121,24 @@ impl Mod for Core {
             };
             score.serves += 1;
             *ball = serve(&score, lost_by);
-            scored = true;
         }
-        if scored {
-            world.insert(score_entity, score);
+        for (_, s) in scores.iter(cx) {
+            *s = score;
         }
-        Status::OK
+    }
+}
+
+impl Mod for Core {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("steer", Self::steer).phase(phase::INPUT);
+        s.add("play", Self::play).phase(phase::SIMULATE);
+    }
+
+    fn load(&mut self, _: &mut (), cx: &mut Cx) {
+        set_up(&mut cx.world());
     }
 }
 
 export_mod!(Core);
-

@@ -9,6 +9,10 @@
 //! their mod being reloaded or unloaded. Storage is a sparse set per
 //! component: values packed densely for queries, plus an entity-index-to-slot
 //! map for lookups.
+//!
+//! The world also holds what a frame defers: structural changes queued by
+//! systems (commands), applied at the end of each phase, and events, which
+//! become visible at phase boundaries. See docs/architecture/scheduling.md.
 
 use std::alloc::Layout;
 use std::any::Any;
@@ -16,9 +20,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use engine_api::{Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, ModContext};
+use engine_api::{
+    Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, EventSlice, ModContext,
+};
 
-use crate::engine::{engine_of, name_of};
+use crate::engine::{Want, engine_of, name_of};
 use crate::schema::{self, Field};
 
 const EMPTY: u32 = u32::MAX;
@@ -33,6 +39,40 @@ pub struct WorldStorage {
     generations: Vec<u32>,
     alive: Vec<bool>,
     free: Vec<u32>,
+    /// Structural changes queued by systems, in the order they were made.
+    commands: Vec<Command>,
+    events: Vec<EventQueue>,
+    events_by_name: HashMap<String, u32>,
+    next_seq: u64,
+    /// Counts frames, to expire events.
+    frame: u64,
+    /// The last event each reader has seen, by system and event type.
+    /// Keyed by name, so a cursor survives its system's reload.
+    cursors: HashMap<(String, String), u64>,
+}
+
+enum Command {
+    /// The value's bytes, moved out of the mod; the world owns them.
+    Insert { e: Entity, id: ComponentId, value: Vec<u8> },
+    Remove { e: Entity, id: ComponentId },
+    Despawn(Entity),
+}
+
+/// One event type's events, oldest first.
+struct EventQueue {
+    name: String,
+    size: usize,
+    align: usize,
+    version: u32,
+    fields: Vec<Field>,
+    code: Code,
+    values: Values,
+    /// Parallel to `values`: each event's sequence number, and the frame it
+    /// became visible in.
+    seqs: Vec<u64>,
+    frames: Vec<u64>,
+    /// Sent since the last phase boundary, not yet visible.
+    pending: Vec<Vec<u8>>,
 }
 
 /// The code that manages one component's values: the newest registered
@@ -92,6 +132,111 @@ impl WorldStorage {
             .map(|slot| (s.entities[slot], unsafe { (*(s.data.at(slot) as *const T)).clone() }))
             .collect();
         Some(values)
+    }
+
+    /// Starts a frame: applies what was queued between frames, and makes
+    /// what was sent between frames visible.
+    pub fn begin_frame(&mut self) {
+        self.frame += 1;
+        self.end_phase();
+    }
+
+    /// A phase boundary: applies the phase's commands, in order, and makes
+    /// its events visible.
+    pub fn end_phase(&mut self) {
+        self.apply_commands();
+        for q in &mut self.events {
+            for value in std::mem::take(&mut q.pending) {
+                q.values.push_uninit();
+                unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), q.values.at(q.values.len - 1), q.size) };
+                q.seqs.push(self.next_seq);
+                q.frames.push(self.frame);
+                self.next_seq += 1;
+            }
+        }
+    }
+
+    /// Ends a frame: drops the events that became visible in the one before,
+    /// which every reader has now had a full frame to see.
+    pub fn end_frame(&mut self) {
+        let frame = self.frame;
+        for q in &mut self.events {
+            let expired = q.frames.partition_point(|&f| f < frame);
+            q.drop_front(expired);
+        }
+    }
+
+    pub fn apply_commands(&mut self) {
+        for command in std::mem::take(&mut self.commands) {
+            match command {
+                Command::Insert { e, id, value } => match self.storage(e, id) {
+                    Some(s) => s.insert(e, value.as_ptr()),
+                    None => {
+                        if let Some(s) = self.components.get(id.0 as usize) {
+                            s.drop_bytes(&value);
+                        }
+                    }
+                },
+                Command::Remove { e, id } => {
+                    if let Some(s) = self.storage(e, id) {
+                        s.remove(e);
+                    }
+                }
+                Command::Despawn(e) => {
+                    self.despawn(e);
+                }
+            }
+        }
+    }
+
+    fn register_event(
+        &mut self,
+        desc: &ComponentDesc,
+        loaded_at: u64,
+        library: impl FnOnce() -> Option<Keepalive>,
+    ) -> ComponentId {
+        let name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(desc.name, desc.name_len))
+        };
+        let Some((fields, _)) = read_fields(desc) else { return ComponentId::INVALID };
+        let code = |library: Option<Keepalive>| Code {
+            loaded_at,
+            drop: desc.drop,
+            default: desc.default,
+            field_drops: Vec::new(),
+            _library: library,
+        };
+        let Some(&id) = self.events_by_name.get(name) else {
+            let id = self.events.len() as u32;
+            self.events.push(EventQueue {
+                name: name.into(),
+                size: desc.size,
+                align: desc.align,
+                version: desc.version,
+                fields,
+                code: code(library()),
+                values: Values::new(desc.size, desc.align),
+                seqs: Vec::new(),
+                frames: Vec::new(),
+                pending: Vec::new(),
+            });
+            self.events_by_name.insert(name.into(), id);
+            return ComponentId(id);
+        };
+        let q = &mut self.events[id as usize];
+        let same_layout = (q.size, q.align, q.version) == (desc.size, desc.align, desc.version) && q.fields == fields;
+        if loaded_at <= q.code.loaded_at {
+            return if same_layout { ComponentId(id) } else { ComponentId::INVALID };
+        }
+        if !same_layout {
+            // Events only last a frame or two, so a newer layout drops them
+            // rather than migrating them.
+            q.clear();
+            (q.size, q.align, q.version, q.fields) = (desc.size, desc.align, desc.version, fields);
+            q.values = Values::new(desc.size, desc.align);
+        }
+        q.code = code(library());
+        ComponentId(id)
     }
 
     fn is_alive(&self, e: Entity) -> bool {
@@ -222,7 +367,57 @@ impl WorldStorage {
     }
 }
 
+impl EventQueue {
+    /// Drops the oldest `n` events.
+    fn drop_front(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        for slot in 0..n {
+            if let Some(drop) = self.code.drop {
+                unsafe { drop(self.values.at(slot)) };
+            }
+        }
+        let left = self.values.len - n;
+        unsafe { std::ptr::copy(self.values.at(n), self.values.at(0), left * self.size) };
+        self.values.len = left;
+        self.seqs.drain(..n);
+        self.frames.drain(..n);
+    }
+
+    /// Drops every event, visible or pending.
+    fn clear(&mut self) {
+        self.drop_front(self.values.len);
+        for value in std::mem::take(&mut self.pending) {
+            drop_bytes(self.code.drop, self.size, self.align, &value);
+        }
+    }
+}
+
+impl Drop for EventQueue {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// Drops a value held as bytes, which may not be aligned for it: copied to
+/// memory that is first.
+fn drop_bytes(drop: Option<DropFn>, size: usize, align: usize, value: &[u8]) {
+    let Some(drop) = drop else { return };
+    let mut aligned = Values::new(size, align);
+    aligned.push_uninit();
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.as_ptr(), aligned.at(0), size);
+        drop(aligned.at(0));
+    }
+}
+
 impl Storage {
+    /// Drops a queued value that never made it into storage.
+    fn drop_bytes(&self, value: &[u8]) {
+        drop_bytes(self.code.drop, self.size, self.align, value);
+    }
+
     /// Rewrites every value into the new layout (see `schema::migrate`).
     /// Returns what happened to each field, for the log.
     fn migrate(&mut self, size: usize, align: usize, fields: &[Field], code: &Code) -> String {
@@ -395,10 +590,16 @@ pub unsafe extern "C" fn spawn(ctx: *const ModContext) -> Entity {
 }
 
 pub unsafe extern "C" fn despawn(ctx: *const ModContext, e: Entity) -> bool {
+    if !allowed(ctx, None, Want::Structure("despawn")) {
+        return false;
+    }
     with_world(ctx, false, |w| w.despawn(e))
 }
 
 pub unsafe extern "C" fn insert(ctx: *const ModContext, e: Entity, id: ComponentId, value: *const u8) -> bool {
+    if !allowed(ctx, Some(id), Want::Structure("insert")) {
+        return false;
+    }
     with_world(ctx, false, |w| match w.storage(e, id) {
         Some(s) => {
             s.insert(e, value);
@@ -409,22 +610,90 @@ pub unsafe extern "C" fn insert(ctx: *const ModContext, e: Entity, id: Component
 }
 
 pub unsafe extern "C" fn remove(ctx: *const ModContext, e: Entity, id: ComponentId) -> bool {
+    if !allowed(ctx, Some(id), Want::Structure("remove")) {
+        return false;
+    }
     with_world(ctx, false, |w| w.storage(e, id).is_some_and(|s| s.remove(e)))
 }
 
-pub unsafe extern "C" fn get(ctx: *const ModContext, e: Entity, id: ComponentId) -> *mut u8 {
+pub unsafe extern "C" fn get(ctx: *const ModContext, e: Entity, id: ComponentId, write: bool) -> *mut u8 {
+    if !allowed(ctx, Some(id), if write { Want::Write } else { Want::Read }) {
+        return std::ptr::null_mut();
+    }
     with_world(ctx, std::ptr::null_mut(), |w| match w.storage(e, id) {
         Some(s) => s.slot(e).map_or(std::ptr::null_mut(), |slot| s.data.at(slot)),
         None => std::ptr::null_mut(),
     })
 }
 
-pub unsafe extern "C" fn column(ctx: *const ModContext, id: ComponentId) -> Column {
+pub unsafe extern "C" fn column(ctx: *const ModContext, id: ComponentId, write: bool) -> Column {
     let empty = Column { entities: std::ptr::null(), data: std::ptr::null_mut(), len: 0 };
+    if !allowed(ctx, Some(id), if write { Want::Write } else { Want::Read }) {
+        return empty;
+    }
     with_world(ctx, empty, |w| match w.components.get(id.0 as usize) {
         Some(s) => Column { entities: s.entities.as_ptr(), data: s.data.ptr, len: s.entities.len() },
         None => Column { entities: std::ptr::null(), data: std::ptr::null_mut(), len: 0 },
     })
+}
+
+pub unsafe extern "C" fn defer_insert(ctx: *const ModContext, e: Entity, id: ComponentId, value: *const u8) -> bool {
+    with_world(ctx, false, |w| {
+        let Some(s) = w.components.get(id.0 as usize) else { return false };
+        let value = unsafe { std::slice::from_raw_parts(value, s.size) }.to_vec();
+        w.commands.push(Command::Insert { e, id, value });
+        true
+    })
+}
+
+pub unsafe extern "C" fn defer_remove(ctx: *const ModContext, e: Entity, id: ComponentId) {
+    with_world(ctx, (), |w| w.commands.push(Command::Remove { e, id }))
+}
+
+pub unsafe extern "C" fn defer_despawn(ctx: *const ModContext, e: Entity) {
+    with_world(ctx, (), |w| w.commands.push(Command::Despawn(e)))
+}
+
+pub unsafe extern "C" fn register_event(ctx: *const ModContext, desc: *const ComponentDesc) -> ComponentId {
+    let loaded_at = unsafe { (*ctx).loaded_at };
+    let library = || unsafe { engine_of(ctx) }.library_of(ctx);
+    with_world(ctx, ComponentId::INVALID, |w| w.register_event(unsafe { &*desc }, loaded_at, library))
+}
+
+pub unsafe extern "C" fn send_event(ctx: *const ModContext, id: ComponentId, value: *const u8) -> bool {
+    with_world(ctx, false, |w| {
+        let Some(q) = w.events.get_mut(id.0 as usize) else { return false };
+        q.pending.push(unsafe { std::slice::from_raw_parts(value, q.size) }.to_vec());
+        true
+    })
+}
+
+pub unsafe extern "C" fn read_events(ctx: *const ModContext, id: ComponentId) -> EventSlice {
+    let empty = EventSlice { data: std::ptr::null(), len: 0 };
+    let Some(system) = (unsafe { engine_of(ctx) }).running_system(ctx) else { return empty };
+    with_world(ctx, empty, |w| {
+        let Some(q) = w.events.get(id.0 as usize) else { return empty };
+        let cursor = w.cursors.entry((system, q.name.clone())).or_insert(0);
+        // The cursor is the next sequence number to read.
+        let start = q.seqs.partition_point(|&seq| seq < *cursor);
+        let Some(&last) = q.seqs.last() else { return empty };
+        *cursor = last + 1;
+        EventSlice { data: q.values.at(start), len: q.seqs.len() - start }
+    })
+}
+
+/// Whether the running system may do `want` to component `id`; see
+/// `Engine::check`. Outside a system, or for code not running as the
+/// system's mod, everything is allowed.
+fn allowed(ctx: *const ModContext, id: Option<ComponentId>, want: Want) -> bool {
+    let engine = unsafe { engine_of(ctx) };
+    // Only looked up when a system is running as `ctx`.
+    let name = || -> String {
+        let Some(id) = id else { return String::new() };
+        let world = engine.world().try_borrow().ok();
+        world.and_then(|w| Some(w.components.get(id.0 as usize)?.name.clone())).unwrap_or_default()
+    };
+    engine.check(ctx, want, name)
 }
 
 #[cfg(test)]

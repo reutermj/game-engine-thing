@@ -25,20 +25,27 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod ecs;
 mod service;
+mod system;
+pub use system::{
+    Access, AccessKind, Commands, Declarations, Event, EventReader, IntoSystem, PhaseBuilder, PhaseDesc, Query,
+    QueryData, SystemBuilder, SystemDesc, SystemFn, SystemParam, Systems, Term, phase,
+};
+#[doc(hidden)]
+pub use system::__declare;
 pub use service::{
     CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc,
 };
 #[doc(hidden)]
 pub use service::{__begin_call, __end_call, __serve};
 pub use ecs::{
-    Column, Component, ComponentDesc, ComponentId, Crossing, DefaultFn, DropFn, Entity, FieldDesc,
+    Column, Component, ComponentDesc, ComponentId, Crossing, DefaultFn, DropFn, Entity, EventSlice, FieldDesc,
     FieldKind, FieldType, World, WorldApi,
 };
 #[doc(hidden)]
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 10;
+pub const API_VERSION: u32 = 12;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -57,8 +64,9 @@ impl Op {
     /// live (the loader made it from `Default` if it's new); the build makes its
     /// transient part.
     pub const LOAD: Op = Op(0);
-    /// Run one tick.
-    pub const STEP: Op = Op(1);
+    /// Run the session: a bootstrap's [`Bootstrap::run`]. Refused
+    /// (`Status::ERROR`) by a build that isn't a bootstrap.
+    pub const RUN: Op = Op(1);
     /// Code is about to be swapped for a new build. The build drops its
     /// transient part; the state is kept (or migrated) for the next build.
     pub const UNLOAD: Op = Op(2);
@@ -74,7 +82,7 @@ impl std::fmt::Debug for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
             Op::LOAD => f.write_str("LOAD"),
-            Op::STEP => f.write_str("STEP"),
+            Op::RUN => f.write_str("RUN"),
             Op::UNLOAD => f.write_str("UNLOAD"),
             Op::CLOSE => f.write_str("CLOSE"),
             Op::MESSAGE => f.write_str("MESSAGE"),
@@ -89,7 +97,7 @@ pub struct Status(pub i32);
 
 impl Status {
     pub const OK: Status = Status(0);
-    /// Returned by the bootstrap mod's step to shut the engine down.
+    /// Returned by a bootstrap's `run` when the engine was asked to quit.
     pub const QUIT: Status = Status(1);
     /// The mod failed (e.g. panicked). The loader stops stepping it until it's reloaded.
     pub const ERROR: Status = Status(-1);
@@ -127,6 +135,12 @@ pub struct ModInfo {
     pub service_count: usize,
     /// Built with `engine_mod(resident = True)`: loaded once, never swapped.
     pub resident: bool,
+    /// Fills a `Declarations` with the build's systems and phases
+    /// (`Mod::systems`). `false` if that panicked.
+    pub declare: unsafe extern "C" fn(out: *mut c_void) -> bool,
+    /// Exported with `export_mod!(.., bootstrap)`: it implements
+    /// [`Bootstrap`] and takes `Op::RUN`.
+    pub bootstrap: bool,
 }
 
 /// Services the loader provides to mods.
@@ -290,9 +304,17 @@ pub trait Mod: ModState {
     /// objects, and it never reaches another build. `()` if there's nothing.
     type Transient: Default + 'static;
 
+    /// Declares the mod's systems and phases; see [`Systems`]. Run by every
+    /// build when it's opened. A mod's per-frame work is its systems: one
+    /// that declares none (it only declares components, or only takes
+    /// messages) runs nothing each frame.
+    fn systems(_systems: &mut Systems<Self>)
+    where
+        Self: Sized,
+    {
+    }
     /// Called after every load, including reloads (`cx.generation() > 0`).
     fn load(&mut self, _transient: &mut Self::Transient, _cx: &mut Cx) {}
-    fn step(&mut self, transient: &mut Self::Transient, cx: &mut Cx) -> Status;
     /// Called before this build is swapped out.
     fn unload(&mut self, _transient: &mut Self::Transient, _cx: &mut Cx) {}
     /// Called before the state is dropped.
@@ -310,6 +332,7 @@ pub fn __info<T: Mod>(
     deps: &'static str,
     services: &'static [ServiceDesc],
     resident: bool,
+    bootstrap: bool,
 ) -> ModInfo {
     ModInfo {
         api_version: API_VERSION,
@@ -327,6 +350,8 @@ pub fn __info<T: Mod>(
         services: services.as_ptr(),
         service_count: services.len(),
         resident,
+        declare: __declare::<T>,
+        bootstrap,
     }
 }
 
@@ -339,10 +364,29 @@ mod_state! {
 
 impl Mod for Inert {
     type Transient = ();
+}
 
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
-    }
+/// A mod that runs the session: the frame loop. Exported with
+/// `export_mod!(T, bootstrap)`, and built resident, since it's on the stack
+/// whenever the loader swaps builds. See docs/architecture/overview.md, "Who
+/// runs the loop".
+pub trait Bootstrap: Mod {
+    /// The session. Runs frames (`cx.step_mods()`) and hands the loader
+    /// control between them (`cx.pump_loader`) until the pump says to quit,
+    /// then returns `Status::QUIT`.
+    fn run(&mut self, transient: &mut Self::Transient, cx: &mut Cx) -> Status;
+}
+
+/// `Op::RUN` for a bootstrap.
+#[doc(hidden)]
+pub unsafe fn __run<T: Bootstrap>(ctx: *mut ModContext) -> Status {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let state = &mut *((*ctx).state as *mut T);
+        let transient = &mut *transient::<T>(&raw mut (*ctx).transient);
+        let mut cx = Cx { raw: &mut *ctx };
+        state.run(transient, &mut cx)
+    }));
+    result.unwrap_or(Status::ERROR)
 }
 
 /// The running build's transient part, made if there's none yet (a `LOAD`
@@ -372,12 +416,11 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
         // Reached through a raw pointer, and before `cx` borrows the context.
         let slot: *mut *mut c_void = &raw mut (*ctx).transient;
         match op {
-            Op::LOAD | Op::STEP | Op::MESSAGE => {
+            Op::LOAD | Op::MESSAGE => {
                 let transient = &mut *transient::<T>(slot);
                 let mut cx = Cx { raw: &mut *ctx };
                 match op {
                     Op::LOAD => state.load(transient, &mut cx),
-                    Op::STEP => return state.step(transient, &mut cx),
                     _ => {
                         let message = std::slice::from_raw_parts(cx.raw.message, cx.raw.message_len);
                         let message = std::str::from_utf8(message).unwrap_or("");
@@ -414,7 +457,8 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
 }
 
 /// Exports `ty` (a [`Mod`]) as this dynamic library's mod, and the services
-/// it provides: `export_mod!(PhysicsMod, provides = [physics::Physics])`.
+/// it provides: `export_mod!(PhysicsMod, provides = [physics::Physics])`. A
+/// bootstrap (a [`Bootstrap`]) says so: `export_mod!(Lockstep, bootstrap)`.
 ///
 /// Also records the interface digests `engine_mod` computed for this build
 /// (`ENGINE_INTERFACE_DIGEST`, `ENGINE_MOD_DEPS`, set at compile time), so the
@@ -422,11 +466,17 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
 /// `engine_mod` records none.
 #[macro_export]
 macro_rules! export_mod {
+    ($ty:ty, bootstrap $(, provides = [$($service:path),* $(,)?])? $(,)?) => {
+        $crate::export_mod!(@export $ty, true, [$($($service),*)?]);
+    };
     ($ty:ty $(, provides = [$($service:path),* $(,)?])? $(,)?) => {
+        $crate::export_mod!(@export $ty, false, [$($($service),*)?]);
+    };
+    (@export $ty:ty, $bootstrap:tt, [$($service:path),*]) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn engine_mod_info() -> $crate::ModInfo {
             // A const, so the list is in the library's static memory.
-            const SERVICES: &[$crate::ServiceDesc] = &[$($(<$ty as $service>::__SERVICE),*)?];
+            const SERVICES: &[$crate::ServiceDesc] = &[$(<$ty as $service>::__SERVICE),*];
             $crate::__info::<$ty>(
                 match option_env!("ENGINE_INTERFACE_DIGEST") {
                     Some(digest) => digest,
@@ -439,6 +489,7 @@ macro_rules! export_mod {
                 SERVICES,
                 // Read here, where the mod compiles, like the digests above.
                 option_env!("ENGINE_MOD_RESIDENT").is_some(),
+                $bootstrap,
             )
         }
 
@@ -447,8 +498,18 @@ macro_rules! export_mod {
             ctx: *mut $crate::ModContext,
             op: $crate::Op,
         ) -> $crate::Status {
-            unsafe { $crate::__dispatch::<$ty>(ctx, op) }
+            $crate::export_mod!(@main $bootstrap, $ty, ctx, op)
         }
+    };
+    (@main true, $ty:ty, $ctx:ident, $op:ident) => {
+        if $op == $crate::Op::RUN {
+            unsafe { $crate::__run::<$ty>($ctx) }
+        } else {
+            unsafe { $crate::__dispatch::<$ty>($ctx, $op) }
+        }
+    };
+    (@main false, $ty:ty, $ctx:ident, $op:ident) => {
+        unsafe { $crate::__dispatch::<$ty>($ctx, $op) }
     };
 }
 
@@ -496,22 +557,35 @@ mod tests {
         }
     }
 
+    impl Tracked {
+        fn tick(&mut self, scratch: &mut Scratch, _cx: &mut Cx) {
+            self.steps += (scratch.0)() - 6;
+            if self.steps > 41 {
+                panic!("second tick panics");
+            }
+        }
+    }
+
     impl Mod for Tracked {
         type Transient = Scratch;
 
-        fn step(&mut self, scratch: &mut Scratch, _cx: &mut Cx) -> Status {
-            self.steps += (scratch.0)() - 6;
-            if self.steps > 41 {
-                panic!("second step panics");
-            }
-            Status::OK
+        fn systems(s: &mut Systems<Self>) {
+            s.add("tick", Self::tick);
         }
+    }
+
+    /// Tracked's one system, as the loader runs it.
+    fn tick(ctx: &mut ModContext) -> Status {
+        let mut decls = Declarations::default();
+        assert!(unsafe { __declare::<Tracked>(&mut decls as *mut Declarations as *mut c_void) });
+        assert_eq!(decls.systems.len(), 1);
+        unsafe { (decls.systems[0].run)(ctx) }
     }
 
     /// A context with a live state, as the loader provides it. No host:
     /// nothing here calls back into one.
     fn context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
-        unsafe { (__info::<Tracked>("", "", &[], false).state_default)(state.as_mut_ptr() as *mut u8) };
+        unsafe { (__info::<Tracked>("", "", &[], false, false).state_default)(state.as_mut_ptr() as *mut u8) };
         ModContext {
             host: std::ptr::null(),
             name: "t".as_ptr(),
@@ -535,11 +609,12 @@ mod tests {
 
         assert_eq!(dispatch(&mut ctx, Op::LOAD), Status::OK);
         assert!(!ctx.transient.is_null(), "LOAD makes the transient part");
-        assert_eq!(dispatch(&mut ctx, Op::STEP), Status::OK);
-        assert_eq!(unsafe { state.assume_init_ref() }.steps, 41, "the step used the transient closure");
-        assert_eq!(dispatch(&mut ctx, Op::STEP), Status::ERROR, "a panic must become ERROR, not unwind");
+        assert_eq!(tick(&mut ctx), Status::OK);
+        assert_eq!(unsafe { state.assume_init_ref() }.steps, 41, "the system used the transient closure");
+        assert_eq!(tick(&mut ctx), Status::ERROR, "a panic must become ERROR, not unwind");
+        assert_eq!(dispatch(&mut ctx, Op::RUN), Status::ERROR, "only a bootstrap runs");
         assert_eq!(dispatch(&mut ctx, Op(77)), Status::ERROR, "unknown ops are errors");
-        assert_eq!(TRANSIENTS_MADE.load(Ordering::SeqCst), made + 1, "one per build, not per step");
+        assert_eq!(TRANSIENTS_MADE.load(Ordering::SeqCst), made + 1, "one per build, not per frame");
 
         // A reload: this build drops its transient part and leaves the state.
         assert_eq!(dispatch(&mut ctx, Op::UNLOAD), Status::OK);
@@ -559,7 +634,7 @@ mod tests {
 
     #[test]
     fn mod_state_records_its_schema() {
-        let info = __info::<Tracked>("", "", &[], false);
+        let info = __info::<Tracked>("", "", &[], false, false);
         assert_eq!(info.state_field_count, 1);
         assert!(info.state_drop.is_some(), "Tracked has a Drop impl");
         let field = unsafe { &*info.state_fields };

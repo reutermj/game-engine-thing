@@ -7,7 +7,7 @@
 //! new start, and if not (a reload for a code change) it leaves the level
 //! alone, so collected coins stay collected.
 
-use engine_api::{Cx, Entity, Mod, Status, World, export_mod};
+use engine_api::{Cx, Entity, Mod, World, export_mod};
 use platformer::{Coin, GOAL, LevelInfo, Player, SOLID, SPIKE, Tile};
 use walkers::Walker;
 
@@ -114,10 +114,6 @@ impl Mod for Level {
         }
         self.built = hash;
         cx.log(format!("{BUILT} a {}x{} level", info.width, info.height));
-    }
-
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
     }
 
     fn close(&mut self, _: &mut (), cx: &mut Cx) {

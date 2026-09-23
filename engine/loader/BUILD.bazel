@@ -8,6 +8,7 @@ rust_library(
         "control_server.rs",
         "engine.rs",
         "lib.rs",
+        "schedule.rs",
         "schema.rs",
         "world.rs",
     ],

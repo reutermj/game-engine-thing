@@ -23,7 +23,7 @@
 //! ```
 //!
 //! A call runs as the provider, with its state, transient part and `Cx`, like
-//! its `step`. Every call asks the loader for the provider's current build, so
+//! its systems. Every call asks the loader for the provider's current build, so
 //! a provider reloaded between two calls is simply called in its new build,
 //! and nothing a consumer holds can point into an old one. See
 //! docs/architecture/mod-deps.md, "Calls between mods".

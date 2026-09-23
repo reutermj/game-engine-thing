@@ -21,6 +21,8 @@ pub extern "C" fn engine_mod_info() -> ModInfo {
         services: std::ptr::null(),
         service_count: 0,
         resident: false,
+        declare: no_systems,
+        bootstrap: false,
     }
 }
 
@@ -30,3 +32,7 @@ pub extern "C" fn engine_mod_main(_ctx: *mut ModContext, _op: Op) -> Status {
 }
 
 unsafe extern "C" fn no_state(_: *mut u8) {}
+
+unsafe extern "C" fn no_systems(_: *mut std::ffi::c_void) -> bool {
+    true
+}

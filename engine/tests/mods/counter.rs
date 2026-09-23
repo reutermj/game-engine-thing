@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use engine_api::{Cx, Entity, Mod, Status, export_mod};
+use engine_api::{Cx, Entity, Mod, Query, Systems, export_mod};
 use test_probe::Probe;
 
 #[cfg(feature = "v1")]
@@ -59,18 +59,35 @@ engine_api::mod_state! {
 }
 
 impl Counter {
+    fn probe_value(&self) -> Probe {
+        Probe { value: self.total, build: BUILD.0, loads_seen_by_statics: LOADS.load(Ordering::Relaxed) }
+    }
+
+    /// Outside a frame, where the world can be changed directly.
     fn write_probe(&self, cx: &mut Cx) {
-        let probe = Probe {
-            value: self.total,
-            build: BUILD.0,
-            loads_seen_by_statics: LOADS.load(Ordering::Relaxed),
-        };
-        cx.world().insert(self.probe.expect("spawned in load"), probe);
+        cx.world().insert(self.probe.expect("spawned in load"), self.probe_value());
+    }
+}
+
+impl Counter {
+    fn count(&mut self, _: &mut (), cx: &mut Cx, probes: Query<&mut Probe>) {
+        if cfg!(feature = "panic") && !PANICKED.swap(true, Ordering::Relaxed) {
+            panic!("this build of counter panics on its first step");
+        }
+        self.total += BUILD.1;
+        let (probe, entity) = (self.probe_value(), self.probe.expect("spawned in load"));
+        if let Some(p) = probes.get(cx, entity) {
+            *p = probe;
+        }
     }
 }
 
 impl Mod for Counter {
     type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("count", Self::count);
+    }
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         LOADS.fetch_add(1, Ordering::Relaxed);
@@ -78,15 +95,6 @@ impl Mod for Counter {
             self.probe = Some(cx.world().spawn());
         }
         self.write_probe(cx);
-    }
-
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        if cfg!(feature = "panic") && !PANICKED.swap(true, Ordering::Relaxed) {
-            panic!("this build of counter panics on its first step");
-        }
-        self.total += BUILD.1;
-        self.write_probe(cx);
-        Status::OK
     }
 
     /// `get` replies with the total; `add <n>` adds to it.

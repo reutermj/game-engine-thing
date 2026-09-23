@@ -8,7 +8,7 @@
 //!   state                 the numbers behind the drawing
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Status, World, export_mod};
+use engine_api::{Cx, Mod, World, export_mod};
 use platformer::{
     Coin, GOAL, Input, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, SPIKE, Tile,
 };
@@ -118,10 +118,6 @@ fn describe(s: &Snapshot) -> String {
 
 impl Mod for Text {
     type Transient = ();
-
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
-    }
 
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut world = cx.world();

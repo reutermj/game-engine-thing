@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, export_mod};
 
 #[cfg(feature = "v1")]
 const BUILD: &str = "v1";
@@ -59,9 +59,6 @@ impl Mod for Vault {
         ticker.start(cx.name());
     }
 
-    fn step(&mut self, _: &mut Ticker, _cx: &mut Cx) -> Status {
-        Status::OK
-    }
 }
 
 impl vault::Vault for Vault {

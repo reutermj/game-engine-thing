@@ -1,7 +1,7 @@
 //! Pong's world. Units are text cells: the court is `WIDTH` columns by
 //! `HEIGHT` rows, with y growing downward, which is how `pong_text` draws it.
 
-use engine_api::component;
+use engine_api::{component, event};
 
 pub const WIDTH: f32 = 40.0;
 pub const HEIGHT: f32 = 20.0;
@@ -55,5 +55,15 @@ component! {
         pub right: u32,
         /// Serves so far, which picks each serve's angle.
         pub serves: u32,
+    }
+}
+
+event! {
+    /// Sets the player's paddle moving: -1 up, 1 down, 0 still. It keeps
+    /// moving until the next one. Sent by `pong_text`, applied in the
+    /// `input` phase.
+    #[derive(Debug, Default, Copy)]
+    pub struct Steer: "pong::Steer" {
+        pub intent: f32,
     }
 }

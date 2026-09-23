@@ -18,7 +18,7 @@ possible:
 
 ### Who runs the loop
 
-The bootstrap does, literally: its `step` is a `loop` that returns
+The bootstrap does, literally: its `Bootstrap::run` is a `loop` that returns
 `Status::QUIT` when the engine is asked to quit. The loader gets control back
 through a host call, `cx.pump_loader(timeout, handler)`, which serves the
 requests queued since the last one (loads, reloads, messages, `list`, `quit`)
@@ -62,10 +62,9 @@ policy, publishing the clock and scheduling, and changing only the first
 means replacing all three. See
 [the pong retrospective](../retrospectives/2026-09-23-pong.md#the-bootstrap-mod).
 
-**Open question:** ordering. `step_mods` steps mods in load order; a real
-engine needs phases (input before simulation before rendering). Whether the
-bootstrap mod should get per-mod stepping, or mods should declare a phase, is
-undecided.
+**Ordering** is by systems and phases: each mod declares its systems, and
+`step_mods` runs one frame of them in plan order. See
+[scheduling.md](scheduling.md).
 
 **Open question:** threading. Mods run on the one thread that owns the loop
 (the control socket's thread runs only loader code). A mod that spawns a thread makes unloading unsafe, because the thread

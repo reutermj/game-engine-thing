@@ -92,3 +92,11 @@ fn unknown_commands_are_refused_with_the_command_list() {
     let err = e.send("pong_text", "jump").unwrap_err();
     assert!(err.contains("commands: up | down | stay | show | state"), "{err}");
 }
+
+#[test]
+fn input_and_the_ai_come_before_the_paddles_move() {
+    // The pong retrospective's complaint: in load order, the AI moved on the
+    // previous frame's ball.
+    let e = game("schedule");
+    assert_eq!(e.schedule().unwrap(), "input: pong::steer\nupdate: pong_ai::think\nsimulate: pong::play");
+}

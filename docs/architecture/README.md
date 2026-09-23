@@ -14,6 +14,8 @@ monolithic design doc.
   why the loader owns it, and what a component layout change does
 - [mod-deps.md](mod-deps.md) — how a mod uses another mod's components, how
   the engine knows, and why interface changes reload through the game
+- [scheduling.md](scheduling.md) — systems, phases and their order, checked
+  access, commands and events, and the steps toward multithreading
 
 ## Conventions
 

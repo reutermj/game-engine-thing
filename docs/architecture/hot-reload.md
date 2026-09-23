@@ -9,10 +9,12 @@ How a mod's code is swapped while its state stays live. The code lives in
 A mod is a `cdylib` exporting two `extern "C"` symbols:
 
 - `engine_mod_info() -> ModInfo`: the mod API version it was built against,
-  and the size, alignment and version of its state. The loader calls this
-  before committing to a new build.
-- `engine_mod_main(ctx, op) -> Status`: the single entry point, as in cr.h.
-  `op` is `LOAD`, `STEP`, `UNLOAD` or `CLOSE`.
+  the size, alignment and version of its state, and a function declaring
+  its systems. The loader calls this before committing to a new build.
+- `engine_mod_main(ctx, op) -> Status`: the lifecycle entry point, as in
+  cr.h. `op` is `LOAD`, `UNLOAD`, `CLOSE`, `MESSAGE`, or, for a bootstrap,
+  `RUN` (the session). A frame's work doesn't go through it: the loader
+  calls each system directly (see [scheduling.md](scheduling.md)).
 
 Everything that crosses the boundary is `#[repr(C)]`, and `Op`/`Status` are
 integer newtypes rather than Rust enums, so a value one side doesn't know is
@@ -110,8 +112,8 @@ frozen too, since its resident dependent could never be rebuilt against a new
 one, and "reloadable" would silently stop meaning it. `engine_mod` fails the
 build for a resident mod with a non-resident dependency, and the loader
 refuses one built some other way. Where a resident layer needs something
-from gameplay, gameplay leaves it in the world (or, later, as an event:
-get-7yi) and the resident layer reads it.
+from gameplay, gameplay leaves it in the world (or sends an
+[event](scheduling.md#events)) and the resident layer reads it.
 
 Every bootstrap is resident: it runs the frame loop, so it's on the stack
 whenever the loader swaps builds. `engine_game` fails the build for a
@@ -167,8 +169,9 @@ Then, for the batch as a whole:
 6. **Swap**, dependencies first. Drop the old library, bump `generation`,
    and send the new build `LOAD`, which makes its transient part.
 
-A mod that returns `Status::ERROR` (including a caught panic) is marked
-failed and not stepped again until a reload clears it.
+A mod that returns `Status::ERROR` (including a caught panic in a system)
+is marked failed, and none of its systems run again until a reload clears
+it.
 
 **Open question:** crash rollback. A panic is caught; a segfault in a freshly
 loaded mod kills the engine. cr.h recovers from this with signal handlers
@@ -203,6 +206,7 @@ batch                the same per mod, joined with "; " (all or nothing)
 unload <name>        ok unloaded <name>
 send <name> <text>   ok <the mod's reply> | err <why the mod declined>
 list                 ok <count> mod(s) loaded, then one line per mod
+schedule             ok <phase>: <system>, ... one line per phase with systems
 quit                 ok quitting
 ```
 

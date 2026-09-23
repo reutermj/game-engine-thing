@@ -2,29 +2,37 @@
 //! the `Clock`, steps every other mod, and hands the loader control once a
 //! frame to serve requests and swap builds.
 //!
-//! The whole session is this mod's one `step`, which returns when the engine
+//! The whole session is this mod's `Bootstrap::run`, which returns when the engine
 //! is asked to quit. It's resident, so the loader never swaps it out while
 //! it's running.
 
 use std::time::{Duration, Instant};
 
 use clock::Clock;
-use engine_api::{Cx, Entity, Mod, Pumped, Status, export_mod};
+use engine_api::{Bootstrap, Cx, Entity, Mod, Pumped, Status, export_mod};
 
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 engine_api::mod_state! {
     #[derive(Default)]
-    struct Bootstrap {
+    struct Realtime {
         frame: u64,
         clock: Option<Entity>,
     }
 }
 
-impl Mod for Bootstrap {
+impl Mod for Realtime {
     type Transient = ();
 
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+    fn close(&mut self, _: &mut (), cx: &mut Cx) {
+        if let Some(e) = self.clock.take() {
+            cx.world().despawn(e);
+        }
+    }
+}
+
+impl Bootstrap for Realtime {
+    fn run(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         cx.log("running the frame loop");
         let mut next_frame = Instant::now();
         loop {
@@ -55,12 +63,6 @@ impl Mod for Bootstrap {
             }
         }
     }
-
-    fn close(&mut self, _: &mut (), cx: &mut Cx) {
-        if let Some(e) = self.clock.take() {
-            cx.world().despawn(e);
-        }
-    }
 }
 
-export_mod!(Bootstrap);
+export_mod!(Realtime, bootstrap);

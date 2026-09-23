@@ -26,6 +26,8 @@ pub enum Request {
     Unload { name: String },
     Send { name: String, message: String },
     List,
+    /// The order the systems run in.
+    Schedule,
     Quit,
 }
 
@@ -68,6 +70,7 @@ impl Request {
                 Ok(Request::Send { name: name.into(), message: message.into() })
             }
             "list" => Ok(Request::List),
+            "schedule" => Ok(Request::Schedule),
             "quit" => Ok(Request::Quit),
             _ => Err(format!("unknown command {cmd:?}")),
         }
@@ -84,6 +87,7 @@ impl Request {
             Request::Unload { name } => format!("unload {name}\n"),
             Request::Send { name, message } => format!("send {name} {message}\n"),
             Request::List => "list\n".into(),
+            Request::Schedule => "schedule\n".into(),
             Request::Quit => "quit\n".into(),
         }
     }
@@ -192,6 +196,7 @@ mod tests {
             Request::Send { name: "pong_text".into(), message: "up".into() },
             Request::Send { name: "lockstep".into(), message: "step 10".into() },
             Request::List,
+            Request::Schedule,
             Request::Quit,
         ];
         for request in requests {

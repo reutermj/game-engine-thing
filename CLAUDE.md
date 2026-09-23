@@ -46,6 +46,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
     API over it. Separate from `lib.rs` because it is a second contract: how
     mods share data, not how a mod is loaded.
+  - `system.rs` — systems: `Mod::systems` declarations, `Query` and
+    `EventReader` parameters (which are the access declaration), commands
+    and events. See
+    [docs/architecture/scheduling.md](docs/architecture/scheduling.md).
   - `service.rs` — calls between mods: `service!`, which generates a
     provider trait and caller functions, and the host calls that resolve a
     call to the provider's current build. See
@@ -57,7 +61,11 @@ changing the ABI, the reload sequence or the Bazel rules.
     handling. The one file where mod code is called, so it owns the rules
     that mods run only while the list is shared-borrowed and that requests
     are served only at a safe point (`safe_point`).
-  - `world.rs` — the ECS storage behind `WorldApi`. Untyped by design: it
+  - `schedule.rs` — turns every build's declarations into the order a
+    frame runs systems in. Pure, so it's unit-tested alone, and so a load
+    can be checked against it before it commits.
+  - `world.rs` — the ECS storage behind `WorldApi`, and the commands and
+    events a frame defers. Untyped by design: it
     holds only bytes and layouts, never code from a mod, so no reload can
     leave it pointing into an unmapped library. See
     [docs/architecture/ecs.md](docs/architecture/ecs.md).

@@ -20,6 +20,14 @@ engine_mod(
     resident = True,
 )
 
+# The same bootstrap built reloadable, which the loader refuses to run.
+engine_mod(
+    name = "fake_os_reloadable",
+    srcs = ["mods/fake_os.rs"],
+    crate_root = "mods/fake_os.rs",
+    mod_name = "fake_os",
+)
+
 # Builds of the one mod `counter`. See mods/counter.rs.
 COUNTER_BUILDS = [
     "v1",
@@ -169,6 +177,60 @@ engine_mod(
     resident = True,
 )
 
+# Scheduled test mods: systems, phases, access, commands and events. See
+# the sources.
+[engine_mod(
+    name = "tracer_" + build,
+    srcs = ["mods/tracer.rs"],
+    crate_features = [build],
+    crate_root = "mods/tracer.rs",
+    mod_name = build[0],
+    deps = [":probe"],
+) for build in [
+    "a",
+    "b",
+    "b_cycle",
+]]
+
+[engine_mod(
+    name = "sneak_" + build,
+    srcs = ["mods/sneak.rs"],
+    crate_features = [build],
+    crate_root = "mods/sneak.rs",
+    mod_name = "sneak",
+    deps = [":probe"],
+) for build in [
+    "read",
+    "insert",
+    "declared",
+]]
+
+engine_mod(
+    name = "builder",
+    srcs = ["mods/builder.rs"],
+    crate_root = "mods/builder.rs",
+    deps = [":probe"],
+)
+
+engine_mod(
+    name = "pinger",
+    srcs = ["mods/pinger.rs"],
+    crate_root = "mods/pinger.rs",
+    deps = [":probe"],
+)
+
+[engine_mod(
+    name = "listener_" + build,
+    srcs = ["mods/listener.rs"],
+    crate_features = [build],
+    crate_root = "mods/listener.rs",
+    mod_name = "listener",
+    deps = [":probe"],
+) for build in [
+    "v1",
+    "v2",
+]]
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -182,6 +244,16 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "TRACER_A": ":tracer_a",
+    "TRACER_B": ":tracer_b",
+    "TRACER_B_CYCLE": ":tracer_b_cycle",
+    "SNEAK_READ": ":sneak_read",
+    "SNEAK_INSERT": ":sneak_insert",
+    "SNEAK_DECLARED": ":sneak_declared",
+    "BUILDER": ":builder",
+    "PINGER": ":pinger",
+    "LISTENER_V1": ":listener_v1",
+    "LISTENER_V2": ":listener_v2",
     "VAULT_V1": ":vault_v1",
     "VAULT_V2": ":vault_v2",
     "TELLER": ":teller",
@@ -207,6 +279,7 @@ TEST_MODS = {
     "USER_V1": ":user_v1",
     "USER_V2": ":user_v2",
     "FAKE_OS": ":fake_os",
+    "FAKE_OS_RELOADABLE": ":fake_os_reloadable",
     "MOVER_V1": ":mover_v1",
     "MOVER_V2": ":mover_v2",
     "NO_ENTRY": ":no_entry",

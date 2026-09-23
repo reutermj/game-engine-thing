@@ -1,7 +1,7 @@
 //! Calls the resident `vault` and replies with what it says: `build`,
 //! `made` (transient parts made), `ticks`.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, export_mod};
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -10,10 +10,6 @@ engine_api::mod_state! {
 
 impl Mod for Teller {
     type Transient = ();
-
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        Status::OK
-    }
 
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let result = match message {

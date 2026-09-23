@@ -1,6 +1,7 @@
 //! Pong's text interface, over messages: `modctl send pong_text <command>`.
 //! It runs nothing on its own; with the lockstep bootstrap, time only moves
-//! with `modctl send lockstep step <frames>`.
+//! with `modctl send lockstep step <frames>`. Steering is sent as a
+//! `pong::Steer` event, which pong applies at the start of the next frame.
 //!
 //!   up | down | stay   set the left paddle moving (it keeps moving until changed)
 //!   show               draw the court
@@ -8,7 +9,7 @@
 
 use clock::Clock;
 use engine_api::{Cx, Mod, World, export_mod};
-use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, WIDTH};
+use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, Steer, WIDTH};
 
 const HELP: &str = "commands: up | down | stay | show | state";
 
@@ -17,13 +18,12 @@ engine_api::mod_state! {
     struct Text {}
 }
 
-fn set_intent(world: &mut World, intent: f32) -> Result<(), String> {
-    let mut found = false;
-    for (_, _, paddle) in world.query2::<Player, Paddle>() {
-        paddle.intent = intent;
-        found = true;
+fn steer(cx: &mut Cx, intent: f32) -> Result<(), String> {
+    if cx.world().query::<Player>().next().is_none() {
+        return Err("no player paddle: is pong loaded?".into());
     }
-    if found { Ok(()) } else { Err("no player paddle: is pong loaded?".into()) }
+    cx.send_event(Steer { intent });
+    Ok(())
 }
 
 struct Snapshot {
@@ -79,18 +79,16 @@ fn describe(s: &Snapshot) -> String {
 impl Mod for Text {
     type Transient = ();
 
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> engine_api::Status {
-        engine_api::Status::OK
-    }
+    /// Only takes messages.
+    fn systems(_: &mut engine_api::Systems<Self>) {}
 
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
-        let mut world = cx.world();
         match message.trim() {
-            "up" => set_intent(&mut world, -1.0).map(|()| "moving up".into()),
-            "down" => set_intent(&mut world, 1.0).map(|()| "moving down".into()),
-            "stay" => set_intent(&mut world, 0.0).map(|()| "staying".into()),
-            "show" => snapshot(&mut world).map(|s| draw(&s)),
-            "state" => snapshot(&mut world).map(|s| describe(&s)),
+            "up" => steer(cx, -1.0).map(|()| "moving up".into()),
+            "down" => steer(cx, 1.0).map(|()| "moving down".into()),
+            "stay" => steer(cx, 0.0).map(|()| "staying".into()),
+            "show" => snapshot(&mut cx.world()).map(|s| draw(&s)),
+            "state" => snapshot(&mut cx.world()).map(|s| describe(&s)),
             "" | "help" => Ok(HELP.into()),
             other => Err(format!("unknown command {other:?}; {HELP}")),
         }

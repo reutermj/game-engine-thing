@@ -781,10 +781,20 @@ mod pumping {
 
     #[test]
     fn the_bootstrap_must_be_resident() {
-        let e = engine_with("bootstrap_not_resident", Some("counter"));
-        load(&e, "counter", "COUNTER_V1");
+        let e = engine_with("bootstrap_not_resident", Some("fake_os"));
+        load(&e, "fake_os", "FAKE_OS_RELOADABLE");
         let err = e.run_bootstrap().unwrap_err();
         assert!(err.contains("must be resident"), "{err}");
+    }
+
+    #[test]
+    fn the_bootstrap_must_be_one() {
+        let e = engine_with("bootstrap_not_one", Some("counter"));
+        let err = e.load("counter", &lib("COUNTER_V1")).unwrap_err();
+        assert_eq!(
+            err,
+            "counter is the game's bootstrap, but isn't one: implement Bootstrap and export_mod!(.., bootstrap)"
+        );
     }
 
     #[test]
@@ -798,5 +808,146 @@ mod pumping {
         assert!(rx.try_recv().is_err(), "served before a pump");
         assert_eq!(e.pump(Duration::ZERO), engine_api::Pumped::Continue);
         assert!(rx.try_recv().unwrap().starts_with("ok 0 mod(s) loaded"));
+    }
+}
+
+/// Systems, phases, access, commands and events: docs/architecture/scheduling.md.
+mod scheduling {
+    use test_probe::Trace;
+
+    use super::{engine, lib, load, step};
+
+    fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
+        let world = e.world().borrow();
+        let traces = world.values::<Trace>().expect("test::Trace is registered with this layout");
+        traces.into_iter().flat_map(|(_, t)| t.lines).collect()
+    }
+
+    /// The trace from the frames run since `from` lines.
+    fn since(e: &engine_loader::engine::Engine, from: usize) -> Vec<String> {
+        trace(e)[from..].to_vec()
+    }
+
+    #[test]
+    fn a_frame_runs_systems_by_phase_then_constraints() {
+        let e = engine("sched_order");
+        load(&e, "a", "TRACER_A");
+        load(&e, "b", "TRACER_B");
+        step(&e, 1);
+        // Load order alone would run a's systems first.
+        assert_eq!(trace(&e), ["a::input", "b::update", "a::update", "b::simulate", "a::late"]);
+        assert_eq!(
+            e.schedule().unwrap(),
+            "input: a::input\nupdate: b::update, a::update\nsimulate: b::simulate\nlate: a::late"
+        );
+    }
+
+    #[test]
+    fn a_load_that_would_order_systems_in_a_cycle_is_refused() {
+        let e = engine("sched_cycle");
+        load(&e, "a", "TRACER_A");
+        load(&e, "b", "TRACER_B");
+        let err = e.load("b", &lib("TRACER_B_CYCLE")).unwrap_err();
+        assert_eq!(err, "the systems a::update, b::update are ordered in a cycle");
+        // The running b is untouched.
+        assert!(e.list().contains("b gen 0"), "{}", e.list());
+        step(&e, 1);
+        assert_eq!(trace(&e).len(), 5);
+    }
+
+    #[test]
+    fn a_mod_without_systems_runs_nothing_each_frame() {
+        let e = engine("sched_none");
+        load(&e, "mover", "MOVER_V1");
+        load(&e, "a", "TRACER_A");
+        assert_eq!(e.schedule().unwrap(), "input: a::input\nupdate: a::update\nlate: a::late");
+    }
+
+    #[test]
+    fn reading_an_undeclared_component_fails_the_mod() {
+        let e = engine("sched_read");
+        load(&e, "sneak", "SNEAK_READ");
+        step(&e, 1);
+        assert!(e.list().contains("sneak gen 0 [failed]"), "{}", e.list());
+        // The read found nothing, and the system's next frames don't run.
+        assert_eq!(trace(&e), ["sneak got false"]);
+        step(&e, 2);
+        assert_eq!(trace(&e).len(), 1);
+    }
+
+    #[test]
+    fn declaring_a_read_allows_it() {
+        let e = engine("sched_declared");
+        load(&e, "sneak", "SNEAK_DECLARED");
+        step(&e, 2);
+        assert!(!e.list().contains("[failed]"), "{}", e.list());
+        assert_eq!(trace(&e), ["sneak got false", "sneak got false"]);
+    }
+
+    #[test]
+    fn a_structural_change_on_the_spot_fails_the_mod() {
+        let e = engine("sched_insert");
+        load(&e, "sneak", "SNEAK_INSERT");
+        step(&e, 1);
+        assert!(e.list().contains("sneak gen 0 [failed]"), "{}", e.list());
+        assert_eq!(trace(&e), ["sneak got false"]);
+        assert!(e.world().borrow().summary().contains("test::Probe x0"), "{}", e.world().borrow().summary());
+    }
+
+    #[test]
+    fn commands_land_at_the_end_of_the_phase() {
+        let e = engine("sched_commands");
+        load(&e, "builder", "BUILDER");
+        step(&e, 1);
+        assert_eq!(trace(&e), ["queued", "saw []", "saw [7]"]);
+    }
+
+    #[test]
+    fn each_reader_sees_each_event_once_from_the_next_phase() {
+        let e = engine("sched_events");
+        load(&e, "pinger", "PINGER");
+        load(&e, "listener", "LISTENER_V1");
+        step(&e, 3);
+        // Ping n is sent in frame n's simulate. `mid`, later in the same
+        // phase, doesn't see it until the next frame; `late` sees it at once.
+        let frames: Vec<Vec<String>> = trace(&e).chunks(3).map(|c| c.to_vec()).collect();
+        assert_eq!(frames[0], ["v1 saw []", "v1 saw []", "v1 saw [1]"]);
+        assert_eq!(frames[1], ["v1 saw [1]", "v1 saw [1]", "v1 saw [2]"]);
+        assert_eq!(frames[2], ["v1 saw [2]", "v1 saw [2]", "v1 saw [3]"]);
+    }
+
+    #[test]
+    fn an_event_lives_until_the_end_of_the_next_frame() {
+        let e = engine("sched_expire");
+        load(&e, "pinger", "PINGER");
+        step(&e, 3);
+        // Pings 1 and 2 have expired; 3 was sent last frame, so it lasts
+        // through this one.
+        load(&e, "listener", "LISTENER_V1");
+        step(&e, 1);
+        assert_eq!(trace(&e), ["v1 saw [3]", "v1 saw [3]", "v1 saw [3, 4]"]);
+    }
+
+    #[test]
+    fn a_reloaded_reader_picks_up_where_it_left_off() {
+        let e = engine("sched_cursor");
+        load(&e, "pinger", "PINGER");
+        load(&e, "listener", "LISTENER_V1");
+        step(&e, 1);
+        load(&e, "listener", "LISTENER_V2");
+        step(&e, 1);
+        // Cursors are per system: `early` and `mid` hadn't seen ping 1,
+        // `late` had, and doesn't see it again though it's still alive.
+        assert_eq!(since(&e, 3), ["v2 saw [1]", "v2 saw [1]", "v2 saw [2]"]);
+    }
+
+    #[test]
+    fn an_event_sent_between_frames_is_seen_at_the_start_of_the_next() {
+        let e = engine("sched_message_event");
+        load(&e, "pinger", "PINGER");
+        load(&e, "listener", "LISTENER_V1");
+        e.send("pinger", "ping 99").unwrap();
+        step(&e, 1);
+        assert_eq!(trace(&e), ["v1 saw [99]", "v1 saw [99]", "v1 saw [99, 1]"]);
     }
 }

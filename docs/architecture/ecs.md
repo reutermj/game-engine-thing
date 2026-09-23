@@ -139,9 +139,9 @@ it hands out are valid until the next structural change. The typed API makes
 that a borrow-checker rule: `insert`, `remove` and `despawn` take `&mut self`,
 and so do queries, for as long as their references are used.
 
-**Open question:** structural changes during a query (spawning from inside a
-loop). The borrow checker currently forbids them. A command buffer applied
-after the query is the usual answer.
+Structural changes during a query (spawning from inside a loop) go through
+commands, applied at the end of the phase: see
+[scheduling.md](scheduling.md#structural-changes-go-through-commands).
 
 **Open question:** archetypes. Sparse sets are the simplest store that works.
 Packing entities with the same components together makes multi-component

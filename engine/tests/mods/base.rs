@@ -1,7 +1,7 @@
 //! Builds of the mod `base`. v1 and v1b share an interface and differ only in
 //! their implementation; v2 changes the interface.
 
-use engine_api::{Cx, Mod, Status, export_mod};
+use engine_api::{Cx, Mod, Query, Systems, export_mod};
 
 #[cfg(feature = "v1")]
 const BUILD: &str = "v1";
@@ -15,17 +15,23 @@ engine_api::mod_state! {
     struct Base {}
 }
 
+impl Base {
+    fn touch(&mut self, _: &mut (), cx: &mut Cx, shared: Query<&base::Shared>) {
+        shared.iter(cx).count();
+    }
+}
+
 impl Mod for Base {
     type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("touch", Self::touch);
+    }
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!("base {BUILD}"));
     }
 
-    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
-        cx.world().query::<base::Shared>().count();
-        Status::OK
-    }
 }
 
 export_mod!(Base);

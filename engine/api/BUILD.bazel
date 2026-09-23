@@ -7,6 +7,7 @@ rust_library(
         "ecs.rs",
         "lib.rs",
         "service.rs",
+        "system.rs",
     ],
     crate_name = "engine_api",
     crate_root = "lib.rs",
