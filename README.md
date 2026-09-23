@@ -2,7 +2,9 @@
 
 A mod-first engine prototype. The engine binary is only a mod loader. Everything
 else, including the frame loop, is a hot-reloadable mod (a `cdylib`) that is reloaded
-cr.h-style: the loader owns each mod's state, so it survives code swaps.
+cr.h-style: the loader owns each mod's state, so it survives code swaps. Game data
+lives in an ECS world the loader also owns: systems are mods and get reloaded,
+components are data and don't.
 
 ## Try it
 
@@ -10,21 +12,27 @@ Nothing needs to be installed: `./bazel` fetches a pinned bazelisk, which
 fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 
 ```sh
-./bazel run //game                  # terminal 1: engine + bootstrap + counter
+./bazel run //game                  # terminal 1: engine + the mods in game/BUILD.bazel
+# edit mods/physics/lib.rs (say, add gravity), then:
+./bazel run //mods/physics          # terminal 2: rebuild and hot-reload; entities keep moving
 # edit mods/counter/lib.rs, then:
-./bazel run //mods/counter          # terminal 2: rebuild and hot-reload
+./bazel run //mods/counter          # per-mod state carries over too
 ./bazel run //mods/hello            # load a mod the running game didn't ship with
 ./bazel run //engine/modctl -- list # or: unload <name>, quit
 ```
 
 ## Layout
 
-- `engine/api`: the C ABI (`Mod` trait + `export_mod!`) shared by loader and mods
-- `engine/loader`: the engine binary (libloading, state ownership, control socket)
+- `engine/api`: the C ABI (`Mod` trait + `export_mod!`, and the ECS `World`) shared
+  by loader and mods
+- `engine/loader`: the engine binary (libloading, state ownership, the ECS store,
+  control socket)
 - `engine/control`: the line protocol spoken over the Unix socket
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it
 - `engine/defs.bzl`: `engine_mod` and `engine_game`
-- `mods/*`: `bootstrap` (frame loop), `counter` (reload demo), `hello` (live-load demo)
+- `mods/*`: `bootstrap` (frame loop), `counter` (per-mod state), `hello` (live
+  load), `spawner`/`physics`/`reporter` (ECS demo)
+- `game/components`: the components those mods share
 
 ## How reload works
 

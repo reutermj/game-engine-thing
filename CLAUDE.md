@@ -8,8 +8,8 @@ See [README.md](README.md) for the human-facing overview.
 A game engine prototype in which **everything is a mod**. The engine binary
 is a mod loader and nothing else; the frame loop, and eventually rendering,
 input and the game itself, are dynamic libraries it loads and hot-reloads,
-cr.h-style. The loader owns each mod's state, so a reload swaps code under
-live data.
+cr.h-style. The loader owns each mod's state, and the ECS world where game
+data lives, so a reload swaps code under live data.
 
 Three invariants, each of which a plausible change would break:
 
@@ -37,10 +37,17 @@ changing the ABI, the reload sequence or the Bazel rules.
   `#[repr(C)]`, and changing a type's shape means bumping `API_VERSION`.
   Also holds the safe `Mod` trait and `export_mod!`, so a mod never touches
   the raw ABI.
+  - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
+    API over it. Separate from `lib.rs` because it is a second contract: how
+    mods share data, not how a mod is loaded.
 - `engine/loader/` — the engine binary.
   - `engine.rs` — the mod list, state memory and host callbacks. The one
     file where mod code is called, so it owns the rule that mods run only
     while the list is shared-borrowed.
+  - `world.rs` — the ECS storage behind `WorldApi`. Untyped by design: it
+    holds only bytes and layouts, never code from a mod, so no reload can
+    leave it pointing into an unmapped library. See
+    [docs/architecture/ecs.md](docs/architecture/ecs.md).
   - `control_server.rs` — serves the control socket. Separate because it is
     polled between frames, and that timing is what makes a reload safe.
   - `main.rs` — manifest reading and the trampoline loop.
@@ -53,9 +60,14 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/defs.bzl` — `engine_mod` and `engine_game`. If a mod needs a new
   build setting (a link flag, a runtime linkage), it goes here, so every mod
   gets it.
-- `mods/` — `bootstrap` (owns the frame loop), `counter` (hot-reload demo),
-  `hello` (loaded live, not in the manifest).
+- `mods/` — `bootstrap` (owns the frame loop), `counter` (per-mod state
+  across reloads), `hello` (loaded live, not in the manifest), and the ECS
+  demo: `spawner` creates entities, `physics` is a stateless system,
+  `reporter` prints positions.
 - `game/` — the `engine_game` target listing the mods loaded at startup.
+  - `components/` — the game's components. A library, not a mod: each mod
+    that uses a component links this crate, and the world matches them by
+    `Component::NAME`.
 - `bazel` — runs a pinned, checksummed bazelisk so a fresh checkout needs no
   host Bazel. Always invoke Bazel as `./bazel`.
 - `docs/architecture/` — design docs, one per area. Living documents.

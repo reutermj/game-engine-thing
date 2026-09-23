@@ -16,8 +16,14 @@
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-/// Bumped whenever any type in this file changes shape.
-pub const API_VERSION: u32 = 1;
+mod ecs;
+pub use ecs::{
+    Column, Component, ComponentDesc, ComponentId, Entity, FieldDesc, FieldKind, FieldType, World,
+    WorldApi,
+};
+
+/// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
+pub const API_VERSION: u32 = 3;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -93,6 +99,8 @@ pub struct Host {
     /// Steps every loaded mod except the caller, in load order. Meant for the
     /// bootstrap mod, which owns the frame loop.
     pub step_mods: unsafe extern "C" fn(ctx: *const ModContext) -> Status,
+    /// The entity/component store every mod shares. See [`World`].
+    pub world: WorldApi,
 }
 
 /// Per-mod context. Lives in the loader and is stable across reloads.
@@ -103,6 +111,9 @@ pub struct ModContext {
     pub name_len: usize,
     /// 0 on first load, incremented on every reload.
     pub generation: u32,
+    /// Set by the loader on every load from one counter shared by all mods, so
+    /// the world can tell a newer build's component layout from a stale one.
+    pub loaded_at: u64,
     /// Loader-owned memory sized and aligned per the mod's `ModInfo`.
     pub state: *mut c_void,
     /// Set by the loader when `state` is zeroed memory rather than a live value.
@@ -137,6 +148,12 @@ impl Cx<'_> {
 
     pub fn step_mods(&self) -> Status {
         unsafe { ((*self.raw.host).step_mods)(self.raw) }
+    }
+
+    /// The shared world. Borrows the context mutably, so log after a query
+    /// rather than inside it.
+    pub fn world(&mut self) -> World<'_> {
+        World::new(self.raw)
     }
 }
 

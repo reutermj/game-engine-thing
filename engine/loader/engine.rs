@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 
 use engine_api::{
     API_VERSION, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, Status,
+    WorldApi,
 };
 use libloading::Library;
+
+use crate::world::{self, WorldStorage};
 
 pub struct Engine {
     host: Host,
@@ -22,6 +25,10 @@ pub struct Engine {
     stepping: Cell<bool>,
     staging_dir: PathBuf,
     staged_count: Cell<u64>,
+    /// Outlives every mod build; see `world.rs`.
+    world: RefCell<WorldStorage>,
+    /// Source of `ModContext::loaded_at`.
+    load_count: Cell<u64>,
 }
 
 struct Loaded {
@@ -53,12 +60,23 @@ impl Engine {
                 userdata: std::ptr::null_mut(),
                 log: host_log,
                 step_mods: host_step_mods,
+                world: WorldApi {
+                    register: world::register,
+                    spawn: world::spawn,
+                    despawn: world::despawn,
+                    insert: world::insert,
+                    remove: world::remove,
+                    get: world::get,
+                    column: world::column,
+                },
             },
             mods: RefCell::new(Vec::new()),
             bootstrap,
             stepping: Cell::new(false),
             staging_dir,
             staged_count: Cell::new(0),
+            world: RefCell::new(WorldStorage::default()),
+            load_count: Cell::new(0),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
         engine
@@ -93,6 +111,7 @@ impl Engine {
                 name: name.as_ptr(),
                 name_len: name.len(),
                 generation: 0,
+                loaded_at: self.next_load(),
                 state: alloc_state(state_layout),
                 state_fresh: true,
             }));
@@ -123,6 +142,7 @@ impl Engine {
                 m.call(Op::UNLOAD);
             }
             (*m.ctx).generation += 1;
+            (*m.ctx).loaded_at = self.next_load();
         }
         // Dropping the old library here unmaps the previous build.
         m.lib = lib;
@@ -147,6 +167,16 @@ impl Engine {
         Ok(format!("unloaded {name}"))
     }
 
+    pub fn world(&self) -> &RefCell<WorldStorage> {
+        &self.world
+    }
+
+    fn next_load(&self) -> u64 {
+        let n = self.load_count.get() + 1;
+        self.load_count.set(n);
+        n
+    }
+
     /// Closes every mod, most recently loaded first.
     pub fn shutdown(&self) {
         let mut mods = self.mods.borrow_mut();
@@ -168,6 +198,7 @@ impl Engine {
                 m.source.display()
             );
         }
+        out += &format!("\n{}", self.world.borrow().summary());
         out
     }
 
@@ -242,11 +273,11 @@ fn alloc_state(layout: Layout) -> *mut c_void {
     ptr as *mut c_void
 }
 
-unsafe fn engine_of<'a>(ctx: *const ModContext) -> &'a Engine {
+pub(crate) unsafe fn engine_of<'a>(ctx: *const ModContext) -> &'a Engine {
     unsafe { &*((*(*ctx).host).userdata as *const Engine) }
 }
 
-unsafe fn name_of<'a>(ctx: *const ModContext) -> &'a str {
+pub(crate) unsafe fn name_of<'a>(ctx: *const ModContext) -> &'a str {
     unsafe {
         let ctx = &*ctx;
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(ctx.name, ctx.name_len))

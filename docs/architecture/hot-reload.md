@@ -31,6 +31,10 @@ but its types don't depend on it.
 
 ## Who owns state
 
+There are two kinds. Data shared between mods, or that belongs to the game
+rather than to one mod, lives in the world as components (see
+[ecs.md](ecs.md)). This section is about the other kind: a mod's own state.
+
 The loader allocates each mod's state (zeroed, sized and aligned per
 `ModInfo`) and passes it in `ModContext`. The mod type *is* the state: the
 `Mod` value lives in that memory, initialized from `Default` the first time

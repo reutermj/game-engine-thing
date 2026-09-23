@@ -4,5 +4,10 @@ load("//engine:defs.bzl", "engine_game")
 engine_game(
     name = "game",
     bootstrap = "//mods/bootstrap",
-    mods = ["//mods/counter"],
+    mods = [
+        "//mods/counter",
+        "//mods/spawner",
+        "//mods/physics",
+        "//mods/reporter",
+    ],
 )

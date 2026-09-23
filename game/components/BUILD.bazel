@@ -1,0 +1,11 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+# Components shared by the game's mods. Linked into each mod that uses them;
+# the world matches them by `Component::NAME`, not by this crate.
+rust_library(
+    name = "components",
+    srcs = ["lib.rs"],
+    crate_name = "game_components",
+    visibility = ["//visibility:public"],
+    deps = ["//engine/api"],
+)

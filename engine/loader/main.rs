@@ -10,6 +10,7 @@
 
 mod control_server;
 mod engine;
+mod world;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

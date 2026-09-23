@@ -10,6 +10,8 @@ monolithic design doc.
   what the bootstrap mod does, and why Bazel is the reload trigger
 - [hot-reload.md](hot-reload.md) — the mod ABI, who owns state, the reload
   sequence, and the control protocol
+- [ecs.md](ecs.md) — the world every mod shares: why an ECS fits hot reload,
+  why the loader owns it, and what a component layout change does
 
 ## Conventions
 
