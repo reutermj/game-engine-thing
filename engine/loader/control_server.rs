@@ -1,23 +1,31 @@
-//! Serves the control socket. Polled from the main loop between frames, so
-//! requests are handled at a point where no mod code is running.
+//! The control socket's transport. A thread accepts each connection, reads
+//! its request, and queues it for the engine (`Engine::requests`), which
+//! serves it the next time the bootstrap pumps the loader: the point where
+//! builds can be swapped safely. The reply goes back on the same connection.
+//!
+//! The thread runs the loader's code, never a mod's, so no reload can unmap
+//! what it runs.
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use engine_control::Request;
-
-use crate::engine::Engine;
+use crate::engine::Pending;
 
 pub struct ControlServer {
-    listener: UnixListener,
     path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl ControlServer {
-    pub fn bind(path: &Path) -> Result<ControlServer, String> {
+    pub fn bind(path: &Path, requests: Sender<Pending>) -> Result<ControlServer, String> {
         if let Some(dir) = path.parent() {
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -37,82 +45,68 @@ impl ControlServer {
         }
         let listener =
             UnixListener::bind(path).map_err(|e| format!("binding {}: {e}", path.display()))?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        Ok(ControlServer { listener, path: path.into() })
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("control".into())
+            .spawn({
+                let stop = stop.clone();
+                move || accept(listener, requests, &stop)
+            })
+            .map_err(|e| format!("starting the control thread: {e}"))?;
+        Ok(ControlServer { path: path.into(), stop, thread: Some(thread) })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    /// Handles every pending request. Returns true if one asked the engine to quit.
-    pub fn poll(&self, engine: &Engine) -> bool {
-        let mut quit = false;
-        loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    if let Err(e) = serve(stream, engine, &mut quit) {
-                        eprintln!("[engine] control connection failed: {e}");
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return quit,
-                Err(e) => {
-                    eprintln!("[engine] accepting control connection: {e}");
-                    return quit;
-                }
-            }
-        }
-    }
 }
 
 impl Drop for ControlServer {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wakes the thread from `accept`, so it sees `stop` and returns.
+        let _ = UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
 
-fn serve(stream: UnixStream, engine: &Engine, quit: &mut bool) -> io::Result<()> {
-    stream.set_nonblocking(false)?;
+fn accept(listener: UnixListener, requests: Sender<Pending>, stop: &AtomicBool) {
+    for stream in listener.incoming() {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("[engine] accepting control connection: {e}");
+                continue;
+            }
+        };
+        let text = match read_request(&stream) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("[engine] control connection failed: {e}");
+                continue;
+            }
+        };
+        let reply = Box::new(move |reply: String| {
+            if let Err(e) = (&stream).write_all(reply.as_bytes()) {
+                eprintln!("[engine] control connection failed: {e}");
+            }
+        });
+        if requests.send(Pending { text, reply }).is_err() {
+            return; // The engine is gone.
+        }
+    }
+}
+
+fn read_request(stream: &UnixStream) -> io::Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     // Clients shut down their side after writing, so EOF ends the request.
     let mut text = String::new();
-    (&stream).read_to_string(&mut text)?;
-
-    let request = Request::parse(&text);
-    // Messages aren't logged, request or reply: a game played over messages
-    // would flood the log.
-    let quiet = matches!(request, Ok(Request::Send { .. }));
-    let result = request.and_then(|request| {
-        match &request {
-            Request::Batch { mods } => println!("[engine] batch of {} mod(s)", mods.len()),
-            Request::Send { .. } => {}
-            other => println!("[engine] {}", other.encode().trim_end()),
-        }
-        match request {
-            Request::Load { name, path } => engine.load(&name, &path),
-            Request::Batch { mods } => engine.load_batch(&mods),
-            Request::Unload { name } => engine.unload(&name),
-            Request::Send { name, message } => engine.send(&name, &message),
-            Request::List => Ok(engine.list()),
-            Request::Quit => {
-                *quit = true;
-                Ok("quitting".into())
-            }
-        }
-    });
-    let reply = match result {
-        Ok(msg) => {
-            if !quiet {
-                println!("[engine] {}", msg.lines().next().unwrap_or(""));
-            }
-            format!("ok {msg}\n")
-        }
-        Err(msg) => {
-            if !quiet {
-                eprintln!("[engine] error: {msg}");
-            }
-            format!("err {msg}\n")
-        }
-    };
-    (&stream).write_all(reply.as_bytes())
+    (&*stream).read_to_string(&mut text)?;
+    Ok(text)
 }

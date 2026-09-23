@@ -5,9 +5,14 @@
 //!
 //! Every frame is the same length, so a game is deterministic given its
 //! inputs and the frames between them.
+//!
+//! Like every bootstrap it's resident and runs the whole session in one
+//! `step`: here, blocked in the loader's pump until a request arrives.
 
 use clock::Clock;
-use engine_api::{Cx, Entity, Mod, Status, export_mod};
+use std::time::Duration;
+
+use engine_api::{Cx, Entity, Mod, Pumped, Status, export_mod};
 
 /// Each frame covers the same time as one of the real-time bootstrap's.
 const DT: f32 = 1.0 / 60.0;
@@ -30,19 +35,8 @@ impl Lockstep {
         world.insert(entity, Clock { frame: self.frame, dt: DT });
         cx.step_mods();
     }
-}
 
-impl Mod for Lockstep {
-    type Transient = ();
-
-    /// Called by the loader's loop between requests: nothing to do, and a
-    /// short sleep so an idle engine doesn't spin a core.
-    fn step(&mut self, _: &mut (), _cx: &mut Cx) -> Status {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        Status::OK
-    }
-
-    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn handle(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut words = message.split_whitespace();
         match (words.next(), words.next(), words.next()) {
             (Some("step"), n, None) => {
@@ -61,6 +55,30 @@ impl Mod for Lockstep {
             (Some("frame"), None, None) => Ok(format!("frame {}", self.frame)),
             _ => Err("usage: step [frames] | frame".into()),
         }
+    }
+}
+
+impl Mod for Lockstep {
+    type Transient = ();
+
+    /// The session: serve the loader's requests as they come, running frames
+    /// when a message asks for them.
+    fn step(&mut self, _: &mut (), cx: &mut Cx) -> Status {
+        loop {
+            match cx.pump_loader(Duration::from_secs(1), |cx, message| self.handle(cx, message)) {
+                Pumped::Continue => {}
+                Pumped::Quit => return Status::QUIT,
+                Pumped::Refused => {
+                    cx.log("the loader refused to pump; is this build resident?");
+                    return Status::ERROR;
+                }
+            }
+        }
+    }
+
+    /// A message delivered directly, as a test driving an `Engine` does.
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
+        self.handle(cx, message)
     }
 
     fn close(&mut self, _: &mut (), cx: &mut Cx) {

@@ -4,5 +4,6 @@ engine_mod(
     name = "lockstep",
     srcs = ["lib.rs"],
     mod_deps = ["//mods/clock"],
+    resident = True,
     visibility = ["//visibility:public"],
 )

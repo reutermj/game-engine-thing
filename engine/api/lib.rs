@@ -38,7 +38,7 @@ pub use ecs::{
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 9;
+pub const API_VERSION: u32 = 10;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -151,8 +151,29 @@ pub struct Host {
     ) -> CallStatus,
     /// Ends a call `begin_call` resolved; `panicked` marks the provider failed.
     pub end_call: unsafe extern "C" fn(ctx: *const ModContext, target: *const CallTarget, panicked: bool),
+    /// Lets the loader do its work: serve requests (loads, messages, quit)
+    /// and swap builds. Waits up to `timeout` for the first request. Messages
+    /// addressed to the caller go to `handler`, since the caller is running.
+    /// See [`Cx::pump_loader`].
+    pub pump: unsafe fn(
+        ctx: *const ModContext,
+        timeout: std::time::Duration,
+        handler: &mut dyn FnMut(&str) -> Result<String, String>,
+    ) -> Pumped,
     /// The entity/component store every mod shares. See [`World`].
     pub world: WorldApi,
+}
+
+/// What [`Cx::pump_loader`] did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pumped {
+    /// The loader did its work (possibly nothing); carry on.
+    Continue,
+    /// The engine was asked to quit: return `Status::QUIT` from the loop.
+    Quit,
+    /// Not a safe point: a mod that isn't resident is on the stack (only a
+    /// resident bootstrap may pump, and not from inside `step_mods`).
+    Refused,
 }
 
 /// Per-mod context. Lives in the loader and is stable across reloads.
@@ -205,6 +226,31 @@ impl Cx<'_> {
 
     pub fn step_mods(&self) -> Status {
         unsafe { ((*self.raw.host).step_mods)(self.raw) }
+    }
+
+    /// Hands the loader control: it serves pending requests (loads and
+    /// reloads, messages, quit) and swaps builds, then returns. Waits up to
+    /// `timeout` for a request if none is pending (`Duration::ZERO` doesn't
+    /// wait). The loader has no loop of its own: the bootstrap owns the frame
+    /// loop and calls this once per frame, or blocks in it while idle.
+    ///
+    /// Only a safe point if every mod on the stack is resident, since those
+    /// builds are never swapped; otherwise it's refused. Messages sent to the
+    /// caller while it pumps go to `handler`, called with a fresh `Cx`,
+    /// rather than to its `Mod::message`, which would re-enter it.
+    pub fn pump_loader(
+        &mut self,
+        timeout: std::time::Duration,
+        mut handler: impl FnMut(&mut Cx, &str) -> Result<String, String>,
+    ) -> Pumped {
+        let raw: *mut ModContext = self.raw;
+        let mut handler = |message: &str| {
+            // The caller's `Cx` is borrowed by this call; the handler gets
+            // its own, derived from it.
+            let mut cx = Cx { raw: unsafe { &mut *raw } };
+            handler(&mut cx, message)
+        };
+        unsafe { ((*self.raw.host).pump)(raw, timeout, &mut handler) }
     }
 
     fn reply(&self, text: &str) {

@@ -261,6 +261,12 @@ GameInfo = provider(
 def _engine_game_impl(ctx):
     bootstrap = ctx.attr.bootstrap[EngineModInfo]
 
+    # The bootstrap runs the frame loop, so it's on the stack whenever the
+    # loader swaps builds, and so can't be swapped itself.
+    if not bootstrap.resident:
+        fail("%s is %s's bootstrap, which runs the frame loop, so it must be resident: engine_mod(resident = True)" %
+             (_pretty(ctx.attr.bootstrap.label), _pretty(ctx.label)))
+
     # Dependencies first, and each mod once, including dependencies the game
     # didn't list.
     closure = depset(
@@ -331,7 +337,8 @@ def engine_game(name, bootstrap, mods = [], visibility = None):
 
     Args:
       name: `bazel run` on it starts the engine.
-      bootstrap: The mod that owns the frame loop and steps the others.
+      bootstrap: The mod that owns the frame loop and steps the others. Must
+        be resident.
       mods: Mods to load. Their `mod_deps` are included too, and every mod is
         loaded after the mods it depends on.
       visibility: Visibility of both targets.

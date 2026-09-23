@@ -1,8 +1,10 @@
 //! The set of loaded mods and the host services they call back into.
 //!
-//! Single-threaded. Mod code runs only while the mod list is shared-borrowed
-//! (stepping); loading and unloading take it mutably between steps, so a reload
-//! never swaps out code that is on the stack.
+//! Single-threaded. The loader has no loop of its own: the bootstrap mod,
+//! which is resident, runs the session in one `STEP` and hands the loader
+//! control each frame (`Cx::pump_loader`). Requests queue on a channel until
+//! then, and are served only when every mod on the stack is resident, so a
+//! reload never swaps out code that is running.
 
 use std::alloc::Layout;
 use std::cell::{Cell, OnceCell, RefCell};
@@ -10,11 +12,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 
 use engine_api::{
     API_VERSION, CallStatus, CallTarget, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL,
-    MainFn, ModContext, ModInfo, Op, Status, WorldApi,
+    MainFn, ModContext, ModInfo, Op, Pumped, Status, WorldApi,
 };
+use engine_control::Request;
 use libloading::Library;
 
 use crate::schema::{self, Field};
@@ -41,6 +46,18 @@ pub struct Engine {
     libs: RefCell<HashMap<usize, Rc<Library>>>,
     /// The rustc this engine was built with, which every mod must match.
     rustc: OnceCell<Option<String>>,
+    /// Control requests waiting for the next pump; see [`Engine::requests`].
+    requests: Sender<Pending>,
+    inbox: Receiver<Pending>,
+    /// Set once a `quit` request is served.
+    quitting: Cell<bool>,
+}
+
+/// A control request waiting for the engine, and how to answer it.
+pub struct Pending {
+    pub text: String,
+    /// Sends the reply (`ok ...` or `err ...`).
+    pub reply: Box<dyn FnOnce(String) + Send>,
 }
 
 struct Loaded {
@@ -117,6 +134,7 @@ impl Drop for Loaded {
 
 impl Engine {
     pub fn new(bootstrap: Option<String>, staging_dir: PathBuf) -> Box<Engine> {
+        let (requests, inbox) = std::sync::mpsc::channel();
         let mut engine = Box::new(Engine {
             host: Host {
                 userdata: std::ptr::null_mut(),
@@ -125,6 +143,7 @@ impl Engine {
                 reply: host_reply,
                 begin_call: host_begin_call,
                 end_call: host_end_call,
+                pump: host_pump,
                 world: WorldApi {
                     register: world::register,
                     spawn: world::spawn,
@@ -146,6 +165,9 @@ impl Engine {
             reply: RefCell::new(String::new()),
             libs: RefCell::new(HashMap::new()),
             rustc: OnceCell::new(),
+            requests,
+            inbox,
+            quitting: Cell::new(false),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
         engine
@@ -466,6 +488,9 @@ impl Engine {
         if m.failed.get() {
             return Err(format!("{name} has failed; reload it first"));
         }
+        if m.running.get() {
+            return Err(format!("{name} is running, so it can't take a message now"));
+        }
         self.reply.borrow_mut().clear();
         unsafe {
             (*m.ctx).message = message.as_ptr();
@@ -569,16 +594,131 @@ impl Engine {
         out
     }
 
-    /// Runs one step of the bootstrap mod, which drives everything else. `None`
-    /// when there's no runnable bootstrap mod yet.
-    pub fn step_bootstrap(&self) -> Option<Status> {
-        let mods = self.mods.borrow();
-        let bootstrap = self.bootstrap.as_deref()?;
-        let m = mods.iter().find(|m| &*m.name == bootstrap)?;
-        if m.failed.get() {
-            return None;
+    /// Where control requests go: the control socket's thread sends each one
+    /// here, and the engine serves it at the next pump.
+    pub fn requests(&self) -> Sender<Pending> {
+        self.requests.clone()
+    }
+
+    /// Runs the session: the bootstrap mod's one `STEP`, which loops until it
+    /// is asked to quit and returns `Status::QUIT`. Its build must be resident,
+    /// since it's on the stack whenever the loader swaps builds.
+    pub fn run_bootstrap(&self) -> Result<Status, String> {
+        let name = self.bootstrap.as_deref().ok_or("the game has no bootstrap mod")?;
+        // Copied out, so no borrow of the mod list is held while it runs:
+        // serving a load takes the list mutably.
+        let (ctx, main) = {
+            let mods = self.mods.borrow();
+            let m = mods.iter().find(|m| &*m.name == name).ok_or_else(|| format!("{name} is not loaded"))?;
+            if !m.resident {
+                return Err(format!(
+                    "{name} runs the frame loop, so it must be resident: engine_mod(resident = True)"
+                ));
+            }
+            if m.failed.get() {
+                return Err(format!("{name} has failed"));
+            }
+            m.running.set(true);
+            (m.ctx, m.main)
+        };
+        // The build is resident, so `main` stays mapped for the whole call.
+        let status = unsafe { main(ctx, Op::STEP) };
+        if let Some(m) = self.mods.borrow().iter().find(|m| m.ctx == ctx) {
+            m.running.set(false);
+            if status == Status::ERROR {
+                m.failed.set(true);
+                eprintln!("[engine] {name} failed while running the frame loop");
+            }
         }
-        Some(m.call(Op::STEP))
+        Ok(status)
+    }
+
+    /// Steps every mod once, in load order: a frame with no bootstrap, for
+    /// tests and tools that drive an `Engine` directly.
+    pub fn step_all(&self) {
+        let mods = self.mods.borrow();
+        for m in mods.iter().filter(|m| !m.failed.get()) {
+            m.call(Op::STEP);
+        }
+    }
+
+    /// Serves control requests, as a bootstrap's `Cx::pump_loader` does, for
+    /// an engine with no bootstrap. Must not be called while any mod runs.
+    pub fn pump(&self, timeout: Duration) -> Pumped {
+        self.serve(None, timeout, &mut |_| Err("no mod is pumping".into()))
+    }
+
+    /// Whether the loader may swap builds with `caller` pumping: nothing is
+    /// on the stack but resident mods, and no load or delivery is under way.
+    fn safe_point(&self, caller: *const ModContext) -> bool {
+        if self.stepping.get() {
+            return false;
+        }
+        let Ok(mods) = self.mods.try_borrow_mut() else { return false };
+        mods.iter().any(|m| std::ptr::eq(m.ctx, caller) && m.resident)
+            && mods.iter().all(|m| m.resident || !m.running.get())
+    }
+
+    /// Serves every queued request, waiting up to `timeout` for the first.
+    /// Messages for `caller`, which is running, go to `handler`.
+    fn serve(
+        &self,
+        caller: Option<&str>,
+        timeout: Duration,
+        handler: &mut dyn FnMut(&str) -> Result<String, String>,
+    ) -> Pumped {
+        let first = if timeout.is_zero() { self.inbox.try_recv().ok() } else { self.inbox.recv_timeout(timeout).ok() };
+        for pending in first.into_iter().chain(std::iter::from_fn(|| self.inbox.try_recv().ok())) {
+            let reply = self.handle(caller, &pending.text, handler);
+            (pending.reply)(reply);
+        }
+        if self.quitting.get() { Pumped::Quit } else { Pumped::Continue }
+    }
+
+    /// Handles one control request, returning the reply to send.
+    fn handle(
+        &self,
+        caller: Option<&str>,
+        text: &str,
+        handler: &mut dyn FnMut(&str) -> Result<String, String>,
+    ) -> String {
+        let request = Request::parse(text);
+        // Messages aren't logged, request or reply: a game played over
+        // messages would flood the log.
+        let quiet = matches!(request, Ok(Request::Send { .. }));
+        let result = request.and_then(|request| {
+            match &request {
+                Request::Batch { mods } => println!("[engine] batch of {} mod(s)", mods.len()),
+                Request::Send { .. } => {}
+                other => println!("[engine] {}", other.encode().trim_end()),
+            }
+            match request {
+                Request::Load { name, path } => self.load(&name, &path),
+                Request::Batch { mods } => self.load_batch(&mods),
+                Request::Unload { name } => self.unload(&name),
+                Request::Send { name, message } if caller == Some(name.as_str()) => handler(&message),
+                Request::Send { name, message } => self.send(&name, &message),
+                Request::List => Ok(self.list()),
+                Request::Quit => {
+                    self.quitting.set(true);
+                    Ok("quitting".into())
+                }
+            }
+        });
+        match result {
+            Ok(msg) => {
+                if !quiet {
+                    println!("[engine] {}", msg.lines().next().unwrap_or(""));
+                }
+                format!("ok {msg}\n")
+            }
+            Err(msg) => {
+                if !quiet {
+                    eprintln!("[engine] error: {msg}");
+                }
+                format!("err {msg}\n")
+            }
+        }
     }
 
     /// Copies the library to a unique file before opening it. `dlopen` hands back
@@ -892,6 +1032,18 @@ unsafe extern "C" fn host_end_call(ctx: *const ModContext, target: *const CallTa
             );
         }
     }
+}
+
+unsafe fn host_pump(
+    ctx: *const ModContext,
+    timeout: Duration,
+    handler: &mut dyn FnMut(&str) -> Result<String, String>,
+) -> Pumped {
+    let engine = unsafe { engine_of(ctx) };
+    if !engine.safe_point(ctx) {
+        return Pumped::Refused;
+    }
+    engine.serve(Some(unsafe { name_of(ctx) }), timeout, handler)
 }
 
 unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {

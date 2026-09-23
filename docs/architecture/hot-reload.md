@@ -113,6 +113,12 @@ refuses one built some other way. Where a resident layer needs something
 from gameplay, gameplay leaves it in the world (or, later, as an event:
 get-7yi) and the resident layer reads it.
 
+Every bootstrap is resident: it runs the frame loop, so it's on the stack
+whenever the loader swaps builds. `engine_game` fails the build for a
+bootstrap that isn't, and so does `Engine::run_bootstrap` for one loaded
+otherwise. The `clock` both bootstraps publish is resident because they
+depend on it.
+
 A resident mod is otherwise an ordinary mod: its state follows the same rules,
 it provides and calls services, and `list` marks it `[resident]`.
 
@@ -171,10 +177,15 @@ library open.
 
 ### Why reloads are safe to apply between frames
 
-Mod code runs only while the loader holds a shared borrow of the mod list
-(stepping). Loading and unloading take it mutably, and the control socket is
-polled only between bootstrap steps, so no request ever swaps code that is on
-the stack. A mod that calls `step_mods` while the list is being modified gets
+Requests are served only when the bootstrap pumps the loader
+(`cx.pump_loader`), and the loader accepts a pump only at a safe point: the
+mods running are all resident, and no step, load or message delivery is
+under way (the mod list isn't borrowed). Resident builds are never swapped,
+so no request ever swaps code that is on the stack. Anywhere else the pump
+answers `Pumped::Refused`. See
+[overview.md](overview.md#who-runs-the-loop).
+
+A mod that calls `step_mods` while the list is being modified gets
 `Status::ERROR` rather than a panic, since a panic inside a host callback
 would unwind through `extern "C"`.
 

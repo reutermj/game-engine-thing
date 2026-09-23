@@ -1,8 +1,9 @@
 # game-engine-thing
 
 A mod-first engine prototype. The engine binary is only a mod loader. Everything
-else, including the frame loop, is a hot-reloadable mod (a `cdylib`) that is reloaded
-cr.h-style: the loader owns each mod's state, so it survives code swaps. Game data
+else, including the frame loop, is a mod (a `cdylib`), hot-reloaded cr.h-style: the
+loader owns each mod's state, so it survives code swaps. The mod running the frame
+loop is resident (loaded once) and hands the loader control between frames. Game data
 lives in an ECS world the loader also owns: systems are mods and get reloaded,
 components are data and don't.
 
@@ -62,7 +63,7 @@ level is `platformer/level/map.txt`: edit it and
 
 1. `./bazel run //mods/foo` builds `libfoo.so`, then runs `modctl`, which sends
    `load foo <path>` to `$XDG_RUNTIME_DIR/game-engine-thing/control.sock`.
-2. Between frames, the engine copies the `.so` to a unique path, `dlopen`s it and
+2. Between frames, when the bootstrap mod hands it control, the engine copies the `.so` to a unique path, `dlopen`s it and
    checks its `ModInfo`. A bad build leaves the old code running.
 3. The old build gets `UNLOAD`, the new one gets `LOAD` with the same state
    memory, migrated field by field if its layout changed. If its version changed,

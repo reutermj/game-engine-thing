@@ -1,17 +1,16 @@
 //! The engine binary: a mod loader and nothing else.
 //!
-//! It loads the mods named in a manifest, then repeatedly steps the bootstrap
-//! mod, which owns the frame loop and steps everything else. Between steps it
-//! serves the control socket, which is how `bazel run //mods/<name>` loads or
-//! hot-reloads a mod.
-//!
-//! The loop lives here rather than inside the bootstrap mod so that the
-//! bootstrap mod can be reloaded too: code can't be swapped while it's on the stack.
+//! It loads the mods named in a manifest, then hands the thread to the
+//! bootstrap mod, which owns the frame loop: it steps the other mods, and
+//! once a frame pumps the loader, which serves the control socket (how
+//! `bazel run //mods/<name>` loads or hot-reloads a mod) and swaps builds.
+//! The loader has no loop of its own. The bootstrap is resident, so it is
+//! never swapped out from under itself.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine_api::Status;
+use engine_api::{Pumped, Status};
 use engine_control::Manifest;
 use engine_loader::control_server::ControlServer;
 use engine_loader::engine::Engine;
@@ -30,7 +29,9 @@ fn main() -> ExitCode {
         Err(_) => Manifest { reload: None, bootstrap: None, mods: Vec::new() },
     };
 
-    let server = match ControlServer::bind(&engine_control::socket_path()) {
+    let has_bootstrap = manifest.bootstrap.is_some();
+    let engine = Engine::new(manifest.bootstrap, engine_control::runtime_dir().join("libs"));
+    let server = match ControlServer::bind(&engine_control::socket_path(), engine.requests()) {
         Ok(server) => server,
         Err(e) => {
             eprintln!("[engine] {e}");
@@ -39,7 +40,6 @@ fn main() -> ExitCode {
     };
     println!("[engine] control socket at {}", server.path().display());
 
-    let engine = Engine::new(manifest.bootstrap, engine_control::runtime_dir().join("libs"));
     engine.set_reload_hint(manifest.reload);
     // One batch, so the game starts with every mod or not at all.
     if !manifest.mods.is_empty() {
@@ -52,19 +52,23 @@ fn main() -> ExitCode {
         }
     }
 
-    loop {
-        if server.poll(&engine) {
-            break;
+    let code = if has_bootstrap {
+        match engine.run_bootstrap() {
+            Ok(Status::QUIT | Status::OK) => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("[engine] error: {e}");
+                ExitCode::FAILURE
+            }
         }
-        match engine.step_bootstrap() {
-            Some(Status::QUIT) => break,
-            Some(_) => {}
-            // Nothing to drive frames yet; idle until a request arrives.
-            None => std::thread::sleep(Duration::from_millis(16)),
-        }
-    }
+    } else {
+        // Nothing runs frames, so only requests need serving.
+        while engine.pump(Duration::from_secs(1)) != Pumped::Quit {}
+        ExitCode::SUCCESS
+    };
 
+    drop(server);
     engine.shutdown();
     println!("[engine] shut down");
-    ExitCode::SUCCESS
+    code
 }

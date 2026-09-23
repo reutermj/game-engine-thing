@@ -12,10 +12,12 @@ rust_library(
     deps = ["//engine/api"],
 )
 
+# A bootstrap shaped like a windowing library's event loop. See mods/fake_os.rs.
 engine_mod(
-    name = "driver",
-    srcs = ["mods/driver.rs"],
-    crate_root = "mods/driver.rs",
+    name = "fake_os",
+    srcs = ["mods/fake_os.rs"],
+    crate_root = "mods/fake_os.rs",
+    resident = True,
 )
 
 # Builds of the one mod `counter`. See mods/counter.rs.
@@ -204,7 +206,7 @@ TEST_MODS = {
     "BASE_V2": ":base_v2",
     "USER_V1": ":user_v1",
     "USER_V2": ":user_v2",
-    "DRIVER": ":driver",
+    "FAKE_OS": ":fake_os",
     "MOVER_V1": ":mover_v1",
     "MOVER_V2": ":mover_v2",
     "NO_ENTRY": ":no_entry",
@@ -222,6 +224,7 @@ rust_test(
     deps = [
         ":probe",
         "//engine/api",
+        "//engine/control",
         "//engine/loader",
         "@rules_rust//rust/runfiles",
     ],

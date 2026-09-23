@@ -9,7 +9,6 @@
 
 use std::path::PathBuf;
 
-use engine_api::Status;
 use engine_loader::engine::Engine;
 use runfiles::Runfiles;
 use test_probe::Probe;
@@ -23,14 +22,16 @@ fn lib(var: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{rlocation} is not in runfiles"))
 }
 
-/// An engine driven by the pacing-free `driver` mod. Each test stages into its
-/// own directory: the test harness runs tests on parallel threads, and staged
-/// names only differ per engine, not per process.
+/// An engine with no bootstrap: tests step it frame by frame themselves.
+/// Each test stages into its own directory: the test harness runs tests on
+/// parallel threads, and staged names only differ per engine, not per process.
 fn engine(test: &str) -> Box<Engine> {
+    engine_with(test, None)
+}
+
+fn engine_with(test: &str, bootstrap: Option<&str>) -> Box<Engine> {
     let dir = PathBuf::from(std::env::var("TEST_TMPDIR").expect("TEST_TMPDIR")).join(test);
-    let engine = Engine::new(Some("driver".into()), dir);
-    load(&engine, "driver", "DRIVER");
-    engine
+    Engine::new(bootstrap.map(Into::into), dir)
 }
 
 fn load(engine: &Engine, name: &str, var: &str) -> String {
@@ -41,7 +42,7 @@ fn load(engine: &Engine, name: &str, var: &str) -> String {
 
 fn step(engine: &Engine, frames: usize) {
     for _ in 0..frames {
-        assert_eq!(engine.step_bootstrap(), Some(Status::OK), "{}", engine.list());
+        engine.step_all();
     }
 }
 
@@ -325,14 +326,15 @@ mod messages {
     #[test]
     fn a_mod_without_a_handler_or_not_loaded_refuses() {
         let e = engine("no_handler");
-        assert_eq!(e.send("driver", "hi").unwrap_err(), "driver doesn't take messages");
+        load(&e, "clock", "CLOCK");
+        assert_eq!(e.send("clock", "hi").unwrap_err(), "clock doesn't take messages");
         assert_eq!(e.send("nobody", "hi").unwrap_err(), "nobody is not loaded");
     }
 
     #[test]
     fn a_message_handler_can_step_the_other_mods() {
-        // What the lockstep bootstrap does. The driver can't take messages,
-        // so this uses the real one.
+        // What the lockstep bootstrap does, delivered directly, as a test
+        // driving an Engine does, rather than through its pump.
         let e = engine("handler_steps");
         load(&e, "counter", "COUNTER_V1");
         load(&e, "clock", "CLOCK");
@@ -668,5 +670,133 @@ mod resident {
         let e = engine("resident_on_resident");
         load(&e, "base", "BASE_RESIDENT");
         assert_eq!(load(&e, "user", "USER_RESIDENT"), "loaded user");
+    }
+}
+
+/// The bootstrap owning the loop (docs/architecture/overview.md, "Who runs
+/// the loop"): the loader serves requests only when the bootstrap pumps it,
+/// and only when nothing but resident mods is running.
+mod pumping {
+    use std::sync::mpsc::{self, Sender};
+    use std::time::{Duration, Instant};
+
+    use engine_api::Status;
+    use engine_control::Request;
+    use engine_loader::engine::Pending;
+
+    use super::{engine, engine_with, lib, load, probe};
+
+    /// Sends `request` as the control socket's thread would, and waits for the reply.
+    fn request(requests: &Sender<Pending>, request: Request) -> String {
+        let (tx, rx) = mpsc::channel();
+        let reply = Box::new(move |reply: String| {
+            let _ = tx.send(reply);
+        });
+        requests.send(Pending { text: request.encode(), reply }).expect("the engine is gone");
+        rx.recv_timeout(Duration::from_secs(10)).expect("no reply: is the bootstrap pumping?").trim_end().to_string()
+    }
+
+    fn send(requests: &Sender<Pending>, name: &str, message: &str) -> String {
+        request(requests, Request::Send { name: name.into(), message: message.into() })
+    }
+
+    /// Asks until the reply is `want`, as frames go by.
+    fn until(requests: &Sender<Pending>, name: &str, message: &str, want: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let reply = send(requests, name, message);
+            if want(&reply) || Instant::now() > deadline {
+                return reply;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn an_event_loop_bootstrap_serves_requests_between_frames() {
+        let e = engine_with("event_loop", Some("fake_os"));
+        load(&e, "fake_os", "FAKE_OS");
+        let requests = e.requests();
+        let (v1, v2, fake_os) = (lib("COUNTER_V1"), lib("COUNTER_V2"), lib("FAKE_OS"));
+
+        // Plays the other end of the control socket while this thread runs
+        // the session. Whatever happens, it ends with a quit, so a failing
+        // check can't leave the session running forever.
+        let client = std::thread::spawn(move || {
+            let checks = std::panic::catch_unwind(|| {
+                let load = |name: &str, path: &std::path::Path| {
+                    request(&requests, Request::Load { name: name.into(), path: path.into() })
+                };
+                assert_eq!(send(&requests, "fake_os", "size"), "ok 640x480");
+                assert_eq!(load("counter", &v1), "ok loaded counter");
+                let total = until(&requests, "counter", "get", |r| r != "ok 0");
+                assert!(total.starts_with("ok "), "{total}");
+
+                // A reload, applied between two frames while the loop runs.
+                assert_eq!(load("counter", &v2), "ok reloaded counter (generation 1)");
+                let total = |r: &str| r.strip_prefix("ok ").and_then(|n| n.parse::<u64>().ok());
+                let after = until(&requests, "counter", "get", |r| total(r).is_some_and(|n| n >= 100));
+                assert!(total(&after).is_some_and(|n| n >= 100), "v2 never stepped: {after}");
+
+                // The bootstrap itself is resident: never swapped or unloaded.
+                assert_eq!(load("fake_os", &fake_os), "ok fake_os unchanged");
+                assert_eq!(
+                    request(&requests, Request::Unload { name: "fake_os".into() }),
+                    "err fake_os is resident: it unloads when the engine exits"
+                );
+
+                // Messages to the running bootstrap go to its pump handler,
+                // and can feed its event loop.
+                assert_eq!(send(&requests, "fake_os", "key a"), "ok queued");
+                assert_eq!(send(&requests, "fake_os", "key b"), "ok queued");
+                assert_eq!(until(&requests, "fake_os", "keys", |r| r == "ok ab"), "ok ab");
+                assert_eq!(send(&requests, "counter", "pump"), "ok Refused");
+            });
+            assert_eq!(request(&requests, Request::Quit), "ok quitting");
+            if let Err(panic) = checks {
+                std::panic::resume_unwind(panic);
+            }
+        });
+
+        assert_eq!(e.run_bootstrap(), Ok(Status::QUIT));
+        client.join().expect("the client's checks failed");
+        assert_eq!(probe(&e).build, 2, "the reload took effect while the loop ran");
+        assert!(probe(&e).value > 100, "{:?}", probe(&e));
+    }
+
+    #[test]
+    fn a_mod_that_isnt_resident_cant_pump() {
+        let e = engine("pump_not_resident");
+        load(&e, "counter", "COUNTER_V1");
+        assert_eq!(e.send("counter", "pump").as_deref(), Ok("Refused"));
+    }
+
+    #[test]
+    fn a_resident_mod_can_pump_only_at_the_top_of_the_stack() {
+        // Delivering a message holds the mod list, so this isn't a safe point.
+        let e = engine("pump_during_delivery");
+        load(&e, "fake_os", "FAKE_OS");
+        assert_eq!(e.send("fake_os", "pump").as_deref(), Ok("Refused"));
+    }
+
+    #[test]
+    fn the_bootstrap_must_be_resident() {
+        let e = engine_with("bootstrap_not_resident", Some("counter"));
+        load(&e, "counter", "COUNTER_V1");
+        let err = e.run_bootstrap().unwrap_err();
+        assert!(err.contains("must be resident"), "{err}");
+    }
+
+    #[test]
+    fn requests_wait_for_the_next_pump() {
+        // With no bootstrap, `Engine::pump` stands in for one.
+        let e = engine("pump_queue");
+        let requests = e.requests();
+        let (tx, rx) = mpsc::channel();
+        let reply = Box::new(move |reply: String| tx.send(reply).unwrap());
+        requests.send(Pending { text: Request::List.encode(), reply }).unwrap();
+        assert!(rx.try_recv().is_err(), "served before a pump");
+        assert_eq!(e.pump(Duration::ZERO), engine_api::Pumped::Continue);
+        assert!(rx.try_recv().unwrap().starts_with("ok 0 mod(s) loaded"));
     }
 }

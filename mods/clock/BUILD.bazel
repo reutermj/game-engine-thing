@@ -1,9 +1,11 @@
 load("//engine:defs.bzl", "engine_mod")
 
-# Declares the Clock that bootstrap mods publish. Runs nothing.
+# Declares the Clock that bootstrap mods publish. Runs nothing. Resident,
+# because the bootstraps are and depend on it.
 engine_mod(
     name = "clock",
     srcs = ["lib.rs"],
     interface = ["components.rs"],
+    resident = True,
     visibility = ["//visibility:public"],
 )

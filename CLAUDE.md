@@ -15,8 +15,10 @@ Three invariants, each of which a plausible change would break:
 
 - **The loader stays bare.** A feature that "just needs a little help from
   the loader" is a mod, or a host service in `engine/api` that any mod can
-  use. The loader's own loop exists only so the bootstrap mod can be
-  reloaded: code on the stack can't be swapped.
+  use. It doesn't even have a loop: the resident bootstrap mod runs the
+  session and hands the loader control once a frame (`pump_loader`). Code on
+  the stack can't be swapped, so the loader only swaps builds when every mod
+  running is resident.
 - **Bazel is the build.** Everything is built by Bazel with hermetic
   toolchains (`rules_rs` for Rust, `llvm` for C/C++ and linking). There is
   no Cargo build; the `Cargo.toml` files only declare crates.io deps for
@@ -51,15 +53,18 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/loader/` — the engine: a library (`lib.rs`) with everything but
   the manifest and the loop, so tests can drive an `Engine` directly, and
   the binary (`main.rs`) around it.
-  - `engine.rs` — the mod list, state memory and host callbacks. The one
-    file where mod code is called, so it owns the rule that mods run only
-    while the list is shared-borrowed.
+  - `engine.rs` — the mod list, state memory, host callbacks and request
+    handling. The one file where mod code is called, so it owns the rules
+    that mods run only while the list is shared-borrowed and that requests
+    are served only at a safe point (`safe_point`).
   - `world.rs` — the ECS storage behind `WorldApi`. Untyped by design: it
     holds only bytes and layouts, never code from a mod, so no reload can
     leave it pointing into an unmapped library. See
     [docs/architecture/ecs.md](docs/architecture/ecs.md).
-  - `control_server.rs` — serves the control socket. Separate because it is
-    polled between frames, and that timing is what makes a reload safe.
+  - `control_server.rs` — the control socket's thread, which reads requests
+    and queues them for the engine. Separate because it's the one other
+    thread in the loader, and must never run mod code: requests wait for the
+    bootstrap's pump, and that timing is what makes a reload safe.
 - `engine/control/` — the control protocol and socket path. Its own crate
   because both the engine and `modctl` speak it; neither should import the
   other.
@@ -75,8 +80,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   compiled against. See
   [docs/architecture/mod-deps.md](docs/architecture/mod-deps.md).
 - `mods/` — `bootstrap` (owns the frame loop in real time), `lockstep` (a
-  bootstrap that runs frames only when sent `step N`), `clock` (declares the
-  `Clock` both bootstraps publish), `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
+  bootstrap that runs frames only when sent `step N`), both resident, `clock`
+  (declares the `Clock` both bootstraps publish), `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
   demo: `transform` declares `Position` and runs nothing, `physics` declares
   `Velocity` and moves things, `spawner` creates entities, `reporter` prints
   positions. Their `mod_deps` are the dependency example.
