@@ -17,6 +17,8 @@ pub struct ModDecls<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Plan {
     pub phases: Vec<PlannedPhase>,
+    /// By id: the phase and position of each system.
+    index: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,6 +29,9 @@ pub struct PlannedPhase {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Planned {
+    /// Its position in the frame, counting across phases: what a scheduler
+    /// names it by.
+    pub id: usize,
     pub module: String,
     /// Index into the mod's systems.
     pub index: usize,
@@ -35,6 +40,11 @@ pub struct Planned {
 }
 
 impl Plan {
+    pub fn system(&self, id: usize) -> Option<&Planned> {
+        let &(phase, at) = self.index.get(id)?;
+        Some(&self.phases[phase].systems[at])
+    }
+
     /// One line per phase with systems, for `modctl schedule`.
     pub fn describe(&self) -> String {
         let lines: Vec<String> = self
@@ -73,7 +83,7 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
             if nodes.iter().any(|n: &Node| n.planned.name == name) {
                 return Err(format!("{} declares the system {name} twice", m.name));
             }
-            nodes.push(Node { planned: Planned { module: m.name.into(), index, name }, phase: rank, desc });
+            nodes.push(Node { planned: Planned { id: 0, module: m.name.into(), index, name }, phase: rank, desc });
         }
     }
     let by_name: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, n)| (n.planned.name.as_str(), i)).collect();
@@ -112,7 +122,14 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
     for i in order {
         planned[nodes[i].phase].systems.push(nodes[i].planned.clone());
     }
-    Ok(Plan { phases: planned })
+    let mut index = Vec::new();
+    for (p, phase) in planned.iter_mut().enumerate() {
+        for (at, system) in phase.systems.iter_mut().enumerate() {
+            system.id = index.len();
+            index.push((p, at));
+        }
+    }
+    Ok(Plan { phases: planned, index })
 }
 
 /// The engine's phases and every declared one, in order.
@@ -280,6 +297,15 @@ mod tests {
     fn phases_in_a_cycle_are_refused() {
         let err = order(&[("a", vec![], vec![phase("a::p", &[phase::RENDER], &[phase::INPUT])])]).unwrap_err();
         assert!(err.starts_with("the phases "), "{err}");
+    }
+
+    #[test]
+    fn systems_are_numbered_in_frame_order() {
+        let systems = [system("late", phase::LATE, &[], &[]), system("early", phase::INPUT, &[], &[])];
+        let plan = plan(&[ModDecls { name: "m", systems: &systems, phases: &[] }]).unwrap();
+        assert_eq!(plan.system(0).map(|s| s.name.as_str()), Some("m::early"));
+        assert_eq!(plan.system(1).map(|s| s.name.as_str()), Some("m::late"));
+        assert_eq!(plan.system(2), None);
     }
 
     #[test]

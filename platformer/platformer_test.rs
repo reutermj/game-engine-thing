@@ -131,3 +131,9 @@ fn a_code_only_reload_of_the_level_keeps_it_as_played() {
     assert!(state(&e).contains("coins 1 (1 left)"), "the collected coin must stay collected:\n{}", state(&e));
     assert_eq!(player(&e, "x"), x, "{before}\n---\n{}", state(&e));
 }
+
+#[test]
+fn input_comes_before_the_rules_and_the_walkers_after() {
+    let e = game("schedule");
+    assert_eq!(e.schedule().unwrap(), "input: platformer::steer\nsimulate: platformer::play, walkers::walk");
+}

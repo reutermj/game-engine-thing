@@ -24,6 +24,7 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod ecs;
+pub mod scheduler;
 mod service;
 mod system;
 pub use system::{
@@ -45,7 +46,7 @@ pub use ecs::{
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 12;
+pub const API_VERSION: u32 = 13;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -148,8 +149,9 @@ pub struct ModInfo {
 pub struct Host {
     pub userdata: *mut c_void,
     pub log: unsafe extern "C" fn(ctx: *const ModContext, msg: *const u8, len: usize),
-    /// Steps every loaded mod except the caller, in load order. Meant for the
-    /// bootstrap mod, which owns the frame loop.
+    /// Runs one frame with the loader's own sequential scheduler: every
+    /// system in plan order, but those of mods already running. What
+    /// `Cx::run_frame` falls back to when no `Scheduler` is loaded.
     pub step_mods: unsafe extern "C" fn(ctx: *const ModContext) -> Status,
     /// Appends to the reply to the message being handled.
     pub reply: unsafe extern "C" fn(ctx: *const ModContext, msg: *const u8, len: usize),
@@ -174,6 +176,12 @@ pub struct Host {
         timeout: std::time::Duration,
         handler: &mut dyn FnMut(&str) -> Result<String, String>,
     ) -> Pumped,
+    /// A scheduler's frame primitives; see [`scheduler`]. `begin_frame`
+    /// returns the plan, or `None` if a frame is already open.
+    pub begin_frame: unsafe fn(ctx: *const ModContext) -> Option<scheduler::FramePlan>,
+    pub run_system: unsafe fn(ctx: *const ModContext, system: usize) -> scheduler::Ran,
+    pub end_phase: unsafe fn(ctx: *const ModContext),
+    pub end_frame: unsafe fn(ctx: *const ModContext),
     /// The entity/component store every mod shares. See [`World`].
     pub world: WorldApi,
 }
@@ -238,6 +246,8 @@ impl Cx<'_> {
         unsafe { ((*self.raw.host).log)(self.raw, msg.as_ptr(), msg.len()) }
     }
 
+    /// One frame on the loader's own sequential scheduler. Bootstraps call
+    /// [`Cx::run_frame`], which prefers a loaded `Scheduler`.
     pub fn step_mods(&self) -> Status {
         unsafe { ((*self.raw.host).step_mods)(self.raw) }
     }

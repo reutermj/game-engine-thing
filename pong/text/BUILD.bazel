@@ -4,7 +4,7 @@ engine_mod(
     name = "text",
     srcs = ["lib.rs"],
     mod_deps = [
-        "//mods/clock",
+        "//engine/std/clock",
         "//pong/core",
     ],
     mod_name = "pong_text",

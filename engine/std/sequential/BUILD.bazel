@@ -1,0 +1,10 @@
+load("//engine:defs.bzl", "engine_mod")
+
+# The default scheduler: every system in plan order, one at a time. Not
+# resident: it owns no threads and isn't running when the loader swaps
+# builds, so scheduling policy can be hot-reloaded like gameplay.
+engine_mod(
+    name = "sequential",
+    srcs = ["lib.rs"],
+    visibility = ["//visibility:public"],
+)

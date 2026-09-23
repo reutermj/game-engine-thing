@@ -6,6 +6,7 @@ rust_library(
     srcs = [
         "ecs.rs",
         "lib.rs",
+        "scheduler.rs",
         "service.rs",
         "system.rs",
     ],

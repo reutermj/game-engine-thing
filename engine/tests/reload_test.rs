@@ -951,3 +951,91 @@ mod scheduling {
         assert_eq!(trace(&e), ["v1 saw [99]", "v1 saw [99]", "v1 saw [99, 1]"]);
     }
 }
+
+/// Scheduling policy as a mod: docs/architecture/scheduling.md, "Who schedules".
+mod schedulers {
+    use test_probe::Trace;
+
+    use super::{engine_with, load};
+
+    fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
+        let world = e.world().borrow();
+        world.values::<Trace>().unwrap().into_iter().flat_map(|(_, t)| t.lines).collect()
+    }
+
+    /// The tracer mods under the lockstep bootstrap, whose `step` runs a
+    /// frame through `cx.run_frame()`, as every bootstrap does.
+    fn game(test: &str, scheduler: Option<&str>) -> Box<engine_loader::engine::Engine> {
+        let e = engine_with(test, Some("lockstep"));
+        load(&e, "clock", "CLOCK");
+        load(&e, "lockstep", "LOCKSTEP");
+        if let Some(var) = scheduler {
+            load(&e, "scheduler", var);
+        }
+        load(&e, "a", "TRACER_A");
+        load(&e, "b", "TRACER_B");
+        e
+    }
+
+    fn frame(e: &engine_loader::engine::Engine) {
+        e.send("lockstep", "step").unwrap();
+    }
+
+    const FRAME: [&str; 5] = ["a::input", "b::update", "a::update", "b::simulate", "a::late"];
+
+    #[test]
+    fn a_scheduler_mod_runs_the_frame_the_loader_would() {
+        let e = game("sched_mod", Some("SCHEDULER_V1"));
+        frame(&e);
+        let mut expected = vec!["scheduled by v1".to_string()];
+        expected.extend(FRAME.map(String::from));
+        assert_eq!(trace(&e), expected);
+
+        let without = game("sched_loader", None);
+        frame(&without);
+        assert_eq!(trace(&without), FRAME);
+    }
+
+    #[test]
+    fn the_default_scheduler_runs_the_same_frame() {
+        let e = engine_with("sched_sequential", Some("lockstep"));
+        load(&e, "clock", "CLOCK");
+        load(&e, "lockstep", "LOCKSTEP");
+        load(&e, "sequential", "SEQUENTIAL");
+        load(&e, "a", "TRACER_A");
+        load(&e, "b", "TRACER_B");
+        frame(&e);
+        assert_eq!(trace(&e), FRAME);
+        assert!(e.list().contains("sequential gen 0"), "{}", e.list());
+    }
+
+    #[test]
+    fn a_scheduler_hot_reloads_between_frames() {
+        let e = game("sched_reload", Some("SCHEDULER_V1"));
+        frame(&e);
+        assert_eq!(load(&e, "scheduler", "SCHEDULER_V2"), "reloaded scheduler (generation 1)");
+        frame(&e);
+        assert_eq!(trace(&e)[6], "scheduled by v2");
+    }
+
+    #[test]
+    fn a_panicking_scheduler_ends_its_frame_and_the_loader_takes_over() {
+        let e = game("sched_panic", Some("SCHEDULER_PANIC"));
+        // The first phase ran before the panic; the rest of the frame didn't.
+        assert!(e.send("lockstep", "step").is_ok());
+        assert_eq!(trace(&e), ["scheduled by panic", "a::input"]);
+        assert!(e.list().contains("scheduler gen 0 [failed]"), "{}", e.list());
+        // The frame was closed as the panic unwound, so the next one opens,
+        // on the loader's own scheduler.
+        frame(&e);
+        assert_eq!(trace(&e)[2..], FRAME);
+    }
+
+    #[test]
+    fn a_frame_inside_a_frame_is_refused() {
+        let e = engine_with("sched_nested", None);
+        load(&e, "sneak", "SNEAK_NESTED");
+        e.step_all();
+        assert_eq!(trace(&e), ["sneak got Status(-1)"]);
+    }
+}

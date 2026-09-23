@@ -1,6 +1,8 @@
 //! The platformer's text interface, over messages:
 //! `modctl send platformer_text <command>`. With the lockstep bootstrap, time
-//! only moves with `modctl send lockstep step <frames>`.
+//! only moves with `modctl send lockstep step <frames>`. Moves are sent as
+//! `Run` and `Jump` events, which the rules apply at the start of the next
+//! frame.
 //!
 //!   left | right | stop   run (held until changed)
 //!   jump                  jump on the next frame, if standing on something
@@ -10,7 +12,7 @@
 use clock::Clock;
 use engine_api::{Cx, Mod, World, export_mod};
 use platformer::{
-    Coin, GOAL, Input, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, SPIKE, Tile,
+    Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile,
 };
 use walkers::Walker;
 
@@ -21,9 +23,13 @@ engine_api::mod_state! {
     struct Text {}
 }
 
-fn with_input(world: &mut World, f: impl FnOnce(&mut Input)) -> Result<(), String> {
-    let input = world.query2::<Input, Player>().next().map(|(_, input, _)| input);
-    input.map(f).ok_or_else(|| "no player yet: is a level loaded? try `step`".into())
+/// Sends `event`, if there's a player to act on it.
+fn send(cx: &mut Cx, event: impl engine_api::Event) -> Result<(), String> {
+    if cx.world().query::<Player>().next().is_none() {
+        return Err("no player yet: is a level loaded? try `step`".into());
+    }
+    cx.send_event(event);
+    Ok(())
 }
 
 struct Snapshot {
@@ -120,14 +126,13 @@ impl Mod for Text {
     type Transient = ();
 
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
-        let mut world = cx.world();
         match message.trim() {
-            "left" => with_input(&mut world, |i| i.dir = -1.0).map(|()| "running left".into()),
-            "right" => with_input(&mut world, |i| i.dir = 1.0).map(|()| "running right".into()),
-            "stop" => with_input(&mut world, |i| i.dir = 0.0).map(|()| "stopped".into()),
-            "jump" => with_input(&mut world, |i| i.jump = true).map(|()| "jumping next frame".into()),
-            "show" => snapshot(&mut world).map(|s| draw(&s)),
-            "state" => snapshot(&mut world).map(|s| describe(&s)),
+            "left" => send(cx, Run { dir: -1.0 }).map(|()| "running left".into()),
+            "right" => send(cx, Run { dir: 1.0 }).map(|()| "running right".into()),
+            "stop" => send(cx, Run { dir: 0.0 }).map(|()| "stopped".into()),
+            "jump" => send(cx, Jump {}).map(|()| "jumping next frame".into()),
+            "show" => snapshot(&mut cx.world()).map(|s| draw(&s)),
+            "state" => snapshot(&mut cx.world()).map(|s| describe(&s)),
             "" | "help" => Ok(HELP.into()),
             other => Err(format!("unknown command {other:?}; {HELP}")),
         }

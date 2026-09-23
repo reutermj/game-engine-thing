@@ -228,7 +228,9 @@ macro_rules! service {
                             unsafe fn(*mut $crate::ModContext, $($ty),*) -> Result<$crate::__service_ret!($($ret)?), ()>,
                             $crate::ErasedFn,
                         >(
-                            (|ctx: *mut $crate::ModContext, $($arg: $ty),*| unsafe {
+                            // Inside the `unsafe` block above, so the body may
+                            // call `__serve`.
+                            (|ctx: *mut $crate::ModContext, $($arg: $ty),*| {
                                 $crate::__serve::<Self, _>(ctx, |state, transient, cx| {
                                     <Self as $name>::$fn(state, transient, cx, $($arg),*)
                                 })

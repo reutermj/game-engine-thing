@@ -101,7 +101,7 @@ impl Bootstrap for FakeOs {
             }
             os::Event::AboutToWait => {
                 self.frames += 1;
-                cx.step_mods();
+                cx.run_frame();
                 match cx.pump_loader(Duration::ZERO, |_, message| self.handle(queue, message)) {
                     Pumped::Continue => os::Flow::Continue,
                     Pumped::Quit => os::Flow::Exit,

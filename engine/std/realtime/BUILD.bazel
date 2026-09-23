@@ -3,9 +3,9 @@ load("//engine:defs.bzl", "engine_mod")
 # Resident, like every bootstrap: it runs the frame loop, so it is on the
 # stack whenever the loader swaps builds.
 engine_mod(
-    name = "bootstrap",
+    name = "realtime",
     srcs = ["lib.rs"],
-    mod_deps = ["//mods/clock"],
+    mod_deps = ["//engine/std/clock"],
     resident = True,
     visibility = ["//visibility:public"],
 )

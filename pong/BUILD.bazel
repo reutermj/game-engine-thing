@@ -9,7 +9,7 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 #   bazel-bin/engine/modctl/modctl send pong_text up | show     # play, look
 engine_game(
     name = "pong",
-    bootstrap = "//mods/lockstep",
+    bootstrap = "//engine/std/lockstep",
     mods = [
         "//pong/ai",
         "//pong/text",

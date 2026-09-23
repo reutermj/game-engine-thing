@@ -15,7 +15,7 @@ are the mods whose interfaces this one uses. Other mods depend on the
 interface, never the implementation, so Bazel rebuilds a dependent only when
 the interface it compiled against changes. See docs/architecture/mod-deps.md.
 
-    engine_game(name = "game", bootstrap = "//mods/bootstrap", mods = [...])
+    engine_game(name = "game", mods = [...])
 
 writes the manifest of mods loaded at startup; `bazel run //game` starts the
 engine with it, and `bazel run //game:reload` reloads every mod whose build
@@ -269,8 +269,9 @@ def _engine_game_impl(ctx):
 
     # Dependencies first, and each mod once, including dependencies the game
     # didn't list.
+    scheduler = [ctx.attr.scheduler] if ctx.attr.scheduler else []
     closure = depset(
-        transitive = [bootstrap.closure] + [m[EngineModInfo].closure for m in ctx.attr.mods],
+        transitive = [bootstrap.closure] + [m[EngineModInfo].closure for m in scheduler + ctx.attr.mods],
         order = "postorder",
     ).to_list()
     lines = ["reload %s" % ctx.attr.reload_label]
@@ -300,6 +301,7 @@ _engine_game = rule(
     attrs = {
         "bootstrap": attr.label(mandatory = True, providers = [EngineModInfo]),
         "mods": attr.label_list(providers = [EngineModInfo]),
+        "scheduler": attr.label(providers = [EngineModInfo]),
         "reload_label": attr.string(mandatory = True),
         "_engine": attr.label(
             default = "//engine/loader:engine",
@@ -332,15 +334,24 @@ _engine_game_reload = rule(
     },
 )
 
-def engine_game(name, bootstrap, mods = [], visibility = None):
+def engine_game(
+        name,
+        mods = [],
+        bootstrap = "//engine/std/realtime",
+        scheduler = "//engine/std/sequential",
+        visibility = None):
     """The engine plus the mods loaded at startup, and a target to reload them.
 
     Args:
       name: `bazel run` on it starts the engine.
-      bootstrap: The mod that owns the frame loop and steps the others. Must
-        be resident.
       mods: Mods to load. Their `mod_deps` are included too, and every mod is
         loaded after the mods it depends on.
+      bootstrap: The mod that runs the frame loop: a `Bootstrap`, built
+        resident. The default runs frames in real time; `//engine/std/lockstep`
+        runs them only when asked.
+      scheduler: The mod providing `engine_api::scheduler::Scheduler`, which
+        decides when each system runs. `None` leaves it to the loader's own
+        sequential frame.
       visibility: Visibility of both targets.
 
     Also declares a reload target: `bazel run` on it sends every mod's current
@@ -354,6 +365,7 @@ def engine_game(name, bootstrap, mods = [], visibility = None):
         name = name,
         bootstrap = bootstrap,
         mods = mods,
+        scheduler = scheduler,
         reload_label = "//%s:%s" % (native.package_name(), reload),
         visibility = visibility,
     )

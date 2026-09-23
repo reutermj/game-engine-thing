@@ -1,7 +1,8 @@
-//! The platformer's rules as a system: runs and jumps the player by its
-//! `Input`, collides it with the level's tiles, collects coins, and kills and
-//! respawns it on spikes or a fall. Also provides `platformer::Rules`, so other
-//! mods (enemies) can kill or bounce the player.
+//! The platformer's rules, as systems: `steer` turns `Run` and `Jump` events
+//! into the player's `Input` (in `input`), and `play` runs and jumps the
+//! player by it, collides it with the level's tiles, collects coins, and
+//! kills and respawns it on spikes or a fall (in `simulate`). Also provides
+//! `platformer::Rules`, so other mods (enemies) can kill or bounce the player.
 //!
 //! The player is spawned once a level exists (a `LevelInfo`) and there's no
 //! player yet, so this mod doesn't care whether it loads before or after the
@@ -10,10 +11,10 @@
 use std::collections::HashMap;
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Systems, World, export_mod, phase};
+use engine_api::{Cx, EventReader, Mod, Query, Systems, export_mod, phase};
 use platformer::{
-    Coin, GOAL, GRAVITY, Input, JUMP_SPEED, LevelInfo, MAX_FALL, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
-    RUN_SPEED, SOLID, SPIKE, Tile,
+    Coin, GOAL, GRAVITY, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
+    RUN_SPEED, Run, SOLID, SPIKE, Tile,
 };
 
 /// Keeps a box that is flush against a tile from counting as inside it.
@@ -32,8 +33,8 @@ struct Tiles {
 }
 
 impl Tiles {
-    fn read(world: &mut World, width: i32) -> Tiles {
-        let kinds = world.query::<Tile>().map(|(_, t)| ((t.x, t.y), t.kind)).collect();
+    fn read(cx: &mut Cx, tiles: &Query<&Tile>, width: i32) -> Tiles {
+        let kinds = tiles.iter(cx).map(|(_, t)| ((t.x, t.y), t.kind)).collect();
         Tiles { kinds, width }
     }
 
@@ -100,23 +101,47 @@ fn with_player(cx: &mut Cx, change: impl FnOnce(&mut Player, &LevelInfo)) {
 }
 
 impl Core {
-    fn play(&mut self, _: &mut (), cx: &mut Cx) {
-        let mut world = cx.world();
-        let Some(Clock { dt, .. }) = clock::now(&mut world) else {
-            return;
-        };
-        let Some(info) = world.query::<LevelInfo>().next().map(|(_, i)| *i) else {
-            return;
-        };
-        let player = world.query2::<Input, Player>().next().map(|(e, i, p)| (e, *i, *p));
-        let Some((entity, mut input, mut p)) = player else {
-            let e = world.spawn();
-            world.insert(e, Player { x: info.spawn_x, y: info.spawn_y, ..Default::default() });
-            world.insert(e, Input::default());
+    fn steer(
+        &mut self,
+        _: &mut (),
+        cx: &mut Cx,
+        runs: EventReader<Run>,
+        jumps: EventReader<Jump>,
+        inputs: Query<(&mut Input, &Player)>,
+    ) {
+        let dir = runs.read(cx).last().map(|r| r.dir);
+        let jump = !jumps.read(cx).is_empty();
+        for (_, (input, _)) in inputs.iter(cx) {
+            if let Some(dir) = dir {
+                input.dir = dir;
+            }
+            input.jump |= jump;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn play(
+        &mut self,
+        _: &mut (),
+        cx: &mut Cx,
+        clocks: Query<&Clock>,
+        levels: Query<&LevelInfo>,
+        players: Query<(&mut Input, &mut Player)>,
+        tiles: Query<&Tile>,
+        coins: Query<&Coin>,
+    ) {
+        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
+        let Some(info) = levels.iter(cx).next().map(|(_, i)| *i) else { return };
+        let Some((entity, (mut input, mut p))) = players.iter(cx).next().map(|(e, (i, p))| (e, (*i, *p))) else {
+            // Visible from the next phase: this frame doesn't move it.
+            let mut commands = cx.commands();
+            let e = commands.spawn();
+            commands.insert(e, Player { x: info.spawn_x, y: info.spawn_y, ..Default::default() });
+            commands.insert(e, Input::default());
             return;
         };
 
-        let tiles = Tiles::read(&mut world, info.width);
+        let tiles = Tiles::read(cx, &tiles, info.width);
         integrate(&mut p, &mut input, &tiles, dt);
 
         if tiles.touches(&p, SPIKE) || p.y > info.height as f32 + 2.0 {
@@ -126,18 +151,17 @@ impl Core {
             p.won = true;
         }
 
-        // Collected first and despawned after: a query can't be open while
-        // the world changes shape.
         let cells: Vec<(i32, i32)> = Tiles::cells(p.x, p.y, PLAYER_WIDTH, PLAYER_HEIGHT).collect();
         let collected: Vec<_> =
-            world.query::<Coin>().filter(|(_, c)| cells.contains(&(c.x, c.y))).map(|(e, _)| e).collect();
+            coins.iter(cx).filter(|(_, c)| cells.contains(&(c.x, c.y))).map(|(e, _)| e).collect();
         for coin in collected {
-            world.despawn(coin);
+            cx.commands().despawn(coin);
             p.coins += 1;
         }
 
-        world.insert(entity, input);
-        world.insert(entity, p);
+        if let Some((i, player)) = players.get(cx, entity) {
+            (*i, *player) = (input, p);
+        }
     }
 }
 
@@ -145,9 +169,9 @@ impl Mod for Core {
     type Transient = ();
 
     fn systems(s: &mut Systems<Self>) {
-        s.add("play", Self::play).phase(phase::SIMULATE).exclusive();
+        s.add("steer", Self::steer).phase(phase::INPUT);
+        s.add("play", Self::play).phase(phase::SIMULATE);
     }
-
 }
 
 impl platformer::Rules for Core {

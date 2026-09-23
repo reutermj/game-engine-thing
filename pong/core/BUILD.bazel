@@ -6,7 +6,7 @@ engine_mod(
     name = "core",
     srcs = ["lib.rs"],
     interface = ["components.rs"],
-    mod_deps = ["//mods/clock"],
+    mod_deps = ["//engine/std/clock"],
     mod_name = "pong",
     visibility = ["//visibility:public"],
 )

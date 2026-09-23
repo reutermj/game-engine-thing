@@ -101,7 +101,7 @@ pub struct Systems<T> {
 impl<T: Mod> Systems<T> {
     /// Adds a system named `name` running `f`, in the `update` phase unless
     /// the builder says otherwise. `f` is a function of the mod's state, its
-    /// transient part, its `Cx` and up to four parameters ([`Query`],
+    /// transient part, its `Cx` and up to eight parameters ([`Query`],
     /// [`EventReader`]), and must not capture anything: a fn item, or a
     /// closure without captures.
     pub fn add<P, F: IntoSystem<T, P>>(&mut self, name: &str, f: F) -> SystemBuilder<'_> {
@@ -197,7 +197,7 @@ pub trait SystemParam: 'static {
 
 /// A function that can be a system. `P` is its parameters, as a tuple.
 /// Implemented for functions of the mod's state, transient part, `Cx` and up
-/// to four parameters.
+/// to eight parameters.
 pub trait IntoSystem<T: Mod, P>: Copy + 'static {
     fn declare(access: &mut Vec<Access>);
     #[doc(hidden)]
@@ -226,6 +226,10 @@ into_system!(P1);
 into_system!(P1, P2);
 into_system!(P1, P2, P3);
 into_system!(P1, P2, P3, P4);
+into_system!(P1, P2, P3, P4, P5);
+into_system!(P1, P2, P3, P4, P5, P6);
+into_system!(P1, P2, P3, P4, P5, P6, P7);
+into_system!(P1, P2, P3, P4, P5, P6, P7, P8);
 
 /// The loader's entry point for one system: `SystemDesc::run`.
 unsafe fn run<T: Mod, P, F: IntoSystem<T, P>>(ctx: *mut ModContext) -> Status {

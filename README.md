@@ -54,7 +54,9 @@ level is `platformer/level/map.txt`: edit it and
 - `engine/control`: the line protocol spoken over the Unix socket
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it
 - `engine/defs.bzl`: `engine_mod` and `engine_game`
-- `mods/*`: `bootstrap` (frame loop), `counter` (per-mod state), `hello` (live
+- `engine/std`: the mods every game gets by default: the `realtime` and
+  `lockstep` bootstraps, `clock`, and the `sequential` scheduler
+- `mods/*`: `counter` (per-mod state), `hello` (live
   load), `transform`/`physics`/`spawner`/`reporter` (ECS demo, and mods that
   depend on each other's components)
 - `engine/tools`: build-time tooling for `engine_mod`

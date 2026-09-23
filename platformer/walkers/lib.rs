@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Systems, export_mod, phase};
+use engine_api::{Cx, Mod, Query, Systems, export_mod, phase};
 use platformer::{PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
@@ -27,18 +27,23 @@ enum Meeting {
 }
 
 impl Walkers {
-    fn walk(&mut self, _: &mut (), cx: &mut Cx) {
-        let mut world = cx.world();
-        let Some(Clock { dt, .. }) = clock::now(&mut world) else {
-            return;
-        };
+    fn walk(
+        &mut self,
+        _: &mut (),
+        cx: &mut Cx,
+        clocks: Query<&Clock>,
+        tiles: Query<&Tile>,
+        players: Query<&Player>,
+        walkers: Query<&mut Walker>,
+    ) {
+        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
         let solid: HashSet<(i32, i32)> =
-            world.query::<Tile>().filter(|(_, t)| t.kind == SOLID).map(|(_, t)| (t.x, t.y)).collect();
-        let player = world.query::<Player>().next().map(|(_, p)| *p);
+            tiles.iter(cx).filter(|(_, t)| t.kind == SOLID).map(|(_, t)| (t.x, t.y)).collect();
+        let player = players.iter(cx).next().map(|(_, p)| *p);
 
         let mut stomped = Vec::new();
         let mut meeting = Meeting::None;
-        for (e, w) in world.query::<Walker>() {
+        for (e, w) in walkers.iter(cx) {
             if w.vx == 0.0 {
                 w.vx = WALK_SPEED;
             }
@@ -63,7 +68,7 @@ impl Walkers {
             }
         }
         for e in stomped {
-            world.despawn(e);
+            cx.commands().despawn(e);
         }
 
         // After the query: a call can change the world, so it can't happen
@@ -83,9 +88,8 @@ impl Mod for Walkers {
     type Transient = ();
 
     fn systems(s: &mut Systems<Self>) {
-        s.add("walk", Self::walk).phase(phase::SIMULATE).after("platformer::play").exclusive();
+        s.add("walk", Self::walk).phase(phase::SIMULATE).after("platformer::play");
     }
-
 }
 
 export_mod!(Walkers);

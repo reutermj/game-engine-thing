@@ -2,7 +2,7 @@
 //! how the level is written and how `platformer_text` draws it. A tile at
 //! `(x, y)` covers `[x, x + 1) × [y, y + 1)`.
 
-use engine_api::component;
+use engine_api::{component, event};
 
 /// Tiles per second squared.
 pub const GRAVITY: f32 = 40.0;
@@ -63,8 +63,8 @@ component! {
 }
 
 component! {
-    /// What the player is asking for, on the player's entity. Set by whoever
-    /// controls the player; read by the rules each frame.
+    /// What the player is asking for, on the player's entity. Set from `Run`
+    /// and `Jump` events in the `input` phase; read by the rules each frame.
     #[derive(Debug, Default, Copy)]
     pub struct Input: "platformer::Input" {
         /// -1 runs left, 1 right, 0 stands. Held until changed.
@@ -73,6 +73,21 @@ component! {
         /// is on the ground then, and is dropped otherwise.
         pub jump: bool,
     }
+}
+
+event! {
+    /// Run: -1 left, 1 right, 0 stand. Held until the next one. Sent by
+    /// whoever controls the player, applied in the `input` phase.
+    #[derive(Debug, Default, Copy)]
+    pub struct Run: "platformer::Run" {
+        pub dir: f32,
+    }
+}
+
+event! {
+    /// Jump on this frame, if standing on something.
+    #[derive(Debug, Default, Copy)]
+    pub struct Jump: "platformer::Jump" {}
 }
 
 engine_api::service! {

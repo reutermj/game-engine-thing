@@ -9,7 +9,7 @@ load("//engine:defs.bzl", "engine_game")
 #   bazel-bin/engine/modctl/modctl send platformer_text show         # look
 engine_game(
     name = "platformer",
-    bootstrap = "//mods/lockstep",
+    bootstrap = "//engine/std/lockstep",
     mods = [
         "//platformer/level",
         "//platformer/text",

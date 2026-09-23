@@ -203,6 +203,20 @@ engine_mod(
     "read",
     "insert",
     "declared",
+    "nested",
+]]
+
+[engine_mod(
+    name = "scheduler_" + build,
+    srcs = ["mods/marking_scheduler.rs"],
+    crate_features = [build],
+    crate_root = "mods/marking_scheduler.rs",
+    mod_name = "scheduler",
+    deps = [":probe"],
+) for build in [
+    "v1",
+    "v2",
+    "panic",
 ]]
 
 engine_mod(
@@ -250,6 +264,11 @@ TEST_MODS = {
     "SNEAK_READ": ":sneak_read",
     "SNEAK_INSERT": ":sneak_insert",
     "SNEAK_DECLARED": ":sneak_declared",
+    "SNEAK_NESTED": ":sneak_nested",
+    "SCHEDULER_V1": ":scheduler_v1",
+    "SCHEDULER_V2": ":scheduler_v2",
+    "SCHEDULER_PANIC": ":scheduler_panic",
+    "SEQUENTIAL": "//engine/std/sequential",
     "BUILDER": ":builder",
     "PINGER": ":pinger",
     "LISTENER_V1": ":listener_v1",
@@ -271,8 +290,8 @@ TEST_MODS = {
     "BAG_V3": ":bag_v3",
     # The real ones: the lockstep bootstrap is what exercises a message
     # handler that steps other mods.
-    "CLOCK": "//mods/clock",
-    "LOCKSTEP": "//mods/lockstep",
+    "CLOCK": "//engine/std/clock",
+    "LOCKSTEP": "//engine/std/lockstep",
     "BASE_V1": ":base_v1",
     "BASE_V1B": ":base_v1b",
     "BASE_V2": ":base_v2",
@@ -307,7 +326,7 @@ rust_test(
 # isn't listed: it comes in as `user`'s dependency.
 engine_game(
     name = "test_game",
-    bootstrap = "//mods/bootstrap",
+    bootstrap = "//engine/std/realtime",
     mods = [
         ":counter_v1",
         ":user_v1",
@@ -318,7 +337,7 @@ engine_game(
 # test_game would send after counter's source changed to v2.
 engine_game(
     name = "test_game_v2",
-    bootstrap = "//mods/bootstrap",
+    bootstrap = "//engine/std/realtime",
     mods = [
         ":counter_v2",
         ":user_v1",

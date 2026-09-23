@@ -41,7 +41,7 @@ impl Bootstrap for Realtime {
             let mut world = cx.world();
             let entity = *self.clock.get_or_insert_with(|| world.spawn());
             world.insert(entity, clock);
-            cx.step_mods();
+            cx.run_frame();
 
             // Between frames, where nothing but this mod is running.
             match cx.pump_loader(Duration::ZERO, |_, _| Err("bootstrap doesn't take messages".into())) {

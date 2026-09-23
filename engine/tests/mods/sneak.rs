@@ -1,7 +1,8 @@
 //! Builds of `sneak`, whose one system declares only the trace but reaches
 //! further through `cx.world()`: `read` reads the probe, `insert` inserts
 //! one on the spot rather than through commands, and `declared` reads it
-//! having declared it with `.reads`, which is fine.
+//! having declared it with `.reads`, which is fine. `nested` asks for a
+//! frame from inside one, which the loader refuses.
 
 use engine_api::{Cx, Mod, Query, Systems, export_mod};
 use test_probe::{Probe, Trace, ensure_trace, trace};
@@ -18,6 +19,11 @@ impl Sneak {
         let found = cx.world().get::<Probe>(e).is_some();
         #[cfg(feature = "insert")]
         let found = cx.world().insert(e, Probe::default());
+        #[cfg(feature = "nested")]
+        let found = {
+            let _ = e;
+            format!("{:?}", cx.step_mods())
+        };
         trace(cx, &q, format!("sneak got {found}"));
     }
 }

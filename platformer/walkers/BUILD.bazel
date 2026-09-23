@@ -7,7 +7,7 @@ engine_mod(
     srcs = ["lib.rs"],
     interface = ["components.rs"],
     mod_deps = [
-        "//mods/clock",
+        "//engine/std/clock",
         "//platformer/core",
     ],
     visibility = ["//visibility:public"],

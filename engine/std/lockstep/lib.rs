@@ -33,7 +33,7 @@ impl Lockstep {
         let mut world = cx.world();
         let entity = *self.clock.get_or_insert_with(|| world.spawn());
         world.insert(entity, Clock { frame: self.frame, dt: DT });
-        cx.step_mods();
+        cx.run_frame();
     }
 
     fn handle(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {

@@ -69,10 +69,16 @@ Then, live:
 - **Deferred despawns, three times.** Coins, stomped walkers and the level
   rebuild all collect entities during a query and despawn them after. The
   pattern is easy but always the same: a command buffer would absorb it.
+  *(Addressed 2026-09-23 for the systems: coins and stomped walkers are
+  despawned through `cx.commands()`. The level's rebuild runs in `load`,
+  where the world can change directly.)*
 - **Order matters, and is implicit.** `walkers` runs after the rules, so a
   hurt player respawns a frame later, and the stomp bounce lands after the
   rules' physics has already moved the player. It works because of load
-  order, which pong also ran into.
+  order, which pong also ran into. *(Addressed 2026-09-23: the order is
+  declared, `walkers::walk` after `platformer::play` in `simulate`, with
+  input applied in `input` from `Run`/`Jump` events. The one-frame lag
+  itself is unchanged, and the replayed routes still pass.)*
 - **Where does progress live?** `won` is on the player, so after a map edit
   the new level shows "YOU WIN". Whether progress belongs to the player, the
   level or something else is a game decision, but the engine gives no place

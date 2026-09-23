@@ -128,7 +128,7 @@ fn a_game_starts_hot_reloads_a_mod_and_quits() {
     let mut engine = Engine::start(&runtime);
 
     let list = wait_until_listening(&mut engine, &runtime);
-    assert!(list.contains("bootstrap gen 0 [bootstrap]"), "{list}");
+    assert!(list.contains("realtime gen 0 [bootstrap]"), "{list}");
     assert!(list.contains("counter gen 0"), "{list}");
     // Not listed by the game, but loaded as user's dependency, and first.
     let (base, user) = (list.find("  base gen 0").expect(&list), list.find("  user gen 0").expect(&list));
@@ -233,7 +233,7 @@ fn a_game_reload_reloads_only_the_mods_that_changed() {
     assert!(reload.status.success(), "{}", describe(&reload));
     assert_eq!(
         stdout(&reload).trim(),
-        "reloaded counter (generation 1); clock unchanged; bootstrap unchanged; base unchanged; user unchanged"
+        "reloaded counter (generation 1); clock unchanged; realtime unchanged; sequential unchanged; base unchanged; user unchanged"
     );
 
     // A per-mod reload that would strand a dependent is refused, naming the

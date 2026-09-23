@@ -35,7 +35,7 @@ impl Physics {
 ```
 
 A system is a function of the mod's state, its transient part, its `Cx`,
-and up to four **parameters**. Its name is qualified with the mod's
+and up to eight **parameters**. Its name is qualified with the mod's
 (`physics::integrate`). It must not capture anything: a fn item or a
 closure without captures, because each build's systems are that build's
 code, referenced by the loader until the next reload replaces them.
@@ -148,6 +148,45 @@ in the loader's world), with these semantics:
 Sends are deferred, so senders never conflict with anything, which makes
 them free to run in parallel later.
 
+## Who schedules
+
+The loader owns what makes a frame safe: the declarations, the plan, the
+access checks, the phase boundaries, and refusing to run a system whose mod
+is already running. When each system runs is policy, and belongs to a mod:
+the one providing `engine_api::scheduler::Scheduler`, a service the engine
+declares rather than any mod, so a bootstrap reaches whichever scheduler the
+game loads without depending on it.
+
+```rust
+impl Scheduler for Sequential {
+    fn run_frame(&mut self, _: &mut (), cx: &mut Cx) {
+        let Some(frame) = scheduler::begin(cx) else { return };
+        for phase in &frame.plan().phases {
+            for system in &phase.systems {
+                frame.run(system.id);
+            }
+            frame.end_phase();
+        }
+    }
+}
+```
+
+`scheduler::begin` opens a frame (publishing what was queued between
+frames) and returns the plan; dropping the `Frame` closes it, including when
+the scheduler panics. The loader refuses a frame inside a frame. A bootstrap
+calls `cx.run_frame()`, which calls the loaded scheduler, or, if none is
+loaded (or it has failed), runs the loader's own sequential frame: what tests
+driving an `Engine` directly get.
+
+The engine ships defaults in `//engine/std`: `realtime` and `lockstep`
+bootstraps, the `clock` they publish, and the `sequential` scheduler.
+`engine_game` uses `realtime` and `sequential` unless told otherwise. A
+game can replace either, or fold scheduling into its own bootstrap.
+
+A scheduler that owns no threads isn't running between frames, so it
+needn't be resident: `sequential` hot-reloads like gameplay. The parallel one
+(step 2) will own worker threads, and so will be resident.
+
 ## Toward parallelism
 
 The four steps, of which this document is the first:
@@ -164,15 +203,7 @@ The four steps, of which this document is the first:
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.
 
-The loader owns declarations, the plan, access claims and the safe point.
-Threads and scheduling policy belong to a resident scheduler mod, behind a
-`Scheduler` service the engine defines, with default implementations the
-engine ships (sequential and parallel) and a library crate of building
-blocks for custom ones. Whether a game's scheduler is its own mod or part of
-its bootstrap is up to the game. Until step 2, the sequential plan runs in
-the loader (`step_mods`).
-
-Before step 2: measure the mod boundary (get-8in), which decides whether
+Before step 3: measure the mod boundary (get-8in), which decides whether
 data parallelism must work on column slices only.
 
 **Open question:** worker threads and `thread_local!`. glibc keeps a library

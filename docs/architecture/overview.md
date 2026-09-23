@@ -9,11 +9,14 @@ possible:
    memory, and serves the control socket when it's handed control. It has no
    loop, no timing and no game concepts: after loading the game, it calls the
    bootstrap mod once and that call is the session.
-2. **The bootstrap mod** (`mods/bootstrap`) owns the frame loop: it paces
-   frames, steps every other mod through the `step_mods` host service, and
-   once a frame hands the loader control. It is
+2. **The bootstrap mod** owns the frame loop: it paces frames, runs each one
+   (`cx.run_frame()`), and once a frame hands the loader control. It is
    [resident](hot-reload.md#resident-mods): loaded once, never swapped.
-3. **Every other mod** does real work when stepped. Today that is `counter`
+   `//engine/std/realtime` is the default.
+3. **The scheduler mod** decides when each of a frame's systems runs, from
+   the plan the loader keeps. `//engine/std/sequential` is the default; see
+   [scheduling.md](scheduling.md#who-schedules).
+4. **Every other mod** does real work in its systems. Today that is `counter`
    and `hello`; eventually windowing, rendering, input and the game.
 
 ### Who runs the loop
@@ -29,10 +32,10 @@ A reload can happen inside that call even though the bootstrap's code is on
 the stack, because the bootstrap is resident: its build is never swapped.
 The loader serves a pump only at a **safe point**, where every mod running is
 resident and no step, load or message delivery is under way; anywhere else,
-such as a reloadable mod or a pump from inside `step_mods`, it answers
+such as a reloadable mod or a pump from inside a frame, it answers
 `Pumped::Refused` and does nothing. A message for the pumping bootstrap
 itself goes to `handler` rather than its `Mod::message`, since the bootstrap
-is already running. `mods/lockstep` is built on that: it blocks in the pump
+is already running. `//engine/std/lockstep` is built on that: it blocks in the pump
 until a request arrives, and runs frames when a message asks.
 
 This is what a platform layer needs. Windowing libraries own the thread in
@@ -52,19 +55,21 @@ Tests and tools can drive an `Engine` with no bootstrap: `Engine::step_all`
 runs a frame, and `Engine::pump` serves requests.
 
 Time is published as data: the bootstrap writes a `Clock` component (from
-`mods/clock`) before each frame, and systems read `dt` from it. That lets a
-game swap the real-time bootstrap for `mods/lockstep`, which runs frames only
-when sent `step N` (see `modctl send`), without changing any system. Pong
-does, so it can be played turn by turn.
+`//engine/std/clock`) before each frame, and systems read `dt` from it. That
+lets a game swap the real-time bootstrap for `//engine/std/lockstep`, which
+runs frames only when sent `step N` (see `modctl send`), without changing any
+system. Pong does, so it can be played turn by turn.
 
-**Open question:** what the bootstrap should own. It currently owns time
-policy, publishing the clock and scheduling, and changing only the first
-means replacing all three. See
+The bootstrap owns time policy and publishing the clock; scheduling is the
+scheduler's, so each can be replaced alone.
+
+**Open question:** time control across bootstraps. `step N` exists only in
+`lockstep`; pausing, stepping or slowing a real-time game (from a debugger,
+a test) would need a time-control protocol every bootstrap implements. See
 [the pong retrospective](../retrospectives/2026-09-23-pong.md#the-bootstrap-mod).
 
-**Ordering** is by systems and phases: each mod declares its systems, and
-`step_mods` runs one frame of them in plan order. See
-[scheduling.md](scheduling.md).
+**Ordering** is by systems and phases: each mod declares its systems, and a
+frame runs them in plan order. See [scheduling.md](scheduling.md).
 
 **Open question:** threading. Mods run on the one thread that owns the loop
 (the control socket's thread runs only loader code). A mod that spawns a thread makes unloading unsafe, because the thread

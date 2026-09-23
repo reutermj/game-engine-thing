@@ -3,7 +3,7 @@ load("//engine:defs.bzl", "engine_mod")
 engine_mod(
     name = "lockstep",
     srcs = ["lib.rs"],
-    mod_deps = ["//mods/clock"],
+    mod_deps = ["//engine/std/clock"],
     resident = True,
     visibility = ["//visibility:public"],
 )

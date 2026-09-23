@@ -19,6 +19,7 @@ use engine_api::{
     API_VERSION, AccessKind, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL,
     InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc, WorldApi,
 };
+use engine_api::scheduler::{FramePlan, PhasePlan, PlannedSystem, Ran};
 use engine_control::Request;
 use libloading::Library;
 
@@ -30,8 +31,9 @@ pub struct Engine {
     host: Host,
     mods: RefCell<Vec<Loaded>>,
     bootstrap: Option<String>,
-    /// Set while `step_mods` runs, so a stepped mod can't recurse into it.
-    stepping: Cell<bool>,
+    /// The plan of the frame being run, while one is open: what a
+    /// scheduler's `run_system` ids refer to.
+    frame: RefCell<Option<Rc<Plan>>>,
     staging_dir: PathBuf,
     staged_count: Cell<u64>,
     /// Outlives every mod build; see `world.rs`.
@@ -173,6 +175,10 @@ impl Engine {
                 begin_call: host_begin_call,
                 end_call: host_end_call,
                 pump: host_pump,
+                begin_frame: host_begin_frame,
+                run_system: host_run_system,
+                end_phase: host_end_phase,
+                end_frame: host_end_frame,
                 world: WorldApi {
                     register: world::register,
                     spawn: world::spawn,
@@ -191,7 +197,7 @@ impl Engine {
             },
             mods: RefCell::new(Vec::new()),
             bootstrap,
-            stepping: Cell::new(false),
+            frame: RefCell::new(None),
             staging_dir,
             staged_count: Cell::new(0),
             world: RefCell::new(WorldStorage::default()),
@@ -693,9 +699,7 @@ impl Engine {
     /// Runs one frame without a bootstrap, for tests and tools that drive an
     /// `Engine` directly.
     pub fn step_all(&self) {
-        let mods = self.mods.borrow();
-        let bootstrap = mods.iter().find(|m| self.bootstrap.as_deref() == Some(&*m.name));
-        self.run_frame(&mods, bootstrap.map_or(std::ptr::null(), |m| m.ctx));
+        self.run_frame();
     }
 
     /// The order systems run in, one line per phase.
@@ -714,31 +718,70 @@ impl Engine {
         Ok(plan)
     }
 
-    /// Runs every system but `skip`'s (the mod running the frame) in plan
-    /// order, applying commands and publishing events at each phase boundary.
-    fn run_frame(&self, mods: &[Loaded], skip: *const ModContext) {
-        let plan = match self.plan(mods) {
+    /// The loader's own frame: every system in plan order, one phase at a
+    /// time. What `step_mods` runs, and what a sequential scheduler mod does
+    /// through the frame primitives below.
+    fn run_frame(&self) -> Status {
+        let Some(plan) = self.begin_frame() else { return Status::ERROR };
+        for phase in &plan.phases {
+            for s in &phase.systems {
+                self.run_planned(s.id);
+            }
+            self.end_phase();
+        }
+        self.end_frame();
+        Status::OK
+    }
+
+    /// Opens a frame and publishes what was queued between frames. `None` if
+    /// a frame is already open, or the mods are being changed.
+    fn begin_frame(&self) -> Option<Rc<Plan>> {
+        if self.frame.borrow().is_some() {
+            return None;
+        }
+        let mods = self.mods.try_borrow().ok()?;
+        let plan = match self.plan(&mods) {
             Ok(plan) => plan,
             Err(e) => {
                 // Loads are checked against this, so only a bug gets here.
                 eprintln!("[engine] no frame: {e}");
-                return;
+                return None;
             }
         };
+        drop(mods);
         self.world.borrow_mut().begin_frame();
-        for phase in &plan.phases {
-            for s in &phase.systems {
-                let Some(m) = mods.iter().find(|m| *m.name == s.module) else { continue };
-                if !std::ptr::eq(m.ctx, skip) && !m.failed.get() {
-                    self.run_system(m, s.index, &s.name);
-                }
-            }
-            self.world.borrow_mut().end_phase();
-        }
-        self.world.borrow_mut().end_frame();
+        *self.frame.borrow_mut() = Some(plan.clone());
+        Some(plan)
     }
 
-    fn run_system(&self, m: &Loaded, index: usize, name: &str) {
+    /// Runs system `id` of the open frame. A mod that is already running
+    /// (the bootstrap, the scheduler, a caller up the stack) is skipped: its
+    /// state is borrowed.
+    fn run_planned(&self, id: usize) -> Ran {
+        let Some(plan) = self.frame.borrow().clone() else { return Ran::Refused };
+        let Some(s) = plan.system(id) else { return Ran::Refused };
+        let Ok(mods) = self.mods.try_borrow() else { return Ran::Refused };
+        let Some(m) = mods.iter().find(|m| *m.name == s.module) else { return Ran::Skipped };
+        if m.failed.get() || m.running.get() {
+            return Ran::Skipped;
+        }
+        if self.run_system(m, s.index, &s.name) { Ran::Ran } else { Ran::Failed }
+    }
+
+    fn end_phase(&self) {
+        if self.frame.borrow().is_some() {
+            self.world.borrow_mut().end_phase();
+        }
+    }
+
+    fn end_frame(&self) {
+        if self.frame.borrow_mut().take().is_some() {
+            self.world.borrow_mut().end_frame();
+        }
+    }
+
+    /// `false` if the system failed.
+    fn run_system(&self, m: &Loaded, index: usize, name: &str) -> bool {
         let desc = &m.systems[index];
         *self.current.borrow_mut() =
             Some(Current { ctx: m.ctx, name: name.into(), desc, violation: None });
@@ -749,9 +792,13 @@ impl Engine {
         if let Some(violation) = violation {
             m.failed.set(true);
             eprintln!("[engine] {violation}; {} won't run again until it is reloaded", m.name);
+            false
         } else if status == Status::ERROR {
             m.failed.set(true);
             eprintln!("[engine] {} failed in {name}; it won't run again until it is reloaded", m.name);
+            false
+        } else {
+            true
         }
     }
 
@@ -806,7 +853,7 @@ impl Engine {
     /// Whether the loader may swap builds with `caller` pumping: nothing is
     /// on the stack but resident mods, and no load or delivery is under way.
     fn safe_point(&self, caller: *const ModContext) -> bool {
-        if self.stepping.get() {
+        if self.frame.borrow().is_some() {
             return false;
         }
         let Ok(mods) = self.mods.try_borrow_mut() else { return false };
@@ -1240,15 +1287,37 @@ unsafe fn host_pump(
 unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {
     let engine = unsafe { engine_of(ctx) };
     // No panicking in here: unwinding out of an extern "C" fn aborts.
-    let Ok(mods) = engine.mods.try_borrow() else {
-        eprintln!("[engine] step_mods can't be called while mods are being loaded");
-        return Status::ERROR;
-    };
-    if engine.stepping.replace(true) {
-        eprintln!("[engine] step_mods called recursively by {}", unsafe { name_of(ctx) });
-        return Status::ERROR;
+    let status = engine.run_frame();
+    if status != Status::OK {
+        eprintln!(
+            "[engine] {} asked for a frame inside a frame, or while the mods are being changed",
+            unsafe { name_of(ctx) }
+        );
     }
-    engine.run_frame(&mods, ctx);
-    engine.stepping.set(false);
-    Status::OK
+    status
+}
+
+unsafe fn host_begin_frame(ctx: *const ModContext) -> Option<FramePlan> {
+    let plan = unsafe { engine_of(ctx) }.begin_frame()?;
+    let phases = plan
+        .phases
+        .iter()
+        .map(|p| PhasePlan {
+            name: p.name.clone(),
+            systems: p.systems.iter().map(|s| PlannedSystem { id: s.id, name: s.name.clone() }).collect(),
+        })
+        .collect();
+    Some(FramePlan { phases })
+}
+
+unsafe fn host_run_system(ctx: *const ModContext, system: usize) -> Ran {
+    unsafe { engine_of(ctx) }.run_planned(system)
+}
+
+unsafe fn host_end_phase(ctx: *const ModContext) {
+    unsafe { engine_of(ctx) }.end_phase()
+}
+
+unsafe fn host_end_frame(ctx: *const ModContext) {
+    unsafe { engine_of(ctx) }.end_frame()
 }

@@ -46,6 +46,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
     API over it. Separate from `lib.rs` because it is a second contract: how
     mods share data, not how a mod is loaded.
+  - `scheduler.rs` — the `Scheduler` service the engine declares, and the
+    frame primitives a scheduler mod is built from.
   - `system.rs` — systems: `Mod::systems` declarations, `Query` and
     `EventReader` parameters (which are the access declaration), commands
     and events. See
@@ -87,9 +89,11 @@ changing the ABI, the reload sequence or the Bazel rules.
   interface, so the engine can check at load time what each build was
   compiled against. See
   [docs/architecture/mod-deps.md](docs/architecture/mod-deps.md).
-- `mods/` — `bootstrap` (owns the frame loop in real time), `lockstep` (a
-  bootstrap that runs frames only when sent `step N`), both resident, `clock`
-  (declares the `Clock` both bootstraps publish), `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
+- `engine/std/` — the mods the engine ships, which `engine_game` uses by
+  default: `realtime` (the frame loop in real time) and `lockstep` (frames
+  only when sent `step N`), both resident bootstraps; `clock` (the `Clock`
+  both publish); and `sequential`, the default scheduler.
+- `mods/` — demo mods: `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
   demo: `transform` declares `Position` and runs nothing, `physics` declares
   `Velocity` and moves things, `spawner` creates entities, `reporter` prints
   positions. Their `mod_deps` are the dependency example.
