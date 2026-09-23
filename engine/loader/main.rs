@@ -9,7 +9,6 @@
 //! bootstrap mod can be reloaded too: code can't be swapped while it's on the stack.
 
 mod control_server;
-mod dylib;
 mod engine;
 
 use std::path::PathBuf;

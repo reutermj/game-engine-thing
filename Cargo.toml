@@ -1,0 +1,6 @@
+# Third-party dependency declarations for rules_rs (`crate.from_cargo` in
+# MODULE.bazel). Bazel is the build system; these manifests only list the
+# crates.io deps each Bazel target pulls from `@crates`.
+[workspace]
+resolver = "3"
+members = ["engine/loader"]

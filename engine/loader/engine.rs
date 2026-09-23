@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 use engine_api::{
     API_VERSION, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, Status,
 };
-
-use crate::dylib::Library;
+use libloading::Library;
 
 pub struct Engine {
     host: Host,
@@ -71,8 +70,8 @@ impl Engine {
         // bad build leaves the old code in place.
         let lib = self.open_staged(name, path)?;
         let (info, main) = unsafe {
-            let info_fn: InfoFn = lib.symbol(INFO_SYMBOL)?;
-            let main: MainFn = lib.symbol(MAIN_SYMBOL)?;
+            let info_fn = *lib.get::<InfoFn>(INFO_SYMBOL).map_err(describe)?;
+            let main = *lib.get::<MainFn>(MAIN_SYMBOL).map_err(describe)?;
             (info_fn(), main)
         };
         if info.api_version != API_VERSION {
@@ -194,7 +193,9 @@ impl Engine {
             .staging_dir
             .join(format!("{name}-{}-{n}.so", std::process::id()));
         std::fs::copy(path, &staged).map_err(|e| format!("copying {}: {e}", path.display()))?;
-        let lib = Library::open(&staged);
+        // `engine_mod` links with `-z now`, so a missing symbol fails here, while
+        // the old build is still running.
+        let lib = unsafe { Library::new(&staged) }.map_err(describe);
         // The mapping outlives the file, so nothing is left behind to clean up.
         let _ = std::fs::remove_file(&staged);
         lib
@@ -219,6 +220,14 @@ impl Loaded {
         if unsafe { !(*self.ctx).state_fresh } {
             self.call(Op::CLOSE);
         }
+    }
+}
+
+/// libloading's `Display` omits the `dlerror` text, which lives in `source()`.
+fn describe(e: libloading::Error) -> String {
+    match std::error::Error::source(&e) {
+        Some(source) => format!("{e}: {source}"),
+        None => e.to_string(),
     }
 }
 

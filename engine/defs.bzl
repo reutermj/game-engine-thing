@@ -90,6 +90,10 @@ def engine_mod(name, srcs, deps = [], mod_name = None, visibility = None, **kwar
         # The engine copies each .so before dlopen, which breaks the $ORIGIN
         # RUNPATH a dynamically linked C++/unwind runtime would need.
         cc_runtime_linkage = "static",
+        # Bind every symbol at dlopen time so a build with unresolved symbols is
+        # rejected while the previous build is still running. rustc's full RELRO
+        # default already does this; pin it so the loader can rely on it.
+        rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
         visibility = ["//visibility:private"],
         **kwargs
     )

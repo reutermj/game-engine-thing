@@ -8,6 +8,7 @@ rust_binary(
     deps = [
         "//engine/api",
         "//engine/control",
+        "@crates//:libloading",
         "@rules_rust//rust/runfiles",
     ],
 )

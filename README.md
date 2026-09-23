@@ -17,7 +17,7 @@ bazel run //engine/modctl -- list # or: unload <name>, quit
 ## Layout
 
 - `engine/api`: the C ABI (`Mod` trait + `export_mod!`) shared by loader and mods
-- `engine/loader`: the engine binary (dlopen, state ownership, control socket)
+- `engine/loader`: the engine binary (libloading, state ownership, control socket)
 - `engine/control`: the line protocol spoken over the Unix socket
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it
 - `engine/defs.bzl`: `engine_mod` and `engine_game`
