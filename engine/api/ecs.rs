@@ -177,10 +177,29 @@ impl FieldDesc {
 /// image (code, statics, string literals): values outlive the build that made
 /// them. Heap memory is fine, since every mod and the loader share one
 /// allocator.
-pub unsafe trait FieldType: Clone + 'static {
+pub unsafe trait FieldType: Crossing + Clone + 'static {
     const KIND: FieldKind;
     const FINGERPRINT: u64;
 }
+
+/// A type that may be passed by value to or returned from a call between mods
+/// (see `service!`): the other side may keep it, so it has to be safe to
+/// outlive the build it came from. Every [`FieldType`] and every component is;
+/// so is any reference, since a borrow can't outlive the call and both builds
+/// are mapped while it runs.
+///
+/// A supertrait of `FieldType` rather than a blanket impl over it, which would
+/// conflict with the impls for references.
+///
+/// # Safety
+///
+/// As for [`FieldType`], if the type isn't a reference: it must hold nothing
+/// that points into a mod's image.
+pub unsafe trait Crossing {}
+
+unsafe impl<T: ?Sized> Crossing for &T {}
+unsafe impl<T: ?Sized> Crossing for &mut T {}
+unsafe impl Crossing for () {}
 
 #[doc(hidden)]
 pub const fn __fnv(mut hash: u64, bytes: &[u8]) -> u64 {
@@ -225,7 +244,8 @@ macro_rules! scalar_field_types {
         $(unsafe impl FieldType for $ty {
             const KIND: FieldKind = FieldKind::$kind;
             const FINGERPRINT: u64 = __fingerprint(stringify!($ty), &[]);
-        })*
+        }
+        unsafe impl Crossing for $ty {})*
     };
 }
 
@@ -239,50 +259,71 @@ scalar_field_types! {
 // sound because every mod and the loader come from one toolchain, which the
 // loader checks at load time.
 // Plain data: seconds and nanoseconds, no pointers.
+unsafe impl Crossing for std::time::Instant {}
 unsafe impl FieldType for std::time::Instant {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Instant", &[]);
 }
 
+unsafe impl Crossing for std::time::Duration {}
 unsafe impl FieldType for std::time::Duration {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Duration", &[]);
 }
 
+unsafe impl Crossing for String {}
 unsafe impl FieldType for String {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("String", &[]);
 }
 
+unsafe impl<T: FieldType> Crossing for Vec<T> {}
 unsafe impl<T: FieldType> FieldType for Vec<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Vec", &[T::FINGERPRINT]);
 }
 
+unsafe impl<T: FieldType> Crossing for Option<T> {}
 unsafe impl<T: FieldType> FieldType for Option<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Option", &[T::FINGERPRINT]);
 }
 
+unsafe impl<T: FieldType> Crossing for Box<T> {}
 unsafe impl<T: FieldType> FieldType for Box<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Box", &[T::FINGERPRINT]);
 }
 
+unsafe impl<T: FieldType, const N: usize> Crossing for [T; N] {}
 unsafe impl<T: FieldType, const N: usize> FieldType for [T; N] {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Array", &[T::FINGERPRINT, N as u64]);
 }
 
+unsafe impl<K: FieldType + Eq + std::hash::Hash, V: FieldType> Crossing for std::collections::HashMap<K, V> {}
 unsafe impl<K: FieldType + Eq + std::hash::Hash, V: FieldType> FieldType for std::collections::HashMap<K, V> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("HashMap", &[K::FINGERPRINT, V::FINGERPRINT]);
 }
 
+unsafe impl<K: FieldType + Ord, V: FieldType> Crossing for std::collections::BTreeMap<K, V> {}
 unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BTreeMap<K, V> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("BTreeMap", &[K::FINGERPRINT, V::FINGERPRINT]);
 }
+
+macro_rules! tuple_field_types {
+    ($(($($t:ident),+)),* $(,)?) => {
+        $(unsafe impl<$($t: FieldType),+> Crossing for ($($t,)+) {}
+        unsafe impl<$($t: FieldType),+> FieldType for ($($t,)+) {
+            const KIND: FieldKind = FieldKind::OPAQUE;
+            const FINGERPRINT: u64 = __fingerprint("Tuple", &[$($t::FINGERPRINT),+]);
+        })*
+    };
+}
+
+tuple_field_types! { (A, B), (A, B, C), (A, B, C, D) }
 
 /// Declares a component whose values survive layout changes.
 ///
@@ -323,6 +364,7 @@ macro_rules! component {
 
         // SAFETY: every field is a `FieldType`, which rules out pointers into
         // the mod, and `FIELDS` is generated from the struct itself.
+        unsafe impl $crate::Crossing for $name {}
         unsafe impl $crate::Component for $name {
             const NAME: &'static str = $id;
             $(const VERSION: u32 = $version;)?
@@ -395,6 +437,7 @@ macro_rules! field_struct {
 
         // SAFETY: every field is a `FieldType`, and the fingerprint covers
         // each one's name, offset and fingerprint.
+        unsafe impl $crate::Crossing for $name {}
         unsafe impl $crate::FieldType for $name {
             const KIND: $crate::FieldKind = $crate::FieldKind::OPAQUE;
             const FINGERPRINT: u64 = $crate::__fingerprint_struct(&[

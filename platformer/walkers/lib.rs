@@ -1,6 +1,7 @@
 //! Walker behavior: pace, turn at a wall or a ledge, and meet the player.
 //! Landing on a walker from above kills it and bounces the player; any other
-//! touch sets `Player::hurt`, which the platformer's rules act on.
+//! touch kills the player. Both go through the platformer's `Rules` service,
+//! which owns what happens to the player.
 
 use std::collections::HashSet;
 
@@ -18,6 +19,13 @@ fn overlaps(p: &Player, w: &Walker) -> bool {
     p.x < w.x + 1.0 && w.x < p.x + PLAYER_WIDTH && p.y < w.y + 1.0 && w.y < p.y + PLAYER_HEIGHT
 }
 
+/// What meeting the player came to this frame.
+enum Meeting {
+    None,
+    Stomped,
+    Hurt,
+}
+
 impl Mod for Walkers {
     type Transient = ();
 
@@ -28,9 +36,10 @@ impl Mod for Walkers {
         };
         let solid: HashSet<(i32, i32)> =
             world.query::<Tile>().filter(|(_, t)| t.kind == SOLID).map(|(_, t)| (t.x, t.y)).collect();
-        let mut player = world.query::<Player>().next().map(|(e, p)| (e, *p));
+        let player = world.query::<Player>().next().map(|(_, p)| *p);
 
         let mut stomped = Vec::new();
+        let mut meeting = Meeting::None;
         for (e, w) in world.query::<Walker>() {
             if w.vx == 0.0 {
                 w.vx = WALK_SPEED;
@@ -44,22 +53,30 @@ impl Mod for Walkers {
                 w.x += w.vx * dt;
             }
 
-            if let Some((_, p)) = player.as_mut().filter(|(_, p)| overlaps(p, w)) {
+            if let Some(p) = player.filter(|p| overlaps(p, w)) {
                 // From above: falling, with the player's feet in the walker's
                 // top half.
                 if p.vy > 0.0 && p.y + PLAYER_HEIGHT < w.y + 0.5 {
                     stomped.push(e);
-                    p.vy = -STOMP_BOUNCE;
-                } else {
-                    p.hurt = true;
+                    meeting = Meeting::Stomped;
+                } else if !matches!(meeting, Meeting::Stomped) {
+                    meeting = Meeting::Hurt;
                 }
             }
         }
         for e in stomped {
             world.despawn(e);
         }
-        if let Some((e, p)) = player {
-            world.insert(e, p);
+
+        // After the query: a call can change the world, so it can't happen
+        // while one is open.
+        let result = match meeting {
+            Meeting::None => Ok(()),
+            Meeting::Stomped => platformer::bounce(cx, STOMP_BOUNCE),
+            Meeting::Hurt => platformer::hurt(cx),
+        };
+        if let Err(e) = result {
+            cx.log(format!("couldn't reach the rules: {e}"));
         }
         Status::OK
     }

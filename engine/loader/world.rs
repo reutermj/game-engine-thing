@@ -735,6 +735,7 @@ mod tests {
     }
 
     // SAFETY: an `Rc` to heap memory; nothing in the test binary's image.
+    unsafe impl engine_api::Crossing for Tracked {}
     unsafe impl engine_api::FieldType for Tracked {
         const KIND: engine_api::FieldKind = engine_api::FieldKind::OPAQUE;
         const FINGERPRINT: u64 = engine_api::__fingerprint("Tracked", &[]);

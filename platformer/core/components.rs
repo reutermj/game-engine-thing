@@ -59,9 +59,6 @@ component! {
         pub deaths: u32,
         /// Set once the player touches the goal.
         pub won: bool,
-        /// Set by anything that kills the player (an enemy); the rules
-        /// respawn the player on the next frame.
-        pub hurt: bool,
     }
 }
 
@@ -75,5 +72,17 @@ component! {
         /// A jump request, consumed by the next frame: it jumps if the player
         /// is on the ground then, and is dropped otherwise.
         pub jump: bool,
+    }
+}
+
+engine_api::service! {
+    /// What other mods may do to the player. Provided by the rules, so the
+    /// consequences (respawning, counting the death) stay in one place.
+    pub trait Rules {
+        /// Kills the player: it respawns at the level's start, and the death
+        /// is counted.
+        fn hurt();
+        /// Sends the player upward at `speed` tiles per second, as a stomp does.
+        fn bounce(speed: f32);
     }
 }

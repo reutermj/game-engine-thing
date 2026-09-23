@@ -1,7 +1,7 @@
 # Mod dependencies
 
-How one mod uses another mod's components, and how reloads stay consistent
-when those components change. The code is in `engine/defs.bzl` (the
+How one mod uses another mod's components and calls its functions, and how
+reloads stay consistent when those change. The code is in `engine/defs.bzl` (the
 `interface`/`mod_deps` attributes and the game reload target),
 `engine/tools/mod_links.rs` (the interface digest), and `load_batch` in
 `engine/loader/engine.rs`.
@@ -116,12 +116,82 @@ Decided 2026-09-23. The per-mod command could instead:
 - **not exist for mods in a game**: always reload through the game. Always
   correct, but loses the direct per-mod command.
 
+## Calls between mods
+
+A mod can offer functions to the mods that depend on it: a **service**,
+declared in its interface crate with `service!` and implemented by the mod.
+Callers use the plain functions the macro generates there.
+
+```rust
+// platformer's interface
+engine_api::service! {
+    pub trait Rules {
+        fn hurt();
+        fn bounce(speed: f32);
+    }
+}
+
+// platformer's implementation: a service method runs as the mod, with its
+// state, transient part and Cx, like its `step`
+impl platformer::Rules for Core {
+    fn hurt(&mut self, _: &mut (), cx: &mut Cx) { ... }
+    fn bounce(&mut self, _: &mut (), cx: &mut Cx, speed: f32) { ... }
+}
+export_mod!(Core, provides = [platformer::Rules]);
+
+// walkers, with platformer in its mod_deps
+if let Err(e) = platformer::hurt(cx) {
+    cx.log(format!("couldn't reach the rules: {e}"));
+}
+```
+
+Methods are declared as callers see them; the provider's side adds `&mut
+self`, the transient part and its `Cx`. Signatures use ordinary Rust types
+(the Rust ABI, which the one-compiler rule already makes safe; see
+[ecs.md](ecs.md#one-compiler-per-session)). A service works the same whether
+its provider is reloadable or resident.
+
+**Every call asks the loader for the provider's current build.** The loader
+keeps no table a caller can hold on to, so a provider reloaded between two
+calls is simply called in its new build, and no caller can keep a pointer into
+an old one. (Linking a caller to its provider directly wouldn't allow that:
+the dynamic linker resolves a library's calls once, when it loads, and can't
+repoint them at a provider's new build.) The lookup isn't cached yet; it's
+cheap next to the call, and worth measuring before optimizing.
+
+**What may cross.** Arguments passed by reference may be anything, `&dyn Fn`
+included: a borrow can't outlive the call, and both builds are mapped while it
+runs. Arguments and return values passed by value must be `Crossing` (every
+`FieldType`, every component), because the other side may keep them. A
+`Box<dyn Fn()>` argument is a compile error.
+
+**A call takes `&mut Cx`**, because the provider may change the world, and an
+insert can reallocate a column an open query is holding. So a call can't be
+made inside a query: collect what the query found, then call.
+
+**Calls fail as values.** A call returns `Result<T, CallError>`: the provider
+isn't loaded, has failed, panicked during the call (the panic stops in the
+provider, which is marked failed), or is already running.
+
+**No calls back into a running mod.** A call into a mod whose code is already
+on the stack (the caller itself, or a mod that called the caller) would give
+it a second `&mut` to its own state, so the loader refuses it
+(`CallErrorKind::Reentrant`). `mod_deps` has no cycles, so this mostly stops a
+mod calling itself; a provider that needs to reach back to its callers should
+leave data or an event for them (get-7yi).
+
+**One provider per service.** A load that would give a service a second
+provider is refused.
+
+A mod's `load` may call the mods it depends on, which have already loaded.
+Its `unload` and `close` can't make calls (`Unavailable`): they run while the
+loader is swapping builds.
+
 ## Open questions
 
-**Open question:** services. Interfaces carry only components, so mods share
-data but can't call each other. A mod exposing functions (a renderer's draw
-calls) would need an interface of function pointers, resolved again after the
-provider reloads.
+**Open question:** several providers of one interface, such as every mod
+that adds tools to an editor. Enumerating them (`cx.providers::<dyn Tool>()`)
+fits the call mechanism; it waits for a use.
 
 **Open question:** partial use. A dependent that reads one field of
 `Velocity` is still rebuilt when another field changes. The world could

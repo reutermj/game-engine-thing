@@ -65,10 +65,10 @@ Mods share data through the world, and a mod can depend on another mod's
 components: see [mod-deps.md](mod-deps.md), which also covers
 `./bazel run //game:reload` for changes that reach several mods.
 
-**Open question:** calls between mods. A renderer mod that a game mod calls
-into needs an interface of functions, not just components, and reloading the
-provider then affects its consumers. The likely shape is a registry of C-ABI
-vtables in the loader, re-fetched after a provider reloads.
+Mods can also call each other through services (`service!`), resolved to the
+provider's current build on every call, so a reloaded provider is simply
+called in its new build: see
+[mod-deps.md](mod-deps.md#calls-between-mods).
 
 **Open question:** distribution. Whether mods will ever be built outside this
 workspace or shipped to players decides whether the ABI must be stable

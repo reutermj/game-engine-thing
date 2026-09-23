@@ -101,6 +101,27 @@ COUNTER_BUILDS = [
     ("right_", ["right"]),
 ]]
 
+# Builds of `calc`, which provides a service, and `caller`, which calls it.
+# See mods/calc.rs.
+[engine_mod(
+    name = "calc_" + build,
+    srcs = ["mods/calc.rs"],
+    crate_features = [build],
+    crate_root = "mods/calc.rs",
+    interface = ["mods/calc_interface.rs"],
+    mod_name = "calc",
+) for build in [
+    "v1",
+    "v2",
+]]
+
+engine_mod(
+    name = "caller",
+    srcs = ["mods/caller.rs"],
+    crate_root = "mods/caller.rs",
+    mod_deps = [":calc_v1"],
+)
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],
@@ -114,6 +135,9 @@ engine_mod(
 )
 
 TEST_MODS = {
+    "CALC_V1": ":calc_v1",
+    "CALC_V2": ":calc_v2",
+    "CALLER": ":caller",
     "GREETER_V1": ":greeter_v1",
     "GREETER_V2": ":greeter_v2",
     "GREETER_RIGHT_V1": ":greeter_right_v1",

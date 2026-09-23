@@ -478,3 +478,74 @@ mod state_pointing_into_its_build {
         assert_eq!((probe(&e).value, probe(&e).build), (13, 5));
     }
 }
+
+/// Calls between mods: `caller` calls `calc`'s service (get-y5t.1).
+mod calls {
+    use super::{engine, lib, load};
+
+    fn with_calc(test: &str) -> Box<engine_loader::engine::Engine> {
+        let e = engine(test);
+        load(&e, "calc", "CALC_V1");
+        load(&e, "caller", "CALLER");
+        e
+    }
+
+    fn call(e: &engine_loader::engine::Engine, message: &str) -> Result<String, String> {
+        e.send("caller", message)
+    }
+
+    #[test]
+    fn a_call_runs_in_the_provider_with_its_state() {
+        let e = with_calc("call");
+        assert_eq!(call(&e, "apply 5").as_deref(), Ok("6"));
+        // One call from caller's load, one just now: counted in calc's state.
+        assert_eq!(call(&e, "describe").as_deref(), Ok("calc v1 (2 calls)"));
+        assert_eq!(call(&e, "at_load").as_deref(), Ok("101"), "a mod's load can call the mods it depends on");
+    }
+
+    #[test]
+    fn borrowed_arguments_and_owned_returns_cross() {
+        let e = with_calc("call_borrow");
+        assert_eq!(call(&e, "greet world").as_deref(), Ok("hello, world"));
+    }
+
+    #[test]
+    fn a_provider_reloaded_between_calls_is_called_in_its_new_build() {
+        let e = with_calc("call_reload");
+        assert_eq!(call(&e, "apply 5").as_deref(), Ok("6"));
+        // Same interface, so caller isn't stranded and isn't reloaded.
+        assert_eq!(load(&e, "calc", "CALC_V2"), "reloaded calc (generation 1)");
+        assert_eq!(call(&e, "apply 5").as_deref(), Ok("10"));
+        assert_eq!(call(&e, "describe").as_deref(), Ok("calc v2 (3 calls)"), "the provider's state carried over");
+        assert!(e.list().contains("caller gen 0"), "{}", e.list());
+    }
+
+    #[test]
+    fn a_panicking_provider_fails_the_call_and_is_marked_failed() {
+        let e = with_calc("call_panic");
+        assert_eq!(call(&e, "boom"), Err("calc::Calc::boom: its provider panicked".into()));
+        assert!(e.list().contains("calc gen 0 [failed]"), "{}", e.list());
+        assert_eq!(call(&e, "apply 5"), Err("calc::Calc::apply: its provider has failed; reload it".into()));
+        // The caller carried on, and a reload of the provider brings it back.
+        load(&e, "calc", "CALC_V2");
+        assert_eq!(call(&e, "apply 5").as_deref(), Ok("10"));
+    }
+
+    #[test]
+    fn a_call_back_into_a_running_mod_is_refused() {
+        let e = with_calc("call_reentrant");
+        assert_eq!(
+            call(&e, "recurse").as_deref(),
+            Ok("calc::Calc::apply: its provider is already running (a call back into a running mod)")
+        );
+        // Refusing it didn't leave calc marked running or failed.
+        assert_eq!(call(&e, "apply 5").as_deref(), Ok("6"));
+    }
+
+    #[test]
+    fn a_service_has_one_provider() {
+        let e = with_calc("call_two_providers");
+        let err = e.load("calc2", &lib("CALC_V2")).unwrap_err();
+        assert_eq!(err, "calc2 and calc both provide calc::Calc");
+    }
+}

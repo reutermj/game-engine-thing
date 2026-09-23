@@ -44,6 +44,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
     API over it. Separate from `lib.rs` because it is a second contract: how
     mods share data, not how a mod is loaded.
+  - `service.rs` — calls between mods: `service!`, which generates a
+    provider trait and caller functions, and the host calls that resolve a
+    call to the provider's current build. See
+    [docs/architecture/mod-deps.md](docs/architecture/mod-deps.md#calls-between-mods).
 - `engine/loader/` — the engine: a library (`lib.rs`) with everything but
   the manifest and the loop, so tests can drive an `Engine` directly, and
   the binary (`main.rs`) around it.

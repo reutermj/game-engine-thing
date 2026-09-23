@@ -24,15 +24,21 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod ecs;
+mod service;
+pub use service::{
+    CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc,
+};
+#[doc(hidden)]
+pub use service::{__begin_call, __end_call, __serve};
 pub use ecs::{
-    Column, Component, ComponentDesc, ComponentId, DefaultFn, DropFn, Entity, FieldDesc, FieldKind,
-    FieldType, World, WorldApi,
+    Column, Component, ComponentDesc, ComponentId, Crossing, DefaultFn, DropFn, Entity, FieldDesc,
+    FieldKind, FieldType, World, WorldApi,
 };
 #[doc(hidden)]
 pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 
 /// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 7;
+pub const API_VERSION: u32 = 8;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -116,6 +122,9 @@ pub struct ModInfo {
     /// separated by commas.
     pub deps: *const u8,
     pub deps_len: usize,
+    /// The services this build provides (`export_mod!(.., provides = [..])`).
+    pub services: *const ServiceDesc,
+    pub service_count: usize,
 }
 
 /// Services the loader provides to mods.
@@ -128,6 +137,18 @@ pub struct Host {
     pub step_mods: unsafe extern "C" fn(ctx: *const ModContext) -> Status,
     /// Appends to the reply to the message being handled.
     pub reply: unsafe extern "C" fn(ctx: *const ModContext, msg: *const u8, len: usize),
+    /// Resolves a call to `service`'s `method` in the provider's current
+    /// build, and marks the provider running until `end_call`.
+    pub begin_call: unsafe extern "C" fn(
+        ctx: *const ModContext,
+        service: *const u8,
+        service_len: usize,
+        method: *const u8,
+        method_len: usize,
+        target: *mut CallTarget,
+    ) -> CallStatus,
+    /// Ends a call `begin_call` resolved; `panicked` marks the provider failed.
+    pub end_call: unsafe extern "C" fn(ctx: *const ModContext, target: *const CallTarget, panicked: bool),
     /// The entity/component store every mod shares. See [`World`].
     pub world: WorldApi,
 }
@@ -157,7 +178,7 @@ pub struct ModContext {
 
 /// Safe view of a [`ModContext`] handed to [`Mod`] callbacks.
 pub struct Cx<'a> {
-    raw: &'a mut ModContext,
+    pub(crate) raw: &'a mut ModContext,
 }
 
 impl Cx<'_> {
@@ -236,7 +257,7 @@ pub trait Mod: ModState {
 }
 
 #[doc(hidden)]
-pub fn __info<T: Mod>(interface: &'static str, deps: &'static str) -> ModInfo {
+pub fn __info<T: Mod>(interface: &'static str, deps: &'static str, services: &'static [ServiceDesc]) -> ModInfo {
     ModInfo {
         api_version: API_VERSION,
         state_version: T::VERSION,
@@ -250,6 +271,8 @@ pub fn __info<T: Mod>(interface: &'static str, deps: &'static str) -> ModInfo {
         interface_len: interface.len(),
         deps: deps.as_ptr(),
         deps_len: deps.len(),
+        services: services.as_ptr(),
+        service_count: services.len(),
     }
 }
 
@@ -270,7 +293,7 @@ impl Mod for Inert {
 
 /// The running build's transient part, made if there's none yet (a `LOAD`
 /// that panicked before making it).
-unsafe fn transient<T: Mod>(slot: *mut *mut c_void) -> *mut T::Transient {
+pub(crate) unsafe fn transient<T: Mod>(slot: *mut *mut c_void) -> *mut T::Transient {
     unsafe {
         if (*slot).is_null() {
             *slot = Box::into_raw(Box::<T::Transient>::default()) as *mut c_void;
@@ -336,7 +359,8 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
     result.unwrap_or(Status::ERROR)
 }
 
-/// Exports `ty` (a [`Mod`]) as this dynamic library's mod.
+/// Exports `ty` (a [`Mod`]) as this dynamic library's mod, and the services
+/// it provides: `export_mod!(PhysicsMod, provides = [physics::Physics])`.
 ///
 /// Also records the interface digests `engine_mod` computed for this build
 /// (`ENGINE_INTERFACE_DIGEST`, `ENGINE_MOD_DEPS`, set at compile time), so the
@@ -344,9 +368,11 @@ pub unsafe fn __dispatch<T: Mod>(ctx: *mut ModContext, op: Op) -> Status {
 /// `engine_mod` records none.
 #[macro_export]
 macro_rules! export_mod {
-    ($ty:ty) => {
+    ($ty:ty $(, provides = [$($service:path),* $(,)?])? $(,)?) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn engine_mod_info() -> $crate::ModInfo {
+            // A const, so the list is in the library's static memory.
+            const SERVICES: &[$crate::ServiceDesc] = &[$($(<$ty as $service>::__SERVICE),*)?];
             $crate::__info::<$ty>(
                 match option_env!("ENGINE_INTERFACE_DIGEST") {
                     Some(digest) => digest,
@@ -356,6 +382,7 @@ macro_rules! export_mod {
                     Some(deps) => deps,
                     None => "",
                 },
+                SERVICES,
             )
         }
 
@@ -428,7 +455,7 @@ mod tests {
     /// A context with a live state, as the loader provides it. No host:
     /// nothing here calls back into one.
     fn context(state: &mut std::mem::MaybeUninit<Tracked>) -> ModContext {
-        unsafe { (__info::<Tracked>("", "").state_default)(state.as_mut_ptr() as *mut u8) };
+        unsafe { (__info::<Tracked>("", "", &[]).state_default)(state.as_mut_ptr() as *mut u8) };
         ModContext {
             host: std::ptr::null(),
             name: "t".as_ptr(),
@@ -476,7 +503,7 @@ mod tests {
 
     #[test]
     fn mod_state_records_its_schema() {
-        let info = __info::<Tracked>("", "");
+        let info = __info::<Tracked>("", "", &[]);
         assert_eq!(info.state_field_count, 1);
         assert!(info.state_drop.is_some(), "Tracked has a Drop impl");
         let field = unsafe { &*info.state_fields };

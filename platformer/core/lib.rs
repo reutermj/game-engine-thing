@@ -1,6 +1,7 @@
 //! The platformer's rules as a system: runs and jumps the player by its
 //! `Input`, collides it with the level's tiles, collects coins, and kills and
-//! respawns it on spikes, a fall, or `Player::hurt`.
+//! respawns it on spikes or a fall. Also provides `platformer::Rules`, so other
+//! mods (enemies) can kill or bounce the player.
 //!
 //! The player is spawned once a level exists (a `LevelInfo`) and there's no
 //! player yet, so this mod doesn't care whether it loads before or after the
@@ -86,8 +87,16 @@ fn integrate(p: &mut Player, input: &mut Input, tiles: &Tiles, dt: f32) {
 
 fn respawn(p: &mut Player, info: &LevelInfo) {
     (p.x, p.y, p.vx, p.vy) = (info.spawn_x, info.spawn_y, 0.0, 0.0);
-    p.hurt = false;
     p.deaths += 1;
+}
+
+/// Changes the player, if there is one.
+fn with_player(cx: &mut Cx, change: impl FnOnce(&mut Player, &LevelInfo)) {
+    let mut world = cx.world();
+    let Some(info) = world.query::<LevelInfo>().next().map(|(_, i)| *i) else { return };
+    if let Some((_, p)) = world.query::<Player>().next() {
+        change(p, &info);
+    }
 }
 
 impl Mod for Core {
@@ -112,7 +121,7 @@ impl Mod for Core {
         let tiles = Tiles::read(&mut world, info.width);
         integrate(&mut p, &mut input, &tiles, dt);
 
-        if p.hurt || tiles.touches(&p, SPIKE) || p.y > info.height as f32 + 2.0 {
+        if tiles.touches(&p, SPIKE) || p.y > info.height as f32 + 2.0 {
             respawn(&mut p, &info);
         }
         if tiles.touches(&p, GOAL) {
@@ -135,4 +144,14 @@ impl Mod for Core {
     }
 }
 
-export_mod!(Core);
+impl platformer::Rules for Core {
+    fn hurt(&mut self, _: &mut (), cx: &mut Cx) {
+        with_player(cx, respawn);
+    }
+
+    fn bounce(&mut self, _: &mut (), cx: &mut Cx, speed: f32) {
+        with_player(cx, |p, _| p.vy = -speed);
+    }
+}
+
+export_mod!(Core, provides = [platformer::Rules]);

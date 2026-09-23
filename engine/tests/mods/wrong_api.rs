@@ -18,6 +18,8 @@ pub extern "C" fn engine_mod_info() -> ModInfo {
         interface_len: 0,
         deps: std::ptr::null(),
         deps_len: 0,
+        services: std::ptr::null(),
+        service_count: 0,
     }
 }
 

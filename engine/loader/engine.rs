@@ -12,8 +12,8 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use engine_api::{
-    API_VERSION, DefaultFn, DropFn, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op,
-    Status, WorldApi,
+    API_VERSION, CallStatus, CallTarget, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL, InfoFn, MAIN_SYMBOL,
+    MainFn, ModContext, ModInfo, Op, Status, WorldApi,
 };
 use libloading::Library;
 
@@ -62,8 +62,20 @@ struct Loaded {
     /// This build's interface digest, and the digests it was built against.
     interface: String,
     deps: Vec<(String, String)>,
+    /// The services this build provides.
+    services: Vec<Service>,
     /// Set when the mod returned `Status::ERROR` (e.g. it panicked). Cleared by a reload.
     failed: Cell<bool>,
+    /// Set while any of the mod's code is on the stack (a hook, a message, a
+    /// call into one of its services), so a call back into it is refused.
+    running: Cell<bool>,
+}
+
+/// A service a build provides: its name and methods, copied out of the
+/// build's `ModInfo`. The methods are that build's code.
+struct Service {
+    name: String,
+    methods: Vec<(String, ErasedFn)>,
 }
 
 /// A new build, opened and validated but not yet swapped in.
@@ -78,6 +90,7 @@ struct Opened {
     state: StateSchema,
     interface: String,
     deps: Vec<(String, String)>,
+    services: Vec<Service>,
 }
 
 /// A build's state layout and schema, copied out of its `ModInfo`. `drops`
@@ -107,6 +120,8 @@ impl Engine {
                 log: host_log,
                 step_mods: host_step_mods,
                 reply: host_reply,
+                begin_call: host_begin_call,
+                end_call: host_end_call,
                 world: WorldApi {
                     register: world::register,
                     spawn: world::spawn,
@@ -201,8 +216,9 @@ impl Engine {
             }
         }
 
-        // Swap in and load the new builds, dependencies first.
+        // Swap in the new builds, then load them, dependencies first.
         let mut report = Vec::new();
+        let mut to_load = Vec::new();
         for o in opened {
             let loaded_at = self.next_load();
             match mods.iter_mut().find(|m| *m.name == *o.name) {
@@ -218,8 +234,9 @@ impl Engine {
                     self.libs.borrow_mut().insert(m.ctx as usize, m.lib.clone());
                     (m.main, m.info, m.source, m.content) = (o.main, o.info, o.path, o.content);
                     (m.interface, m.deps, m.state, m.image) = (o.interface, o.deps, o.state, o.image);
+                    m.services = o.services;
                     m.failed.set(false);
-                    m.call(Op::LOAD);
+                    to_load.push(m.ctx);
                     let note = match notes.iter().find(|(name, _)| *name == o.name) {
                         Some((_, note)) => format!(", {note}"),
                         None => String::new(),
@@ -253,11 +270,22 @@ impl Engine {
                         content: o.content,
                         interface: o.interface,
                         deps: o.deps,
+                        services: o.services,
                         failed: Cell::new(false),
+                        running: Cell::new(false),
                     });
-                    mods.last().unwrap().call(Op::LOAD);
+                    to_load.push(ctx);
                     report.push(format!("loaded {}", o.name));
                 }
+            }
+        }
+        // With the list only shared, so a mod's `load` can call services of the
+        // mods it depends on, which are already loaded: dependencies first.
+        drop(mods);
+        let mods = self.mods.borrow();
+        for ctx in to_load {
+            if let Some(m) = mods.iter().find(|m| m.ctx == ctx) {
+                m.call(Op::LOAD);
             }
         }
         report.extend(unchanged.iter().map(|name| format!("{name} unchanged")));
@@ -301,7 +329,8 @@ impl Engine {
                 Ok((dep.to_string(), digest.to_string()))
             })
             .collect::<Result<_, String>>()?;
-        Ok(Opened { name: name.into(), path: path.into(), content, lib, image, info, main, state, interface, deps })
+        let services = unsafe { read_services(&info) }.map_err(|e| format!("{name}: {e}"))?;
+        Ok(Opened { name: name.into(), path: path.into(), content, lib, image, info, main, state, interface, deps, services })
     }
 
     /// Checks that after swapping in `opened`, every mod runs against the
@@ -350,6 +379,23 @@ impl Engine {
                 names.join(", "),
                 if names.len() == 1 { "was" } else { "were" }
             ));
+        }
+        // One provider per service, among the mods after the batch.
+        let providers = mods
+            .iter()
+            .filter(|m| !opened.iter().any(|o| *o.name == *m.name))
+            .map(|m| (&*m.name, &m.services))
+            .chain(opened.iter().map(|o| (o.name.as_str(), &o.services)));
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for (name, services) in providers {
+            for service in services {
+                match seen.iter().find(|(s, _)| *s == service.name) {
+                    Some((_, other)) => {
+                        problems.push(format!("{name} and {other} both provide {}", service.name))
+                    }
+                    None => seen.push((&service.name, name)),
+                }
+            }
         }
         if problems.is_empty() { Ok(()) } else { Err(problems.join("; ")) }
     }
@@ -502,7 +548,9 @@ impl Engine {
 
 impl Loaded {
     fn call(&self, op: Op) -> Status {
+        let was_running = self.running.replace(true);
         let status = unsafe { (self.main)(self.ctx, op) };
+        self.running.set(was_running);
         if status == Status::ERROR {
             self.failed.set(true);
             eprintln!(
@@ -643,6 +691,32 @@ fn new_state(schema: &StateSchema) -> *mut c_void {
     state
 }
 
+/// The services a build's `ModInfo` lists, copied.
+///
+/// # Safety
+/// `info` must come from a loaded build (its pointers point into it).
+unsafe fn read_services(info: &ModInfo) -> Result<Vec<Service>, String> {
+    let services = match info.service_count {
+        0 => &[][..],
+        n => unsafe { std::slice::from_raw_parts(info.services, n) },
+    };
+    services
+        .iter()
+        .map(|s| {
+            let name = unsafe { copy_str(s.name, s.name_len) };
+            let methods = match s.method_count {
+                0 => &[][..],
+                n => unsafe { std::slice::from_raw_parts(s.methods, n) },
+            };
+            let methods = methods.iter().map(|m| (unsafe { copy_str(m.name, m.name_len) }, m.call)).collect();
+            if services.iter().filter(|o| unsafe { copy_str(o.name, o.name_len) } == name).count() > 1 {
+                return Err(format!("provides {name} twice"));
+            }
+            Ok(Service { name, methods })
+        })
+        .collect()
+}
+
 /// The address ranges `/proc/self/maps` shows `path` mapped at.
 fn mapped_ranges(path: &Path) -> Vec<(usize, usize)> {
     let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else { return Vec::new() };
@@ -693,6 +767,58 @@ unsafe extern "C" fn host_reply(ctx: *const ModContext, msg: *const u8, len: usi
     // Can't fail: nothing else holds the buffer while a mod runs.
     if let Ok(mut reply) = engine.reply.try_borrow_mut() {
         reply.push_str(&String::from_utf8_lossy(msg));
+    }
+}
+
+unsafe extern "C" fn host_begin_call(
+    ctx: *const ModContext,
+    service: *const u8,
+    service_len: usize,
+    method: *const u8,
+    method_len: usize,
+    target: *mut CallTarget,
+) -> CallStatus {
+    let engine = unsafe { engine_of(ctx) };
+    // No panicking in here: unwinding out of an extern "C" fn aborts.
+    let Ok(mods) = engine.mods.try_borrow() else {
+        // Mods are being retired or swapped (an `unload` or `close` calling out).
+        return CallStatus::UNAVAILABLE;
+    };
+    let (service, method) = unsafe {
+        let bytes = |p, n| std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n));
+        (bytes(service, service_len), bytes(method, method_len))
+    };
+    let Some((provider, s)) = mods.iter().find_map(|m| Some((m, m.services.iter().find(|s| s.name == service)?)))
+    else {
+        return CallStatus::NOT_PROVIDED;
+    };
+    let Some(&(_, call)) = s.methods.iter().find(|(name, _)| name == method) else {
+        return CallStatus::NO_SUCH_METHOD;
+    };
+    if provider.failed.get() {
+        return CallStatus::PROVIDER_FAILED;
+    }
+    if provider.running.replace(true) {
+        return CallStatus::REENTRANT;
+    }
+    unsafe { *target = CallTarget { call: Some(call), provider: provider.ctx } };
+    CallStatus::OK
+}
+
+unsafe extern "C" fn host_end_call(ctx: *const ModContext, target: *const CallTarget, panicked: bool) {
+    let engine = unsafe { engine_of(ctx) };
+    let Ok(mods) = engine.mods.try_borrow() else { return };
+    let provider = unsafe { (*target).provider };
+    if let Some(m) = mods.iter().find(|m| m.ctx == provider) {
+        m.running.set(false);
+        if panicked {
+            m.failed.set(true);
+            eprintln!(
+                "[engine] {} panicked in a call from {}; it won't run again until it is reloaded",
+                m.name,
+                unsafe { name_of(ctx) }
+            );
+        }
     }
 }
 
