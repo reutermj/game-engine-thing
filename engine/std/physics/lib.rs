@@ -33,6 +33,17 @@ field_struct! {
         gravity: u64,
         contacts: u64,
         solve: u64,
+        /// Within `contacts`: colliders gathered and sorted, the
+        /// broadphase, the narrowphase, and the merge with the world's.
+        gather: u64,
+        broadphase: u64,
+        narrowphase: u64,
+        merge: u64,
+        /// Within `solve`: bodies and contacts gathered, the solver, and
+        /// the results written back.
+        solve_gather: u64,
+        solver: u64,
+        write_back: u64,
     }
 }
 
@@ -41,6 +52,27 @@ engine_api::mod_state! {
     struct Physics {
         steps: u64,
         time: Timings,
+    }
+}
+
+/// Entities to positions in a list, by entity index: ids are small dense
+/// integers, so a vector by index finds one in O(1), where sorting the list
+/// and binary-searching it was most of gathering. The generation is kept,
+/// so a stale id (despawned since, its index reused) finds nothing.
+struct Slots(Vec<(u32, u32)>);
+
+impl Slots {
+    fn of(entities: impl Iterator<Item = Entity> + Clone) -> Slots {
+        let len = entities.clone().map(|e| e.index as usize + 1).max().unwrap_or(0);
+        let mut slots = vec![(u32::MAX, u32::MAX); len];
+        for (k, e) in entities.enumerate() {
+            slots[e.index as usize] = (e.generation, k as u32);
+        }
+        Slots(slots)
+    }
+
+    fn get(&self, e: Entity) -> Option<u32> {
+        self.0.get(e.index as usize).filter(|(g, k)| *g == e.generation && *k != u32::MAX).map(|(_, k)| *k)
     }
 }
 
@@ -102,15 +134,15 @@ impl Physics {
         let mut items = Vec::new();
         bodies.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b)));
         statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed())));
-        for i in &mut items {
-            if let Some(v) = velocities.with(i.entity, |_, v| Vec2::new(v.x, v.y)) {
-                i.v = v;
+        let slots = Slots::of(items.iter().map(|i| i.entity));
+        velocities.for_each(|row, v| {
+            if let Some(k) = slots.get(row.entity()) {
+                items[k as usize].v = Vec2::new(v.x, v.y);
             }
-        }
-        // Entity order, so pairs (and everything after) don't depend on
-        // which table a body is in.
-        items.sort_by_key(|i| i.entity);
-        let index = |e: Entity| items.binary_search_by_key(&e, |i| i.entity).expect("a collider has a position") as u32;
+        });
+        // Pairs come in entity order, so what's found doesn't depend on the
+        // order items were gathered in.
+        let index = |e: Entity| slots.get(e).expect("a collider has a position");
         let arrives = |a: &Item, b: &Item| a.body.kind != STATIC || b.body.kind != STATIC;
         let collides = |a: &Item, b: &Item| {
             let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
@@ -125,7 +157,9 @@ impl Physics {
         };
         // The storage's own order is the broadphase: pairs whose boxes, grown
         // by the speculative margin, meet. In entity order, lesser first.
+        let gathered = Instant::now();
         let pairs: Vec<(u32, u32)> = shapes.near_pairs(narrow::MARGIN).into_iter().map(|(a, b)| (index(a), index(b))).collect();
+        let paired = Instant::now();
 
         let mut found: Vec<(ContactPair, Manifold, Response)> = Vec::new();
         // Each overlap, and whether it's a sensor's, which triggers.
@@ -154,6 +188,7 @@ impl Physics {
             }
         }
 
+        let narrowed = Instant::now();
         let key = |p: &ContactPair| (p.a, p.b);
         let mut next = 0;
         let spawn = |(pair, m, r): (ContactPair, Manifold, Response)| {
@@ -196,7 +231,12 @@ impl Physics {
             }
         });
         overlapping[next..].iter().copied().for_each(begin);
-        self.time.contacts += nanos(start);
+        let t = &mut self.time;
+        t.gather += (gathered - start).as_nanos() as u64;
+        t.broadphase += (paired - gathered).as_nanos() as u64;
+        t.narrowphase += (narrowed - paired).as_nanos() as u64;
+        t.merge += nanos(narrowed);
+        t.contacts += nanos(start);
     }
 
     fn solve(
@@ -220,13 +260,10 @@ impl Physics {
         });
         // Bodies with no velocity (statics) all stand for one immovable
         // body at the end.
-        let mut order: Vec<usize> = (0..entities.len()).collect();
-        order.sort_by_key(|&i| entities[i]);
+        let slots = Slots::of(entities.iter().copied());
         let still = bodies.len() as u32;
         bodies.push(SolverBody::default());
-        let index_of = |e: Entity| {
-            order.binary_search_by_key(&e, |&i| entities[i]).map_or(still, |k| order[k] as u32)
-        };
+        let index_of = |e: Entity| slots.get(e).unwrap_or(still);
 
         // In pair order, which storage keeps: the solve doesn't depend on
         // when each contact began. Copied out, then mapped: building
@@ -252,7 +289,9 @@ impl Physics {
                 speed: 0.0,
             })
             .collect();
+        let gathered = Instant::now();
         solver::solve(&mut bodies, &mut constraints, dt);
+        let after_solver = Instant::now();
 
         let mut i = 0;
         moving.for_each(|_, (body, mut v, mut p)| {
@@ -268,7 +307,14 @@ impl Physics {
             p.y += step.y * dt;
         });
 
-        touching.for_each(|_, mut t| *t = Touching::default());
+        // Most bodies don't ask (the pile's none), and a failed lookup per
+        // end of every contact was half of writing back.
+        let mut asking = Vec::new();
+        touching.for_each(|row, mut t| {
+            *t = Touching::default();
+            asking.push(row.entity());
+        });
+        let asking = Slots::of(asking.iter().copied());
         let mut solved = constraints.iter();
         contacts.for_each_ordered(|_, (pair, mut m, r, mut j)| {
             if r.disabled {
@@ -282,13 +328,20 @@ impl Physics {
                 return;
             }
             let n = Vec2::new(m.nx, m.ny);
-            touching.with(pair.a, |_, mut t| mark(&mut t, n));
-            touching.with(pair.b, |_, mut t| mark(&mut t, -n));
+            for (e, n) in [(pair.a, n), (pair.b, -n)] {
+                if asking.get(e).is_some() {
+                    touching.with(e, |_, mut t| mark(&mut t, n));
+                }
+            }
             if !m.was_pressed {
                 began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
             }
         });
-        self.time.solve += nanos(start);
+        let t = &mut self.time;
+        t.solve_gather += (gathered - start).as_nanos() as u64;
+        t.solver += (after_solver - gathered).as_nanos() as u64;
+        t.write_back += nanos(after_solver);
+        t.solve += nanos(start);
     }
 }
 
@@ -343,6 +396,20 @@ impl Mod for Physics {
                     per(t.gravity),
                     per(t.contacts),
                     per(t.solve)
+                ))
+            }
+            "stages" => {
+                let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
+                let t = self.time;
+                Ok(format!(
+                    "gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
+                    per(t.gather),
+                    per(t.broadphase),
+                    per(t.narrowphase),
+                    per(t.merge),
+                    per(t.solve_gather),
+                    per(t.solver),
+                    per(t.write_back)
                 ))
             }
             "reset_timings" => {

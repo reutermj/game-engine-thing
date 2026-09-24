@@ -1,5 +1,6 @@
 //! The stress demo: a walled box that bodies are dropped into.
 //!
+//!   widen <w>  rebuild the box's walls w wide, for piles bigger than ~1100
 //!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
 //!   stats      how many bodies, how many at rest, the deepest overlap
 //!              between two of them, and how many got out of the box
@@ -18,6 +19,8 @@ engine_api::mod_state! {
     struct Pile {
         walls: Vec<Entity>,
         dropped: u32,
+        /// 0 until widened: `WIDTH`.
+        width: f32,
     }
 }
 
@@ -26,13 +29,26 @@ fn wall(world: &mut WorldMut, cx: f32, cy: f32, hx: f32, hy: f32) -> Entity {
 }
 
 impl Pile {
+    fn width(&self) -> f32 {
+        if self.width > 0.0 { self.width } else { WIDTH }
+    }
+
+    fn build_walls(&mut self, world: &mut WorldMut) {
+        let (w, h) = (self.width(), HEIGHT);
+        self.walls = vec![
+            wall(world, w / 2.0, h + 0.5, w / 2.0 + 1.0, 0.5),
+            wall(world, -0.5, h / 2.0, 0.5, h),
+            wall(world, w + 0.5, h / 2.0, 0.5, h),
+        ];
+    }
+
     fn drop_bodies(&mut self, world: &mut WorldMut, n: u32) {
         // Rows from the floor up, a little apart so each falls a little, and
         // jittered so the pile doesn't stand in perfect columns. The jitter
         // is a function of the index, so a drop is the same on every run.
         // The walls reach half the box's height above it, room for about
         // 1100 bodies.
-        let per_row = ((WIDTH - 2.0) / 1.2) as u32;
+        let per_row = ((self.width() - 2.0) / 1.2) as u32;
         for k in self.dropped..self.dropped + n {
             let (col, row) = (k % per_row, k / per_row);
             let jitter = ((k * 7919) % 100) as f32 / 100.0 * 0.2 - 0.1;
@@ -45,7 +61,7 @@ impl Pile {
     }
 }
 
-fn stats(world: &mut WorldMut) -> String {
+fn stats(world: &mut WorldMut, width: f32) -> String {
     let mut bodies: Vec<(Placed, f32)> = Vec::new();
     world.for_each::<(&Position, &Velocity, &Collider)>(|_, (p, v, c)| {
         bodies.push((Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }, Vec2::new(v.x, v.y).len()));
@@ -53,7 +69,7 @@ fn stats(world: &mut WorldMut) -> String {
     let resting = bodies.iter().filter(|(_, speed)| *speed < REST).count();
     let escaped = bodies
         .iter()
-        .filter(|(b, _)| b.at.x < 0.0 || b.at.x > WIDTH || b.at.y < -HEIGHT / 2.0 || b.at.y > HEIGHT)
+        .filter(|(b, _)| b.at.x < 0.0 || b.at.x > width || b.at.y < -HEIGHT / 2.0 || b.at.y > HEIGHT)
         .count();
     // Quadratic, and fine for a message.
     let mut deepest = 0.0f32;
@@ -91,23 +107,26 @@ impl Mod for Pile {
         }
         let mut world = cx.world();
         world.spawn((Gravity { x: 0.0, y: 20.0 },));
-        let (w, h) = (WIDTH, HEIGHT);
-        self.walls = vec![
-            wall(&mut world, w / 2.0, h + 0.5, w / 2.0 + 1.0, 0.5),
-            wall(&mut world, -0.5, h / 2.0, 0.5, h),
-            wall(&mut world, w + 0.5, h / 2.0, 0.5, h),
-        ];
+        self.build_walls(&mut world);
     }
 
     fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut world = cx.world();
         match message.split_once(' ') {
+            Some(("widen", w)) => {
+                self.width = w.trim().parse().map_err(|e| format!("{w:?}: {e}"))?;
+                for e in std::mem::take(&mut self.walls) {
+                    world.despawn(e);
+                }
+                self.build_walls(&mut world);
+                Ok(format!("{} wide", self.width))
+            }
             Some(("drop", n)) => {
                 let n = n.trim().parse().map_err(|e| format!("{n:?}: {e}"))?;
                 self.drop_bodies(&mut world, n);
                 Ok(format!("dropped {n}"))
             }
-            None if message.trim() == "stats" => Ok(stats(&mut world)),
+            None if message.trim() == "stats" => Ok(stats(&mut world, self.width())),
             _ => Err("commands: drop <n> | stats".into()),
         }
     }

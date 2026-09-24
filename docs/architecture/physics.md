@@ -343,6 +343,56 @@ determinism and reload tests run and `:bench` times. The engine's demo
 couple of dozen bodies. It's also the scene system parallelism and
 `par_for_each` will be measured on.
 
+## What the ECS costs
+
+2026-09-24. `./bazel run -c opt //engine/std/physics:tax` runs a pile in
+the engine to the frame to measure, copies its whole state (bodies, and
+contacts with their impulses) into plain arrays, and runs the same steps
+both ways: the mod in the world, and the same step on arrays, with the same
+narrowphase and solver, contacts in the same order, bodies as indices. It
+asserts they end bit for bit the same (they do), so what differs is the
+cost of the world, not different work.
+
+µs per step, settled pile, `-c opt`, one thread, ECS / arrays:
+
+| | 1000 bodies | 10 000 bodies |
+|---|---|---|
+| frame | 233 / 124 | 2909 / 1269 |
+| gathering colliders | 10 / – | 144 / – |
+| broadphase | 57 / 25 | 996 / 277 |
+| narrowphase | 9 / 18 | 110 / 182 |
+| merging contacts | 12 / 1 | 113 / 11 |
+| solve: gathering | 18 / 3 | 179 / 29 |
+| solver | 75 / 74 | 793 / 739 |
+| writing back | 18 / 2 | 184 / 19 |
+| outside the systems (the spatial re-sort) | 32 / – | 352 / – |
+
+Before two fixes found this way, the 10 000 frame was 4738 µs. The mod
+mapped entities to array indices by sorting and binary search, three times
+a step; entity ids are small dense integers, so a vector by index does it
+in O(1) (`Slots`). And writing back looked up `Touching` on both ends of
+every contact, though most bodies don't have one.
+
+**What's left:**
+
+1. **Spatial storage, about two thirds of the gap.** `near_pairs` (pairs of
+   Z-order pages, swept) is 3.6× a sweep and prune on arrays that keeps its
+   x order between steps, and 2.3× one that sorts afresh every step (425
+   µs). On top of that, keeping the order costs 352 µs a step: `solve`
+   writes every body, at rest or not, and each write re-bounds its row.
+2. **Copying in and out, about a quarter.** Colliders out for detection,
+   bodies and contacts into the solver's arrays, and results back. Arrays
+   skip it because a body's index is where it's stored. Rows in the world
+   can't be that, since spatial order moves them every step: the same cause
+   as the first.
+3. **The merge**, contacts updated through a query rather than assigned,
+   about 100 µs.
+
+The solver and the narrowphase cost the same either way, since they're
+the same code over the same arrays. The scheduler and frame cost about 7
+µs. Neither side is parallel yet, and scenes that churn contacts, or
+bodies carrying many game components, aren't measured.
+
 ## What changes elsewhere
 
 - `mods/transform` and the old `mods/physics` demo went;

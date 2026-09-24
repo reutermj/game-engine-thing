@@ -134,3 +134,24 @@ rust_binary(
         "@rules_rust//rust/runfiles",
     ],
 )
+
+# The ECS's cost over the same step on plain arrays, checked to be the same
+# computation bit for bit:
+#   ./bazel run -c opt //engine/std/physics:tax
+rust_binary(
+    name = "tax",
+    srcs = [
+        "narrow.rs",
+        "solver.rs",
+        "tests/tax.rs",
+    ],
+    crate_root = "tests/tax.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
