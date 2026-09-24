@@ -10,7 +10,7 @@
 //!   state                 the numbers behind the drawing
 
 use clock::Clock;
-use engine_api::{Cx, Mod, World, export_mod};
+use engine_api::{Cx, Mod, WorldMut, export_mod};
 use platformer::{
     Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile,
 };
@@ -25,7 +25,7 @@ engine_api::mod_state! {
 
 /// Sends `event`, if there's a player to act on it.
 fn send(cx: &mut Cx, event: impl engine_api::Event) -> Result<(), String> {
-    if cx.world().query::<Player>().next().is_none() {
+    if cx.world().single::<&Player, ()>(|_, _| ()).is_none() {
         return Err("no player yet: is a level loaded? try `step`".into());
     }
     cx.send_event(event);
@@ -42,22 +42,26 @@ struct Snapshot {
     walkers: Vec<Walker>,
 }
 
-fn snapshot(world: &mut World) -> Result<Snapshot, String> {
+/// Every `T` in the world, copied out.
+fn all<T: engine_api::Component + Copy>(world: &mut WorldMut) -> Vec<T> {
+    let mut out = Vec::new();
+    world.for_each::<&T>(|_, t| out.push(*t));
+    out
+}
+
+fn snapshot(world: &mut WorldMut) -> Result<Snapshot, String> {
     let frame = clock::now(world).map_or(0, |c: Clock| c.frame);
-    let info = world.query::<LevelInfo>().next().map(|(_, i)| *i).ok_or("no level loaded")?;
-    let (input, player) = world
-        .query2::<Input, Player>()
-        .next()
-        .map(|(_, i, p)| (*i, *p))
-        .ok_or("no player yet: try `step`")?;
+    let info = world.single::<&LevelInfo, _>(|_, i| *i).ok_or("no level loaded")?;
+    let (input, player) =
+        world.single::<(&Input, &Player), _>(|_, (i, p)| (*i, *p)).ok_or("no player yet: try `step`")?;
     Ok(Snapshot {
         frame,
         info,
         player,
         input,
-        tiles: world.query::<Tile>().map(|(_, t)| *t).collect(),
-        coins: world.query::<Coin>().map(|(_, c)| *c).collect(),
-        walkers: world.query::<Walker>().map(|(_, w)| *w).collect(),
+        tiles: all(world),
+        coins: all(world),
+        walkers: all(world),
     })
 }
 

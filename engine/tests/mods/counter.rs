@@ -70,15 +70,13 @@ impl Counter {
 }
 
 impl Counter {
-    fn count(&mut self, _: &mut (), cx: &mut Cx, probes: Query<&mut Probe>) {
+    fn count(&mut self, _: &mut (), _: &mut Cx, mut probes: Query<&mut Probe>) {
         if cfg!(feature = "panic") && !PANICKED.swap(true, Ordering::Relaxed) {
             panic!("this build of counter panics on its first step");
         }
         self.total += BUILD.1;
         let (probe, entity) = (self.probe_value(), self.probe.expect("spawned in load"));
-        if let Some(p) = probes.get(cx, entity) {
-            *p = probe;
-        }
+        probes.with(entity, |_, p| *p = probe);
     }
 }
 
@@ -92,7 +90,7 @@ impl Mod for Counter {
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         LOADS.fetch_add(1, Ordering::Relaxed);
         if self.probe.is_none() {
-            self.probe = Some(cx.world().spawn());
+            self.probe = Some(cx.world().spawn(()));
         }
         self.write_probe(cx);
     }

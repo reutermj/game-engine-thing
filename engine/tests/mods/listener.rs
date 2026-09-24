@@ -16,9 +16,9 @@ engine_api::mod_state! {
 }
 
 impl Listener {
-    fn listen(&mut self, _: &mut (), cx: &mut Cx, q: Query<&mut Trace>, pings: EventReader<Ping>) {
-        let seen: Vec<u64> = pings.read(cx).iter().map(|p| p.n).collect();
-        trace(cx, &q, format!("{BUILD} saw {seen:?}"));
+    fn listen(&mut self, _: &mut (), _: &mut Cx, mut q: Query<&mut Trace>, mut pings: EventReader<Ping>) {
+        let seen: Vec<u64> = pings.read().iter().map(|p| p.n).collect();
+        trace(&mut q, format!("{BUILD} saw {seen:?}"));
     }
 }
 

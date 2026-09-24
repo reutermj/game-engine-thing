@@ -1,9 +1,9 @@
 //! Schemas: the field-by-field description of a component or a mod's state
-//! that lets the loader migrate values between builds whose layouts differ.
-//! Shared by the world's components and by mod state, which migrate by the
-//! same rules (docs/architecture/ecs.md, "Layout changes").
+//! that lets values migrate between builds whose layouts differ. Shared by
+//! the world's components and by mod state (the loader), which migrate by
+//! the same rules (docs/architecture/ecs.md, "Layout changes").
 
-use engine_api::{DefaultFn, DropFn, FieldDesc, FieldKind};
+use crate::component::{DefaultFn, DropFn, FieldDesc, FieldKind};
 
 /// A field of a schema, copied out of the mod's `FieldDesc` because that
 /// points into the mod's memory. Its drop function is kept apart, with the

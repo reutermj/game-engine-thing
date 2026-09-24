@@ -15,11 +15,11 @@ engine_api::mod_state! {
 }
 
 impl Physics {
-    fn integrate(&mut self, _: &mut (), cx: &mut Cx, q: Query<(&Velocity, &mut Position)>) {
-        for (_, (velocity, position)) in q.iter(cx) {
+    fn integrate(&mut self, _: &mut (), _: &mut Cx, mut q: Query<(&Velocity, &mut Position)>) {
+        q.for_each(|_, (velocity, position)| {
             position.x += velocity.x * DT;
             position.y += velocity.y * DT;
-        }
+        });
     }
 }
 

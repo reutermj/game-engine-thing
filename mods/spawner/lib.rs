@@ -23,9 +23,7 @@ impl Mod for Spawner {
         }
         let mut world = cx.world();
         for (i, vx) in [1.0, 2.0, 3.0].into_iter().enumerate() {
-            let e = world.spawn();
-            world.insert(e, Position { x: 0.0, y: i as f32 });
-            world.insert(e, Velocity { x: vx, y: 0.0 });
+            let e = world.spawn((Position { x: 0.0, y: i as f32 }, Velocity { x: vx, y: 0.0 }));
             self.spawned.push(e);
         }
         let n = self.spawned.len();

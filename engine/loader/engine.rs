@@ -10,34 +10,37 @@ use std::alloc::Layout;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use engine_api::{
-    API_VERSION, AccessKind, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL,
-    InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc, WorldApi,
+    API_VERSION, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL,
+    InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc,
 };
-use engine_api::scheduler::{FramePlan, PhasePlan, PlannedSystem, Ran};
+use engine_api::scheduler::{FramePlan, PlannedNode, Ran};
+use engine_ecs::schema::{self, Field};
+use engine_ecs::{Build, Change, FrameCx, Keepalive, Log, Structural, World};
 use engine_control::Request;
 use libloading::Library;
 
 use crate::schedule::{self, ModDecls, Plan};
-use crate::schema::{self, Field};
-use crate::world::{self, Keepalive, WorldStorage};
+
 
 pub struct Engine {
     host: Host,
     mods: RefCell<Vec<Loaded>>,
     bootstrap: Option<String>,
-    /// The plan of the frame being run, while one is open: what a
-    /// scheduler's `run_system` ids refer to.
-    frame: RefCell<Option<Rc<Plan>>>,
+    /// The frame being run, while one is open: what a scheduler's
+    /// `run_node` ids refer to.
+    frame: RefCell<Option<OpenFrame>>,
     staging_dir: PathBuf,
     staged_count: Cell<u64>,
-    /// Outlives every mod build; see `world.rs`.
-    world: RefCell<WorldStorage>,
+    /// Outlives every mod build: component values keep the builds whose
+    /// code they need mapped (see engine_ecs's world.rs).
+    world: World,
     /// Source of `ModContext::loaded_at`.
     load_count: Cell<u64>,
     reload_hint: RefCell<Option<String>>,
@@ -46,7 +49,7 @@ pub struct Engine {
     /// Each loaded mod's current library, by `ModContext` address, for
     /// `library_of`. Separate from `mods` because it is read while `mods` is
     /// borrowed for a load.
-    libs: RefCell<HashMap<usize, Rc<Library>>>,
+    libs: RefCell<HashMap<usize, Arc<Library>>>,
     /// The rustc this engine was built with, which every mod must match.
     rustc: OnceCell<Option<String>>,
     /// Control requests waiting for the next pump; see [`Engine::requests`].
@@ -56,28 +59,24 @@ pub struct Engine {
     quitting: Cell<bool>,
     /// The order systems run in, rebuilt after the builds change.
     plan: RefCell<Option<Rc<Plan>>>,
-    /// The system running, whose own world calls are checked against what
-    /// it declared.
-    current: RefCell<Option<Current>>,
+
 }
 
-struct Current {
-    ctx: *const ModContext,
-    /// `mod::system`.
-    name: String,
-    /// Into the running build's systems, which can't change while it runs.
-    desc: *const SystemDesc,
-    /// The first undeclared access, which fails the mod when the system returns.
-    violation: Option<String>,
+/// A frame in progress: its plan, its nodes in order (each system, then its
+/// apply node if it can change the world), and the logs of systems that
+/// have run and whose applies haven't.
+struct OpenFrame {
+    plan: Rc<Plan>,
+    nodes: Vec<(FrameNode, String)>,
+    logs: HashMap<usize, Vec<Change>>,
 }
 
-/// What a world call does, for checking it against the running system's
-/// declarations.
-pub(crate) enum Want {
-    Read,
-    Write,
-    /// Changing the world's structure on the spot: the named operation.
-    Structure(&'static str),
+#[derive(Clone, Copy)]
+enum FrameNode {
+    /// A system, by its id in the plan.
+    System(usize),
+    /// A system's apply node.
+    Apply(usize),
 }
 
 /// A control request waiting for the engine, and how to answer it.
@@ -98,8 +97,8 @@ struct Loaded {
     info: ModInfo,
     main: MainFn,
     /// Shared with the world, which keeps a build's library mapped while
-    /// component values still need its code; see `world.rs`.
-    lib: Rc<Library>,
+    /// component values still need its code.
+    lib: Arc<Library>,
     source: PathBuf,
     /// Hash of the library file, to recognize an unchanged build.
     content: u64,
@@ -132,7 +131,7 @@ struct Opened {
     name: String,
     path: PathBuf,
     content: u64,
-    lib: Library,
+    lib: Arc<Library>,
     image: Vec<(usize, usize)>,
     info: ModInfo,
     main: MainFn,
@@ -176,31 +175,17 @@ impl Engine {
                 end_call: host_end_call,
                 pump: host_pump,
                 begin_frame: host_begin_frame,
-                run_system: host_run_system,
-                end_phase: host_end_phase,
+                run_node: host_run_node,
                 end_frame: host_end_frame,
-                world: WorldApi {
-                    register: world::register,
-                    spawn: world::spawn,
-                    despawn: world::despawn,
-                    insert: world::insert,
-                    remove: world::remove,
-                    get: world::get,
-                    column: world::column,
-                    defer_insert: world::defer_insert,
-                    defer_remove: world::defer_remove,
-                    defer_despawn: world::defer_despawn,
-                    register_event: world::register_event,
-                    send_event: world::send_event,
-                    read_events: world::read_events,
-                },
+                world: std::ptr::null(),
+                keepalive: host_keepalive,
             },
             mods: RefCell::new(Vec::new()),
             bootstrap,
             frame: RefCell::new(None),
             staging_dir,
             staged_count: Cell::new(0),
-            world: RefCell::new(WorldStorage::default()),
+            world: World::new(),
             load_count: Cell::new(0),
             reload_hint: RefCell::new(None),
             reply: RefCell::new(String::new()),
@@ -210,9 +195,9 @@ impl Engine {
             inbox,
             quitting: Cell::new(false),
             plan: RefCell::new(None),
-            current: RefCell::new(None),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
+        engine.host.world = &engine.world;
         engine
     }
 
@@ -237,8 +222,6 @@ impl Engine {
     /// and after the batch every mod must be running against the interfaces
     /// it was built against (see docs/architecture/mod-deps.md).
     pub fn load_batch(&self, batch: &[(String, PathBuf)]) -> Result<String, String> {
-        // Queued by the builds about to be replaced, in their layouts.
-        self.world.borrow_mut().apply_commands();
         let mut mods = self.mods.borrow_mut();
         let mut opened = Vec::new();
         let mut unchanged = Vec::new();
@@ -301,11 +284,22 @@ impl Engine {
             }
         }
 
+        // The new builds' components and events, now the old builds have let
+        // go of theirs: a changed layout migrates stored values here. The
+        // checks above rule out a refusal (an older layout, a changed storage).
+        let loaded_at: Vec<u64> = opened.iter().map(|_| self.next_load()).collect();
+        for (o, &loaded_at) in opened.iter().zip(&loaded_at) {
+            let build = Build { name: o.name.clone(), loaded_at, keepalive: Some(o.lib.clone() as Keepalive) };
+            match engine_ecs::between::install_all(&self.world, &o.decls.components, &o.decls.events, &build) {
+                Ok(reports) => reports.iter().for_each(|r| println!("[engine] {r}")),
+                Err(e) => eprintln!("[engine] {}: {e}", o.name),
+            }
+        }
+
         // Swap in the new builds, then load them, dependencies first.
         let mut report = Vec::new();
         let mut to_load = Vec::new();
-        for o in opened {
-            let loaded_at = self.next_load();
+        for (o, loaded_at) in opened.into_iter().zip(loaded_at) {
             match mods.iter_mut().find(|m| *m.name == *o.name) {
                 Some(m) => {
                     let generation = unsafe {
@@ -315,7 +309,7 @@ impl Engine {
                     };
                     // Releasing the old library unmaps the previous build, unless
                     // the world still needs its code.
-                    m.lib = Rc::new(o.lib);
+                    m.lib = o.lib;
                     self.libs.borrow_mut().insert(m.ctx as usize, m.lib.clone());
                     (m.main, m.info, m.source, m.content) = (o.main, o.info, o.path, o.content);
                     (m.interface, m.deps, m.state, m.image) = (o.interface, o.deps, o.state, o.image);
@@ -343,7 +337,7 @@ impl Engine {
                         message: std::ptr::null(),
                         message_len: 0,
                     }));
-                    let lib = Rc::new(o.lib);
+                    let lib = o.lib;
                     self.libs.borrow_mut().insert(ctx as usize, lib.clone());
                     mods.push(Loaded {
                         name,
@@ -422,8 +416,11 @@ impl Engine {
             .collect::<Result<_, String>>()?;
         let services = unsafe { read_services(&info) }.map_err(|e| format!("{name}: {e}"))?;
         let mut decls = Declarations::default();
-        if !unsafe { (info.declare)(&mut decls as *mut Declarations as *mut c_void) } {
+        if !unsafe { (info.declare)(&mut decls as *mut Declarations as *mut c_void, &self.world) } {
             return Err(format!("{name}: declaring its systems panicked"));
+        }
+        if let Some(e) = decls.error.take() {
+            return Err(format!("{name}: {e}"));
         }
         let resident = info.resident;
         if self.bootstrap.as_deref() == Some(name) && !info.bootstrap {
@@ -433,7 +430,7 @@ impl Engine {
             name: name.into(),
             path: path.into(),
             content,
-            lib,
+            lib: Arc::new(lib),
             image,
             info,
             main,
@@ -569,7 +566,7 @@ impl Engine {
 
     /// The library of the mod whose context this is, for the world to keep
     /// mapped while it holds that build's code.
-    pub(crate) fn library_of(&self, ctx: *const ModContext) -> Option<Keepalive> {
+    fn library_of(&self, ctx: *const ModContext) -> Option<Keepalive> {
         let lib = self.libs.borrow().get(&(ctx as usize)).cloned()?;
         Some(lib as Keepalive)
     }
@@ -616,7 +613,7 @@ impl Engine {
         Ok(format!("unloaded {name}"))
     }
 
-    pub fn world(&self) -> &RefCell<WorldStorage> {
+    pub fn world(&self) -> &World {
         &self.world
     }
 
@@ -650,7 +647,7 @@ impl Engine {
                 m.source.display()
             );
         }
-        out += &format!("\n{}", self.world.borrow().summary());
+        out += &format!("\n{}", self.world.summary());
         out
     }
 
@@ -718,24 +715,25 @@ impl Engine {
         Ok(plan)
     }
 
-    /// The loader's own frame: every system in plan order, one phase at a
-    /// time. What `step_mods` runs, and what a sequential scheduler mod does
-    /// through the frame primitives below.
+    /// The loader's own frame: every node in plan order. What `step_mods`
+    /// runs, and what a sequential scheduler mod does through the frame
+    /// primitives below.
     fn run_frame(&self) -> Status {
-        let Some(plan) = self.begin_frame() else { return Status::ERROR };
-        for phase in &plan.phases {
-            for s in &phase.systems {
-                self.run_planned(s.id);
-            }
-            self.end_phase();
+        if self.begin_frame().is_none() {
+            return Status::ERROR;
+        }
+        let count = self.frame.borrow().as_ref().map_or(0, |f| f.nodes.len());
+        for id in 0..count {
+            self.run_node(id);
         }
         self.end_frame();
         Status::OK
     }
 
-    /// Opens a frame and publishes what was queued between frames. `None` if
-    /// a frame is already open, or the mods are being changed.
-    fn begin_frame(&self) -> Option<Rc<Plan>> {
+    /// Opens a frame: its nodes, in plan order, each system followed by its
+    /// apply node if it can change the world or send events. `None` if a
+    /// frame is already open, or the mods are being changed.
+    fn begin_frame(&self) -> Option<Vec<(usize, String)>> {
         if self.frame.borrow().is_some() {
             return None;
         }
@@ -748,98 +746,101 @@ impl Engine {
                 return None;
             }
         };
-        drop(mods);
-        self.world.borrow_mut().begin_frame();
-        *self.frame.borrow_mut() = Some(plan.clone());
-        Some(plan)
-    }
-
-    /// Runs system `id` of the open frame. A mod that is already running
-    /// (the bootstrap, the scheduler, a caller up the stack) is skipped: its
-    /// state is borrowed.
-    fn run_planned(&self, id: usize) -> Ran {
-        let Some(plan) = self.frame.borrow().clone() else { return Ran::Refused };
-        let Some(s) = plan.system(id) else { return Ran::Refused };
-        let Ok(mods) = self.mods.try_borrow() else { return Ran::Refused };
-        let Some(m) = mods.iter().find(|m| *m.name == s.module) else { return Ran::Skipped };
-        if m.failed.get() || m.running.get() {
-            return Ran::Skipped;
+        let mut nodes = Vec::new();
+        for phase in &plan.phases {
+            for s in &phase.systems {
+                nodes.push((FrameNode::System(s.id), s.name.clone()));
+                let changes = mods
+                    .iter()
+                    .find(|m| *m.name == s.module)
+                    .is_some_and(|m| m.systems[s.index].params.iter().any(|p| p.changes()));
+                if changes {
+                    nodes.push((FrameNode::Apply(s.id), format!("apply({})", s.name)));
+                }
+            }
         }
-        if self.run_system(m, s.index, &s.name) { Ran::Ran } else { Ran::Failed }
+        drop(mods);
+        self.world.begin_frame();
+        let listed = nodes.iter().enumerate().map(|(i, (_, name))| (i, name.clone())).collect();
+        *self.frame.borrow_mut() = Some(OpenFrame { plan, nodes, logs: HashMap::new() });
+        Some(listed)
     }
 
-    fn end_phase(&self) {
-        if self.frame.borrow().is_some() {
-            self.world.borrow_mut().end_phase();
+    /// Runs node `id` of the open frame. A system of a mod that is already
+    /// running (the bootstrap, the scheduler, a caller up the stack) is
+    /// skipped: its state is borrowed.
+    fn run_node(&self, id: usize) -> Ran {
+        let (node, plan) = {
+            let frame = self.frame.borrow();
+            let Some(frame) = frame.as_ref() else { return Ran::Refused };
+            let Some(&(node, _)) = frame.nodes.get(id) else { return Ran::Refused };
+            (node, frame.plan.clone())
+        };
+        match node {
+            FrameNode::System(s) => {
+                let Some(planned) = plan.system(s) else { return Ran::Refused };
+                let Ok(mods) = self.mods.try_borrow() else { return Ran::Refused };
+                let Some(m) = mods.iter().find(|m| *m.name == planned.module) else { return Ran::Skipped };
+                if m.failed.get() || m.running.get() {
+                    return Ran::Skipped;
+                }
+                match self.run_system(m, planned.index, &planned.name) {
+                    Some(log) => {
+                        if let Some(frame) = self.frame.borrow_mut().as_mut() {
+                            frame.logs.insert(s, log);
+                        }
+                        Ran::Ran
+                    }
+                    None => Ran::Failed,
+                }
+            }
+            FrameNode::Apply(s) => {
+                let log = self.frame.borrow_mut().as_mut().and_then(|f| f.logs.remove(&s));
+                let Some(log) = log else { return Ran::Skipped };
+                self.apply(log, &plan.system(s).map(|p| p.module.clone()).unwrap_or_default());
+                Ran::Ran
+            }
         }
     }
 
     fn end_frame(&self) {
         if self.frame.borrow_mut().take().is_some() {
-            self.world.borrow_mut().end_frame();
+            self.world.end_frame();
         }
     }
 
-    /// `false` if the system failed.
-    fn run_system(&self, m: &Loaded, index: usize, name: &str) -> bool {
+    /// Runs one system; its log, or `None` if it failed, in which case its
+    /// changes are discarded with it.
+    fn run_system(&self, m: &Loaded, index: usize, name: &str) -> Option<Vec<Change>> {
         let desc = &m.systems[index];
-        *self.current.borrow_mut() =
-            Some(Current { ctx: m.ctx, name: name.into(), desc, violation: None });
+        let log = Log::default();
+        let frame = FrameCx { world: &self.world, log: &log, system: name };
         let was_running = m.running.replace(true);
-        let status = unsafe { (desc.run)(m.ctx) };
+        let status = unsafe { (desc.run)(m.ctx, &frame, &desc.params) };
         m.running.set(was_running);
-        let violation = self.current.borrow_mut().take().and_then(|c| c.violation);
-        if let Some(violation) = violation {
-            m.failed.set(true);
-            eprintln!("[engine] {violation}; {} won't run again until it is reloaded", m.name);
-            false
-        } else if status == Status::ERROR {
+        if status == Status::ERROR {
             m.failed.set(true);
             eprintln!("[engine] {} failed in {name}; it won't run again until it is reloaded", m.name);
-            false
-        } else {
-            true
+            return None;
         }
+        Some(log.into_inner())
     }
 
-    /// The running system's name, if `ctx` is its mod's: the reader whose
-    /// event cursor a read advances.
-    pub(crate) fn running_system(&self, ctx: *const ModContext) -> Option<String> {
-        let current = self.current.try_borrow().ok()?;
-        current.as_ref().filter(|c| std::ptr::eq(c.ctx, ctx)).map(|c| c.name.clone())
-    }
-
-    /// Whether a world call from `ctx` may do `want` to the component named
-    /// `component()`. Only the running system's own calls are checked: code
-    /// outside a frame, and a service it calls, run as themselves.
-    pub(crate) fn check(&self, ctx: *const ModContext, want: Want, component: impl FnOnce() -> String) -> bool {
-        let Ok(mut current) = self.current.try_borrow_mut() else { return true };
-        let Some(c) = current.as_mut().filter(|c| std::ptr::eq(c.ctx, ctx)) else { return true };
-        let desc = unsafe { &*c.desc };
-        if desc.exclusive {
-            return true;
-        }
-        let problem = match want {
-            Want::Structure(op) => Some(format!(
-                "{} used {op} directly; queue it with cx.commands(), or make the system exclusive",
-                c.name
-            )),
-            Want::Read | Want::Write => {
-                let name = component();
-                let write = matches!(want, Want::Write);
-                let declared = desc.access.iter().any(|a| {
-                    a.name == name && (a.kind == AccessKind::Write || (!write && a.kind == AccessKind::Read))
-                });
-                (!declared).then(|| {
-                    format!("{} {} {name} without declaring it", c.name, if write { "wrote" } else { "read" })
-                })
+    /// Lands a system's changes and publishes its events, in the order it
+    /// made them.
+    fn apply(&self, log: Vec<Change>, module: &str) {
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut s = Structural::new(&self.world);
+            for change in log {
+                change.apply(&mut s);
             }
-        };
-        match problem {
-            None => true,
-            Some(problem) => {
-                c.violation.get_or_insert(problem);
-                false
+        }));
+        if applied.is_err() {
+            eprintln!("[engine] applying {module}'s changes panicked; it won't run again until it is reloaded");
+            if let Ok(mods) = self.mods.try_borrow() {
+                if let Some(m) = mods.iter().find(|m| *m.name == *module) {
+                    m.failed.set(true);
+                }
             }
         }
     }
@@ -885,9 +886,6 @@ impl Engine {
         handler: &mut dyn FnMut(&str) -> Result<String, String>,
     ) -> String {
         let request = Request::parse(text);
-        // Whatever a message handler queued lands before the next request,
-        // which may swap the build that queued it.
-        let _flush = Flush(&self.world);
         // Messages aren't logged, request or reply: a game played over
         // messages would flood the log.
         let quiet = matches!(request, Ok(Request::Send { .. }));
@@ -1028,17 +1026,6 @@ fn bootstrap_note(name: &str) -> String {
 
 fn resident_note(name: &str) -> String {
     format!("{name} is resident: restart the engine to load its new build")
-}
-
-/// Applies queued commands when dropped.
-struct Flush<'a>(&'a RefCell<WorldStorage>);
-
-impl Drop for Flush<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut world) = self.0.try_borrow_mut() {
-            world.apply_commands();
-        }
-    }
 }
 
 /// Checks that the systems of the mods after a batch (`opened` swapped in,
@@ -1298,24 +1285,16 @@ unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {
 }
 
 unsafe fn host_begin_frame(ctx: *const ModContext) -> Option<FramePlan> {
-    let plan = unsafe { engine_of(ctx) }.begin_frame()?;
-    let phases = plan
-        .phases
-        .iter()
-        .map(|p| PhasePlan {
-            name: p.name.clone(),
-            systems: p.systems.iter().map(|s| PlannedSystem { id: s.id, name: s.name.clone() }).collect(),
-        })
-        .collect();
-    Some(FramePlan { phases })
+    let nodes = unsafe { engine_of(ctx) }.begin_frame()?;
+    Some(FramePlan { nodes: nodes.into_iter().map(|(id, name)| PlannedNode { id, name }).collect() })
 }
 
-unsafe fn host_run_system(ctx: *const ModContext, system: usize) -> Ran {
-    unsafe { engine_of(ctx) }.run_planned(system)
+unsafe fn host_run_node(ctx: *const ModContext, node: usize) -> Ran {
+    unsafe { engine_of(ctx) }.run_node(node)
 }
 
-unsafe fn host_end_phase(ctx: *const ModContext) {
-    unsafe { engine_of(ctx) }.end_phase()
+unsafe fn host_keepalive(ctx: *const ModContext) -> Option<Keepalive> {
+    unsafe { engine_of(ctx) }.library_of(ctx)
 }
 
 unsafe fn host_end_frame(ctx: *const ModContext) {

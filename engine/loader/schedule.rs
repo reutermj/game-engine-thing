@@ -182,11 +182,12 @@ fn topological<K: Ord>(n: usize, edges: &[(usize, usize)], rank: impl Fn(usize) 
 
 #[cfg(test)]
 mod tests {
+    use engine_api::engine_ecs::{FrameCx, ParamDecl};
     use engine_api::{ModContext, Status};
 
     use super::*;
 
-    unsafe fn nothing(_: *mut ModContext) -> Status {
+    unsafe fn nothing(_: *mut ModContext, _: &FrameCx<'_>, _: &[ParamDecl]) -> Status {
         Status::OK
     }
 
@@ -196,8 +197,7 @@ mod tests {
             phase: phase.into(),
             after: after.iter().map(|s| s.to_string()).collect(),
             before: before.iter().map(|s| s.to_string()).collect(),
-            access: Vec::new(),
-            exclusive: false,
+            params: Vec::new(),
             run: nothing,
         }
     }

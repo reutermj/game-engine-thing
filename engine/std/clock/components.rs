@@ -3,7 +3,7 @@
 //! instead of assuming a frame rate, and work unchanged under a real-time or
 //! a lockstep bootstrap.
 
-use engine_api::{World, component};
+use engine_api::{WorldMut, component};
 
 component! {
     #[derive(Debug, Default, Copy)]
@@ -15,7 +15,17 @@ component! {
     }
 }
 
-/// The world's clock, if a bootstrap mod has published one.
-pub fn now(world: &mut World) -> Option<Clock> {
-    world.query::<Clock>().next().map(|(_, clock)| *clock)
+/// The world's clock, if a bootstrap mod has published one: for code
+/// between frames. A system reads it with a `Query<&Clock>`.
+pub fn now(world: &mut WorldMut) -> Option<Clock> {
+    world.single::<&Clock, _>(|_, clock| *clock)
+}
+
+/// Publishes `clock`, on the entity `slot` names, making one if there's
+/// none (or it's gone): what a bootstrap does before each frame.
+pub fn publish(world: &mut WorldMut, slot: &mut Option<engine_api::Entity>, clock: Clock) {
+    match slot.filter(|&e| world.is_alive(e)) {
+        Some(e) => world.insert(e, clock),
+        None => *slot = Some(world.spawn((clock,))),
+    }
 }

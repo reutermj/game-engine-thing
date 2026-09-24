@@ -16,13 +16,13 @@ engine_api::mod_state! {
 }
 
 impl Ai {
-    fn think(&mut self, _: &mut (), cx: &mut Cx, balls: Query<&Ball>, paddles: Query<(&Opponent, &mut Paddle)>) {
-        let Some(ball) = balls.iter(cx).next().map(|(_, b)| *b) else { return };
+    fn think(&mut self, _: &mut (), _: &mut Cx, mut balls: Query<&Ball>, mut paddles: Query<(&Opponent, &mut Paddle)>) {
+        let Some(ball) = balls.single(|_, b| *b) else { return };
         let target = if ball.vx > 0.0 { ball.y } else { HEIGHT / 2.0 };
-        for (_, (_, paddle)) in paddles.iter(cx) {
+        paddles.for_each(|_, (_, paddle)| {
             let off = target - paddle.y;
             paddle.intent = if off.abs() < SLACK { 0.0 } else { off.signum() * EFFORT };
-        }
+        });
     }
 }
 

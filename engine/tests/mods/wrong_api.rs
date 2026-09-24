@@ -33,6 +33,6 @@ pub extern "C" fn engine_mod_main(_ctx: *mut ModContext, _op: Op) -> Status {
 
 unsafe extern "C" fn no_state(_: *mut u8) {}
 
-unsafe extern "C" fn no_systems(_: *mut std::ffi::c_void) -> bool {
+unsafe extern "C" fn no_systems(_: *mut std::ffi::c_void, _: *const engine_api::World) -> bool {
     true
 }

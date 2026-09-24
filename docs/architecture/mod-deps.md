@@ -123,25 +123,25 @@ declared in its interface crate with `service!` and implemented by the mod.
 Callers use the plain functions the macro generates there.
 
 ```rust
-// platformer's interface
+// loot's interface
 engine_api::service! {
-    pub trait Rules {
-        fn hurt();
-        fn bounce(speed: f32);
+    pub trait Loot {
+        /// The next drop from `table`, from the provider's seeded generator.
+        fn roll(table: &str) -> Option<String>;
     }
 }
 
-// platformer's implementation: a service method runs as the mod, with its
-// state, transient part and Cx, like its systems
-impl platformer::Rules for Core {
-    fn hurt(&mut self, _: &mut (), cx: &mut Cx) { ... }
-    fn bounce(&mut self, _: &mut (), cx: &mut Cx, speed: f32) { ... }
+// loot's implementation: a service method runs as the mod, with its state,
+// transient part and Cx, like its systems
+impl loot::Loot for Tables {
+    fn roll(&mut self, _: &mut (), cx: &mut Cx, table: &str) -> Option<String> { ... }
 }
-export_mod!(Core, provides = [platformer::Rules]);
+export_mod!(Tables, provides = [loot::Loot]);
 
-// walkers, with platformer in its mod_deps
-if let Err(e) = platformer::hurt(cx) {
-    cx.log(format!("couldn't reach the rules: {e}"));
+// a chest system, with loot in its mod_deps
+match loot::roll(cx, "chest") {
+    Ok(drop) => { ... }
+    Err(e) => cx.log(format!("couldn't reach loot: {e}")),
 }
 ```
 
@@ -165,9 +165,15 @@ runs. Arguments and return values passed by value must be `Crossing` (every
 `FieldType`, every component), because the other side may keep them. A
 `Box<dyn Fn()>` argument is a compile error.
 
-**A call takes `&mut Cx`**, because the provider may change the world, and an
-insert can reallocate a column an open query is holding. So a call can't be
-made inside a query: collect what the query found, then call.
+**A call doesn't reach the world.** Called from a system, the provider's
+`cx.world()` panics, as the system's own would: a service method works on
+its provider's state and its arguments, so the scheduler can order a call
+like a second system of the provider's. A provider that must change the
+world does it through an [event](scheduling.md#events) that one of its own
+systems reads, as the platformer's rules take `Hurt` and `Bounce` from the
+walkers. Called between frames (from a hook or a message handler), a
+provider may use `cx.world()` like its caller. See storage.md, "Services
+don't touch the world".
 
 **Calls fail as values.** A call returns `Result<T, CallError>`: the provider
 isn't loaded, has failed, panicked during the call (the panic stops in the

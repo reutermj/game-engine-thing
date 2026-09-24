@@ -47,9 +47,11 @@ level is `platformer/level/map.txt`: edit it and
 
 ## Layout
 
-- `engine/api`: the C ABI (`Mod` trait + `export_mod!`, and the ECS `World`) shared
-  by loader and mods
-- `engine/loader`: the engine binary (libloading, state ownership, the ECS store,
+- `engine/api`: the ABI shared by loader and mods (`Mod` trait, `export_mod!`,
+  systems, services)
+- `engine/ecs`: the ECS world (archetype tables in pages, sparse sets, queries,
+  events), linked into the loader and every mod
+- `engine/loader`: the engine binary (libloading, state ownership, the world,
   control socket)
 - `engine/control`: the line protocol spoken over the Unix socket
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it

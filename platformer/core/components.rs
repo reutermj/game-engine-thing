@@ -90,14 +90,22 @@ event! {
     pub struct Jump: "platformer::Jump" {}
 }
 
-engine_api::service! {
-    /// What other mods may do to the player. Provided by the rules, so the
-    /// consequences (respawning, counting the death) stay in one place.
-    pub trait Rules {
-        /// Kills the player: it respawns at the level's start, and the death
-        /// is counted.
-        fn hurt();
-        /// Sends the player upward at `speed` tiles per second, as a stomp does.
-        fn bounce(speed: f32);
+// What other mods may do to the player: sent by them, applied by the rules
+// late in the frame, so the consequences (respawning, counting the death)
+// stay in one place. Events rather than a service because a service call
+// can't reach the world (docs/architecture/storage.md).
+
+event! {
+    /// Kills the player: it respawns at the level's start, and the death is
+    /// counted. Several in one frame are one death.
+    #[derive(Debug, Default, Copy)]
+    pub struct Hurt: "platformer::Hurt" {}
+}
+
+event! {
+    /// Sends the player upward at `speed` tiles per second, as a stomp does.
+    #[derive(Debug, Default, Copy)]
+    pub struct Bounce: "platformer::Bounce" {
+        pub speed: f32,
     }
 }

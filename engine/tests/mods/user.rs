@@ -9,8 +9,8 @@ engine_api::mod_state! {
 }
 
 impl User {
-    fn touch(&mut self, _: &mut (), cx: &mut Cx, shared: Query<&base::Shared>) {
-        shared.iter(cx).count();
+    fn touch(&mut self, _: &mut (), _: &mut Cx, mut shared: Query<&base::Shared>) {
+        shared.for_each(|_, _| {});
     }
 }
 

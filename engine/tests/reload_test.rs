@@ -47,7 +47,7 @@ fn step(engine: &Engine, frames: usize) {
 }
 
 fn probes(engine: &Engine) -> Vec<Probe> {
-    let world = engine.world().borrow();
+    let world = engine.world();
     let values = world.values::<Probe>().expect("test::Probe is registered with this layout");
     values.into_iter().map(|(_, probe)| probe).collect()
 }
@@ -188,7 +188,7 @@ mod migration {
         super::load(&e, "mover", "MOVER_V1");
         super::load(&e, "mover", "MOVER_V2");
 
-        let world = e.world().borrow();
+        let world = e.world();
         let values = world.values::<Pos>().expect("test::Pos should now have mover_v2's layout");
         let values: Vec<Pos> = values.into_iter().map(|(_, pos)| pos).collect();
         // One entity, spawned by v1 and never respawned: its fields carried
@@ -371,7 +371,7 @@ mod heap {
     }
 
     fn words(e: &engine_loader::engine::Engine) -> Vec<String> {
-        let world = e.world().borrow();
+        let world = e.world();
         let bags = world.values::<v1::Bag>().expect("test::Bag with v1's layout");
         assert_eq!(bags.len(), 1);
         bags.into_iter().next().unwrap().1.words
@@ -416,7 +416,7 @@ mod heap {
         step(&e, 2);
         load(&e, "bag", "BAG_V3");
         step(&e, 1);
-        let world = e.world().borrow();
+        let world = e.world();
         let bags = world.values::<v3::Bag>().expect("test::Bag with v3's layout");
         let bag = &bags[0].1;
         assert_eq!(bag.words, ["v1-1", "v1-2", "v3-3"], "the Vec<String> moved intact");
@@ -811,14 +811,15 @@ mod pumping {
     }
 }
 
-/// Systems, phases, access, commands and events: docs/architecture/scheduling.md.
+/// Systems, phases, access, structural changes and events:
+/// docs/architecture/scheduling.md and storage.md.
 mod scheduling {
     use test_probe::Trace;
 
     use super::{engine, lib, load, step};
 
     fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
-        let world = e.world().borrow();
+        let world = e.world();
         let traces = world.values::<Trace>().expect("test::Trace is registered with this layout");
         traces.into_iter().flat_map(|(_, t)| t.lines).collect()
     }
@@ -864,56 +865,40 @@ mod scheduling {
     }
 
     #[test]
-    fn reading_an_undeclared_component_fails_the_mod() {
-        let e = engine("sched_read");
-        load(&e, "sneak", "SNEAK_READ");
+    fn reaching_for_the_whole_world_from_a_system_fails_the_mod() {
+        let e = engine("sched_world");
+        load(&e, "sneak", "SNEAK_WORLD");
         step(&e, 1);
         assert!(e.list().contains("sneak gen 0 [failed]"), "{}", e.list());
-        // The read found nothing, and the system's next frames don't run.
-        assert_eq!(trace(&e), ["sneak got false"]);
+        // What it did through its parameters before reaching stands, and
+        // its next frames don't run.
+        assert_eq!(trace(&e), ["sneak ran"]);
         step(&e, 2);
         assert_eq!(trace(&e).len(), 1);
     }
 
     #[test]
-    fn declaring_a_read_allows_it() {
-        let e = engine("sched_declared");
-        load(&e, "sneak", "SNEAK_DECLARED");
-        step(&e, 2);
-        assert!(!e.list().contains("[failed]"), "{}", e.list());
-        assert_eq!(trace(&e), ["sneak got false", "sneak got false"]);
-    }
-
-    #[test]
-    fn a_structural_change_on_the_spot_fails_the_mod() {
+    fn an_insert_is_seen_by_the_systems_after_the_one_that_made_it() {
         let e = engine("sched_insert");
-        load(&e, "sneak", "SNEAK_INSERT");
-        step(&e, 1);
-        assert!(e.list().contains("sneak gen 0 [failed]"), "{}", e.list());
-        assert_eq!(trace(&e), ["sneak got false"]);
-        assert!(e.world().borrow().summary().contains("test::Probe x0"), "{}", e.world().borrow().summary());
-    }
-
-    #[test]
-    fn commands_land_at_the_end_of_the_phase() {
-        let e = engine("sched_commands");
         load(&e, "builder", "BUILDER");
         step(&e, 1);
-        assert_eq!(trace(&e), ["queued", "saw []", "saw [7]"]);
+        assert_eq!(trace(&e), ["saw []", "inserted", "build saw []", "saw [7]"]);
+        assert!(e.world().summary().contains("test::Probe x1"), "{}", e.world().summary());
     }
 
     #[test]
-    fn each_reader_sees_each_event_once_from_the_next_phase() {
+    fn each_reader_sees_each_event_once_from_the_apply_that_publishes_it() {
         let e = engine("sched_events");
         load(&e, "pinger", "PINGER");
         load(&e, "listener", "LISTENER_V1");
         step(&e, 3);
-        // Ping n is sent in frame n's simulate. `mid`, later in the same
-        // phase, doesn't see it until the next frame; `late` sees it at once.
+        // Ping n is sent in frame n's simulate, and published when
+        // `pinger::ping` returns: `mid` and `late`, after it, see it that
+        // frame; `early`, before it, the next.
         let frames: Vec<Vec<String>> = trace(&e).chunks(3).map(|c| c.to_vec()).collect();
-        assert_eq!(frames[0], ["v1 saw []", "v1 saw []", "v1 saw [1]"]);
-        assert_eq!(frames[1], ["v1 saw [1]", "v1 saw [1]", "v1 saw [2]"]);
-        assert_eq!(frames[2], ["v1 saw [2]", "v1 saw [2]", "v1 saw [3]"]);
+        assert_eq!(frames[0], ["v1 saw []", "v1 saw [1]", "v1 saw [1]"]);
+        assert_eq!(frames[1], ["v1 saw [1]", "v1 saw [2]", "v1 saw [2]"]);
+        assert_eq!(frames[2], ["v1 saw [2]", "v1 saw [3]", "v1 saw [3]"]);
     }
 
     #[test]
@@ -925,7 +910,7 @@ mod scheduling {
         // through this one.
         load(&e, "listener", "LISTENER_V1");
         step(&e, 1);
-        assert_eq!(trace(&e), ["v1 saw [3]", "v1 saw [3]", "v1 saw [3, 4]"]);
+        assert_eq!(trace(&e), ["v1 saw [3]", "v1 saw [3, 4]", "v1 saw [3, 4]"]);
     }
 
     #[test]
@@ -936,9 +921,9 @@ mod scheduling {
         step(&e, 1);
         load(&e, "listener", "LISTENER_V2");
         step(&e, 1);
-        // Cursors are per system: `early` and `mid` hadn't seen ping 1,
-        // `late` had, and doesn't see it again though it's still alive.
-        assert_eq!(since(&e, 3), ["v2 saw [1]", "v2 saw [1]", "v2 saw [2]"]);
+        // Cursors are per system: `early` hadn't seen ping 1; `mid` and
+        // `late` had, and don't see it again though it's still alive.
+        assert_eq!(since(&e, 3), ["v2 saw [1]", "v2 saw [2]", "v2 saw [2]"]);
     }
 
     #[test]
@@ -948,7 +933,7 @@ mod scheduling {
         load(&e, "listener", "LISTENER_V1");
         e.send("pinger", "ping 99").unwrap();
         step(&e, 1);
-        assert_eq!(trace(&e), ["v1 saw [99]", "v1 saw [99]", "v1 saw [99, 1]"]);
+        assert_eq!(trace(&e), ["v1 saw [99]", "v1 saw [99, 1]", "v1 saw [99, 1]"]);
     }
 }
 
@@ -959,7 +944,7 @@ mod schedulers {
     use super::{engine_with, load};
 
     fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
-        let world = e.world().borrow();
+        let world = e.world();
         world.values::<Trace>().unwrap().into_iter().flat_map(|(_, t)| t.lines).collect()
     }
 
@@ -1021,7 +1006,7 @@ mod schedulers {
     #[test]
     fn a_panicking_scheduler_ends_its_frame_and_the_loader_takes_over() {
         let e = game("sched_panic", Some("SCHEDULER_PANIC"));
-        // The first phase ran before the panic; the rest of the frame didn't.
+        // The first node ran before the panic; the rest of the frame didn't.
         assert!(e.send("lockstep", "step").is_ok());
         assert_eq!(trace(&e), ["scheduled by panic", "a::input"]);
         assert!(e.list().contains("scheduler gen 0 [failed]"), "{}", e.list());
@@ -1036,6 +1021,6 @@ mod schedulers {
         let e = engine_with("sched_nested", None);
         load(&e, "sneak", "SNEAK_NESTED");
         e.step_all();
-        assert_eq!(trace(&e), ["sneak got Status(-1)"]);
+        assert_eq!(trace(&e), ["sneak ran", "sneak got Status(-1)"]);
     }
 }

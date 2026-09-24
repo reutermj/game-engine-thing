@@ -38,9 +38,7 @@ impl Bootstrap for Realtime {
         loop {
             self.frame += 1;
             let clock = Clock { frame: self.frame, dt: FRAME.as_secs_f32() };
-            let mut world = cx.world();
-            let entity = *self.clock.get_or_insert_with(|| world.spawn());
-            world.insert(entity, clock);
+            clock::publish(&mut cx.world(), &mut self.clock, clock);
             cx.run_frame();
 
             // Between frames, where nothing but this mod is running.

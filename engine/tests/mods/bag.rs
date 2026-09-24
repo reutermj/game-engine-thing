@@ -37,15 +37,15 @@ engine_api::mod_state! {
 }
 
 impl BagMod {
-    fn fill(&mut self, _: &mut (), cx: &mut Cx, bags: Query<&mut Bag>) {
+    fn fill(&mut self, _: &mut (), _: &mut Cx, mut bags: Query<&mut Bag>) {
         self.steps += 1;
-        for (_, bag) in bags.iter(cx) {
+        bags.for_each(|_, bag| {
             bag.words.push(format!("{BUILD}-{}", self.steps));
             #[cfg(feature = "v3")]
             {
                 bag.note = format!("{} words", bag.words.len());
             }
-        }
+        });
     }
 }
 
@@ -58,9 +58,8 @@ impl Mod for BagMod {
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
-        if world.query::<Bag>().next().is_none() {
-            let e = world.spawn();
-            world.insert(e, Bag::default());
+        if world.single::<&Bag, ()>(|_, _| ()).is_none() {
+            world.spawn((Bag::default(),));
         }
     }
 

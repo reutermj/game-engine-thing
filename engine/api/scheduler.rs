@@ -3,27 +3,25 @@
 //!
 //! A bootstrap runs each frame with `cx.run_frame()`, which calls the loaded
 //! `Scheduler` if there is one. A scheduler asks the loader for the frame's
-//! plan and runs its systems:
+//! plan and runs its nodes: each system, then its apply node, which lands
+//! the system's changes and publishes its events.
 //!
 //! ```ignore
 //! impl engine_api::scheduler::Scheduler for Sequential {
 //!     fn run_frame(&mut self, _: &mut (), cx: &mut Cx) {
 //!         let Some(frame) = scheduler::begin(cx) else { return };
-//!         for phase in &frame.plan().phases {
-//!             for system in &phase.systems {
-//!                 frame.run(system.id);
-//!             }
-//!             frame.end_phase();
+//!         for node in &frame.plan().nodes {
+//!             frame.run(node.id);
 //!         }
 //!     }
 //! }
 //! export_mod!(Sequential, provides = [engine_api::scheduler::Scheduler]);
 //! ```
 //!
-//! The loader keeps what makes a frame safe: the plan, the access checks,
-//! and refusing a system whose mod is already running. The scheduler decides
-//! only when each system runs. See docs/architecture/scheduling.md, "Who
-//! schedules".
+//! The loader keeps what makes a frame safe: the plan, and refusing a
+//! system whose mod is already running. The scheduler decides only when
+//! each node runs; running them in plan order gives the sequential frame.
+//! See docs/architecture/scheduling.md, "Who schedules".
 
 use std::marker::PhantomData;
 
@@ -38,23 +36,17 @@ crate::service! {
     }
 }
 
-/// The systems of one frame, by phase, in the loader's order.
+/// The nodes of one frame, in the loader's order.
 #[derive(Clone, Debug, Default)]
 pub struct FramePlan {
-    pub phases: Vec<PhasePlan>,
+    pub nodes: Vec<PlannedNode>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PhasePlan {
-    pub name: String,
-    pub systems: Vec<PlannedSystem>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PlannedSystem {
+pub struct PlannedNode {
     /// What [`Frame::run`] takes.
     pub id: usize,
-    /// `mod::system`.
+    /// `mod::system`, or `apply(mod::system)`.
     pub name: String,
 }
 
@@ -79,8 +71,8 @@ pub struct Frame<'a> {
     _cx: PhantomData<&'a mut ModContext>,
 }
 
-/// Opens a frame: publishes what was queued between frames, and returns the
-/// plan. `None` if a frame is already open, or the mods are being changed.
+/// Opens a frame and returns its plan. `None` if a frame is already open,
+/// or the mods are being changed.
 pub fn begin<'a>(cx: &'a mut Cx) -> Option<Frame<'a>> {
     let ctx: *const ModContext = cx.raw;
     let plan = unsafe { ((*(*ctx).host).begin_frame)(ctx) }?;
@@ -92,15 +84,9 @@ impl Frame<'_> {
         &self.plan
     }
 
-    /// Runs one system of the plan.
-    pub fn run(&self, system: usize) -> Ran {
-        unsafe { ((*(*self.ctx).host).run_system)(self.ctx, system) }
-    }
-
-    /// A phase boundary: applies the phase's commands and publishes its
-    /// events. Call it after each phase's systems, in order.
-    pub fn end_phase(&self) {
-        unsafe { ((*(*self.ctx).host).end_phase)(self.ctx) }
+    /// Runs one node of the plan.
+    pub fn run(&self, node: usize) -> Ran {
+        unsafe { ((*(*self.ctx).host).run_node)(self.ctx, node) }
     }
 }
 

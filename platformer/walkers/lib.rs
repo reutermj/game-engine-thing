@@ -1,13 +1,13 @@
 //! Walker behavior: pace, turn at a wall or a ledge, and meet the player.
 //! Landing on a walker from above kills it and bounces the player; any other
-//! touch kills the player. Both go through the platformer's `Rules` service,
-//! which owns what happens to the player.
+//! touch kills the player. Both are `Bounce` and `Hurt` events to the
+//! platformer's rules, which own what happens to the player.
 
 use std::collections::HashSet;
 
 use clock::Clock;
-use engine_api::{Cx, Mod, Query, Systems, export_mod, phase};
-use platformer::{PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
+use engine_api::{Cx, Despawns, EventWriter, Mod, Query, Systems, export_mod, phase};
+use platformer::{Bounce, Hurt, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
 engine_api::mod_state! {
@@ -30,20 +30,25 @@ impl Walkers {
     fn walk(
         &mut self,
         _: &mut (),
-        cx: &mut Cx,
-        clocks: Query<&Clock>,
-        tiles: Query<&Tile>,
-        players: Query<&Player>,
-        walkers: Query<&mut Walker>,
+        _: &mut Cx,
+        mut clocks: Query<&Clock>,
+        mut tiles: Query<&Tile>,
+        mut players: Query<&Player>,
+        mut walkers: Query<&mut Walker, (), Despawns>,
+        hurts: EventWriter<Hurt>,
+        bounces: EventWriter<Bounce>,
     ) {
-        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
-        let solid: HashSet<(i32, i32)> =
-            tiles.iter(cx).filter(|(_, t)| t.kind == SOLID).map(|(_, t)| (t.x, t.y)).collect();
-        let player = players.iter(cx).next().map(|(_, p)| *p);
+        let Some(dt) = clocks.single(|_, c| c.dt) else { return };
+        let mut solid = HashSet::new();
+        tiles.for_each(|_, t| {
+            if t.kind == SOLID {
+                solid.insert((t.x, t.y));
+            }
+        });
+        let player = players.single(|_, p| *p);
 
-        let mut stomped = Vec::new();
         let mut meeting = Meeting::None;
-        for (e, w) in walkers.iter(cx) {
+        walkers.for_each(|walker, w| {
             if w.vx == 0.0 {
                 w.vx = WALK_SPEED;
             }
@@ -60,26 +65,17 @@ impl Walkers {
                 // From above: falling, with the player's feet in the walker's
                 // top half.
                 if p.vy > 0.0 && p.y + PLAYER_HEIGHT < w.y + 0.5 {
-                    stomped.push(e);
+                    walker.despawn();
                     meeting = Meeting::Stomped;
                 } else if !matches!(meeting, Meeting::Stomped) {
                     meeting = Meeting::Hurt;
                 }
             }
-        }
-        for e in stomped {
-            cx.commands().despawn(e);
-        }
-
-        // After the query: a call can change the world, so it can't happen
-        // while one is open.
-        let result = match meeting {
-            Meeting::None => Ok(()),
-            Meeting::Stomped => platformer::bounce(cx, STOMP_BOUNCE),
-            Meeting::Hurt => platformer::hurt(cx),
-        };
-        if let Err(e) = result {
-            cx.log(format!("couldn't reach the rules: {e}"));
+        });
+        match meeting {
+            Meeting::None => {}
+            Meeting::Stomped => bounces.send(Bounce { speed: STOMP_BOUNCE }),
+            Meeting::Hurt => hurts.send(Hurt {}),
         }
     }
 }

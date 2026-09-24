@@ -1,0 +1,856 @@
+//! System parameters: queries, their rows, spawners and event readers and
+//! writers. A system's parameters are its declaration: what it reads and
+//! writes, and which changes it may make. See docs/architecture/storage.md.
+//!
+//! A query is `Query<Data, Filter, Changes>`. `Changes` lists the shape
+//! changes rows from this query may make (`Adds<..>`, `Removes<..>`,
+//! `Despawns`); a row only comes from its query, so the query's tables bound
+//! the change before the system runs. Changes go into the system's log, in
+//! call order, applied by its apply node after it returns.
+//!
+//! Each parameter holds the guards for what it declared, taken when the
+//! system starts, so a query is iterated without borrowing anything else.
+
+use std::cell::RefCell;
+use std::marker::PhantomData;
+
+use crate::component::{Component, ComponentDesc, Entity, Storage};
+use crate::erased::ErasedColumn;
+use crate::events::{Event, EventQueue};
+use crate::world::{ColumnGuard, ComponentId, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, World};
+
+// ---- Declaring ----
+
+/// Where parameters declare themselves: interns the components they name,
+/// and collects their descriptions, which the loader installs if the build's
+/// load commits.
+pub struct Declare<'w> {
+    pub world: &'w World,
+    pub components: Vec<ComponentDesc>,
+    pub events: Vec<ComponentDesc>,
+    /// The first component that couldn't be interned (its storage changed).
+    pub error: Option<String>,
+}
+
+impl<'w> Declare<'w> {
+    pub fn new(world: &'w World) -> Declare<'w> {
+        Declare { world, components: Vec::new(), events: Vec::new(), error: None }
+    }
+
+    pub fn component<T: Component>(&mut self) -> ComponentId {
+        let desc = ComponentDesc::of::<T>();
+        if !self.components.iter().any(|d| d.name == desc.name) {
+            self.components.push(desc);
+        }
+        match self.world.intern(&desc) {
+            Ok(id) => id,
+            Err(e) => {
+                self.error.get_or_insert(e);
+                ComponentId(u32::MAX)
+            }
+        }
+    }
+
+    pub fn event<E: Event>(&mut self) -> usize {
+        let desc = ComponentDesc::of::<E>();
+        if !self.events.iter().any(|d| d.name == desc.name) {
+            self.events.push(desc);
+        }
+        self.world.intern_event(&desc)
+    }
+}
+
+/// What a running system's parameters are fetched with.
+pub struct FrameCx<'w> {
+    pub world: &'w World,
+    pub log: &'w Log,
+    /// `mod::system`: whose event cursors a reader advances.
+    pub system: &'w str,
+}
+
+/// Components named by type, one or a tuple: `Adds<Burning>`, `With<(A, B)>`.
+pub trait ComponentSet: 'static {
+    fn ids(d: &mut Declare<'_>) -> Vec<ComponentId>;
+}
+
+impl<T: Component> ComponentSet for T {
+    fn ids(d: &mut Declare<'_>) -> Vec<ComponentId> {
+        vec![d.component::<T>()]
+    }
+}
+
+macro_rules! component_set {
+    ($($t:ident),+) => {
+        impl<$($t: Component),+> ComponentSet for ($($t,)+) {
+            fn ids(d: &mut Declare<'_>) -> Vec<ComponentId> {
+                vec![$(d.component::<$t>()),+]
+            }
+        }
+    };
+}
+component_set!(A, B);
+component_set!(A, B, C);
+component_set!(A, B, C, D);
+
+// ---- Filters ----
+
+pub struct With<T>(PhantomData<T>);
+pub struct Without<T>(PhantomData<T>);
+
+#[derive(Clone, Debug, Default)]
+pub struct FilterDecl {
+    pub with: Vec<ComponentId>,
+    pub without: Vec<ComponentId>,
+}
+
+pub trait Filter: 'static {
+    fn declare(d: &mut Declare<'_>, out: &mut FilterDecl);
+}
+
+impl Filter for () {
+    fn declare(_: &mut Declare<'_>, _: &mut FilterDecl) {}
+}
+
+impl<T: ComponentSet> Filter for With<T> {
+    fn declare(d: &mut Declare<'_>, out: &mut FilterDecl) {
+        out.with.extend(T::ids(d));
+    }
+}
+
+impl<T: ComponentSet> Filter for Without<T> {
+    fn declare(d: &mut Declare<'_>, out: &mut FilterDecl) {
+        out.without.extend(T::ids(d));
+    }
+}
+
+macro_rules! filter_tuple {
+    ($($t:ident),+) => {
+        impl<$($t: Filter),+> Filter for ($($t,)+) {
+            fn declare(d: &mut Declare<'_>, out: &mut FilterDecl) {
+                $($t::declare(d, out);)+
+            }
+        }
+    };
+}
+filter_tuple!(A, B);
+filter_tuple!(A, B, C);
+
+// ---- Changes ----
+
+pub struct Adds<T>(PhantomData<T>);
+pub struct Removes<T>(PhantomData<T>);
+pub struct Despawns;
+
+#[derive(Clone, Debug, Default)]
+pub struct ChangeDecl {
+    pub adds: Vec<ComponentId>,
+    pub removes: Vec<ComponentId>,
+    pub despawns: bool,
+}
+
+impl ChangeDecl {
+    pub fn is_empty(&self) -> bool {
+        self.adds.is_empty() && self.removes.is_empty() && !self.despawns
+    }
+}
+
+pub trait Changes: 'static {
+    fn declare(d: &mut Declare<'_>, out: &mut ChangeDecl);
+}
+
+impl Changes for () {
+    fn declare(_: &mut Declare<'_>, _: &mut ChangeDecl) {}
+}
+
+impl<T: ComponentSet> Changes for Adds<T> {
+    fn declare(d: &mut Declare<'_>, out: &mut ChangeDecl) {
+        out.adds.extend(T::ids(d));
+    }
+}
+
+impl<T: ComponentSet> Changes for Removes<T> {
+    fn declare(d: &mut Declare<'_>, out: &mut ChangeDecl) {
+        out.removes.extend(T::ids(d));
+    }
+}
+
+impl Changes for Despawns {
+    fn declare(_: &mut Declare<'_>, out: &mut ChangeDecl) {
+        out.despawns = true;
+    }
+}
+
+macro_rules! changes_tuple {
+    ($($t:ident),+) => {
+        impl<$($t: Changes),+> Changes for ($($t,)+) {
+            fn declare(d: &mut Declare<'_>, out: &mut ChangeDecl) {
+                $($t::declare(d, out);)+
+            }
+        }
+    };
+}
+changes_tuple!(A, B);
+changes_tuple!(A, B, C);
+
+// ---- Query data ----
+
+/// What one term of a query holds while the system runs: a column guard per
+/// matched table, or the component's sparse set.
+pub enum TermState<'w> {
+    Table(Vec<ColumnGuard<'w>>),
+    Sparse(SparseGuard<'w>),
+}
+
+impl<'w> TermState<'w> {
+    fn take<T: Component>(world: &'w World, tables: &[TableId], c: ComponentId, write: bool) -> TermState<'w> {
+        // A build compiled against another layout of `T` would misread it.
+        assert!(
+            world.installed_as(c, T::FINGERPRINT),
+            "this build has another layout of {} than the one installed; reload it with the rest of the game",
+            T::NAME
+        );
+        match T::STORAGE {
+            Storage::Table => TermState::Table(
+                tables
+                    .iter()
+                    .map(|&t| {
+                        let table = world.table(t);
+                        ColumnGuard::take(&table.columns[table.column_index(c).expect("a matched table")], write)
+                    })
+                    .collect(),
+            ),
+            Storage::Sparse => TermState::Sparse(SparseGuard::take(world.sparse_set(c), write)),
+        }
+    }
+
+    /// The entities of this term's sparse set, and how many, if it's sparse.
+    fn sparse_entities(&self) -> Option<(usize, Vec<Entity>)> {
+        match self {
+            TermState::Sparse(set) => Some((set.set().len(), set.set().entities().to_vec())),
+            TermState::Table(_) => None,
+        }
+    }
+
+    fn sparse_len(&self) -> Option<usize> {
+        match self {
+            TermState::Sparse(set) => Some(set.set().len()),
+            TermState::Table(_) => None,
+        }
+    }
+}
+
+/// One term's view of one page: a slice for a table term, taken once per
+/// page; the set for a sparse term, looked up by entity per row.
+pub enum PageView<'a, T> {
+    Read(&'a [T]),
+    Write(&'a mut [T]),
+    Sparse(&'a SparseSet),
+    SparseMut(&'a mut SparseSet),
+}
+
+/// One term: `&T` or `&mut T`, over a table or a sparse component.
+pub trait Term {
+    type C: Component;
+    const WRITE: bool;
+    type Item<'a>;
+    /// The term's value for one entity, by its location: random access.
+    fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<Self::Item<'a>>;
+    /// The term's view of one page, for walking its rows in order.
+    fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, Self::C>;
+    fn at<'b>(page: &'b mut PageView<'_, Self::C>, row: usize, e: Entity) -> Option<Self::Item<'b>>;
+}
+
+impl<T: Component> Term for &T {
+    type C = T;
+    const WRITE: bool = false;
+    type Item<'a> = &'a T;
+    fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<&'a T> {
+        match state {
+            TermState::Table(guards) => Some(&guards[table].pages()[page].as_slice::<T>()[row]),
+            TermState::Sparse(set) => set.set().get::<T>(e),
+        }
+    }
+    fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
+        match state {
+            TermState::Table(guards) => PageView::Read(guards[table].pages()[page].as_slice::<T>()),
+            TermState::Sparse(set) => PageView::Sparse(set.set()),
+        }
+    }
+    fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<&'b T> {
+        match page {
+            PageView::Read(rows) => Some(&rows[row]),
+            PageView::Sparse(set) => set.get::<T>(e),
+            _ => unreachable!("a read term's view"),
+        }
+    }
+}
+
+impl<T: Component> Term for &mut T {
+    type C = T;
+    const WRITE: bool = true;
+    type Item<'a> = &'a mut T;
+    fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<&'a mut T> {
+        match state {
+            TermState::Table(guards) => Some(&mut guards[table].pages_mut()[page].as_mut_slice::<T>()[row]),
+            TermState::Sparse(set) => set.set_mut().get_mut::<T>(e),
+        }
+    }
+    fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
+        match state {
+            TermState::Table(guards) => PageView::Write(guards[table].pages_mut()[page].as_mut_slice::<T>()),
+            TermState::Sparse(set) => PageView::SparseMut(set.set_mut()),
+        }
+    }
+    fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<&'b mut T> {
+        match page {
+            PageView::Write(rows) => Some(&mut rows[row]),
+            PageView::SparseMut(set) => set.get_mut::<T>(e),
+            _ => unreachable!("a write term's view"),
+        }
+    }
+}
+
+/// A query's data: `()`, a term, or a tuple of up to four.
+pub trait Data {
+    type Items<'a>;
+    type States<'w>;
+    type Pages<'a>;
+    fn terms(d: &mut Declare<'_>) -> Vec<(ComponentId, bool)>;
+    fn take<'w>(world: &'w World, tables: &[TableId], ids: &[(ComponentId, bool)]) -> Self::States<'w>;
+    fn fetch<'a>(states: &'a mut Self::States<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<Self::Items<'a>>;
+    /// The terms' views of one page, taken once per page.
+    fn pages<'a>(states: &'a mut Self::States<'_>, table: usize, page: usize) -> Self::Pages<'a>;
+    fn at<'b>(pages: &'b mut Self::Pages<'_>, row: usize, e: Entity) -> Option<Self::Items<'b>>;
+    /// The entities of its smallest sparse term, and how many: what a query
+    /// walks instead of its tables when that's fewer.
+    fn driver(states: &Self::States<'_>) -> Option<(usize, Vec<Entity>)>;
+}
+
+impl Data for () {
+    type Items<'a> = ();
+    type States<'w> = ();
+    type Pages<'a> = ();
+    fn terms(_: &mut Declare<'_>) -> Vec<(ComponentId, bool)> {
+        Vec::new()
+    }
+    fn take<'w>(_: &'w World, _: &[TableId], _: &[(ComponentId, bool)]) {}
+    fn fetch<'a>(_: &'a mut (), _: usize, _: usize, _: usize, _: Entity) -> Option<()> {
+        Some(())
+    }
+    fn pages<'a>(_: &'a mut (), _: usize, _: usize) {}
+    fn at<'b>(_: &'b mut (), _: usize, _: Entity) -> Option<()> {
+        Some(())
+    }
+    fn driver(_: &()) -> Option<(usize, Vec<Entity>)> {
+        None
+    }
+}
+
+impl<A: Term> Data for A {
+    type Items<'a> = A::Item<'a>;
+    type States<'w> = TermState<'w>;
+    type Pages<'a> = PageView<'a, A::C>;
+    fn terms(d: &mut Declare<'_>) -> Vec<(ComponentId, bool)> {
+        vec![(d.component::<A::C>(), A::WRITE)]
+    }
+    fn take<'w>(world: &'w World, tables: &[TableId], ids: &[(ComponentId, bool)]) -> TermState<'w> {
+        TermState::take::<A::C>(world, tables, ids[0].0, A::WRITE)
+    }
+    fn fetch<'a>(s: &'a mut TermState<'_>, t: usize, p: usize, r: usize, e: Entity) -> Option<A::Item<'a>> {
+        A::item(s, t, p, r, e)
+    }
+    fn pages<'a>(s: &'a mut TermState<'_>, t: usize, p: usize) -> PageView<'a, A::C> {
+        A::page(s, t, p)
+    }
+    fn at<'b>(page: &'b mut PageView<'_, A::C>, r: usize, e: Entity) -> Option<A::Item<'b>> {
+        A::at(page, r, e)
+    }
+    fn driver(s: &TermState<'_>) -> Option<(usize, Vec<Entity>)> {
+        s.sparse_entities()
+    }
+}
+
+macro_rules! data_tuple {
+    ($($t:ident : $s:ident : $i:tt),+) => {
+        impl<$($t: Term),+> Data for ($($t,)+) {
+            type Items<'a> = ($($t::Item<'a>,)+);
+            type States<'w> = ($(data_tuple!(@state $t, 'w),)+);
+            type Pages<'a> = ($(PageView<'a, $t::C>,)+);
+            fn terms(d: &mut Declare<'_>) -> Vec<(ComponentId, bool)> {
+                vec![$((d.component::<$t::C>(), $t::WRITE)),+]
+            }
+            fn take<'w>(world: &'w World, tables: &[TableId], ids: &[(ComponentId, bool)]) -> Self::States<'w> {
+                ($(TermState::take::<$t::C>(world, tables, ids[$i].0, $t::WRITE),)+)
+            }
+            fn fetch<'a>(states: &'a mut Self::States<'_>, t: usize, p: usize, r: usize, e: Entity) -> Option<Self::Items<'a>> {
+                // Each term's state is its own field, so each item borrows
+                // its own guard.
+                let ($($s,)+) = states;
+                Some(($($t::item($s, t, p, r, e)?,)+))
+            }
+            fn pages<'a>(states: &'a mut Self::States<'_>, t: usize, p: usize) -> Self::Pages<'a> {
+                let ($($s,)+) = states;
+                ($($t::page($s, t, p),)+)
+            }
+            fn at<'b>(pages: &'b mut Self::Pages<'_>, r: usize, e: Entity) -> Option<Self::Items<'b>> {
+                let ($($s,)+) = pages;
+                Some(($($t::at($s, r, e)?,)+))
+            }
+            fn driver(states: &Self::States<'_>) -> Option<(usize, Vec<Entity>)> {
+                let ($($s,)+) = states;
+                let smallest = [$($s.sparse_len().map(|n| (n, $s as &TermState))),+]
+                    .into_iter()
+                    .flatten()
+                    .min_by_key(|(n, _)| *n)?;
+                smallest.1.sparse_entities()
+            }
+        }
+    };
+    (@state $t:ident, $w:lifetime) => { TermState<$w> };
+}
+data_tuple!(A: a: 0);
+data_tuple!(A: a: 0, B: b: 1);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3);
+
+// ---- Declarations ----
+
+#[derive(Clone, Debug)]
+pub struct QueryDecl {
+    /// Data terms, and whether each is written.
+    pub terms: Vec<(ComponentId, bool)>,
+    pub filter: FilterDecl,
+    pub changes: ChangeDecl,
+}
+
+impl QueryDecl {
+    fn of(world: &World, ids: impl Iterator<Item = ComponentId>, storage: Storage) -> Vec<ComponentId> {
+        ids.filter(|c| world.storage(*c) == storage).collect()
+    }
+
+    /// Table components an entity must have: table terms and `With`.
+    pub fn table_with(&self, world: &World) -> Vec<ComponentId> {
+        Self::of(world, self.terms.iter().map(|t| t.0).chain(self.filter.with.iter().copied()), Storage::Table)
+    }
+
+    pub fn table_without(&self, world: &World) -> Vec<ComponentId> {
+        Self::of(world, self.filter.without.iter().copied(), Storage::Table)
+    }
+
+    /// Sparse sets the query reads or writes: its sparse terms, and its
+    /// sparse filters (reads of membership).
+    pub fn sparse(&self, world: &World) -> Vec<(ComponentId, bool)> {
+        let terms = self.terms.iter().copied().filter(|(c, _)| world.storage(*c) == Storage::Sparse);
+        let filters = self.filter.with.iter().chain(&self.filter.without).copied();
+        terms.chain(filters.filter(|c| world.storage(*c) == Storage::Sparse).map(|c| (c, false))).collect()
+    }
+
+    /// Driven by a sparse set rather than tables: sparse terms and no table
+    /// terms. Such a query iterates the set, and observes who's alive.
+    pub fn sparse_driven(&self, world: &World) -> bool {
+        let table_terms = self.terms.iter().any(|(c, _)| world.storage(*c) == Storage::Table);
+        !table_terms && self.terms.iter().any(|(c, _)| world.storage(*c) == Storage::Sparse)
+    }
+
+    /// Whether the query uses tables at all: to walk them, or to check the
+    /// entities its sparse set yields against table filters.
+    pub fn uses_tables(&self, world: &World) -> bool {
+        !self.sparse_driven(world) || !self.table_with(world).is_empty() || !self.table_without(world).is_empty()
+    }
+
+    /// Whether the query reads the rows of a table with exactly `set`.
+    pub fn matches(&self, world: &World, set: &[ComponentId]) -> bool {
+        self.uses_tables(world)
+            && self.table_with(world).iter().all(|c| set.contains(c))
+            && !self.table_without(world).iter().any(|c| set.contains(c))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ParamDecl {
+    Query(QueryDecl),
+    Spawner { components: Vec<ComponentId> },
+    /// An event queue, read or written.
+    Events { queue: usize, write: bool },
+}
+
+impl ParamDecl {
+    pub fn query(&self) -> Option<&QueryDecl> {
+        match self {
+            ParamDecl::Query(q) => Some(q),
+            _ => None,
+        }
+    }
+
+    /// Whether this parameter can change the world, needing an apply node.
+    pub fn changes(&self) -> bool {
+        match self {
+            ParamDecl::Query(q) => !q.changes.is_empty(),
+            ParamDecl::Spawner { .. } => true,
+            ParamDecl::Events { write, .. } => *write,
+        }
+    }
+}
+
+// ---- Changes, as logged ----
+
+type Apply = Box<dyn for<'x> FnOnce(&mut Structural<'x>) + Send>;
+type Publish = Box<dyn FnOnce(&mut EventQueue, u64) + Send>;
+
+/// One change a system made. A system's changes are applied in the order it
+/// made them, by its apply node.
+pub enum Change {
+    Insert { e: Entity, c: ComponentId, apply: Apply },
+    Remove { e: Entity, c: ComponentId },
+    Despawn(Entity),
+    Spawn { e: Entity, components: Vec<ComponentId>, apply: Apply },
+    Event { queue: usize, publish: Publish },
+}
+
+impl Change {
+    pub fn apply(self, s: &mut Structural<'_>) {
+        match self {
+            Change::Insert { apply, .. } | Change::Spawn { apply, .. } => apply(s),
+            Change::Remove { e, c } => s.remove_id(e, c),
+            Change::Despawn(e) => s.despawn(e),
+            Change::Event { queue, publish } => {
+                let frame = s.world.frame();
+                publish(s.events(queue), frame)
+            }
+        }
+    }
+}
+
+pub type Log = RefCell<Vec<Change>>;
+
+/// An entity a query yielded, through which its shape is changed. The
+/// changes land after the system returns, so the system itself never sees
+/// them.
+pub struct Row<'a> {
+    entity: Entity,
+    world: &'a World,
+    changes: &'a ChangeDecl,
+    log: &'a Log,
+}
+
+/// The id of `T` among `ids`, by name: the declaration interned it.
+fn declared<T: Component>(world: &World, ids: &[ComponentId]) -> Option<ComponentId> {
+    ids.iter().copied().find(|&c| world.name(c) == T::NAME)
+}
+
+impl Row<'_> {
+    pub fn entity(&self) -> Entity {
+        self.entity
+    }
+
+    pub fn insert<T: Component>(&self, value: T) {
+        let c = declared::<T>(self.world, &self.changes.adds)
+            .unwrap_or_else(|| panic!("{} isn't in this query's Adds", T::NAME));
+        let e = self.entity;
+        self.log.borrow_mut().push(Change::Insert { e, c, apply: Box::new(move |s| s.insert_id(e, c, value)) });
+    }
+
+    pub fn remove<T: Component>(&self) {
+        let c = declared::<T>(self.world, &self.changes.removes)
+            .unwrap_or_else(|| panic!("{} isn't in this query's Removes", T::NAME));
+        self.log.borrow_mut().push(Change::Remove { e: self.entity, c });
+    }
+
+    pub fn despawn(&self) {
+        assert!(self.changes.despawns, "this query doesn't declare Despawns");
+        self.log.borrow_mut().push(Change::Despawn(self.entity));
+    }
+}
+
+// ---- Parameters ----
+
+pub struct Query<'w, D: Data, F = (), C = ()> {
+    world: &'w World,
+    decl: &'w QueryDecl,
+    table_ids: Vec<TableId>,
+    rows: Vec<TableRead<'w>>,
+    states: D::States<'w>,
+    /// Sparse sets its filters check: (component, with).
+    filters: Vec<(ComponentId, bool, SparseGuard<'w>)>,
+    log: &'w Log,
+    _marker: PhantomData<fn() -> (F, C)>,
+}
+
+impl<'w, D: Data, F, C> Query<'w, D, F, C> {
+    pub(crate) fn take(world: &'w World, decl: &'w QueryDecl, log: &'w Log) -> Self {
+        let table_ids: Vec<TableId> =
+            world.tables().filter(|t| decl.matches(world, &t.components)).map(|t| t.id).collect();
+        let rows = table_ids.iter().map(|&t| TableRead::new(world.table(t))).collect();
+        let states = D::take(world, &table_ids, &decl.terms);
+        let is_sparse = |c: &&ComponentId| world.storage(**c) == Storage::Sparse;
+        let filters = decl
+            .filter
+            .with
+            .iter()
+            .filter(is_sparse)
+            .map(|&c| (c, true))
+            .chain(decl.filter.without.iter().filter(is_sparse).map(|&c| (c, false)))
+            .map(|(c, with)| (c, with, SparseGuard::take(world.sparse_set(c), false)))
+            .collect();
+        Query { world, decl, table_ids, rows, states, filters, log, _marker: PhantomData }
+    }
+
+    fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
+        filters.iter().all(|(_, with, set)| set.set().contains(e) == *with)
+    }
+
+    fn row<'a>(world: &'a World, decl: &'a QueryDecl, log: &'a Log, e: Entity) -> Row<'a> {
+        Row { entity: e, world, changes: &decl.changes, log }
+    }
+
+    /// Every entity the query matches, with its row and values.
+    pub fn for_each(&mut self, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+        let Query { world, decl, table_ids, rows, states, filters, log, .. } = self;
+        // Walk whichever is smaller: the matched tables' rows, or the
+        // smallest sparse term's set (which a query with no table terms
+        // always walks).
+        let table_rows: usize = rows.iter().map(|t| t.rows.iter().map(Vec::len).sum::<usize>()).sum();
+        let driver = D::driver(states).filter(|(n, _)| decl.sparse_driven(world) || *n < table_rows);
+        if let Some((_, entities)) = driver {
+            let uses_tables = decl.uses_tables(world);
+            for e in entities {
+                if !world.entities.is_alive(e) || !Self::passes(filters, e) {
+                    continue;
+                }
+                // Random access into the matched tables, by location.
+                let (t, p, r) = if uses_tables {
+                    let Some(at) = world.entities.location(e) else { continue };
+                    let Some(t) = table_ids.iter().position(|&id| id == at.table) else { continue };
+                    (t, at.page as usize, at.row as usize)
+                } else {
+                    (usize::MAX, 0, 0)
+                };
+                if let Some(items) = D::fetch(states, t, p, r, e) {
+                    f(Self::row(world, decl, log, e), items);
+                }
+            }
+            return;
+        }
+        for (t, table_rows) in rows.iter().enumerate() {
+            for (p, page) in table_rows.rows.iter().enumerate() {
+                // Each term's slice once per page, then plain indexing.
+                let mut pages = D::pages(states, t, p);
+                for (r, &e) in page.iter().enumerate() {
+                    if !Self::passes(filters, e) {
+                        continue;
+                    }
+                    if let Some(items) = D::at(&mut pages, r, e) {
+                        f(Self::row(world, decl, log, e), items);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The row of `e`, if the query matches it: how a system changes an
+    /// entity it didn't iterate to (one kept in state, or named by an event).
+    pub fn get(&mut self, e: Entity) -> Option<Row<'_>> {
+        self.with(e, |_, _| ())?;
+        Some(Self::row(self.world, self.decl, self.log, e))
+    }
+
+    /// Calls `f` with `e`'s row and values, if the query matches it.
+    pub fn with<R>(&mut self, e: Entity, f: impl FnOnce(Row<'_>, D::Items<'_>) -> R) -> Option<R> {
+        let Query { world, decl, table_ids, states, filters, log, .. } = self;
+        if !world.entities.is_alive(e) || !Self::passes(filters, e) {
+            return None;
+        }
+        let at = world.entities.location(e);
+        let (t, p, r) = if decl.sparse_driven(world) {
+            if decl.uses_tables(world) && !at.is_some_and(|at| table_ids.contains(&at.table)) {
+                return None;
+            }
+            (usize::MAX, 0, 0)
+        } else {
+            let at = at?;
+            let t = table_ids.iter().position(|&id| id == at.table)?;
+            (t, at.page as usize, at.row as usize)
+        };
+        let items = D::fetch(states, t, p, r, e)?;
+        Some(f(Self::row(world, decl, log, e), items))
+    }
+
+    /// The first entity the query matches, with its values: for a query
+    /// meant to match one (a clock, a level).
+    pub fn single<R>(&mut self, f: impl FnOnce(Row<'_>, D::Items<'_>) -> R) -> Option<R> {
+        let mut f = Some(f);
+        let mut out = None;
+        self.for_each(|row, items| {
+            if let Some(f) = f.take() {
+                out = Some(f(row, items));
+            }
+        });
+        out
+    }
+}
+
+/// Spawns entities with the components `B` names.
+pub struct Spawner<'w, B> {
+    world: &'w World,
+    components: &'w [ComponentId],
+    log: &'w Log,
+    _marker: PhantomData<fn() -> B>,
+}
+
+impl<B: Bundle> Spawner<'_, B> {
+    /// A new entity, with its id now; its components land after the system.
+    pub fn spawn(&self, bundle: B) -> Entity {
+        let e = self.world.entities.reserve();
+        let components = self.components.to_vec();
+        let ids = components.clone();
+        self.log.borrow_mut().push(Change::Spawn { e, components, apply: Box::new(move |s| s.spawn(e, bundle, &ids)) });
+        e
+    }
+}
+
+/// Something a system can take as a parameter.
+pub trait Param: 'static {
+    type Item<'w>;
+    fn declare(d: &mut Declare<'_>) -> ParamDecl;
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Self::Item<'w>;
+}
+
+impl<D: Data + 'static, F: Filter, C: Changes> Param for Query<'static, D, F, C> {
+    type Item<'w> = Query<'w, D, F, C>;
+
+    fn declare(d: &mut Declare<'_>) -> ParamDecl {
+        let terms = D::terms(d);
+        for (i, (c, _)) in terms.iter().enumerate() {
+            // Two guards on one column would contend with each other.
+            assert!(!terms[..i].iter().any(|(x, _)| x == c), "a query names a component twice");
+        }
+        let mut filter = FilterDecl::default();
+        F::declare(d, &mut filter);
+        let mut changes = ChangeDecl::default();
+        C::declare(d, &mut changes);
+        ParamDecl::Query(QueryDecl { terms, filter, changes })
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Query<'w, D, F, C> {
+        Query::take(cx.world, decl.query().expect("a query's declaration"), cx.log)
+    }
+}
+
+impl<B: Bundle> Param for Spawner<'static, B> {
+    type Item<'w> = Spawner<'w, B>;
+
+    fn declare(d: &mut Declare<'_>) -> ParamDecl {
+        ParamDecl::Spawner { components: B::components(d) }
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Spawner<'w, B> {
+        let ParamDecl::Spawner { components } = decl else { panic!("a spawner's declaration") };
+        Spawner { world: cx.world, components, log: cx.log, _marker: PhantomData }
+    }
+}
+
+/// Refuses two queries of one system that would take conflicting guards.
+pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Result<(), String> {
+    let queries: Vec<&QueryDecl> = params.iter().filter_map(ParamDecl::query).collect();
+    for (i, a) in queries.iter().enumerate() {
+        for b in &queries[i + 1..] {
+            for &(c, wa) in &a.terms {
+                if b.terms.iter().any(|&(d, wb)| c == d && (wa || wb)) {
+                    return Err(format!("{name}: two queries access {} and one writes it", world.name(c)));
+                }
+            }
+        }
+    }
+    let queues: Vec<(usize, bool)> = params
+        .iter()
+        .filter_map(|p| match p {
+            ParamDecl::Events { queue, write } => Some((*queue, *write)),
+            _ => None,
+        })
+        .collect();
+    for (i, &(q, w)) in queues.iter().enumerate() {
+        if queues[i + 1..].iter().any(|&(r, v)| q == r && (w || v)) {
+            return Err(format!("{name}: reads and writes one event type, or writes it twice"));
+        }
+    }
+    Ok(())
+}
+
+// ---- Spawning ----
+
+/// A bundle of components to spawn with: a tuple of one to four.
+pub trait Bundle: Send + 'static {
+    fn components(d: &mut Declare<'_>) -> Vec<ComponentId>;
+    fn put(self, sink: &mut BundleSink<'_, '_>);
+}
+
+type SparseInsert = Box<dyn for<'x> FnOnce(&mut Structural<'x>, Entity) + Send>;
+
+/// Where a bundle's values go: table components into the new row, sparse
+/// ones into their sets after it.
+pub struct BundleSink<'s, 'c> {
+    world: &'s World,
+    table: &'s Table,
+    ids: &'s [ComponentId],
+    columns: &'s mut [&'c mut ErasedColumn],
+    sparse: Vec<SparseInsert>,
+}
+
+impl BundleSink<'_, '_> {
+    pub fn put<T: Component>(&mut self, value: T) {
+        let c = declared::<T>(self.world, self.ids).expect("a bundle's component was declared");
+        match self.table.column_index(c) {
+            Some(i) => self.columns[i].push(value),
+            None => self.sparse.push(Box::new(move |s, e| s.insert_id(e, c, value))),
+        }
+    }
+}
+
+macro_rules! bundle {
+    ($($t:ident),+) => {
+        impl<$($t: Component),+> Bundle for ($($t,)+) {
+            fn components(d: &mut Declare<'_>) -> Vec<ComponentId> {
+                vec![$(d.component::<$t>()),+]
+            }
+            #[allow(non_snake_case)]
+            fn put(self, sink: &mut BundleSink<'_, '_>) {
+                let ($($t,)+) = self;
+                $(sink.put($t);)+
+            }
+        }
+    };
+}
+/// No components: an entity to add them to later, or one that only marks
+/// something by existing.
+impl Bundle for () {
+    fn components(_: &mut Declare<'_>) -> Vec<ComponentId> {
+        Vec::new()
+    }
+    fn put(self, _: &mut BundleSink<'_, '_>) {}
+}
+bundle!(A);
+bundle!(A, B);
+bundle!(A, B, C);
+bundle!(A, B, C, D);
+
+impl<'w> Structural<'w> {
+    /// Places reserved entity `e` with `bundle`'s components, `ids` being
+    /// their declared ids.
+    pub fn spawn<B: Bundle>(&mut self, e: Entity, bundle: B, ids: &[ComponentId]) {
+        let world = self.world;
+        let table_components: Vec<ComponentId> =
+            ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
+        let to = world.table_for(&table_components);
+        self.lock_table(to);
+        let table = world.table(to);
+        let mut deferred = Vec::new();
+        self.push_row(to, e, |columns| {
+            let mut sink = BundleSink { world, table, ids, columns, sparse: Vec::new() };
+            bundle.put(&mut sink);
+            deferred = sink.sparse;
+        });
+        for insert in deferred {
+            insert(self, e);
+        }
+    }
+}

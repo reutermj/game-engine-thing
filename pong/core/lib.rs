@@ -7,7 +7,7 @@
 //! court.
 
 use clock::Clock;
-use engine_api::{Cx, EventReader, Mod, Query, Systems, World, export_mod, phase};
+use engine_api::{Cx, EventReader, Mod, Query, Systems, WorldMut, export_mod, phase};
 use pong::{
     Ball, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
     SERVE_SPEED, Score, Steer, WIDTH,
@@ -27,25 +27,17 @@ engine_api::mod_state! {
     struct Core {}
 }
 
-fn set_up(world: &mut World) {
-    if world.query::<Ball>().next().is_some() {
+fn set_up(world: &mut WorldMut) {
+    if world.single::<&Ball, ()>(|_, _| ()).is_some() {
         return;
     }
     let score = Score::default();
-    let ball = world.spawn();
     // The first serve goes to the player, on the left.
-    world.insert(ball, serve(&score, -1.0));
-    let e = world.spawn();
-    world.insert(e, score);
-    for (face, player) in [(LEFT_FACE, true), (RIGHT_FACE, false)] {
-        let e = world.spawn();
-        world.insert(e, Paddle { face, y: HEIGHT / 2.0, intent: 0.0 });
-        if player {
-            world.insert(e, Player {});
-        } else {
-            world.insert(e, Opponent {});
-        }
-    }
+    world.spawn((serve(&score, -1.0),));
+    world.spawn((score,));
+    let paddle = |face| Paddle { face, y: HEIGHT / 2.0, intent: 0.0 };
+    world.spawn((paddle(LEFT_FACE), Player {}));
+    world.spawn((paddle(RIGHT_FACE), Opponent {}));
 }
 
 /// A ball at the center, heading toward `direction` (-1 left, 1 right).
@@ -69,33 +61,37 @@ fn hit(ball: &mut Ball, before_x: f32, paddle: &Paddle) {
 }
 
 impl Core {
-    fn steer(&mut self, _: &mut (), cx: &mut Cx, steers: EventReader<Steer>, players: Query<(&Player, &mut Paddle)>) {
-        let Some(intent) = steers.read(cx).last().map(|s| s.intent) else { return };
-        for (_, (_, paddle)) in players.iter(cx) {
-            paddle.intent = intent;
-        }
+    fn steer(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut steers: EventReader<Steer>,
+        mut players: Query<(&Player, &mut Paddle)>,
+    ) {
+        let Some(intent) = steers.read().last().map(|s| s.intent) else { return };
+        players.for_each(|_, (_, paddle)| paddle.intent = intent);
     }
 
     fn play(
         &mut self,
         _: &mut (),
-        cx: &mut Cx,
-        clocks: Query<&Clock>,
-        paddles: Query<&mut Paddle>,
-        balls: Query<&mut Ball>,
-        scores: Query<&mut Score>,
+        _: &mut Cx,
+        mut clocks: Query<&Clock>,
+        mut paddles: Query<&mut Paddle>,
+        mut balls: Query<&mut Ball>,
+        mut scores: Query<&mut Score>,
     ) {
-        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
+        let Some(dt) = clocks.single(|_, c| c.dt) else { return };
 
         let mut moved = Vec::new();
-        for (_, paddle) in paddles.iter(cx) {
+        paddles.for_each(|_, paddle| {
             let half = PADDLE_HEIGHT / 2.0;
             paddle.y = (paddle.y + paddle.intent.clamp(-1.0, 1.0) * PADDLE_SPEED * dt).clamp(half, HEIGHT - half);
             moved.push(*paddle);
-        }
-        let Some(mut score) = scores.iter(cx).next().map(|(_, s)| *s) else { return };
+        });
+        let Some(mut score) = scores.single(|_, s| *s) else { return };
 
-        for (_, ball) in balls.iter(cx) {
+        balls.for_each(|_, ball| {
             let before_x = ball.x;
             ball.x += ball.vx * dt;
             ball.y += ball.vy * dt;
@@ -117,14 +113,12 @@ impl Core {
                 score.left += 1;
                 1.0
             } else {
-                continue;
+                return;
             };
             score.serves += 1;
             *ball = serve(&score, lost_by);
-        }
-        for (_, s) in scores.iter(cx) {
-            *s = score;
-        }
+        });
+        scores.for_each(|_, s| *s = score);
     }
 }
 

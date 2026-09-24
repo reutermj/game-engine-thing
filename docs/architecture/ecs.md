@@ -1,8 +1,10 @@
 # ECS
 
 The world is an entity/component store that every mod shares and no reload
-touches. The code is in `engine/api/ecs.rs` (the ABI and the typed API mods
-use) and `engine/loader/world.rs` (the storage).
+touches. The code is the `engine/ecs` crate, which the loader and every mod
+link. This document covers what a component is and how it survives
+reloads; how the world stores components, and how systems change it
+without stopping the world, is [storage.md](storage.md).
 
 ## Why an ECS fits hot reload
 
@@ -26,16 +28,17 @@ values field by field instead of resetting a whole mod's state (see
 ## Why the loader owns it
 
 The world has to be shared by every mod and survive any of them reloading, so
-it can't live in one mod's state. Until mods can call each other, only the
-loader can hold it. It is a host service like `step_mods`: the loader stores
-bytes and knows nothing about the game.
+it can't live in one mod's state. The loader holds it, and knows nothing
+about the game: it stores bytes and layouts, and the code for a
+component's values comes from the builds that declare it.
 
-Mods reach it only through `WorldApi`, a table of `extern "C"` functions.
-The alternative, a Rust `World` type linked into every mod and operating on
-shared memory, would need every mod and the loader to agree on that type's
-layout. That holds only until one of them is rebuilt against a changed ECS
-crate and reloaded alone, and then it fails silently. Through the C ABI, the
-storage code exists in one place, and `API_VERSION` covers the contract.
+Mods use the world's Rust types directly: `engine/ecs` is linked into the
+loader and every mod, and a mod iterates a query's pages as `&[T]` and
+`&mut [T]` in its own code. That relies on every mod and the loader
+agreeing on those types' layouts, which the [one-compiler
+rule](#one-compiler-per-session) already guarantees for `String` and `Vec`,
+and on them being built from the same `engine/ecs`, which `API_VERSION`
+covers: a change to the crate bumps it.[^c-abi]
 
 **Open question:** whether the world should move into a mod once mods can
 call each other. That would make the ECS itself reloadable, at the cost of
@@ -97,15 +100,19 @@ loader that code: a drop function for the whole value, one per field, and a
 keeps the newest registered build's functions, and a reference to that
 build's library, which keeps it mapped: an older build's library is unmapped
 once a newer build has taken over every component it provided code for,
-normally on that build's first access. Values therefore survive their mod
+normally when the newer build's load commits. Values therefore survive their mod
 being reloaded or even unloaded, and are dropped with valid code when they're
 removed, despawned, cleared or the world goes away. (`dlclose` really does
 unmap a mod whose code nothing holds; see
 [lore](../lore/dlclose-unmaps-a-mod-nothing-holds.md).)
 
-`World::insert` moves the value in: the world owns it from then on and drops
-the value it replaces. A value the world refuses (dead entity, stale layout)
-is dropped by the caller.
+Inserting moves the value in: the world owns it from then on and drops the
+value it replaces, and a value for a dead entity is dropped at once.
+
+The world declares its tables and event queues before the components that
+keep their builds mapped, so on the way out every value is dropped before
+the library holding its drop code can go (see
+[lore](../lore/drop-values-before-the-library-with-their-drop-code.md)).
 
 ### One compiler per session
 
@@ -125,35 +132,25 @@ engine-owned `#[repr(C)]` containers could lift it.
 
 ## Storage
 
-Each component has a sparse set: values packed densely alongside their
-entities, plus a map from entity index to slot. A query walks one component's
-dense column, and `query2` looks the second component up per entity, so it
-should be given the rarer component first. Removal swaps the last value into
-the gap, so iteration order is not stable.
+Archetype tables in pages by default, or a sparse set for a component that
+asks for one (`component! { pub struct Burning: "game::Burning", storage =
+sparse { ... } }`): see [storage.md](storage.md). A component's storage is
+fixed for the session; a build that changes it is refused until the engine
+restarts, since moving every value between the two isn't worth building
+yet.
 
 Entities are generational indices: despawning bumps the index's generation,
 so an old handle never reaches the entity that reuses its index.
 
-The loader borrows the store only for the length of one call, and pointers
-it hands out are valid until the next structural change. The typed API makes
-that a borrow-checker rule: `insert`, `remove` and `despawn` take `&mut self`,
-and so do queries, for as long as their references are used.
-
-Structural changes during a query (spawning from inside a loop) go through
-commands, applied at the end of the phase: see
-[scheduling.md](scheduling.md#structural-changes-go-through-commands).
-
-**Open question:** archetypes. Sparse sets are the simplest store that works.
-Packing entities with the same components together makes multi-component
-queries faster, but moves data on every add and remove.
-
 ## Layout changes
 
-A component's size, alignment, `VERSION` and schema are checked on every
-access. When two builds disagree, the one loaded more recently wins, because
-that is the one the developer just changed. "More recently" means
-`ModContext::loaded_at`, a counter the loader increments on every load across
-all mods.
+A build's layout of a component is **installed** when the build's load
+commits, for every component its systems name, or when a hook or message
+handler first uses it through `cx.world()`. When two builds disagree, the
+one loaded more recently wins, because that is the one the developer just
+changed. "More recently" means `ModContext::loaded_at`, a counter the loader
+increments on every load across all mods. Two layouts are the same when
+their fingerprints (size, alignment, `VERSION` and schema) match.
 
 **A newer build migrates the values** to its layout. Each registration
 carries the build's `Default` constructor along with the schema, and the
@@ -180,20 +177,22 @@ shared between values.
 The loader logs what happened, e.g.
 `migrated 3 value(s) of game::Position to physics's layout: kept x, kept y, added z (default)`.
 
-**Bumping `VERSION` clears the values instead** (`component!` takes it as
-`pub struct Position: "game::Position", version = 1 { ... }`). It is for a
-change a schema can't see: a field that now means something else, such as
-different units. A component with no schema is also cleared, since there is
-nothing to match fields by.
+**Bumping `VERSION` resets the values instead** to the new build's
+`Default` (`component!` takes it as `pub struct Position: "game::Position",
+version = 1 { ... }`); entities keep the component. It is for a change a
+schema can't see: a field that now means something else, such as different
+units. A component with no schema is also reset, since there is nothing to
+match fields by.
 
-**An older build** (still built against the previous layout) gets
-`ComponentId::INVALID`, which makes every operation on that component a no-op,
-with one warning per build. It works again once it is reloaded. For mods
-built with `engine_mod` this doesn't arise: the engine refuses a reload that
-would leave a dependent on the old layout, and a game reload swaps the
-component's owner and its dependents together (see
+**An older build** (still built against the previous layout) is refused when
+it loads: "built with an older layout of game::Position; reload it with the
+rest of the game". For mods built with `engine_mod` this doesn't arise: the
+engine refuses a reload that would leave a dependent on the old layout, and
+a game reload swaps the component's owner and its dependents together (see
 [mod-deps.md](mod-deps.md)). The check remains for libraries that record no
-dependencies.
+dependencies. A system whose build was replaced under it without a reload
+(which only such a library can arrange) panics when its query is taken,
+failing its mod, rather than reading values under the wrong layout.
 
 **Open question:** renames. A rename is indistinguishable from a removal
 plus an addition. An attribute naming the old field
@@ -203,7 +202,11 @@ plus an addition. An attribute naming the old field
 field or changing units. They need code from the new build, given the old
 values, and a hook for it would sit beside the version bump.
 
-**Open question:** nested types and arrays (`[f32; 3]`, a struct field). The
-schema has only scalar kinds, so `component!` rejects them, and a component
-that needs one has to be implemented by hand, without a schema. Nesting
-schemas would handle both.
+[^c-abi]: *(History, 2026-09-23.)* Mods used to reach the world only
+    through `WorldApi`, a table of `extern "C"` functions, so the storage
+    code existed in one place, the loader, and a mod rebuilt against a
+    changed ECS couldn't disagree with it about a layout. It cost a call
+    across the boundary per entity, and it kept the typed views that let
+    systems run concurrently out of mods' reach. Replaced when the storage
+    redesign landed (storage.md, "Landing"), once the one-compiler rule had
+    made sharing Rust types safe anyway.

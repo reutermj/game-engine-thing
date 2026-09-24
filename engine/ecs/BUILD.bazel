@@ -1,0 +1,76 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# The ECS the loader and every mod share, as Rust types. See lib.rs.
+rust_library(
+    name = "ecs",
+    srcs = [
+        "between.rs",
+        "component.rs",
+        "erased.rs",
+        "events.rs",
+        "graph.rs",
+        "harness.rs",
+        "lib.rs",
+        "query.rs",
+        "schema.rs",
+        "world.rs",
+    ],
+    crate_name = "engine_ecs",
+    crate_root = "lib.rs",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "ecs_test",
+    crate = ":ecs",
+)
+
+# The walkthrough's scenario (docs/architecture/storage.md), for the tests
+# and the benchmark.
+rust_library(
+    name = "game",
+    testonly = True,
+    srcs = ["tests/game.rs"],
+    crate_name = "ecs_game",
+    crate_root = "tests/game.rs",
+    deps = [":ecs"],
+)
+
+# The storage against a trivially correct model, under random changes.
+rust_test(
+    name = "model_test",
+    srcs = ["tests/model_test.rs"],
+    deps = [":ecs"],
+)
+
+# The graph and the query API, on the scenario and small cases.
+rust_test(
+    name = "graph_test",
+    srcs = ["tests/graph_test.rs"],
+    deps = [
+        ":ecs",
+        ":game",
+    ],
+)
+
+# Components across builds, events, and the world between frames.
+rust_test(
+    name = "world_test",
+    srcs = ["tests/world_test.rs"],
+    deps = [":ecs"],
+)
+
+# Frame times and timelines for the game scenario, sequential and parallel:
+# `./bazel run -c opt //engine/ecs:bench`, with `WORK=0` for the framework's
+# own cost. Test-only because the scenario is.
+rust_binary(
+    name = "bench",
+    testonly = True,
+    srcs = ["bench.rs"],
+    deps = [
+        ":ecs",
+        ":game",
+    ],
+)

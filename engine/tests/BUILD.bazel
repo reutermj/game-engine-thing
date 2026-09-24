@@ -177,7 +177,8 @@ engine_mod(
     resident = True,
 )
 
-# Scheduled test mods: systems, phases, access, commands and events. See
+# Scheduled test mods: systems, phases, access, structural changes and
+# events. See
 # the sources.
 [engine_mod(
     name = "tracer_" + build,
@@ -200,9 +201,7 @@ engine_mod(
     mod_name = "sneak",
     deps = [":probe"],
 ) for build in [
-    "read",
-    "insert",
-    "declared",
+    "world",
     "nested",
 ]]
 
@@ -261,9 +260,7 @@ TEST_MODS = {
     "TRACER_A": ":tracer_a",
     "TRACER_B": ":tracer_b",
     "TRACER_B_CYCLE": ":tracer_b_cycle",
-    "SNEAK_READ": ":sneak_read",
-    "SNEAK_INSERT": ":sneak_insert",
-    "SNEAK_DECLARED": ":sneak_declared",
+    "SNEAK_WORLD": ":sneak_world",
     "SNEAK_NESTED": ":sneak_nested",
     "SCHEDULER_V1": ":scheduler_v1",
     "SCHEDULER_V2": ":scheduler_v2",

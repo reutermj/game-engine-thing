@@ -36,21 +36,20 @@ changing the ABI, the reload sequence or the Bazel rules.
 ## Where things live
 
 - `engine/api/` — the ABI between loader and mods. Its own crate because
-  it is the only code linked into both sides: everything in it is
-  `#[repr(C)]`, and changing a type's shape means bumping `API_VERSION`.
+  it is linked into both sides: the load-time tables (`ModInfo`, `Host`)
+  are `#[repr(C)]`, the rest is Rust types both sides share under the
+  one-compiler rule, and changing either, or `engine/ecs`, means bumping
+  `API_VERSION`.
   Also holds the safe `Mod` trait, `mod_state!` and `export_mod!`, so a mod
   never touches the raw ABI. A mod's state is carried across reloads and so
   follows the component rule (only `FieldType` fields); anything else it
   keeps goes in its `Transient`, which each build makes for itself. See
   [docs/architecture/hot-reload.md](docs/architecture/hot-reload.md#who-owns-state).
-  - `ecs.rs` — the world's ABI (`WorldApi`) and the typed `World`/`Component`
-    API over it. Separate from `lib.rs` because it is a second contract: how
-    mods share data, not how a mod is loaded.
   - `scheduler.rs` — the `Scheduler` service the engine declares, and the
     frame primitives a scheduler mod is built from.
-  - `system.rs` — systems: `Mod::systems` declarations, `Query` and
-    `EventReader` parameters (which are the access declaration), commands
-    and events. See
+  - `system.rs` — systems: `Mod::systems` declarations, and turning a
+    mod's functions into systems whose parameters are the access
+    declaration. See
     [docs/architecture/scheduling.md](docs/architecture/scheduling.md).
   - `service.rs` — calls between mods: `service!`, which generates a
     provider trait and caller functions, and the host calls that resolve a
@@ -66,15 +65,31 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `schedule.rs` — turns every build's declarations into the order a
     frame runs systems in. Pure, so it's unit-tested alone, and so a load
     can be checked against it before it commits.
-  - `world.rs` — the ECS storage behind `WorldApi`, and the commands and
-    events a frame defers. Untyped by design: it
-    holds only bytes and layouts, never code from a mod, so no reload can
-    leave it pointing into an unmapped library. See
-    [docs/architecture/ecs.md](docs/architecture/ecs.md).
   - `control_server.rs` — the control socket's thread, which reads requests
     and queues them for the engine. Separate because it's the one other
     thread in the loader, and must never run mod code: requests wait for the
     bootstrap's pump, and that timing is what makes a reload safe.
+- `engine/ecs/` — the world: components, archetype tables in pages and
+  sparse sets, queries and their structural changes, events, and the
+  footprints that decide which systems may run together. Its own crate
+  because the loader and every mod link it, and mods iterate its storage
+  directly. See [docs/architecture/ecs.md](docs/architecture/ecs.md) and
+  [docs/architecture/storage.md](docs/architecture/storage.md).
+  - `erased.rs`, `schema.rs` — type-erased columns, and migrating values
+    as bytes: the unsafe core, with `component!`'s drop and default glue.
+    Tables, queries, guards and the executors are safe Rust, and no unsafe
+    code depends on concurrency (storage.md, "Where the unsafe is"), so
+    keep new unsafe beside the existing unsafe code.
+  - `world.rs` — storage, entity locations, installing a build's layouts
+    (and migrating values), and the guards each node takes.
+  - `query.rs`, `events.rs` — system parameters: `Query`, `Spawner`, rows
+    and their change log; `EventReader` and `EventWriter`.
+  - `graph.rs` — footprints and the overlap rules the schedule's edges
+    come from.
+  - `between.rs` — `WorldMut`, the whole world for hooks and message
+    handlers, refused while a frame is open.
+  - `harness.rs` — sequential and parallel executors over plain functions,
+    for tests and `:bench` without the loader.
 - `engine/control/` — the control protocol and socket path. Its own crate
   because both the engine and `modctl` speak it; neither should import the
   other.
@@ -133,10 +148,11 @@ changing the ABI, the reload sequence or the Bazel rules.
 - **Tests come in three tiers, and each proves something the others
   can't.** Run them all with `./bazel test //...`. Fix a bug at the lowest
   tier that can fail on it.
-  - *Unit tests* (`//engine/api:api_test`, `//engine/loader:loader_test`,
-    `//engine/control:control_test`) cover pure logic: the world store,
-    migration, the `component!` schema, `__dispatch`, the protocol. They
-    are the cheap place to pin edge cases and negatives.
+  - *Unit tests* (`//engine/ecs:*`, `//engine/api:api_test`,
+    `//engine/loader:loader_test`, `//engine/control:control_test`) cover
+    pure logic: the world store against a model, the graph's overlap
+    rules, migration, the `component!` schema, `__dispatch`, the protocol.
+    They are the cheap place to pin edge cases and negatives.
   - *Integration tests* (`//engine/tests:reload_test`) load real mod
     libraries into a real `Engine` and step exact frame counts: no process,
     socket or sleeping. The only tier that exercises staging, `dlopen` and

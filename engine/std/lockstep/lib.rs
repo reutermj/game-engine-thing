@@ -30,9 +30,7 @@ engine_api::mod_state! {
 impl Lockstep {
     fn run_frame(&mut self, cx: &mut Cx) {
         self.frame += 1;
-        let mut world = cx.world();
-        let entity = *self.clock.get_or_insert_with(|| world.spawn());
-        world.insert(entity, Clock { frame: self.frame, dt: DT });
+        clock::publish(&mut cx.world(), &mut self.clock, Clock { frame: self.frame, dt: DT });
         cx.run_frame();
     }
 

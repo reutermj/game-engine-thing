@@ -1,8 +1,9 @@
 //! The platformer's rules, as systems: `steer` turns `Run` and `Jump` events
 //! into the player's `Input` (in `input`), and `play` runs and jumps the
 //! player by it, collides it with the level's tiles, collects coins, and
-//! kills and respawns it on spikes or a fall (in `simulate`). Also provides
-//! `platformer::Rules`, so other mods (enemies) can kill or bounce the player.
+//! kills and respawns it on spikes or a fall (in `simulate`); `take_hits`
+//! applies the `Hurt` and `Bounce` events other mods (enemies) send (in
+//! `late`).
 //!
 //! The player is spawned once a level exists (a `LevelInfo`) and there's no
 //! player yet, so this mod doesn't care whether it loads before or after the
@@ -11,10 +12,10 @@
 use std::collections::HashMap;
 
 use clock::Clock;
-use engine_api::{Cx, EventReader, Mod, Query, Systems, export_mod, phase};
+use engine_api::{Cx, Despawns, EventReader, Mod, Query, Spawner, Systems, export_mod, phase};
 use platformer::{
-    Coin, GOAL, GRAVITY, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
-    RUN_SPEED, Run, SOLID, SPIKE, Tile,
+    Bounce, Coin, GOAL, GRAVITY, Hurt, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER_HEIGHT, PLAYER_WIDTH,
+    Player, RUN_SPEED, Run, SOLID, SPIKE, Tile,
 };
 
 /// Keeps a box that is flush against a tile from counting as inside it.
@@ -33,8 +34,11 @@ struct Tiles {
 }
 
 impl Tiles {
-    fn read(cx: &mut Cx, tiles: &Query<&Tile>, width: i32) -> Tiles {
-        let kinds = tiles.iter(cx).map(|(_, t)| ((t.x, t.y), t.kind)).collect();
+    fn read(tiles: &mut Query<&Tile>, width: i32) -> Tiles {
+        let mut kinds = HashMap::new();
+        tiles.for_each(|_, t| {
+            kinds.insert((t.x, t.y), t.kind);
+        });
         Tiles { kinds, width }
     }
 
@@ -91,77 +95,86 @@ fn respawn(p: &mut Player, info: &LevelInfo) {
     p.deaths += 1;
 }
 
-/// Changes the player, if there is one.
-fn with_player(cx: &mut Cx, change: impl FnOnce(&mut Player, &LevelInfo)) {
-    let mut world = cx.world();
-    let Some(info) = world.query::<LevelInfo>().next().map(|(_, i)| *i) else { return };
-    if let Some((_, p)) = world.query::<Player>().next() {
-        change(p, &info);
-    }
-}
-
 impl Core {
     fn steer(
         &mut self,
         _: &mut (),
-        cx: &mut Cx,
-        runs: EventReader<Run>,
-        jumps: EventReader<Jump>,
-        inputs: Query<(&mut Input, &Player)>,
+        _: &mut Cx,
+        mut runs: EventReader<Run>,
+        mut jumps: EventReader<Jump>,
+        mut inputs: Query<(&mut Input, &Player)>,
     ) {
-        let dir = runs.read(cx).last().map(|r| r.dir);
-        let jump = !jumps.read(cx).is_empty();
-        for (_, (input, _)) in inputs.iter(cx) {
+        let dir = runs.read().last().map(|r| r.dir);
+        let jump = !jumps.read().is_empty();
+        inputs.for_each(|_, (input, _)| {
             if let Some(dir) = dir {
                 input.dir = dir;
             }
             input.jump |= jump;
-        }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
     fn play(
         &mut self,
         _: &mut (),
-        cx: &mut Cx,
-        clocks: Query<&Clock>,
-        levels: Query<&LevelInfo>,
-        players: Query<(&mut Input, &mut Player)>,
-        tiles: Query<&Tile>,
-        coins: Query<&Coin>,
+        _: &mut Cx,
+        mut clocks: Query<&Clock>,
+        mut levels: Query<&LevelInfo>,
+        mut players: Query<(&mut Input, &mut Player)>,
+        mut tiles: Query<&Tile>,
+        mut coins: Query<&Coin, (), Despawns>,
+        spawner: Spawner<(Player, Input)>,
     ) {
-        let Some(dt) = clocks.iter(cx).next().map(|(_, c)| c.dt) else { return };
-        let Some(info) = levels.iter(cx).next().map(|(_, i)| *i) else { return };
-        let Some((entity, (mut input, mut p))) = players.iter(cx).next().map(|(e, (i, p))| (e, (*i, *p))) else {
-            // Visible from the next phase: this frame doesn't move it.
-            let mut commands = cx.commands();
-            let e = commands.spawn();
-            commands.insert(e, Player { x: info.spawn_x, y: info.spawn_y, ..Default::default() });
-            commands.insert(e, Input::default());
-            return;
-        };
+        let Some(dt) = clocks.single(|_, c| c.dt) else { return };
+        let Some(info) = levels.single(|_, i| *i) else { return };
+        let tiles = Tiles::read(&mut tiles, info.width);
+        let played = players.single(|_, (input, p)| {
+            integrate(p, input, &tiles, dt);
 
-        let tiles = Tiles::read(cx, &tiles, info.width);
-        integrate(&mut p, &mut input, &tiles, dt);
+            if tiles.touches(p, SPIKE) || p.y > info.height as f32 + 2.0 {
+                respawn(p, &info);
+            }
+            if tiles.touches(p, GOAL) {
+                p.won = true;
+            }
 
-        if tiles.touches(&p, SPIKE) || p.y > info.height as f32 + 2.0 {
-            respawn(&mut p, &info);
+            let cells: Vec<(i32, i32)> = Tiles::cells(p.x, p.y, PLAYER_WIDTH, PLAYER_HEIGHT).collect();
+            coins.for_each(|coin, c| {
+                if cells.contains(&(c.x, c.y)) {
+                    coin.despawn();
+                    p.coins += 1;
+                }
+            });
+        });
+        if played.is_none() {
+            // Seen by the systems after this one: this frame doesn't move it.
+            spawner.spawn((Player { x: info.spawn_x, y: info.spawn_y, ..Default::default() }, Input::default()));
         }
-        if tiles.touches(&p, GOAL) {
-            p.won = true;
-        }
+    }
 
-        let cells: Vec<(i32, i32)> = Tiles::cells(p.x, p.y, PLAYER_WIDTH, PLAYER_HEIGHT).collect();
-        let collected: Vec<_> =
-            coins.iter(cx).filter(|(_, c)| cells.contains(&(c.x, c.y))).map(|(e, _)| e).collect();
-        for coin in collected {
-            cx.commands().despawn(coin);
-            p.coins += 1;
-        }
-
-        if let Some((i, player)) = players.get(cx, entity) {
-            (*i, *player) = (input, p);
-        }
+    /// Applies what other mods did to the player this frame. In `late`, so
+    /// it sees every `simulate` system's events the same frame.
+    fn take_hits(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut hurts: EventReader<Hurt>,
+        mut bounces: EventReader<Bounce>,
+        mut levels: Query<&LevelInfo>,
+        mut players: Query<&mut Player>,
+    ) {
+        let bounce = bounces.read().last().map(|b| b.speed);
+        let hurt = !hurts.read().is_empty();
+        let Some(info) = levels.single(|_, i| *i) else { return };
+        players.for_each(|_, p| {
+            if let Some(speed) = bounce {
+                p.vy = -speed;
+            }
+            if hurt {
+                respawn(p, &info);
+            }
+        });
     }
 }
 
@@ -171,17 +184,8 @@ impl Mod for Core {
     fn systems(s: &mut Systems<Self>) {
         s.add("steer", Self::steer).phase(phase::INPUT);
         s.add("play", Self::play).phase(phase::SIMULATE);
+        s.add("take_hits", Self::take_hits).phase(phase::LATE);
     }
 }
 
-impl platformer::Rules for Core {
-    fn hurt(&mut self, _: &mut (), cx: &mut Cx) {
-        with_player(cx, respawn);
-    }
-
-    fn bounce(&mut self, _: &mut (), cx: &mut Cx, speed: f32) {
-        with_player(cx, |p, _| p.vy = -speed);
-    }
-}
-
-export_mod!(Core, provides = [platformer::Rules]);
+export_mod!(Core);

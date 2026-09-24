@@ -1,7 +1,7 @@
 //! Builds of `scheduler`, a `Scheduler` that runs frames as the sequential
 //! one does and marks the trace with its build first, so a test can tell it
 //! ran the frame rather than the loader's own. `panic` panics once, inside
-//! the frame, after running the first phase.
+//! the frame, after running the first node.
 
 use engine_api::scheduler::{self, Scheduler};
 use engine_api::{Cx, Mod, export_mod};
@@ -25,16 +25,11 @@ impl Mod for Marking {
 
 impl Scheduler for Marking {
     fn run_frame(&mut self, _: &mut (), cx: &mut Cx) {
-        // Not a system, so it may touch the world directly.
-        for (_, trace) in cx.world().query::<Trace>() {
-            trace.lines.push(format!("scheduled by {BUILD}"));
-        }
+        // Before the frame opens, so the world may be touched directly.
+        cx.world().for_each::<&mut Trace>(|_, trace| trace.lines.push(format!("scheduled by {BUILD}")));
         let Some(frame) = scheduler::begin(cx) else { return };
-        for (i, phase) in frame.plan().phases.iter().enumerate() {
-            for system in &phase.systems {
-                frame.run(system.id);
-            }
-            frame.end_phase();
+        for (i, node) in frame.plan().nodes.iter().enumerate() {
+            frame.run(node.id);
             if cfg!(feature = "panic") && i == 0 {
                 panic!("the scheduler panics mid-frame");
             }

@@ -43,15 +43,15 @@ impl Mod for Mover {
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         let mut world = cx.world();
         if !self.spawned {
-            let e = world.spawn();
             #[cfg(feature = "v1")]
-            world.insert(e, Pos { x: 1.5, y: 2.5 });
+            world.spawn((Pos { x: 1.5, y: 2.5 },));
             #[cfg(feature = "v2")]
-            world.insert(e, Pos { y: 2.5, x: 1.5, z: 0.0 });
+            world.spawn((Pos { y: 2.5, x: 1.5, z: 0.0 },));
             self.spawned = true;
         }
-        // Touching the component is what registers this build's layout.
-        world.query::<Pos>().count();
+        // A mod without systems declares nothing, so naming the component is
+        // what installs this build's layout.
+        world.id::<Pos>();
     }
 
 }

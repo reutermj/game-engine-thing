@@ -74,10 +74,16 @@ fn landing_on_a_walker_stomps_it() {
     play(&e, TO_THE_CORNER);
     assert!(state(&e).contains("walker"), "{}", state(&e));
     // Timed to come down on it as it turns at the wall.
-    play(&e, &["step 31", "jump", "step 60"]);
-    let state = state(&e);
-    assert!(!state.contains("walker"), "{state}");
-    assert!(state.contains("deaths 0"), "{state}");
+    play(&e, &["step 31", "jump"]);
+    let stomped = (0..60).find(|_| {
+        play(&e, &["step 1"]);
+        !state(&e).contains("walker")
+    });
+    assert!(stomped.is_some(), "{}", state(&e));
+    // The frame it's stomped, the player bounces off it.
+    assert!(player(&e, "vy") < 0.0, "{}", state(&e));
+    play(&e, &["step 60"]);
+    assert!(state(&e).contains("deaths 0"), "{}", state(&e));
 }
 
 #[test]
@@ -133,7 +139,10 @@ fn a_code_only_reload_of_the_level_keeps_it_as_played() {
 }
 
 #[test]
-fn input_comes_before_the_rules_and_the_walkers_after() {
+fn input_comes_before_the_rules_the_walkers_and_what_they_did() {
     let e = game("schedule");
-    assert_eq!(e.schedule().unwrap(), "input: platformer::steer\nsimulate: platformer::play, walkers::walk");
+    assert_eq!(
+        e.schedule().unwrap(),
+        "input: platformer::steer\nsimulate: platformer::play, walkers::walk\nlate: platformer::take_hits"
+    );
 }

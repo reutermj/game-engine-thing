@@ -14,22 +14,21 @@ engine_api::mod_state! {
     struct Tracer {}
 }
 
-type Traced = Query<&'static mut Trace>;
 
 // Each build registers only some of these.
 #[allow(dead_code)]
 impl Tracer {
-    fn input(&mut self, _: &mut (), cx: &mut Cx, q: Traced) {
-        trace(cx, &q, format!("{}::input", cx.name()));
+    fn input(&mut self, _: &mut (), cx: &mut Cx, mut q: Query<&mut Trace>) {
+        trace(&mut q, format!("{}::input", cx.name()));
     }
-    fn update(&mut self, _: &mut (), cx: &mut Cx, q: Traced) {
-        trace(cx, &q, format!("{}::update", cx.name()));
+    fn update(&mut self, _: &mut (), cx: &mut Cx, mut q: Query<&mut Trace>) {
+        trace(&mut q, format!("{}::update", cx.name()));
     }
-    fn simulate(&mut self, _: &mut (), cx: &mut Cx, q: Traced) {
-        trace(cx, &q, format!("{}::simulate", cx.name()));
+    fn simulate(&mut self, _: &mut (), cx: &mut Cx, mut q: Query<&mut Trace>) {
+        trace(&mut q, format!("{}::simulate", cx.name()));
     }
-    fn late(&mut self, _: &mut (), cx: &mut Cx, q: Traced) {
-        trace(cx, &q, format!("{}::late", cx.name()));
+    fn late(&mut self, _: &mut (), cx: &mut Cx, mut q: Query<&mut Trace>) {
+        trace(&mut q, format!("{}::late", cx.name()));
     }
 }
 

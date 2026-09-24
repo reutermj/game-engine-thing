@@ -8,7 +8,7 @@
 //!   state              the numbers behind the drawing
 
 use clock::Clock;
-use engine_api::{Cx, Mod, World, export_mod};
+use engine_api::{Cx, Mod, WorldMut, export_mod};
 use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, Steer, WIDTH};
 
 const HELP: &str = "commands: up | down | stay | show | state";
@@ -19,7 +19,7 @@ engine_api::mod_state! {
 }
 
 fn steer(cx: &mut Cx, intent: f32) -> Result<(), String> {
-    if cx.world().query::<Player>().next().is_none() {
+    if cx.world().single::<&Player, ()>(|_, _| ()).is_none() {
         return Err("no player paddle: is pong loaded?".into());
     }
     cx.send_event(Steer { intent });
@@ -33,11 +33,12 @@ struct Snapshot {
     score: Score,
 }
 
-fn snapshot(world: &mut World) -> Result<Snapshot, String> {
+fn snapshot(world: &mut WorldMut) -> Result<Snapshot, String> {
     let frame = clock::now(world).map_or(0, |c: Clock| c.frame);
-    let ball = world.query::<Ball>().next().map(|(_, b)| *b).ok_or("no ball: is pong loaded?")?;
-    let paddles = world.query::<Paddle>().map(|(_, p)| *p).collect();
-    let score = world.query::<Score>().next().map(|(_, s)| *s).unwrap_or_default();
+    let ball = world.single::<&Ball, _>(|_, b| *b).ok_or("no ball: is pong loaded?")?;
+    let mut paddles = Vec::new();
+    world.for_each::<&Paddle>(|_, p| paddles.push(*p));
+    let score = world.single::<&Score, _>(|_, s| *s).unwrap_or_default();
     Ok(Snapshot { frame, ball, paddles, score })
 }
 

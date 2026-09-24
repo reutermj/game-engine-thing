@@ -37,16 +37,13 @@ engine_api::event! {
 /// change the world's structure directly.
 pub fn ensure_trace(cx: &mut engine_api::Cx) {
     let mut world = cx.world();
-    if world.query::<Trace>().next().is_none() {
-        let e = world.spawn();
-        world.insert(e, Trace::default());
+    if world.single::<&Trace, ()>(|_, _| ()).is_none() {
+        world.spawn((Trace::default(),));
     }
 }
 
 /// Appends to the trace through a query: what a system declares.
-pub fn trace(cx: &mut engine_api::Cx, q: &engine_api::Query<&mut Trace>, line: impl Into<String>) {
+pub fn trace<F, C>(q: &mut engine_api::Query<&mut Trace, F, C>, line: impl Into<String>) {
     let line = line.into();
-    for (_, trace) in q.iter(cx) {
-        trace.lines.push(line.clone());
-    }
+    q.for_each(|_, trace| trace.lines.push(line.clone()));
 }

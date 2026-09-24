@@ -23,30 +23,32 @@
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-mod ecs;
 pub mod scheduler;
 mod service;
 mod system;
 pub use system::{
-    Access, AccessKind, Commands, Declarations, Event, EventReader, IntoSystem, PhaseBuilder, PhaseDesc, Query,
-    QueryData, SystemBuilder, SystemDesc, SystemFn, SystemParam, Systems, Term, phase,
+    Declarations, IntoSystem, PhaseBuilder, PhaseDesc, SystemBuilder, SystemDesc, SystemFn, Systems, phase,
 };
 #[doc(hidden)]
 pub use system::__declare;
+
+/// The ECS, shared with the loader as Rust types: see `engine_ecs`.
+pub use engine_ecs;
+pub use engine_ecs::{
+    Adds, Bundle, Component, ComponentDesc, Crossing, DefaultFn, Despawns, DropFn, Entity, Event, EventReader,
+    EventWriter, FieldDesc, FieldKind, FieldType, Query, Removes, Row, Spawner, Storage, With, Without, World,
+    WorldMut, component, event, field_struct,
+};
+#[doc(hidden)]
+pub use engine_ecs::{__component_fingerprint, __drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __storage, __write_default};
 pub use service::{
     CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc,
 };
 #[doc(hidden)]
 pub use service::{__begin_call, __end_call, __serve};
-pub use ecs::{
-    Column, Component, ComponentDesc, ComponentId, Crossing, DefaultFn, DropFn, Entity, EventSlice, FieldDesc,
-    FieldKind, FieldType, World, WorldApi,
-};
-#[doc(hidden)]
-pub use ecs::{__drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
-
-/// Bumped whenever any `#[repr(C)]` type in this crate changes shape.
-pub const API_VERSION: u32 = 13;
+/// Bumped whenever any type crossing between the loader and a mod changes
+/// shape: this crate's and `engine_ecs`'s.
+pub const API_VERSION: u32 = 14;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -137,8 +139,9 @@ pub struct ModInfo {
     /// Built with `engine_mod(resident = True)`: loaded once, never swapped.
     pub resident: bool,
     /// Fills a `Declarations` with the build's systems and phases
-    /// (`Mod::systems`). `false` if that panicked.
-    pub declare: unsafe extern "C" fn(out: *mut c_void) -> bool,
+    /// (`Mod::systems`), interning what they name in the world. `false` if
+    /// that panicked.
+    pub declare: unsafe extern "C" fn(out: *mut c_void, world: *const World) -> bool,
     /// Exported with `export_mod!(.., bootstrap)`: it implements
     /// [`Bootstrap`] and takes `Op::RUN`.
     pub bootstrap: bool,
@@ -179,11 +182,14 @@ pub struct Host {
     /// A scheduler's frame primitives; see [`scheduler`]. `begin_frame`
     /// returns the plan, or `None` if a frame is already open.
     pub begin_frame: unsafe fn(ctx: *const ModContext) -> Option<scheduler::FramePlan>,
-    pub run_system: unsafe fn(ctx: *const ModContext, system: usize) -> scheduler::Ran,
-    pub end_phase: unsafe fn(ctx: *const ModContext),
+    pub run_node: unsafe fn(ctx: *const ModContext, node: usize) -> scheduler::Ran,
     pub end_frame: unsafe fn(ctx: *const ModContext),
-    /// The entity/component store every mod shares. See [`World`].
-    pub world: WorldApi,
+    /// The world every mod shares, which the loader owns. Mods reach it
+    /// through their systems' parameters, and `Cx::world` between frames.
+    pub world: *const World,
+    /// What keeps the build behind `ctx` mapped, for the world to hold while
+    /// values need that build's code.
+    pub keepalive: unsafe fn(ctx: *const ModContext) -> Option<engine_ecs::Keepalive>,
 }
 
 /// What [`Cx::pump_loader`] did.
@@ -281,11 +287,69 @@ impl Cx<'_> {
         unsafe { ((*self.raw.host).reply)(self.raw, text.as_ptr(), text.len()) }
     }
 
-    /// The shared world. Borrows the context mutably, so log after a query
-    /// rather than inside it.
-    pub fn world(&mut self) -> World<'_> {
-        World::new(self.raw)
+    /// The whole world, between frames: for hooks (`load`, `close`) and
+    /// message handlers. In a frame the world is reached only through a
+    /// system's parameters, so this panics there, which is also what keeps
+    /// a service called from a system out of the world.
+    pub fn world(&mut self) -> WorldMut<'_> {
+        let host = unsafe { &*self.raw.host };
+        let world = unsafe { &*host.world };
+        let build = engine_ecs::Build {
+            name: self.name().to_string(),
+            loaded_at: self.raw.loaded_at,
+            keepalive: unsafe { (host.keepalive)(self.raw) },
+        };
+        let name = self.name().to_string();
+        world.between_frames(build).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
+
+    /// Sends an event, readable from the next frame: for code outside a
+    /// frame. A system sends through an `EventWriter` parameter.
+    pub fn send_event<E: Event>(&mut self, event: E) {
+        self.world().send_event(event);
+    }
+}
+
+/// Declares a mod's state: the data the loader carries from one build to the
+/// next, so it follows the same rule as a component's fields (every field a
+/// [`FieldType`]) and migrates the same way when its layout changes. Anything
+/// that doesn't fit (a closure, a trait object, a crate's handle) goes in
+/// [`Mod::Transient`], which each build makes for itself.
+///
+/// ```ignore
+/// engine_api::mod_state! {
+///     #[derive(Default)]
+///     struct Counter {
+///         frames: u64,
+///         count: u64,
+///     }
+/// }
+/// ```
+///
+/// Bump the version (`struct Counter, version = 1 { ... }`) when a field's
+/// meaning changes, to reset the state instead of migrating it.
+#[macro_export]
+macro_rules! mod_state {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident $(, version = $version:literal)? {
+            $($(#[$fmeta:meta])* $fvis:vis $field:ident : $ty:ty),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $($(#[$fmeta])* $fvis $field: $ty),*
+        }
+
+        // SAFETY: every field is a `FieldType`, which rules out pointers into
+        // the mod, and `FIELDS` is generated from the struct itself.
+        unsafe impl $crate::ModState for $name {
+            $(const VERSION: u32 = $version;)?
+            const FIELDS: &'static [$crate::FieldDesc] = &[
+                $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*
+            ];
+        }
+    };
 }
 
 /// A mod's state: the data the loader carries from one build to the next.
@@ -586,10 +650,13 @@ mod tests {
 
     /// Tracked's one system, as the loader runs it.
     fn tick(ctx: &mut ModContext) -> Status {
+        let world = World::new();
         let mut decls = Declarations::default();
-        assert!(unsafe { __declare::<Tracked>(&mut decls as *mut Declarations as *mut c_void) });
+        assert!(unsafe { __declare::<Tracked>(&mut decls as *mut Declarations as *mut c_void, &world as *const World) });
         assert_eq!(decls.systems.len(), 1);
-        unsafe { (decls.systems[0].run)(ctx) }
+        let log = engine_ecs::Log::default();
+        let frame = engine_ecs::FrameCx { world: &world, log: &log, system: "t::tick" };
+        unsafe { (decls.systems[0].run)(ctx, &frame, &decls.systems[0].params) }
     }
 
     /// A context with a live state, as the loader provides it. No host:

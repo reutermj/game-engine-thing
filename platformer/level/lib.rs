@@ -7,7 +7,7 @@
 //! new start, and if not (a reload for a code change) it leaves the level
 //! alone, so collected coins stay collected.
 
-use engine_api::{Cx, Entity, Mod, World, export_mod};
+use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
 use platformer::{Coin, GOAL, LevelInfo, Player, SOLID, SPIKE, Tile};
 use walkers::Walker;
 
@@ -44,7 +44,7 @@ fn map_hash() -> u64 {
 }
 
 impl Level {
-    fn build(&mut self, world: &mut World) -> Result<LevelInfo, String> {
+    fn build(&mut self, world: &mut WorldMut) -> Result<LevelInfo, String> {
         let map = map();
         let width = map.first().ok_or("the map is empty")?.len();
         if let Some(row) = map.iter().position(|r| r.len() != width) {
@@ -54,19 +54,18 @@ impl Level {
         for (y, row) in map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
                 let (x, y) = (x as i32, y as i32);
-                let e = world.spawn();
-                match c {
-                    '#' => world.insert(e, Tile { x, y, kind: SOLID }),
-                    '^' => world.insert(e, Tile { x, y, kind: SPIKE }),
-                    'G' => world.insert(e, Tile { x, y, kind: GOAL }),
-                    'C' => world.insert(e, Coin { x, y }),
-                    'E' => world.insert(e, Walker { x: x as f32, y: y as f32, vx: 0.0 }),
+                let e = match c {
+                    '#' => world.spawn((Tile { x, y, kind: SOLID },)),
+                    '^' => world.spawn((Tile { x, y, kind: SPIKE },)),
+                    'G' => world.spawn((Tile { x, y, kind: GOAL },)),
+                    'C' => world.spawn((Coin { x, y },)),
+                    'E' => world.spawn((Walker { x: x as f32, y: y as f32, vx: 0.0 },)),
                     'P' => {
                         // Standing on the floor of its cell.
                         spawn = Some((x as f32 + 0.1, y as f32 + 1.0 - platformer::PLAYER_HEIGHT));
-                        world.despawn(e)
+                        continue;
                     }
-                    '.' => world.despawn(e),
+                    '.' => continue,
                     other => return Err(format!("unknown map character {other:?} at ({x}, {y})")),
                 };
                 self.entities.push(e);
@@ -74,13 +73,11 @@ impl Level {
         }
         let (spawn_x, spawn_y) = spawn.ok_or("the map has no P")?;
         let info = LevelInfo { width: width as i32, height: map.len() as i32, spawn_x, spawn_y };
-        let e = world.spawn();
-        world.insert(e, info);
-        self.entities.push(e);
+        self.entities.push(world.spawn((info,)));
         Ok(info)
     }
 
-    fn clear(&mut self, world: &mut World) {
+    fn clear(&mut self, world: &mut WorldMut) {
         for e in self.entities.drain(..) {
             // Stale handles (a collected coin, a stomped walker) are no-ops.
             world.despawn(e);
@@ -109,9 +106,7 @@ impl Mod for Level {
             }
         };
         // A player from the previous map may be inside a wall of this one.
-        for (_, p) in world.query::<Player>() {
-            *p = Player { x: info.spawn_x, y: info.spawn_y, vx: 0.0, vy: 0.0, ..*p };
-        }
+        world.for_each::<&mut Player>(|_, p| *p = Player { x: info.spawn_x, y: info.spawn_y, vx: 0.0, vy: 0.0, ..*p });
         self.built = hash;
         cx.log(format!("{BUILT} a {}x{} level", info.width, info.height));
     }

@@ -11,18 +11,18 @@ engine_api::mod_state! {
 }
 
 impl Reporter {
-    fn report(&mut self, _: &mut (), cx: &mut Cx, positions: Query<&Position>) {
+    fn report(&mut self, _: &mut (), cx: &mut Cx, mut positions: Query<&Position>) {
         self.frames += 1;
         if self.frames % 60 != 0 {
             return;
         }
-        // Collected first: the query borrows `cx`, and so does logging.
-        let lines: Vec<String> = positions.iter(cx).map(|(e, p)| format!("entity {}: {p:?}", e.index)).collect();
-        if lines.is_empty() {
+        let mut any = false;
+        positions.for_each(|row, p| {
+            cx.log(format!("entity {}: {p:?}", row.entity().index));
+            any = true;
+        });
+        if !any {
             cx.log("no positions");
-        }
-        for line in lines {
-            cx.log(line);
         }
     }
 }
