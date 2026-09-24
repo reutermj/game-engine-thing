@@ -9,7 +9,7 @@ use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
 use engine_ecs::{Build, Despawns, Query, Spawner, With, Without, World};
 use relations::cases::{entity_one_way, table_one_way};
 use relations::common::{Body, Found, Grounded, Player, Pos, Shape, Vel, detect, has, pile};
-use relations::entities::{self, ContactIndex, ContactOf, Impulse, Manifold, Response};
+use relations::entities::{self, ContactOf, Impulse, Manifold, Response};
 use relations::links::*;
 use relations::table::{self, ContactTable, Contacts};
 
@@ -41,12 +41,11 @@ fn stages(w: &World, entity: bool) -> Vec<Schedule> {
     })
     .system(w, "detect");
     if entity {
-        entities::setup(w);
         vec![
             one(entities::gravity_system.system(w, "gravity")),
             one(detect),
-            one((move |_: &mut Cx, index: Query<&mut ContactIndex>, contacts: Query<(&mut Manifold, &mut Response), (), Despawns>, spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>| {
-                entities::merge(&from.lock().unwrap(), index, contacts, spawner)
+            one((move |_: &mut Cx, contacts: Query<(&ContactOf, &mut Manifold, &mut Response), (), Despawns>, spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>| {
+                entities::merge(&from.lock().unwrap(), contacts, spawner)
             })
             .system(w, "merge")),
             one(entity_hook_all.system(w, "hook_all")),
@@ -141,11 +140,10 @@ fn churn() {
         let w = World::new();
         let (lists, frame) = (lists.clone(), frame.clone());
         let merge = if entity {
-            entities::setup(&w);
-            (move |_: &mut Cx, index: Query<&mut ContactIndex>, contacts: Query<(&mut Manifold, &mut Response), (), Despawns>, spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>| {
+            (move |_: &mut Cx, contacts: Query<(&ContactOf, &mut Manifold, &mut Response), (), Despawns>, spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>| {
                 let mut f = frame.lock().unwrap();
                 *f += 1;
-                entities::merge(&lists[*f % 2], index, contacts, spawner)
+                entities::merge(&lists[*f % 2], contacts, spawner)
             })
             .system(&w, "merge")
         } else {
@@ -158,6 +156,7 @@ fn churn() {
             .system(&w, "merge")
         };
         row.push(format!("{:.0}", time(&w, &Schedule { systems: vec![merge] }, 200)));
+
     }
     println!("\nFull churn, {} contacts ending and as many beginning a frame, upkeep µs: table {}, entities {}.", lists[0].len(), row[0], row[1]);
 }

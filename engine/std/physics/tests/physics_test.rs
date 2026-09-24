@@ -150,8 +150,12 @@ mod runner {
         assert_eq!(field(&landed, "triggers"), 0.0, "a static sensor in a static floor is quiet: {landed}");
         assert!(field(&landed, "hardest") > 0.5, "{landed}");
         send(&e, "runner", "go");
-        step(&e, 80);
-        // Through the coin (at 8.5) once. Each tile stepped onto is a new
+        // In the coin (at 8.5) at about 8.45, an overlap while it lasts.
+        step(&e, 51);
+        assert_eq!(send(&e, "runner", "overlaps"), "1");
+        step(&e, 29);
+        assert_eq!(send(&e, "runner", "overlaps"), "0", "past the coin");
+        // Through the coin once. Each tile stepped onto is a new
         // pair, so a new contact: `Contact` is per pair, and "landed" is
         // `Touching::below` becoming true.
         let end = trace(&e).last().unwrap().0;
@@ -160,6 +164,33 @@ mod runner {
         assert!(events.starts_with("coins 1 "), "{events}");
         let tiles_crossed = (end + 0.4).floor() - (2.5f32 + 0.4).floor();
         assert_eq!(field(&events, "landings"), 1.0 + tiles_crossed, "{events}");
+    }
+
+    /// Standing, the player presses on the tile under it and nothing else:
+    /// a contact entity whose normal, seen from the player, points down.
+    #[test]
+    fn a_player_standing_still_has_one_pressed_contact_with_the_tile_under_it() {
+        let e = game("RUNNER", "contacts");
+        step(&e, 20);
+        let contacts = send(&e, "runner", "contacts");
+        let lines: Vec<Vec<f32>> =
+            contacts.lines().map(|l| l.split_whitespace().map(|v| v.parse().unwrap()).collect()).collect();
+        // At x 2.5, only the tile across 2..3 is under it.
+        assert_eq!(lines.len(), 1, "{contacts}");
+        assert_eq!((lines[0][1], lines[0][2]), (0.0, 1.0), "{contacts}");
+    }
+
+    /// A system between finding contacts and solving them disables the
+    /// player's: nothing holds it up.
+    #[test]
+    fn a_contact_disabled_before_the_solve_lets_the_player_fall_through() {
+        let e = game("RUNNER", "ghost");
+        step(&e, 20);
+        assert!(trace(&e).last().unwrap().4, "standing first");
+        send(&e, "runner", "ghost");
+        step(&e, 20);
+        let y = trace(&e).last().unwrap().1;
+        assert!(y > FLOOR + 1.0, "through the floor: y {y}");
     }
 
     #[test]

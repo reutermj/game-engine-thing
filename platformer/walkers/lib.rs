@@ -3,31 +3,19 @@
 //! touch kills the player. Both are `Bounce` and `Hurt` events to the
 //! platformer's rules, which own what happens to the player.
 //!
-//! A walker is a physics body that collides with tiles only; it meets the
-//! player by overlap, not collision, so a stomp and a touch can be told
-//! apart before either pushes the other.
+//! A walker is a physics body that collides with tiles only and senses the
+//! player: physics reports their overlap (an `Overlap` entity) rather than
+//! pushing them apart, so a stomp and a touch can be told apart before
+//! either pushes the other.
 
 use engine_api::{Cx, Despawns, EventWriter, Mod, Query, Systems, With, Without, export_mod, phase};
-use physics::{Position, Spatial, Touching, Vec2, Velocity, rect};
-use platformer::{Bounce, Hurt, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SOLID, Tile};
+use physics::{Overlap, Position, Spatial, Touching, Vec2, Velocity, rect};
+use platformer::{Bounce, Hurt, PLAYER_HEIGHT, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
 engine_api::mod_state! {
     #[derive(Default)]
     struct Walkers {}
-}
-
-/// The player, as a walker meets it.
-#[derive(Clone, Copy)]
-struct Seen {
-    x: f32,
-    y: f32,
-    vy: f32,
-}
-
-/// Whether the player's box overlaps a walker's, both by their centers.
-fn overlaps(p: &Seen, w: &Position) -> bool {
-    (p.x - w.x).abs() < PLAYER_WIDTH / 2.0 + 0.5 && (p.y - w.y).abs() < PLAYER_HEIGHT / 2.0 + 0.5
 }
 
 /// What meeting the player came to this frame.
@@ -38,21 +26,14 @@ enum Meeting {
 }
 
 impl Walkers {
-    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        mut walkers: Query<(&Position, &mut Velocity, &Touching), With<Walker>, Despawns>,
-        // Not a walker, whose velocity `walkers` writes.
-        mut players: Query<(&Position, &Velocity), (With<Player>, Without<Walker>)>,
+        mut walkers: Query<(&Position, &mut Velocity, &Touching), With<Walker>>,
         mut tiles: Spatial<&Tile>,
-        hurts: EventWriter<Hurt>,
-        bounces: EventWriter<Bounce>,
     ) {
-        let player = players.single(|_, (p, v)| Seen { x: p.x, y: p.y, vy: v.y });
-        let mut meeting = Meeting::None;
-        walkers.for_each(|walker, (w, mut v, touching)| {
+        walkers.for_each(|_, (w, mut v, touching)| {
             let dir = if v.x < 0.0 { -1.0 } else { 1.0 };
             // Just past its leading edge, and just below its feet.
             let ahead = Vec2::new(w.x + dir * 0.55, w.y + 0.6);
@@ -60,16 +41,36 @@ impl Walkers {
             tiles.overlapping(rect(ahead, Vec2::ZERO), |_, t| ground |= t.kind == SOLID);
             let wall = if dir > 0.0 { touching.right } else { touching.left };
             v.x = if wall || !ground { -dir * WALK_SPEED } else { dir * WALK_SPEED };
+        });
+    }
 
-            if let Some(p) = player.filter(|p| overlaps(p, w)) {
-                // From above: falling, with the player's feet in the walker's
-                // top half.
-                if p.vy > 0.0 && p.y + PLAYER_HEIGHT / 2.0 < w.y {
-                    walker.despawn();
-                    meeting = Meeting::Stomped;
-                } else if !matches!(meeting, Meeting::Stomped) {
-                    meeting = Meeting::Hurt;
-                }
+    /// The player overlapping a walker, as physics found it this step: run
+    /// right after `find_contacts`, so it's as of where everything is now
+    /// (a respawn included), not last step.
+    fn meet(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut walkers: Query<&Position, With<Walker>, Despawns>,
+        mut players: Query<(&Position, &Velocity), (With<Player>, Without<Walker>)>,
+        mut overlaps: Query<&Overlap>,
+        hurts: EventWriter<Hurt>,
+        bounces: EventWriter<Bounce>,
+    ) {
+        let mut meeting = Meeting::None;
+        overlaps.for_each(|_, o| {
+            for (walker, other) in [(o.a, o.b), (o.b, o.a)] {
+                let Some((p, vy)) = players.with(other, |_, (p, v)| (*p, v.y)) else { continue };
+                walkers.with(walker, |row, w| {
+                    // From above: falling, with the player's feet in the
+                    // walker's top half.
+                    if vy > 0.0 && p.y + PLAYER_HEIGHT / 2.0 < w.y {
+                        row.despawn();
+                        meeting = Meeting::Stomped;
+                    } else if !matches!(meeting, Meeting::Stomped) {
+                        meeting = Meeting::Hurt;
+                    }
+                });
             }
         });
         match meeting {
@@ -85,6 +86,7 @@ impl Mod for Walkers {
 
     fn systems(s: &mut Systems<Self>) {
         s.add("walk", Self::walk).phase(phase::SIMULATE).after("platformer::play");
+        s.add("meet", Self::meet).phase("physics::step").after("physics::find_contacts").before("physics::solve");
     }
 }
 

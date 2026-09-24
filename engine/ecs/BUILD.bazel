@@ -13,6 +13,7 @@ rust_library(
         "graph.rs",
         "harness.rs",
         "lib.rs",
+        "ordered.rs",
         "query.rs",
         "schema.rs",
         "spatial.rs",
@@ -87,5 +88,12 @@ rust_test(
 rust_binary(
     name = "spatial_bench",
     srcs = ["tests/spatial_bench.rs"],
+    deps = [":ecs"],
+)
+
+# Ordered tables: key order kept through every change, walks by key.
+rust_test(
+    name = "ordered_test",
+    srcs = ["tests/ordered_test.rs"],
     deps = [":ecs"],
 )

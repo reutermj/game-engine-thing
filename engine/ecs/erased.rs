@@ -221,6 +221,44 @@ impl ErasedColumn {
         self.ty = ty;
     }
 
+    /// Moves every value of `pages` into new pages of `page_rows` values,
+    /// in the order `order` names them, as (page, row): how an ordered
+    /// table is re-sorted. Each value keeps its tick, and `pages` are left
+    /// empty. Panics unless `order` names every value exactly once, which
+    /// is what makes the moves sound.
+    pub fn gather(pages: &mut [ErasedColumn], order: &[(u32, u32)], page_rows: usize) -> Vec<ErasedColumn> {
+        let ty = pages.first().expect("a table has a page").ty;
+        assert!(pages.iter().all(|p| p.ty.same_values(&ty)), "gathering one column's pages");
+        assert_eq!(order.len(), pages.iter().map(|p| p.len).sum::<usize>(), "gathering every value");
+        let mut seen: Vec<Vec<bool>> = pages.iter().map(|p| vec![false; p.len]).collect();
+        let size = ty.layout.size();
+        let mut out = Vec::with_capacity(order.len().div_ceil(page_rows).max(1));
+        for chunk in order.chunks(page_rows) {
+            let mut column = ErasedColumn::new(ty);
+            column.reserve(chunk.len());
+            column.ticks.reserve(chunk.len());
+            for &(p, r) in chunk {
+                let (p, r) = (p as usize, r as usize);
+                assert!(r < pages[p].len && !std::mem::replace(&mut seen[p][r], true), "row {r} of page {p} gathered once");
+                // SAFETY: `(p, r)` is an initialized value, moved once
+                // (checked above) into `column`'s next allocated slot.
+                unsafe { std::ptr::copy_nonoverlapping(pages[p].slot(r), column.slot(column.len), size) };
+                column.len += 1;
+                column.ticks.push(pages[p].ticks[r]);
+            }
+            out.push(column);
+        }
+        // Every value was moved out: the old pages own nothing.
+        for p in pages.iter_mut() {
+            p.len = 0;
+            p.ticks.clear();
+        }
+        if out.is_empty() {
+            out.push(ErasedColumn::new(ty));
+        }
+        out
+    }
+
     /// Rewrites every value into `to`'s layout with `migrate`, which must
     /// move or drop every part of the old value and initialize the new one
     /// fully (see `schema::migrate`).
@@ -264,10 +302,15 @@ impl ErasedColumn {
     }
 
     fn reserve_one(&mut self) {
-        if self.len < self.cap {
+        self.reserve(1);
+    }
+
+    /// Room for `n` more values.
+    fn reserve(&mut self, n: usize) {
+        if self.cap - self.len >= n {
             return;
         }
-        let cap = (self.cap * 2).max(4);
+        let cap = (self.cap * 2).max(4).max(self.len + n);
         let new = array(self.ty.layout, cap);
         // SAFETY: `new` has a non-zero size (zero-sized types never get here:
         // their cap is usize::MAX). Growing an existing allocation uses the

@@ -64,6 +64,8 @@ pub struct ComponentDesc {
     pub default: DefaultFn,
     /// For a spatial key, its extent and bounds glue.
     pub spatial: Option<crate::spatial::SpatialDesc>,
+    /// For an ordered key, its key glue.
+    pub order: Option<crate::ordered::OrderDesc>,
 }
 
 impl ComponentDesc {
@@ -80,6 +82,7 @@ impl ComponentDesc {
             drop: __drop_fn::<T>(),
             default: __write_default::<T>,
             spatial: T::SPATIAL,
+            order: T::ORDER,
         }
     }
 }
@@ -366,7 +369,9 @@ tuple_field_types! { (A, B), (A, B, C), (A, B, C, D) }
 /// added and removed often is better sparse: `pub struct Burning:
 /// "game::Burning", storage = sparse { ... }`. A position whose tables should
 /// be kept in spatial order says `order = spatial`, and implements
-/// [`SpatialKey`](crate::spatial::SpatialKey).
+/// [`SpatialKey`](crate::spatial::SpatialKey). One whose tables should be
+/// kept sorted by it says `order = key`, and implements
+/// [`OrderKey`](crate::ordered::OrderKey).
 #[macro_export]
 macro_rules! component {
     (
@@ -388,7 +393,10 @@ macro_rules! component {
             const NAME: &'static str = $id;
             $(const VERSION: u32 = $version;)?
             $(const STORAGE: $crate::Storage = $crate::__storage!($storage);)?
-            $(const SPATIAL: ::std::option::Option<$crate::spatial::SpatialDesc> = $crate::__order!($order, $name);)?
+            $(
+                const SPATIAL: ::std::option::Option<$crate::spatial::SpatialDesc> = $crate::__spatial!($order, $name);
+                const ORDER: ::std::option::Option<$crate::ordered::OrderDesc> = $crate::__keyed!($order, $name);
+            )?
             const FIELDS: &'static [$crate::FieldDesc] = &[
                 $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*
             ];
@@ -452,6 +460,9 @@ pub unsafe trait Component: Default + Send + Sync + 'static {
     /// For a spatial key (`order = spatial`, with `SpatialKey`
     /// implemented), what keeps its tables in spatial order.
     const SPATIAL: Option<crate::spatial::SpatialDesc> = None;
+    /// For an ordered key (`order = key`, with `OrderKey` implemented),
+    /// what keeps its tables sorted.
+    const ORDER: Option<crate::ordered::OrderDesc> = None;
     /// Checked on every typed access to stored values, so a build can't
     /// read a layout it wasn't compiled for.
     const FINGERPRINT: u64 =
@@ -461,9 +472,23 @@ pub unsafe trait Component: Default + Send + Sync + 'static {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __order {
+macro_rules! __spatial {
     (spatial, $name:ident) => {
         ::std::option::Option::Some($crate::spatial::SpatialDesc::of::<$name>())
+    };
+    (key, $name:ident) => {
+        ::std::option::Option::None
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __keyed {
+    (spatial, $name:ident) => {
+        ::std::option::Option::None
+    };
+    (key, $name:ident) => {
+        ::std::option::Option::Some($crate::ordered::OrderDesc::of::<$name>())
     };
 }
 

@@ -164,7 +164,7 @@ fn input_comes_first_then_the_rules_the_walkers_physics_and_what_they_did() {
         e.schedule().unwrap(),
         "input: platformer::steer\n\
          simulate (60 Hz): platformer::play, walkers::walk\n\
-         physics::step (60 Hz): physics::integrate_velocities, physics::find_contacts, physics::solve\n\
+         physics::step (60 Hz): physics::integrate_velocities, physics::find_contacts, walkers::meet, physics::solve\n\
          late: platformer::take_hits"
     );
 }

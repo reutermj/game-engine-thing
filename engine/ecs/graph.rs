@@ -15,10 +15,12 @@
 //!   exactly the tables its log touches.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 use crate::component::{Entity, Storage};
 use crate::query::{Change, ParamDecl, QueryDecl};
-use crate::world::{ComponentId, World};
+use crate::world::{ComponentId, TableId, World};
 
 /// What the graph needs to know of a system: its parameters, and whose it
 /// is (a mod's systems all borrow its state mutably).
@@ -122,11 +124,12 @@ fn table_only(world: &World, ids: &[ComponentId]) -> Vec<ComponentId> {
 pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
     let mut fp = Footprint::default();
     for p in ParamDecl::leaves(params) {
-        // A reorder rearranges the whole of each spatial table it matched.
+        // A reorder rearranges the whole of each spatial or ordered table
+        // it matched.
         if let ParamDecl::Query(q) = p
             && q.reorders
         {
-            for t in world.tables().filter(|t| t.spatial.is_some() && q.matches(world, &t.components)) {
+            for t in world.tables().filter(|t| (t.spatial.is_some() || t.ordered.is_some()) && q.matches(world, &t.components)) {
                 fp.add(Shape::exactly(t.components.clone()));
             }
         }
@@ -169,26 +172,26 @@ pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
 }
 
 /// An apply node's footprint once its system has run: the tables its log
-/// moves each entity through, replayed in order.
+/// moves each entity through, replayed in order. Linear in the log with
+/// small constants: it runs before every apply, and a log can hold a
+/// thousand spawns.
 pub fn exact(world: &World, log: &[Change]) -> Footprint {
     let mut fp = Footprint::default();
-    // Each entity's table set as the log moves it.
-    let mut shapes: HashMap<Entity, Vec<ComponentId>> = HashMap::new();
-    // `e`'s set in `shapes`, starting from its table now.
-    fn current<'s>(
-        world: &World,
-        fp: &mut Footprint,
-        shapes: &'s mut HashMap<Entity, Vec<ComponentId>>,
-        e: Entity,
-    ) -> Option<&'s mut Vec<ComponentId>> {
-        if !shapes.contains_key(&e) {
-            let at = world.entities.location(e)?;
-            let set = world.table(at.table).components.clone();
-            fp.add(Shape::exactly(set.clone()));
-            shapes.insert(e, set);
+    // The table sets entities have been given so far, and, for each entity
+    // the log has spawned or moved, its set now. Spawns from one spawner
+    // share one set.
+    let mut sets: Vec<Vec<ComponentId>> = Vec::new();
+    let mut now: HashMap<Entity, usize, BuildHasherDefault<EntityHasher>> = HashMap::default();
+    // Tables already in `fp`, by id, so a log of despawns adds each shape
+    // once without comparing component lists.
+    let mut seen: Vec<TableId> = Vec::new();
+    let mut table = |fp: &mut Footprint, t: TableId| {
+        if !seen.contains(&t) {
+            seen.push(t);
+            fp.add(Shape::exactly(world.table(t).components.clone()));
         }
-        shapes.get_mut(&e)
-    }
+    };
+    let mut last_spawn: Option<(&Arc<[ComponentId]>, usize)> = None;
     for change in log {
         match change {
             Change::Insert { e, c, .. } | Change::Remove { e, c } => {
@@ -196,42 +199,85 @@ pub fn exact(world: &World, log: &[Change]) -> Footprint {
                     fp.add_sparse(*c);
                     continue;
                 }
-                let Some(set) = current(world, &mut fp, &mut shapes, *e) else { continue };
-                let changed = match change {
-                    Change::Insert { .. } if !set.contains(c) => {
-                        set.push(*c);
-                        true
+                let i = match now.get(e) {
+                    Some(&i) => i,
+                    None => {
+                        let Some(at) = world.entities.location(*e) else { continue };
+                        table(&mut fp, at.table);
+                        sets.push(world.table(at.table).components.clone());
+                        sets.len() - 1
                     }
-                    Change::Remove { .. } if set.contains(c) => {
-                        set.retain(|x| x != c);
-                        true
-                    }
-                    _ => false,
                 };
-                if changed {
-                    set.sort();
-                    fp.add(Shape::exactly(set.clone()));
-                }
+                let set = &sets[i];
+                let moved: Vec<ComponentId> = match change {
+                    Change::Insert { .. } if !set.contains(c) => set.iter().chain([c]).copied().collect(),
+                    Change::Remove { .. } if set.contains(c) => set.iter().copied().filter(|x| x != c).collect(),
+                    _ => {
+                        now.insert(*e, i);
+                        continue;
+                    }
+                };
+                let moved = sorted(moved);
+                fp.add(Shape::exactly(moved.clone()));
+                sets.push(moved);
+                now.insert(*e, sets.len() - 1);
             }
             Change::Despawn(e) => {
                 fp.kills = true;
-                current(world, &mut fp, &mut shapes, *e);
+                // An entity the log spawned or moved is in a table already
+                // added; a dead one is in none.
+                if !now.contains_key(e)
+                    && let Some(at) = world.entities.location(*e)
+                {
+                    table(&mut fp, at.table);
+                }
             }
             Change::Event { queue, .. } => fp.add_events(*queue),
-            Change::Reorder(t) => fp.add(Shape::exactly(world.table(*t).components.clone())),
+            Change::Reorder(t) => table(&mut fp, *t),
             Change::Spawn { e, components, .. } => {
-                let set = sorted(table_only(world, components));
-                fp.add(Shape::exactly(set.clone()));
+                let i = match last_spawn {
+                    Some((last, i)) if Arc::ptr_eq(last, components) => i,
+                    _ => {
+                        let set = sorted(table_only(world, components));
+                        fp.add(Shape::exactly(set.clone()));
+                        for &c in components.iter().filter(|c| world.storage(**c) == Storage::Sparse) {
+                            fp.add_sparse(c);
+                        }
+                        sets.push(set);
+                        last_spawn = Some((components, sets.len() - 1));
+                        sets.len() - 1
+                    }
+                };
                 // Later changes in the log start from the spawn's table: the
                 // entity has no location until the apply places it.
-                shapes.insert(*e, set);
-                for &c in components.iter().filter(|c| world.storage(**c) == Storage::Sparse) {
-                    fp.add_sparse(c);
-                }
+                now.insert(*e, i);
             }
         }
     }
     fp
+}
+
+/// Hashes entities for `exact`'s map: one multiply per word. The standard
+/// hasher, keyed against flooding, was most of a spawn's footprint cost,
+/// and entity ids aren't attacker-chosen.
+#[derive(Default)]
+pub struct EntityHasher(u64);
+
+impl Hasher for EntityHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64);
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(26) ^ n).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 /// The columns `decl`'s queries touch in a table with exactly `set`, with

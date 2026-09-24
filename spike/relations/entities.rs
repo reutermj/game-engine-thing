@@ -1,18 +1,26 @@
 //! Option 3: each contact an entity, with `ContactOf { a, b }`, its
 //! manifold, impulses and what the game made of it. A step updates the
 //! contacts that persist in place, spawns the ones that began and
-//! despawns the ones that ended; an index finds a pair's entity. Hooks are
-//! ordinary queries over contact entities.
+//! despawns the ones that ended. `ContactOf` is an ordered key, so contacts
+//! are stored in pair order: the step's merge and the solver's gather are
+//! one pass each, with no index and no sort. Hooks are ordinary queries over
+//! contact entities.
 
 use engine_ecs::harness::Cx;
-use engine_ecs::{Despawns, Entity, Query, Spawner, Without, component, field_struct};
+use engine_ecs::{Despawns, Entity, OrderKey, Query, Spawner, Without, component, pair_key};
 use physics::Vec2;
 
 use crate::common::{Body, Found, Pos, Shape, Solvable, Vel, detect, gravity, solve_step};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
-    pub struct ContactOf: "rel::ContactOf" { pub a: Entity, pub b: Entity }
+    pub struct ContactOf: "rel::ContactOf", order = key { pub a: Entity, pub b: Entity }
+}
+
+impl OrderKey for ContactOf {
+    fn key(&self) -> u128 {
+        pair_key(self.a, self.b)
+    }
 }
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -29,21 +37,6 @@ component! {
     pub struct Response: "rel::Response" { pub restitution: f32, pub friction: f32, pub disabled: bool }
 }
 
-field_struct! {
-    #[derive(Debug, Default, Copy, PartialEq)]
-    pub struct Indexed { pub a: Entity, pub b: Entity, pub contact: Entity }
-}
-
-component! {
-    /// Each live contact's entity, by pair, sorted: one entity has it.
-    #[derive(Debug, Default, PartialEq)]
-    pub struct ContactIndex: "rel::ContactIndex" { pub entries: Vec<Indexed> }
-}
-
-pub fn setup(w: &engine_ecs::World) {
-    w.between_frames(Default::default()).unwrap().spawn((ContactIndex::default(),));
-}
-
 pub fn gravity_system(_: &mut Cx, mut bodies: Query<(&Body, &mut Vel)>) {
     gravity(&mut bodies);
 }
@@ -55,57 +48,41 @@ pub fn find(
     _: &mut Cx,
     mut bodies: Query<(&Pos, &Shape, &Vel, &Body)>,
     mut statics: Query<(&Pos, &Shape), Without<Body>>,
-    index: Query<&mut ContactIndex>,
-    contacts: Query<(&mut Manifold, &mut Response), (), Despawns>,
+    contacts: Query<(&ContactOf, &mut Manifold, &mut Response), (), Despawns>,
     spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>,
 ) {
-    merge(&detect(&mut bodies, &mut statics), index, contacts, spawner);
+    merge(&detect(&mut bodies, &mut statics), contacts, spawner);
 }
 
-/// The storage's half of `find`: contacts that persist updated in place,
-/// ended ones despawned, new ones spawned.
+/// The storage's half of `find`, one pass over both lists in pair order:
+/// contacts that persist updated in place, ended ones despawned, new ones
+/// spawned.
 #[allow(clippy::type_complexity)]
 pub fn merge(
     found: &[Found],
-    mut index: Query<&mut ContactIndex>,
-    mut contacts: Query<(&mut Manifold, &mut Response), (), Despawns>,
+    mut contacts: Query<(&ContactOf, &mut Manifold, &mut Response), (), Despawns>,
     spawner: Spawner<(ContactOf, Manifold, Impulse, Response)>,
 ) {
-    index.single(|_, mut idx| {
-        let old = std::mem::take(&mut idx.entries);
-        let mut entries = Vec::with_capacity(found.len());
-        let (mut i, mut j) = (0, 0);
-        while i < old.len() || j < found.len() {
-            let ok = old.get(i).map(|o| (o.a, o.b));
-            let fk = found.get(j).map(|f| (f.a, f.b));
-            match (ok, fk) {
-                (Some(o), Some(f)) if o == f => {
-                    let (e, f) = (old[i].contact, found[j]);
-                    contacts.with(e, |_, (mut m, mut r)| {
-                        *m = Manifold { nx: f.normal.x, ny: f.normal.y, depth: f.depth, began: false };
-                        *r = FRESH;
-                    });
-                    entries.push(old[i]);
-                    i += 1;
-                    j += 1;
-                }
-                (Some(o), f) if f.is_none_or(|f| o < f) => {
-                    if let Some(row) = contacts.get(old[i].contact) {
-                        row.despawn();
-                    }
-                    i += 1;
-                }
-                _ => {
-                    let f = found[j];
-                    let m = Manifold { nx: f.normal.x, ny: f.normal.y, depth: f.depth, began: true };
-                    let contact = spawner.spawn((ContactOf { a: f.a, b: f.b }, m, Impulse::default(), FRESH));
-                    entries.push(Indexed { a: f.a, b: f.b, contact });
-                    j += 1;
-                }
-            }
+    let spawn = |f: &Found| {
+        let m = Manifold { nx: f.normal.x, ny: f.normal.y, depth: f.depth, began: true };
+        spawner.spawn((ContactOf { a: f.a, b: f.b }, m, Impulse::default(), FRESH));
+    };
+    let mut next = 0;
+    contacts.for_each_ordered(|row, (pair, mut m, mut r)| {
+        while found.get(next).is_some_and(|f| (f.a, f.b) < (pair.a, pair.b)) {
+            spawn(&found[next]);
+            next += 1;
         }
-        idx.entries = entries;
+        match found.get(next) {
+            Some(f) if (f.a, f.b) == (pair.a, pair.b) => {
+                *m = Manifold { nx: f.normal.x, ny: f.normal.y, depth: f.depth, began: false };
+                *r = FRESH;
+                next += 1;
+            }
+            _ => row.despawn(),
+        }
     });
+    found[next..].iter().for_each(spawn);
 }
 
 pub fn solve(
@@ -113,10 +90,11 @@ pub fn solve(
     mut bodies: Query<(&Body, &mut Vel, &mut Pos)>,
     mut contacts: Query<(&ContactOf, &Manifold, &mut Impulse, &Response)>,
 ) {
-    let mut gathered: Vec<(Entity, Solvable)> = Vec::new();
-    contacts.for_each(|row, (pair, m, j, r)| {
+    // In pair order already: storage keeps it.
+    let mut solvable: Vec<Solvable> = Vec::new();
+    contacts.for_each_ordered(|_, (pair, m, j, r)| {
         if !r.disabled {
-            let s = Solvable {
+            solvable.push(Solvable {
                 a: pair.a,
                 b: pair.b,
                 normal: Vec2::new(m.nx, m.ny),
@@ -125,16 +103,13 @@ pub fn solve(
                 friction: r.friction,
                 jn: j.jn,
                 jt: j.jt,
-            };
-            gathered.push((row.entity(), s));
+            });
         }
     });
-    // Storage order depends on history; solving in pair order doesn't.
-    gathered.sort_by_key(|(_, s)| (s.a, s.b));
-    let solvable: Vec<Solvable> = gathered.iter().map(|(_, s)| *s).collect();
-    let impulses = solve_step(&mut bodies, &solvable);
-    for ((e, _), (jn, jt)) in gathered.iter().zip(impulses) {
-        contacts.with(*e, |_, (_, _, mut j, _)| (j.jn, j.jt) = (jn, jt));
-    }
+    let mut impulses = solve_step(&mut bodies, &solvable).into_iter();
+    contacts.for_each_ordered(|_, (_, _, mut j, r)| {
+        if !r.disabled {
+            (j.jn, j.jt) = impulses.next().expect("an impulse per contact solved");
+        }
+    });
 }
-

@@ -29,6 +29,7 @@ use crate::component::{ComponentDesc, DefaultFn, DropFn, Entity, Storage};
 use crate::erased::{ErasedColumn, ValueType, drop_value};
 use crate::events::EventQueue;
 use crate::schema::{self, Field};
+use crate::ordered::{self, KeyOrder, OrderDesc};
 use crate::spatial::{Resort, SPATIAL_PAGE_ROWS, SpatialDesc, SpatialPages};
 
 /// Rows per page: the unit of borrowing for data parallelism, and where a
@@ -186,12 +187,18 @@ impl Entities {
         self.slot(e.index).expect("a placed entity's slot").1.store(at.pack(), Ordering::Release);
     }
 
+    /// Kills `e`; its slot is reusable once the caller hands it to `free`.
     fn kill(&self, e: Entity) {
         let (g, l) = self.slot(e.index).expect("a killed entity's slot");
         l.store(DEAD, Ordering::Release);
         g.fetch_add(1, Ordering::AcqRel);
         self.alive.fetch_sub(1, Ordering::Relaxed);
-        self.free.lock().unwrap().push(e.index);
+    }
+
+    fn free(&self, slots: &mut Vec<u32>) {
+        if !slots.is_empty() {
+            self.free.lock().unwrap().append(slots);
+        }
     }
 }
 
@@ -203,6 +210,9 @@ pub struct ComponentInfo {
     /// Whether this component keeps its tables in spatial order: fixed at
     /// its first declaration, like its storage.
     pub spatial: bool,
+    /// Whether this component keeps its tables sorted by it: fixed like
+    /// `spatial`.
+    pub ordered: bool,
     /// The sparse set, for a sparse component, made when first installed.
     /// Before `installed`, so its values drop while the keepalive there
     /// still maps their code.
@@ -218,6 +228,8 @@ struct Installed {
     default: DefaultFn,
     /// A spatial key's glue, from the same build as the layout.
     spatial: Option<SpatialDesc>,
+    /// An ordered key's glue, likewise.
+    order: Option<OrderDesc>,
     loaded_at: u64,
     _keepalive: Option<Keepalive>,
 }
@@ -237,6 +249,14 @@ pub struct Table {
     /// For a table holding a spatial key: the key, and the order. Locked
     /// with `rows`: whoever reads rows by page reads their order too.
     pub spatial: Option<SpatialTable>,
+    /// For a table holding an ordered key (and no spatial one, which wins):
+    /// the key, and each row's. Locked with `rows`, like `spatial`.
+    pub ordered: Option<OrderedTable>,
+}
+
+pub struct OrderedTable {
+    pub key: ComponentId,
+    pub order: RwLock<KeyOrder>,
 }
 
 pub struct SpatialTable {
@@ -421,6 +441,13 @@ impl World {
                     desc.name, info.storage, desc.storage
                 ));
             }
+            if info.ordered != desc.order.is_some() {
+                return Err(format!(
+                    "{} is {}an ordered key, and this build says otherwise; restart the engine to change it",
+                    desc.name,
+                    if info.ordered { "" } else { "not " }
+                ));
+            }
             if info.spatial != desc.spatial.is_some() {
                 return Err(format!(
                     "{} is {}kept in spatial order, and this build says otherwise; restart the engine to change it",
@@ -435,10 +462,14 @@ impl World {
             // in one.
             return Err(format!("{} can't be both sparse and a spatial key", desc.name));
         }
+        if desc.order.is_some() && desc.storage == Storage::Sparse {
+            return Err(format!("{} can't be both sparse and an ordered key", desc.name));
+        }
         let info = ComponentInfo {
             name: desc.name.into(),
             storage: desc.storage,
             spatial: desc.spatial.is_some(),
+            ordered: desc.order.is_some(),
             installed: RwLock::new(None),
             sparse: OnceLock::new(),
         };
@@ -470,6 +501,7 @@ impl World {
             field_drops,
             default: desc.default,
             spatial: desc.spatial,
+            order: desc.order,
             loaded_at: build.loaded_at,
             _keepalive: build.keepalive.clone(),
         };
@@ -574,7 +606,12 @@ impl World {
     /// which re-sorts what it wrote.
     pub fn moves_rows(&self, c: ComponentId) -> bool {
         let info = self.component(c);
-        info.spatial || self.extents.lock().unwrap().iter().any(|n| *n == info.name)
+        info.spatial || info.ordered || self.extents.lock().unwrap().iter().any(|n| *n == info.name)
+    }
+
+    /// The glue of ordered key `c`, from the build that installed it.
+    fn order_desc(&self, c: ComponentId) -> Option<OrderDesc> {
+        self.component(c).installed.read().unwrap().as_ref().and_then(|i| i.order)
     }
 
     /// The glue of spatial key `c`, from the build that installed it.
@@ -631,7 +668,11 @@ impl World {
             pages: RwLock::new(SpatialPages::default()),
         });
         let page_rows = if spatial.is_some() { SPATIAL_PAGE_ROWS } else { PAGE_ROWS };
-        let table = Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial };
+        let ordered = spatial.is_none().then(|| set.iter().copied().find(|&c| self.component(c).ordered)).flatten().map(|key| {
+            OrderedTable { key, order: RwLock::new(KeyOrder { keys: vec![Vec::new()], ..Default::default() }) }
+        });
+        let table =
+            Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial, ordered };
         assert_eq!(self.tables.push(table), id.0 as usize);
         by_set.insert(set, id);
         id
@@ -761,9 +802,28 @@ impl<T> TakeGuard<T> for RwLock<T> {
 /// changes: an apply node takes one for exactly its footprint.
 pub struct Structural<'w> {
     pub world: &'w World,
-    tables: HashMap<TableId, LockedTable<'w>>,
+    /// By table id: a spawn looks its table up several times, and a hash
+    /// of the id per lookup was a fifth of a spawn's cost.
+    tables: Vec<Option<LockedTable<'w>>>,
     sparse: HashMap<ComponentId, RwLockWriteGuard<'w, SparseSet>>,
     events: HashMap<usize, RwLockWriteGuard<'w, EventQueue>>,
+    /// The table the last shared component list spawned into: a system's
+    /// spawns share one list, so a log of them resolves it once.
+    pub(crate) spawned_into: Option<(Arc<[ComponentId]>, TableId)>,
+    /// Entity slots freed by despawns, returned to the free list in one
+    /// lock when this drops.
+    freed: Vec<u32>,
+}
+
+/// The new row a spawn or move is writing: each column's last page.
+pub struct NewRow<'a, 'w> {
+    columns: &'a mut [RwLockWriteGuard<'w, Vec<ErasedColumn>>],
+}
+
+impl NewRow<'_, '_> {
+    pub fn column(&mut self, i: usize) -> &mut ErasedColumn {
+        self.columns[i].last_mut().expect("a table has a page")
+    }
 }
 
 struct LockedTable<'w> {
@@ -771,20 +831,25 @@ struct LockedTable<'w> {
     rows: RwLockWriteGuard<'w, Vec<Vec<Entity>>>,
     columns: Vec<RwLockWriteGuard<'w, Vec<ErasedColumn>>>,
     spatial: Option<RwLockWriteGuard<'w, SpatialPages>>,
+    ordered: Option<RwLockWriteGuard<'w, KeyOrder>>,
 }
 
 impl LockedTable<'_> {
-    /// Marks a spatial table for re-sorting when the `Structural` drops.
+    /// Marks a spatial or ordered table for re-sorting when the
+    /// `Structural` drops.
     fn touch(&mut self) {
         if let Some(pages) = &mut self.spatial {
             pages.dirty = true;
+        }
+        if let Some(order) = &mut self.ordered {
+            order.dirty = true;
         }
     }
 }
 
 impl<'w> Structural<'w> {
     pub fn new(world: &'w World) -> Structural<'w> {
-        Structural { world, tables: HashMap::new(), sparse: HashMap::new(), events: HashMap::new() }
+        Structural { world, tables: Vec::new(), sparse: HashMap::new(), events: HashMap::new(), spawned_into: None, freed: Vec::new() }
     }
 
     /// Every table and sparse set, for use between frames.
@@ -806,14 +871,19 @@ impl<'w> Structural<'w> {
     }
 
     pub fn lock_table(&mut self, id: TableId) {
-        if self.tables.contains_key(&id) {
+        if self.tables.get(id.0 as usize).is_some_and(Option::is_some) {
             return;
         }
         let table = self.world.table(id);
         let rows = table.rows.take_write();
         let columns = table.columns.iter().map(|c| c.take_write()).collect();
         let spatial = table.spatial.as_ref().map(|s| s.pages.take_write());
-        self.tables.insert(id, LockedTable { table, rows, columns, spatial });
+        let ordered = table.ordered.as_ref().map(|o| o.order.take_write());
+        let i = id.0 as usize;
+        if self.tables.len() <= i {
+            self.tables.resize_with(i + 1, || None);
+        }
+        self.tables[i] = Some(LockedTable { table, rows, columns, spatial, ordered });
     }
 
     pub fn lock_sparse(&mut self, c: ComponentId) {
@@ -844,7 +914,7 @@ impl<'w> Structural<'w> {
     /// outside its footprint shows up here as a contended guard.
     fn locked(&mut self, id: TableId) -> &mut LockedTable<'w> {
         self.lock_table(id);
-        self.tables.get_mut(&id).expect("just locked")
+        self.tables[id.0 as usize].as_mut().expect("just locked")
     }
 
     /// A new page at the end of table `id`, if its last is full.
@@ -859,23 +929,28 @@ impl<'w> Structural<'w> {
             if let Some(pages) = &mut t.spatial {
                 pages.add_page();
             }
+            if let Some(order) = &mut t.ordered {
+                order.add_page();
+            }
         }
     }
 
     /// Places reserved entity `e` in table `id`, with `values` writing its
     /// components' values into the new row.
-    pub(crate) fn push_row(&mut self, id: TableId, e: Entity, values: impl FnOnce(&mut [&mut ErasedColumn])) {
+    pub(crate) fn push_row(&mut self, id: TableId, e: Entity, values: impl FnOnce(NewRow<'_, 'w>)) {
         let world = self.world;
         self.make_room(id);
         let t = self.locked(id);
         let page = t.rows.len() - 1;
         t.rows[page].push(e);
         let row = t.rows[page].len() - 1;
-        let mut last: Vec<&mut ErasedColumn> = t.columns.iter_mut().map(|c| c.last_mut().unwrap()).collect();
-        values(&mut last);
-        assert!(last.iter().all(|c| c.len() == row + 1), "every column gets a value");
+        values(NewRow { columns: &mut t.columns });
+        assert!(t.columns.iter().all(|c| c[page].len() == row + 1), "every column gets a value");
         if let Some(pages) = &mut t.spatial {
             pages.push_row(page);
+        }
+        if let Some(order) = &mut t.ordered {
+            order.push_row(page);
         }
         world.entities.place(e, Location { table: id, page: page as u32, row: row as u32 });
     }
@@ -890,8 +965,8 @@ impl<'w> Structural<'w> {
                 self.lock_table(at.table);
                 self.lock_table(d);
                 // Both tables' guards at once, from the one map.
-                let [from, to] = self.tables.get_disjoint_mut([&at.table, &d]);
-                let (from, to) = (from.expect("source in the footprint"), to.expect("destination in the footprint"));
+                let [from, to] = self.tables.get_disjoint_mut([at.table.0 as usize, d.0 as usize]).expect("two different tables");
+                let (from, to) = (from.as_mut().expect("source in the footprint"), to.as_mut().expect("destination in the footprint"));
                 let (from_table, to_table) = (from.table, world.table(d));
                 for (i, c) in from_table.components.iter().enumerate() {
                     match to_table.column_index(*c) {
@@ -911,6 +986,9 @@ impl<'w> Structural<'w> {
         if let Some(pages) = &mut t.spatial {
             pages.swap_remove(page, row);
         }
+        if let Some(order) = &mut t.ordered {
+            order.swap_remove(page, row);
+        }
         if let Some(&moved) = t.rows[page].get(row) {
             world.entities.place(moved, Location { table: at.table, page: at.page, row: at.row });
         }
@@ -918,7 +996,7 @@ impl<'w> Structural<'w> {
 
     /// Moves `e` to table `to`, keeping the values both tables have and
     /// dropping the rest; `extra` writes the rest.
-    fn move_entity(&mut self, e: Entity, at: Location, to: TableId, extra: impl FnOnce(&mut [&mut ErasedColumn], &Table)) {
+    fn move_entity(&mut self, e: Entity, at: Location, to: TableId, extra: impl FnOnce(NewRow<'_, 'w>, &Table)) {
         let world = self.world;
         let table = world.table(to);
         self.make_room(to);
@@ -927,11 +1005,13 @@ impl<'w> Structural<'w> {
         let page = t.rows.len() - 1;
         t.rows[page].push(e);
         let row = t.rows[page].len() - 1;
-        let mut last: Vec<&mut ErasedColumn> = t.columns.iter_mut().map(|c| c.last_mut().unwrap()).collect();
-        extra(&mut last, table);
-        assert!(last.iter().all(|c| c.len() == row + 1), "every column gets a value");
+        extra(NewRow { columns: &mut t.columns }, table);
+        assert!(t.columns.iter().all(|c| c[page].len() == row + 1), "every column gets a value");
         if let Some(pages) = &mut t.spatial {
             pages.push_row(page);
+        }
+        if let Some(order) = &mut t.ordered {
+            order.push_row(page);
         }
         world.entities.place(e, Location { table: to, page: page as u32, row: row as u32 });
     }
@@ -970,8 +1050,8 @@ impl<'w> Structural<'w> {
         set.push(c);
         let to = world.table_for(&set);
         self.lock_table(to);
-        self.move_entity(e, at, to, |columns, table| {
-            columns[table.column_index(c).unwrap()].push(value);
+        self.move_entity(e, at, to, |mut row, table| {
+            row.column(table.column_index(c).unwrap()).push(value);
         });
     }
 
@@ -1001,6 +1081,7 @@ impl<'w> Structural<'w> {
         let Some(at) = self.world.entities.location(e) else { return };
         self.take_row(at, None);
         self.world.entities.kill(e);
+        self.freed.push(e.index);
     }
 
     /// The value of `c` on `e`, through the guards this holds.
@@ -1011,7 +1092,7 @@ impl<'w> Structural<'w> {
             return self.sparse.get_mut(&c)?.get_mut::<T>(e);
         }
         let at = world.entities.location(e)?;
-        let t = self.tables.get_mut(&at.table)?;
+        let t = self.tables.get_mut(at.table.0 as usize)?.as_mut()?;
         let i = t.table.column_index(c)?;
         // Handed out mutably: counted as written, and if it's a key or an
         // extent, its row may move.
@@ -1035,7 +1116,22 @@ impl Drop for Structural<'_> {
     /// guards next finds it in order.
     fn drop(&mut self) {
         let world = self.world;
-        for t in self.tables.values_mut() {
+        world.entities.free(&mut self.freed);
+        for t in self.tables.iter_mut().flatten() {
+            if let Some(order) = t.ordered.as_mut().filter(|o| o.dirty) {
+                let key = t.table.ordered.as_ref().expect("an ordered table").key;
+                ordered::Resort {
+                    table: t.table.id,
+                    rows: &mut t.rows,
+                    columns: t.columns.iter_mut().map(|c| &mut **c).collect(),
+                    order,
+                    key: t.table.column_index(key).expect("the key's own table"),
+                    desc: world.order_desc(key).expect("an installed ordered key"),
+                    page_rows: t.table.page_rows,
+                    entities: &world.entities,
+                }
+                .run();
+            }
             let Some(pages) = t.spatial.as_mut().filter(|p| p.dirty) else { continue };
             let spatial = t.table.spatial.as_ref().expect("a spatial table");
             let desc = world.spatial_desc(spatial.key).expect("an installed spatial key");
@@ -1067,12 +1163,14 @@ pub struct TableRead<'w> {
     pub table: &'w Table,
     pub rows: RwLockReadGuard<'w, Vec<Vec<Entity>>>,
     pub spatial: Option<RwLockReadGuard<'w, SpatialPages>>,
+    pub ordered: Option<RwLockReadGuard<'w, KeyOrder>>,
 }
 
 impl<'w> TableRead<'w> {
     pub fn new(table: &'w Table) -> TableRead<'w> {
         let spatial = table.spatial.as_ref().map(|s| s.pages.take_read());
-        TableRead { table, rows: table.rows.take_read(), spatial }
+        let ordered = table.ordered.as_ref().map(|o| o.order.take_read());
+        TableRead { table, rows: table.rows.take_read(), spatial, ordered }
     }
 }
 

@@ -7,11 +7,19 @@
 //!   walker             the walker: x y vx
 //!   events             what the player met: coin triggers, contacts begun;
 //!                      and every trigger sent at all
+//!   contacts           the player's pressed contacts, as entities: the other
+//!                      end and the normal away from the player, each
+//!   overlaps           how many overlaps the player is in, as entities
+//!   ghost              from now on, the player's contacts are disabled
+//!                      between finding and solving them: it falls through
 
 use engine_api::{
     Cx, Entity, EventReader, Mod, Query, Systems, With, Without, component, export_mod, field_struct, phase,
 };
-use physics::{Body, Collider, Contact, Gravity, Position, Spatial, Touching, Trigger, Vec2, Velocity};
+use physics::{
+    Body, Collider, Contact, ContactPair, Gravity, Manifold, Overlap, Position, Response, Spatial, Touching, Trigger, Vec2,
+    Velocity,
+};
 
 pub const FLOOR_Y: f32 = 10.0;
 /// Columns with no tile.
@@ -62,6 +70,7 @@ engine_api::mod_state! {
         /// Contacts begun between the player and a tile, and the fastest.
         landings: u32,
         hardest: f32,
+        ghost: bool,
     }
 }
 
@@ -107,6 +116,24 @@ impl Scene {
             self.hardest = self.hardest.max(c.speed);
         }
     }
+
+    /// Between finding contacts and solving them: a pre-solve hook.
+    fn pass_through(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut contacts: Query<(&ContactPair, &mut Response)>,
+        mut runners: Query<(), With<Runner>>,
+    ) {
+        if !self.ghost {
+            return;
+        }
+        contacts.for_each(|_, (pair, mut r)| {
+            if runners.with(pair.a, |_, _| ()).is_some() || runners.with(pair.b, |_, _| ()).is_some() {
+                r.disabled = true;
+            }
+        });
+    }
 }
 
 impl Mod for Scene {
@@ -117,6 +144,10 @@ impl Mod for Scene {
         s.add("walk", Self::walk);
         s.add("record", Self::record).phase(phase::LATE);
         s.add("meet", Self::meet).phase(phase::LATE);
+        s.add("pass_through", Self::pass_through)
+            .phase("physics::step")
+            .after("physics::find_contacts")
+            .before("physics::solve");
     }
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
@@ -160,6 +191,23 @@ impl Mod for Scene {
             "go" => self.running = true,
             "stop" => self.running = false,
             "jump" => self.jump = true,
+            "ghost" => self.ghost = true,
+            "overlaps" => {
+                let player = self.player.ok_or("no player")?;
+                let mut n = 0;
+                cx.world().for_each::<&Overlap>(|_, o| n += o.other(player).is_some() as u32);
+                return Ok(n.to_string());
+            }
+            "contacts" => {
+                let player = self.player.ok_or("no player")?;
+                let mut out = Vec::new();
+                cx.world().for_each::<(&ContactPair, &Manifold)>(|_, (pair, m)| {
+                    if let Some((other, sign)) = pair.seen_from(player).filter(|_| m.pressed) {
+                        out.push(format!("{} {:.2} {:.2}", other.index, m.nx * sign, m.ny * sign));
+                    }
+                });
+                return Ok(out.join("\n"));
+            }
             "trace" => {
                 let lines: Vec<String> = self
                     .trace

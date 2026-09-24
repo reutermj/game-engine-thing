@@ -13,10 +13,10 @@ mod solver;
 
 use std::time::Instant;
 
-use engine_api::{Cx, Dt, Entity, EventWriter, Mod, Query, Systems, Without, export_mod, field_struct, phase};
+use engine_api::{Cx, Despawns, Dt, Entity, EventWriter, Mod, Query, Spawner, Systems, Without, export_mod, field_struct, phase};
 use physics::{
-    Body, Collider, Contact, DYNAMIC, Gravity, KINEMATIC, Placed, Position, STATIC, Shape, Touching, Trigger, Vec2,
-    Velocity,
+    Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
+    Response, STATIC, Shape, Touching, Trigger, Vec2, Velocity,
 };
 use solver::{Constraint, SolverBody};
 
@@ -25,37 +25,6 @@ use solver::{Constraint, SolverBody};
 const BUILD: &str = "v1";
 #[cfg(feature = "v2")]
 const BUILD: &str = "v2";
-
-field_struct! {
-    /// One contact, from `find_contacts` to `solve` and on to the next
-    /// step, for warm starting and to tell a new contact from an old one.
-    #[derive(Debug, Default, Copy)]
-    struct Cached {
-        a: Entity,
-        b: Entity,
-        nx: f32,
-        ny: f32,
-        depth: f32,
-        friction: f32,
-        restitution: f32,
-        jn: f32,
-        jt: f32,
-        /// Pressing on each other at the end of the step: the solver pushed,
-        /// or they overlap. A speculative contact is held before it touches,
-        /// so being held last step doesn't mean touching.
-        pressed: bool,
-        /// Pressed last step.
-        was_pressed: bool,
-    }
-}
-
-field_struct! {
-    #[derive(Debug, Default, Copy, PartialEq)]
-    struct Pair {
-        a: Entity,
-        b: Entity,
-    }
-}
 
 field_struct! {
     /// Nanoseconds spent in each system, summed: for the benchmark.
@@ -70,11 +39,6 @@ field_struct! {
 engine_api::mod_state! {
     #[derive(Default)]
     struct Physics {
-        /// This step's contacts, sorted by pair; last step's until
-        /// `find_contacts` runs.
-        contacts: Vec<Cached>,
-        /// Sensor pairs overlapping last step.
-        sensing: Vec<Pair>,
         steps: u64,
         time: Timings,
     }
@@ -115,14 +79,23 @@ impl Physics {
         self.time.gravity += nanos(start);
     }
 
+    /// Finds this step's contacts and overlaps, and brings the world's in
+    /// line with them in one pass each: both are in pair order, the
+    /// world's by storage (ordered tables) and this step's by the
+    /// broadphase. A contact that persists keeps its entity and impulses.
+    #[allow(clippy::type_complexity)]
     fn find_contacts(
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        mut bodies: Query<(&Position, &Collider, &Body)>,
-        mut statics: Query<(&Position, &Collider), Without<Body>>,
+        (mut bodies, mut statics): (Query<(&Position, &Collider, &Body)>, Query<(&Position, &Collider), Without<Body>>),
         mut velocities: Query<&Velocity>,
         mut shapes: Query<(&Position, &Collider)>,
+        (mut contacts, new_contacts): (
+            Query<(&ContactPair, &mut Manifold, &mut Response), (), Despawns>,
+            Spawner<(ContactPair, Manifold, Response, Impulse)>,
+        ),
+        (mut overlaps, new_overlaps): (Query<&Overlap, (), Despawns>, Spawner<(Overlap,)>),
         triggers: EventWriter<Trigger>,
     ) {
         let start = Instant::now();
@@ -137,64 +110,92 @@ impl Physics {
         // Entity order, so pairs (and everything after) don't depend on
         // which table a body is in.
         items.sort_by_key(|i| i.entity);
-
         let index = |e: Entity| items.binary_search_by_key(&e, |i| i.entity).expect("a collider has a position") as u32;
-        let wanted = |a: usize, b: usize| {
-            let (a, b) = (&items[a], &items[b]);
+        let arrives = |a: &Item, b: &Item| a.body.kind != STATIC || b.body.kind != STATIC;
+        let collides = |a: &Item, b: &Item| {
             let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
             // Contacts need something to push; a sensor needs something to
             // arrive. Static colliders overlapping (a goal line and the wall
             // across its end) are the level's shape, not an event.
             let pushes = a.body.kind == DYNAMIC || b.body.kind == DYNAMIC;
-            let arrives = a.body.kind != STATIC || b.body.kind != STATIC;
-            meets && if a.collider.sensor || b.collider.sensor { arrives } else { pushes }
+            meets && if a.collider.sensor || b.collider.sensor { arrives(a, b) } else { pushes }
+        };
+        let senses = |a: &Item, b: &Item| {
+            (a.collider.senses & b.collider.layer != 0 || b.collider.senses & a.collider.layer != 0) && arrives(a, b)
         };
         // The storage's own order is the broadphase: pairs whose boxes, grown
         // by the speculative margin, meet. In entity order, lesser first.
-        let pairs: Vec<(u32, u32)> = shapes
-            .near_pairs(narrow::MARGIN)
-            .into_iter()
-            .map(|(a, b)| (index(a), index(b)))
-            .filter(|&(a, b)| wanted(a as usize, b as usize))
-            .collect();
+        let pairs: Vec<(u32, u32)> = shapes.near_pairs(narrow::MARGIN).into_iter().map(|(a, b)| (index(a), index(b))).collect();
 
-        let previous = std::mem::take(&mut self.contacts);
-        let mut sensing = Vec::new();
+        let mut found: Vec<(ContactPair, Manifold, Response)> = Vec::new();
+        // Each overlap, and whether it's a sensor's, which triggers.
+        let mut overlapping: Vec<(Overlap, bool)> = Vec::new();
         for (i, j) in pairs {
             let (a, b) = (&items[i as usize], &items[j as usize]);
-            let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { continue };
-            if a.collider.sensor || b.collider.sensor {
-                if m.depth >= 0.0 {
-                    sensing.push(Pair { a: a.entity, b: b.entity });
-                }
+            let (collide, sense) = (collides(a, b), senses(a, b));
+            if !collide && !sense {
                 continue;
             }
-            let old = previous.binary_search_by_key(&(a.entity, b.entity), |c| (c.a, c.b)).ok().map(|k| previous[k]);
-            self.contacts.push(Cached {
-                a: a.entity,
-                b: b.entity,
-                nx: m.normal.x,
-                ny: m.normal.y,
-                depth: m.depth,
-                friction: a.body.friction.min(b.body.friction),
-                restitution: a.body.restitution.max(b.body.restitution),
-                jn: old.map_or(0.0, |c| c.jn),
-                jt: old.map_or(0.0, |c| c.jt),
-                pressed: false,
-                was_pressed: old.is_some_and(|c| c.pressed),
-            });
-        }
-        for pair in &sensing {
-            if !self.sensing.contains(pair) {
-                let (sensor, other) = if items[items.binary_search_by_key(&pair.a, |i| i.entity).unwrap()].collider.sensor {
-                    (pair.a, pair.b)
-                } else {
-                    (pair.b, pair.a)
-                };
-                triggers.send(Trigger { sensor, other });
+            let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { continue };
+            let sensor = collide && (a.collider.sensor || b.collider.sensor);
+            if (sensor || sense) && m.depth >= 0.0 {
+                overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
+            }
+            if collide && !sensor {
+                found.push((
+                    ContactPair { a: a.entity, b: b.entity },
+                    Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, pressed: false, was_pressed: false },
+                    Response {
+                        friction: a.body.friction.min(b.body.friction),
+                        restitution: a.body.restitution.max(b.body.restitution),
+                        disabled: false,
+                    },
+                ));
             }
         }
-        self.sensing = sensing;
+
+        let key = |p: &ContactPair| (p.a, p.b);
+        let mut next = 0;
+        let spawn = |(pair, m, r): (ContactPair, Manifold, Response)| {
+            new_contacts.spawn((pair, m, r, Impulse::default()));
+        };
+        contacts.for_each_ordered(|row, (pair, mut m, mut r)| {
+            while found.get(next).is_some_and(|f| key(&f.0) < key(pair)) {
+                spawn(found[next]);
+                next += 1;
+            }
+            match found.get(next) {
+                Some(f) if f.0 == *pair => {
+                    *m = Manifold { was_pressed: m.pressed, ..f.1 };
+                    *r = f.2;
+                    next += 1;
+                }
+                _ => row.despawn(),
+            }
+        });
+        found[next..].iter().copied().for_each(spawn);
+
+        let key = |o: &Overlap| (o.a, o.b);
+        let mut next = 0;
+        let begin = |(o, sensor): (Overlap, bool)| {
+            new_overlaps.spawn((o,));
+            if sensor {
+                let (sensor, other) = if items[index(o.a) as usize].collider.sensor { (o.a, o.b) } else { (o.b, o.a) };
+                triggers.send(Trigger { sensor, other });
+            }
+        };
+        overlaps.for_each_ordered(|row, o| {
+            while overlapping.get(next).is_some_and(|f| key(&f.0) < key(o)) {
+                begin(overlapping[next]);
+                next += 1;
+            }
+            if overlapping.get(next).is_some_and(|f| f.0 == *o) {
+                next += 1;
+            } else {
+                row.despawn();
+            }
+        });
+        overlapping[next..].iter().copied().for_each(begin);
         self.time.contacts += nanos(start);
     }
 
@@ -205,7 +206,8 @@ impl Physics {
         dt: Dt,
         mut moving: Query<(&Body, &mut Velocity, &mut Position)>,
         mut touching: Query<&mut Touching>,
-        contacts: EventWriter<Contact>,
+        mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse)>,
+        began: EventWriter<Contact>,
     ) {
         let start = Instant::now();
         let dt = *dt;
@@ -226,18 +228,27 @@ impl Physics {
             order.binary_search_by_key(&e, |&i| entities[i]).map_or(still, |k| order[k] as u32)
         };
 
-        let mut constraints: Vec<Constraint> = self
-            .contacts
+        // In pair order, which storage keeps: the solve doesn't depend on
+        // when each contact began. Copied out, then mapped: building
+        // constraints in the walk's closure measured 11 µs slower at 1000
+        // contacts (2026-09-24).
+        let mut live: Vec<(ContactPair, Manifold, Response, Impulse)> = Vec::new();
+        contacts.for_each_ordered(|_, (pair, m, r, j)| {
+            if !r.disabled {
+                live.push((*pair, *m, *r, *j));
+            }
+        });
+        let mut constraints: Vec<Constraint> = live
             .iter()
-            .map(|c| Constraint {
-                a: index_of(c.a),
-                b: index_of(c.b),
-                normal: Vec2::new(c.nx, c.ny),
-                depth: c.depth,
-                friction: c.friction,
-                restitution: c.restitution,
-                jn: c.jn,
-                jt: c.jt,
+            .map(|(pair, m, r, j)| Constraint {
+                a: index_of(pair.a),
+                b: index_of(pair.b),
+                normal: Vec2::new(m.nx, m.ny),
+                depth: m.depth,
+                friction: r.friction,
+                restitution: r.restitution,
+                jn: j.normal,
+                jt: j.tangent,
                 speed: 0.0,
             })
             .collect();
@@ -258,22 +269,29 @@ impl Physics {
         });
 
         touching.for_each(|_, mut t| *t = Touching::default());
-        for (c, k) in self.contacts.iter_mut().zip(&constraints) {
-            (c.jn, c.jt) = (k.jn, k.jt);
-            c.pressed = k.jn > 0.0 || c.depth >= 0.0;
-            if !c.pressed {
-                continue;
+        let mut solved = constraints.iter();
+        contacts.for_each_ordered(|_, (pair, mut m, r, mut j)| {
+            if r.disabled {
+                (m.pressed, *j) = (false, Impulse::default());
+                return;
             }
-            let n = Vec2::new(c.nx, c.ny);
-            touching.with(c.a, |_, mut t| mark(&mut t, n));
-            touching.with(c.b, |_, mut t| mark(&mut t, -n));
-            if !c.was_pressed {
-                contacts.send(Contact { a: c.a, b: c.b, nx: c.nx, ny: c.ny, speed: k.speed });
+            let k = solved.next().expect("a constraint per contact solved");
+            *j = Impulse { normal: k.jn, tangent: k.jt };
+            m.pressed = k.jn > 0.0 || m.depth >= 0.0;
+            if !m.pressed {
+                return;
             }
-        }
+            let n = Vec2::new(m.nx, m.ny);
+            touching.with(pair.a, |_, mut t| mark(&mut t, n));
+            touching.with(pair.b, |_, mut t| mark(&mut t, -n));
+            if !m.was_pressed {
+                began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+            }
+        });
         self.time.solve += nanos(start);
     }
 }
+
 
 fn placed(p: &Position, c: &Collider) -> Placed {
     Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
@@ -311,15 +329,17 @@ impl Mod for Physics {
     }
 
     /// `stats`: the build, steps run, contacts held, and time per system.
-    fn message(&mut self, _: &mut (), _: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
         match message.trim() {
             "stats" => {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
+                let mut contacts = 0;
+                cx.world().for_each::<&ContactPair>(|_, _| contacts += 1);
                 let t = self.time;
                 Ok(format!(
                     "build {BUILD} steps {} contacts {} us/step gravity {:.1} contacts {:.1} solve {:.1}",
                     self.steps,
-                    self.contacts.len(),
+                    contacts,
                     per(t.gravity),
                     per(t.contacts),
                     per(t.solve)

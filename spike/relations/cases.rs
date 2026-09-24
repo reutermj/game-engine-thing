@@ -107,7 +107,6 @@ mod tests {
                 systems.push(table::find.system(w, "find"));
             }
             Model::Entities => {
-                entities::setup(w);
                 systems.push(entities::gravity_system.system(w, "gravity"));
                 systems.push(entities::find.system(w, "find"));
             }

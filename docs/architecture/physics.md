@@ -78,6 +78,9 @@ component! {
         /// Reports overlaps as `Trigger` events and doesn't push: coins,
         /// spikes, the goal, pong's goal lines.
         pub sensor: bool,
+        /// Layers it notices overlapping it, colliding or not: each such
+        /// overlap is an `Overlap` (a walker senses the player).
+        pub senses: u32,
     }
 }
 
@@ -111,6 +114,31 @@ event! {
 }
 ```
 
+Contacts and overlaps are entities, kept by physics
+([relationships.md](relationships.md)):
+
+```rust
+component! {
+    /// Two solid colliders touching or about to, `a < b`: an entity from
+    /// the step physics finds them until the step it doesn't. An ordered
+    /// key, so contacts are stored in pair order.
+    pub struct ContactPair: "physics::ContactPair", order = key { pub a: Entity, pub b: Entity }
+}
+// With it on each contact: `Manifold` (normal from a to b, depth, pressed
+// now and the step before), `Response` (friction, restitution, disabled:
+// what the solver does with it this step) and `Impulse` (for warm starting).
+
+component! {
+    /// Two colliders overlapping where one is a sensor or senses the
+    /// other: an entity while it lasts, in pair order too.
+    pub struct Overlap: "physics::Overlap", order = key { pub a: Entity, pub b: Entity }
+}
+```
+
+`ContactPair::seen_from(me)` and `Overlap::other(me)` give the other end
+(and the sign for the normal) from either side, the part every system
+reading a pair would otherwise get wrong once.
+
 Shapes are a `u8` and half extents rather than an enum because a
 component's fields must be `FieldType`, and the schema has no enums;
 migration still works field by field.
@@ -137,31 +165,45 @@ contacts in `late`:
    pairs, then a narrowphase per pair (box–box, box–circle,
    circle–circle): a normal and a depth, and no contact points, which
    without rotation change nothing.
-   Pairs filtered by layer and mask; sensor pairs become `Trigger`s and go
-   no further.
+   Pairs filtered by layer and mask; overlaps of sensors (and sensed
+   layers) become `Overlap`s, a sensor's new ones a `Trigger` too, and go
+   no further. The rest bring the world's contacts in line: this step's
+   pairs and the stored contacts are both in pair order, so it's one pass,
+   updating contacts that persist in place (their impulses carried), and
+   despawning and spawning the rest.
 3. **`solve`**: sequential impulses over the contacts, eight iterations,
    warm-started from the last step's impulses, with Coulomb friction and
    restitution above a small speed threshold. Positional error is
    corrected by a split impulse, so correction doesn't add energy. It also
    moves the bodies (the split impulse's pseudo velocities exist only
-   here), updates `Touching`, and sends `Contact` for pairs that weren't
-   pressing last step. Writing positions makes its apply node re-sort
+   here), stores each contact's impulses and whether it's pressed, updates
+   `Touching`, and sends `Contact` for pairs that weren't pressing last
+   step. Contacts whose `Response` is disabled aren't solved. Writing
+   positions makes its apply node re-sort
    them ([Broadphase](#broadphase)), so every system after the step
    finds bodies where they are.
 
 Each system is a plain system over queries, so the pipeline is the ECS
 doing what it's for, and step 3 gathers bodies into local arrays, solves
 there, and writes them back, the shape data parallelism (step 3 of
-scheduling) will want. The systems pass contacts along in the mod's
-state, which also carries them to the next step for warm starting and for
-"began touching". Systems of one mod never run at once (storage.md), so
-the pipeline needs no ordering beyond its plan order, and a reload
-carries the contact cache over; if its layout changes, it resets, which
-costs one step of warm starting.
+scheduling) will want. The systems pass contacts along as entities, which
+also carry them to the next step for warm starting and for "began
+touching", and a reload of physics leaves them in place like any other
+entities.
 
-**Determinism.** A fixed step, contacts sorted by entity pair before
-solving (so results don't depend on table order, which parallel spawning
-would make timing-dependent), no iteration over hash maps, and no
+**Pre-solve hooks** are systems a game orders between the two:
+`.phase("physics::step").after("physics::find_contacts").before("physics::solve")`.
+One sees this step's contacts and overlaps, found from where everything
+is now, and may change a contact's `Response` (disable it: a one-way
+platform; its restitution: a bounce pad). The platformer's walkers meet
+the player this way. What physics found is as of when it found it, so a
+system reading it belongs after the system that found it: read a step
+later, an overlap from before the player respawned killed it a second
+time.
+
+**Determinism.** A fixed step, contacts stored and solved in entity pair
+order (so results don't depend on when each began, or on table order,
+which parallel spawning would make timing-dependent), no iteration over hash maps, and no
 `f32` math that varies by thread. The same build on the same machine
 replays exactly; across machines is not promised (fused multiply-add and
 libm differ).
@@ -279,8 +321,10 @@ The level's tiles become static bodies with box colliders (one per cell,
 as now), and neither the rules nor the walkers rebuild a tile map every
 frame. A walker is a dynamic body; `walkers` turns it at a wall from
 `Touching`, and at a ledge with the spatial query in
-[Spatial queries](#spatial-queries). A stomp is a `Contact` between the
-player and a walker whose normal points up.
+[Spatial queries](#spatial-queries). It collides with tiles only and
+senses the player, so meeting it is an `Overlap`; `walkers::meet`, a
+pre-solve hook, reads each one and tells a stomp (the player falling,
+feet in its top half) from a touch.
 
 ### Pong's ball
 

@@ -6,8 +6,12 @@
 //! it changed, it replaces every entity it made and moves the player to the
 //! new start, and if not (a reload for a code change) it leaves the level
 //! alone, so collected coins stay collected.
+//!
+//! What it made is in the world, not this mod's state: the level is the
+//! entity holding its `LevelInfo`, and everything built from the map is
+//! `ChildOf` it.
 
-use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
+use engine_api::{ChildOf, Cx, Entity, Mod, WorldMut, export_mod};
 use physics::{Body, Collider, Position, Touching, Velocity};
 use platformer::{
     Coin, GOAL, LevelInfo, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SENSORS, SOLID, SPIKE, TILES, Tile, WALKERS,
@@ -36,7 +40,6 @@ engine_api::mod_state! {
     struct Level {
         /// Hash of the map these entities were built from; 0 before the first build.
         built: u64,
-        entities: Vec<Entity>,
     }
 }
 
@@ -54,6 +57,9 @@ impl Level {
             return Err(format!("row {row} is {} wide, not {width}", map[row].len()));
         }
         let mut spawn = None;
+        // The level itself, its info filled in once the map is read.
+        let level = world.spawn((LevelInfo::default(),));
+        let of = ChildOf { parent: level };
         for (y, row) in map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
                 let (x, y) = (x as i32, y as i32);
@@ -61,18 +67,19 @@ impl Level {
                 let at = Position { x: x as f32 + 0.5, y: y as f32 + 0.5 };
                 let solid = Collider::rect(0.5, 0.5).on(TILES, u32::MAX);
                 let sensor = Collider::rect(0.5, 0.5).on(SENSORS, PLAYER).sensor();
-                let e = match c {
-                    '#' => world.spawn((Tile { x, y, kind: SOLID }, at, solid)),
-                    '^' => world.spawn((Tile { x, y, kind: SPIKE }, at, sensor)),
-                    'G' => world.spawn((Tile { x, y, kind: GOAL }, at, sensor)),
-                    'C' => world.spawn((Coin { x, y }, at, sensor)),
+                match c {
+                    '#' => world.spawn((Tile { x, y, kind: SOLID }, at, solid, of)),
+                    '^' => world.spawn((Tile { x, y, kind: SPIKE }, at, sensor, of)),
+                    'G' => world.spawn((Tile { x, y, kind: GOAL }, at, sensor, of)),
+                    'C' => world.spawn((Coin { x, y }, at, sensor, of)),
                     'E' => world.spawn((
                         Walker {},
                         at,
                         Velocity::default(),
                         Body { friction: 0.0, ..Body::default() },
-                        Collider::rect(0.5, 0.5).on(WALKERS, TILES),
+                        Collider::rect(0.5, 0.5).on(WALKERS, TILES).sensing(PLAYER),
                         Touching::default(),
+                        of,
                     )),
                     'P' => {
                         // Standing on the floor of its cell.
@@ -82,7 +89,6 @@ impl Level {
                     '.' => continue,
                     other => return Err(format!("unknown map character {other:?} at ({x}, {y})")),
                 };
-                self.entities.push(e);
             }
         }
         let (spawn_x, spawn_y) = spawn.ok_or("the map has no P")?;
@@ -90,15 +96,24 @@ impl Level {
         // The level's sides are walls, however high the player jumps.
         let (w, h) = (width as f32, map.len() as f32);
         for x in [-0.5, w + 0.5] {
-            self.entities.push(world.spawn((Position { x, y: h / 2.0 }, Collider::rect(0.5, h * 4.0).on(TILES, u32::MAX))));
+            world.spawn((Position { x, y: h / 2.0 }, Collider::rect(0.5, h * 4.0).on(TILES, u32::MAX), of));
         }
-        self.entities.push(world.spawn((info,)));
+        world.insert(level, info);
         Ok(info)
     }
 
+    /// Despawns every level and what's left of what was built from it (a
+    /// collected coin or a stomped walker is gone already).
     fn clear(&mut self, world: &mut WorldMut) {
-        for e in self.entities.drain(..) {
-            // Stale handles (a collected coin, a stomped walker) are no-ops.
+        let mut levels: Vec<Entity> = Vec::new();
+        world.for_each::<&LevelInfo>(|e, _| levels.push(e));
+        let mut built: Vec<Entity> = Vec::new();
+        world.for_each::<&ChildOf>(|e, of| {
+            if levels.contains(&of.parent) {
+                built.push(e);
+            }
+        });
+        for e in built.into_iter().chain(levels) {
             world.despawn(e);
         }
     }

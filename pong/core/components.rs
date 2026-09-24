@@ -50,6 +50,16 @@ component! {
 }
 
 component! {
+    /// A goal line, a sensor behind a paddle: `side` -1 is the left one
+    /// (the player's), 1 the right. A ball reaching it is a point to the
+    /// other side.
+    #[derive(Debug, Default, Copy)]
+    pub struct Goal: "pong::Goal" {
+        pub side: f32,
+    }
+}
+
+component! {
     #[derive(Debug, Default, Copy)]
     pub struct Score: "pong::Score" {
         pub left: u32,

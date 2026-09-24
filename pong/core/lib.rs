@@ -12,7 +12,7 @@
 use engine_api::{Cx, Dt, Entity, EventReader, Mod, Query, Systems, With, Without, WorldMut, export_mod, phase};
 use physics::{Body, Collider, Contact, Position, Trigger, Velocity};
 use pong::{
-    BALL_RADIUS, Ball, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
+    BALL_RADIUS, Ball, Goal, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
     SERVE_SPEED, Score, Steer, WIDTH,
 };
 
@@ -27,10 +27,7 @@ const MAX_SPEED: f32 = 40.0;
 
 engine_api::mod_state! {
     #[derive(Default)]
-    struct Core {
-        /// The goal lines: behind the left paddle, then the right.
-        goals: [Option<Entity>; 2],
-    }
+    struct Core {}
 }
 
 /// A box by its edges.
@@ -56,10 +53,10 @@ impl Core {
         wall(world, -10.0, -10.0, WIDTH + 10.0, -r, Collider::default());
         wall(world, -10.0, HEIGHT + r, WIDTH + 10.0, HEIGHT + 10.0, Collider::default());
         let goal = Collider::default().sensor();
-        self.goals = [
-            Some(wall(world, -10.0, -10.0, -r, HEIGHT + 10.0, goal)),
-            Some(wall(world, WIDTH + r, -10.0, WIDTH + 10.0, HEIGHT + 10.0, goal)),
-        ];
+        let left = wall(world, -10.0, -10.0, -r, HEIGHT + 10.0, goal);
+        world.insert(left, Goal { side: -1.0 });
+        let right = wall(world, WIDTH + r, -10.0, WIDTH + 10.0, HEIGHT + 10.0, goal);
+        world.insert(right, Goal { side: 1.0 });
         // One cell deep, and a radius longer at each end than they're drawn,
         // so the ball's center reaches as far as the drawing does.
         let paddle = |face: f32| {
@@ -116,6 +113,7 @@ impl Core {
         mut paddles: Query<&Position, (With<Paddle>, Without<Ball>)>,
         mut balls: Query<(&mut Position, &mut Velocity), With<Ball>>,
         mut scores: Query<&mut Score>,
+        mut goals: Query<&Goal>,
     ) {
         for c in contacts.read() {
             // Physics sends each pair in entity order: either may be the ball.
@@ -128,11 +126,7 @@ impl Core {
             }
         }
         for t in triggers.read() {
-            let lost_by = match self.goals.iter().position(|&g| g == Some(t.sensor)) {
-                Some(0) => -1.0,
-                Some(_) => 1.0,
-                None => continue,
-            };
+            let Some(lost_by) = goals.with(t.sensor, |_, g| g.side) else { continue };
             if balls.with(t.other, |_, _| ()).is_none() {
                 continue;
             }

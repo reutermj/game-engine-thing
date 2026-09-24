@@ -13,12 +13,13 @@
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use crate::component::{Component, ComponentDesc, Entity, Storage};
-use crate::erased::ErasedColumn;
 use crate::events::{Event, EventQueue};
+use crate::ordered::OrderKey;
 use crate::spatial::{Bounds, PageKind, RUN};
-use crate::world::{ColumnGuard, ComponentId, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, World};
+use crate::world::{ColumnGuard, ComponentId, NewRow, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, TakeGuard, World};
 
 // ---- Declaring ----
 
@@ -577,7 +578,7 @@ pub enum Change {
     Insert { e: Entity, c: ComponentId, apply: Apply },
     Remove { e: Entity, c: ComponentId },
     Despawn(Entity),
-    Spawn { e: Entity, components: Vec<ComponentId>, apply: Apply },
+    Spawn { e: Entity, components: Arc<[ComponentId]>, apply: Apply },
     Event { queue: usize, publish: Publish },
     /// A spatial table whose keys or extents the system could write, to
     /// re-sort after it.
@@ -755,15 +756,16 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         Query { world, decl, table_ids, rows, states, filters, log, _marker: PhantomData }
     }
 
-    /// Logs a re-sort of each spatial table this query can write keys or
-    /// extents in: it writes in place, so its apply node puts rows back in
-    /// order afterwards.
+    /// Logs a re-sort of each spatial or ordered table this query can write
+    /// keys or extents in: it writes in place, so its apply node puts rows
+    /// back in order afterwards.
     pub(crate) fn log_reorders(&self) {
         if !self.decl.reorders {
             return;
         }
         for &t in &self.table_ids {
-            if self.world.table(t).spatial.is_some() {
+            let table = self.world.table(t);
+            if table.spatial.is_some() || table.ordered.is_some() {
                 self.log.borrow_mut().push(Change::Reorder(t));
             }
         }
@@ -818,6 +820,112 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                     }
                 }
             }
+        }
+    }
+
+    /// Every entity the query matches whose key `K` is in `keys`: a seek in
+    /// tables kept in `K`'s order, which come out in key order, and a scan
+    /// of tables that hold `K` but are kept in another (a spatial one: a
+    /// table has one order), which come out in theirs. The query must read
+    /// `K`. Keys are as of the last re-sort, as spatial boxes are.
+    pub fn in_keys<K: OrderKey>(&mut self, keys: std::ops::RangeInclusive<u128>, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+        let Query { world, decl, rows, states, filters, log, .. } = self;
+        let k = world.id(K::NAME).filter(|&k| decl.terms.iter().any(|&(c, write)| c == k && !write));
+        let k = k.unwrap_or_else(|| panic!("in_keys::<{}> is for a query that reads {0}", K::NAME));
+        for (t, table) in rows.iter().enumerate() {
+            let visit = |r: usize, e: Entity, pages: &mut D::Pages<'_>, f: &mut dyn FnMut(Row<'_>, D::Items<'_>)| {
+                if Self::passes(filters, e)
+                    && let Some(items) = D::at(pages, r, e)
+                {
+                    f(Self::row(world, decl, log, e), items);
+                }
+            };
+            match (&table.ordered, table.table.ordered.as_ref().is_some_and(|o| o.key == k)) {
+                (Some(order), true) => {
+                    let (mut p, mut r) = order.seek(*keys.start());
+                    'pages: while p < table.rows.len() {
+                        let mut pages = D::pages(states, t, p);
+                        while r < table.rows[p].len() {
+                            if order.keys[p][r] > *keys.end() {
+                                break 'pages;
+                            }
+                            visit(r, table.rows[p][r], &mut pages, &mut f);
+                            r += 1;
+                        }
+                        (p, r) = (p + 1, 0);
+                    }
+                }
+                _ => {
+                    let Some(i) = table.table.column_index(k) else { continue };
+                    // The query reads `K`, so its footprint already covers
+                    // this column; a second read guard beside its own.
+                    let column = table.table.columns[i].take_read();
+                    for (p, page) in table.rows.iter().enumerate() {
+                        let values = column[p].as_slice::<K>();
+                        let mut pages = D::pages(states, t, p);
+                        for (r, &e) in page.iter().enumerate() {
+                            if keys.contains(&values[r].key()) {
+                                visit(r, e, &mut pages, &mut f);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every entity the query matches, in key order across all its ordered
+    /// tables (ties by entity): `for_each` walks table by table, so rows of
+    /// one key in two tables would come out as two sorted runs. Tables that
+    /// aren't ordered come after, in their own order.
+    pub fn for_each_ordered(&mut self, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+        let Query { world, decl, rows, states, filters, log, .. } = self;
+        // Not `for_each`, which may walk a sparse set's order instead.
+        fn walk<'w, D: Data, F, C>(
+            (world, decl, log, filters): (&World, &QueryDecl, &Log, &[(ComponentId, bool, SparseGuard<'_>)]),
+            t: usize,
+            table: &TableRead<'_>,
+            states: &mut D::States<'w>,
+            f: &mut impl FnMut(Row<'_>, D::Items<'_>),
+        ) {
+            for (p, page) in table.rows.iter().enumerate() {
+                let mut pages = D::pages(states, t, p);
+                for (r, &e) in page.iter().enumerate() {
+                    if Query::<D, F, C>::passes(filters, e)
+                        && let Some(items) = D::at(&mut pages, r, e)
+                    {
+                        f(Query::<D, F, C>::row(world, decl, log, e), items);
+                    }
+                }
+            }
+        }
+        let cx = (*world, *decl, *log, filters.as_slice());
+        let ordered: Vec<usize> = (0..rows.len()).filter(|&t| rows[t].ordered.is_some()).collect();
+        if ordered.len() <= 1 {
+            // One sorted run already: no merge.
+            for &t in &ordered {
+                walk::<D, F, C>(cx, t, &rows[t], states, &mut f);
+            }
+        } else {
+            let mut all: Vec<(u128, Entity, u32, u32, u32)> = Vec::new();
+            for &t in &ordered {
+                let (table, order) = (&rows[t], rows[t].ordered.as_ref().expect("ordered"));
+                for (p, page) in table.rows.iter().enumerate() {
+                    all.extend(page.iter().enumerate().map(|(r, &e)| (order.keys[p][r], e, t as u32, p as u32, r as u32)));
+                }
+            }
+            // One sorted run per table: a stable sort merges them.
+            all.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+            for (_, e, t, p, r) in all {
+                if Self::passes(filters, e)
+                    && let Some(items) = D::fetch(states, t as usize, p as usize, r as usize, e)
+                {
+                    f(Self::row(world, decl, log, e), items);
+                }
+            }
+        }
+        for t in (0..rows.len()).filter(|&t| rows[t].ordered.is_none()) {
+            walk::<D, F, C>(cx, t, &rows[t], states, &mut f);
         }
     }
 
@@ -955,7 +1063,9 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
 /// Spawns entities with the components `B` names.
 pub struct Spawner<'w, B> {
     world: &'w World,
-    components: &'w [ComponentId],
+    /// Shared by every spawn this run logs, so the apply resolves their
+    /// table once.
+    components: Arc<[ComponentId]>,
     log: &'w Log,
     _marker: PhantomData<fn() -> B>,
 }
@@ -964,9 +1074,9 @@ impl<B: Bundle> Spawner<'_, B> {
     /// A new entity, with its id now; its components land after the system.
     pub fn spawn(&self, bundle: B) -> Entity {
         let e = self.world.entities.reserve();
-        let components = self.components.to_vec();
-        let ids = components.clone();
-        self.log.borrow_mut().push(Change::Spawn { e, components, apply: Box::new(move |s| s.spawn(e, bundle, &ids)) });
+        let ids = self.components.clone();
+        let components = ids.clone();
+        self.log.borrow_mut().push(Change::Spawn { e, components, apply: Box::new(move |s| s.spawn_shared(e, bundle, &ids)) });
         e
     }
 }
@@ -1011,7 +1121,7 @@ impl<B: Bundle> Param for Spawner<'static, B> {
 
     fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Spawner<'w, B> {
         let ParamDecl::Spawner { components } = decl else { panic!("a spawner's declaration") };
-        Spawner { world: cx.world, components, log: cx.log, _marker: PhantomData }
+        Spawner { world: cx.world, components: components.as_slice().into(), log: cx.log, _marker: PhantomData }
     }
 }
 
@@ -1122,18 +1232,21 @@ type SparseInsert = Box<dyn for<'x> FnOnce(&mut Structural<'x>, Entity) + Send>;
 /// Where a bundle's values go: table components into the new row, sparse
 /// ones into their sets after it.
 pub struct BundleSink<'s, 'c> {
-    world: &'s World,
     table: &'s Table,
+    /// The bundle's declared ids, in its order: `put` is called in that
+    /// order, so the `n`th value is `ids[n]` without comparing names.
     ids: &'s [ComponentId],
-    columns: &'s mut [&'c mut ErasedColumn],
+    next: usize,
+    row: NewRow<'s, 'c>,
     sparse: Vec<SparseInsert>,
 }
 
 impl BundleSink<'_, '_> {
     pub fn put<T: Component>(&mut self, value: T) {
-        let c = declared::<T>(self.world, self.ids).expect("a bundle's component was declared");
+        let c = self.ids[self.next];
+        self.next += 1;
         match self.table.column_index(c) {
-            Some(i) => self.columns[i].push(value),
+            Some(i) => self.row.column(i).push(value),
             None => self.sparse.push(Box::new(move |s, e| s.insert_id(e, c, value))),
         }
     }
@@ -1178,11 +1291,33 @@ impl<'w> Structural<'w> {
         let table_components: Vec<ComponentId> =
             ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
         let to = world.table_for(&table_components);
+        self.spawn_into(to, e, bundle, ids);
+    }
+
+    /// `spawn`, remembering the table `ids` resolved to for the next spawn
+    /// with the same list.
+    pub fn spawn_shared<B: Bundle>(&mut self, e: Entity, bundle: B, ids: &Arc<[ComponentId]>) {
+        let to = match &self.spawned_into {
+            Some((last, t)) if Arc::ptr_eq(last, ids) => *t,
+            _ => {
+                let world = self.world;
+                let table_components: Vec<ComponentId> =
+                    ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
+                let t = world.table_for(&table_components);
+                self.spawned_into = Some((ids.clone(), t));
+                t
+            }
+        };
+        self.spawn_into(to, e, bundle, ids);
+    }
+
+    fn spawn_into<B: Bundle>(&mut self, to: TableId, e: Entity, bundle: B, ids: &[ComponentId]) {
+        let world = self.world;
         self.lock_table(to);
         let table = world.table(to);
         let mut deferred = Vec::new();
-        self.push_row(to, e, |columns| {
-            let mut sink = BundleSink { world, table, ids, columns, sparse: Vec::new() };
+        self.push_row(to, e, |row| {
+            let mut sink = BundleSink { table, ids, next: 0, row, sparse: Vec::new() };
             bundle.put(&mut sink);
             deferred = sink.sparse;
         });

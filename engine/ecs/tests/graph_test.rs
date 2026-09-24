@@ -117,6 +117,35 @@ mod readiness {
         assert_eq!(blockers(&w, &s, &fs, "apply(kill)"), ["watch"]);
     }
 
+    /// Spawns from two spawners, interleaved, in one log: each spawner's
+    /// list resolves its own table, in the footprint and in the apply,
+    /// though both remember the last list they resolved.
+    #[test]
+    fn spawns_from_two_spawners_in_one_log_land_in_their_own_tables() {
+        use engine_ecs::harness::{Cx, IntoSystem};
+        use engine_ecs::{Query, Spawner};
+        use ecs_game::{Label, Position};
+        let w = ecs_game::world::<SparseBurning>();
+        fn spawn(_: &mut Cx, points: Spawner<(Position,)>, labels: Spawner<(Label,)>) {
+            for i in 0..3 {
+                points.spawn((Position { x: i as f32, y: 0.0 },));
+                labels.spawn((Label { text: format!("l{i}") },));
+            }
+        }
+        fn read(_: &mut Cx, mut labels: Query<&Label>) {
+            labels.for_each(|_, _| {});
+        }
+        let s = Schedule { systems: vec![spawn.system(&w, "spawn"), read.system(&w, "read")] };
+        let mut fs = s.frame();
+        step(&w, &s, &mut fs, "spawn");
+        assert_eq!(blockers(&w, &s, &fs, "read"), ["apply(spawn)"]);
+        step(&w, &s, &mut fs, "apply(spawn)");
+        let mut labels: Vec<String> = w.values::<Label>().unwrap().into_iter().map(|(_, l)| l.text).collect();
+        labels.sort();
+        assert_eq!(labels, ["l0", "l1", "l2"]);
+        assert_eq!(w.values::<Position>().unwrap().len(), 3);
+    }
+
     #[test]
     fn a_despawn_waits_for_earlier_readers_of_the_tables() {
         let (w, s) = setup::<SparseBurning>(false);

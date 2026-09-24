@@ -166,7 +166,9 @@ spatial key with any extent, and physics is one user. What it assumes:
   (`Mut<T>`, below).
 - **One order per table**, like a database's clustered index: rows have
   one physical order, so an entity with two positions clusters by one.
-  Inherent to storing space as structure.
+  Inherent to storing space as structure. An ordered key
+  ([relationships.md](relationships.md#ordered-tables)) in a spatial table
+  gives way: ranges of it there are scanned.
 - **One extent per key**: no compound shapes, which ties into several
   colliders per body (the physics retrospective's first flaw).
 - **2D, boxes, two size classes** (ordered and big, at a threshold the

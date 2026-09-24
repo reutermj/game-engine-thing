@@ -36,8 +36,8 @@ pub use system::__declare;
 pub use engine_ecs;
 pub use engine_ecs::{
     Adds, Bounds, Bundle, Component, ComponentDesc, Dt, Crossing, DefaultFn, Despawns, DropFn, Entity, Event, EventReader,
-    EventWriter, FieldDesc, FieldKind, FieldType, Mut, Query, Removes, Row, SpatialKey, Spawner, Storage, With, Without,
-    World,
+    EventWriter, FieldDesc, FieldKind, FieldType, Mut, OrderKey, Query, Removes, Row, SpatialKey, Spawner, Storage, With,
+    Without, World, ChildOf, children_of, entity_key, pair_key, pairs_from,
     WorldMut, component, event, field_struct,
 };
 #[doc(hidden)]
@@ -49,7 +49,7 @@ pub use service::{
 pub use service::{__begin_call, __end_call, __serve};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
-pub const API_VERSION: u32 = 18;
+pub const API_VERSION: u32 = 19;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";

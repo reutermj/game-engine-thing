@@ -90,6 +90,11 @@ changing the ABI, the reload sequence or the Bazel rules.
     pages in Z-order with boxes, re-sorted when a `Structural` drops;
     what `Query::in_region` and `near_pairs` walk. See
     [docs/architecture/spatial-storage.md](docs/architecture/spatial-storage.md).
+  - `ordered.rs` — ordered tables: an `order = key` component keeps its
+    tables sorted by it, re-sorted the same way; what `in_keys` and
+    `for_each_ordered` walk. Contacts (by pair) and `ChildOf` (by parent)
+    are its users. See
+    [docs/architecture/relationships.md](docs/architecture/relationships.md).
   - `between.rs` — `WorldMut`, the whole world for hooks and message
     handlers, refused while a frame is open.
   - `harness.rs` — sequential and parallel executors over plain functions,
@@ -116,8 +121,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
-  drops bodies into a box and `reporter` prints what's moving, both on
-  `//engine/std/physics`. Their `mod_deps` are the dependency example.
+  drops bodies into a box (all `ChildOf` it) and `reporter` prints what's
+  moving, both on `//engine/std/physics`. Their `mod_deps` are the dependency example.
 - `engine/tests/` — integration and e2e tests, and the test mods they load.
   The test mods are separate from `mods/` so editing a demo never changes
   what a test proves. See the testing conventions below.
