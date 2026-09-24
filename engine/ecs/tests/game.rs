@@ -164,7 +164,7 @@ fn ignite_anywhere<B: Burning>(
 }
 
 fn burn<B: Burning>(_: &mut Cx, mut fires: Query<(&mut Health, &mut B), (), Removes<B>>) {
-    fires.for_each(|row, (h, fire)| {
+    fires.for_each(|row, (mut h, mut fire)| {
         work();
         let (damage, done) = fire.tick();
         h.hp -= damage;
@@ -191,14 +191,14 @@ fn spawn(_: &mut Cx, new: Spawner<(Position, Velocity, Health)>) {
 }
 
 fn physics(_: &mut Cx, mut moving: Query<(&mut Position, &Velocity)>) {
-    moving.for_each(|_, (p, v)| {
+    moving.for_each(|_, (mut p, v)| {
         work();
         p.x = (p.x + v.x).rem_euclid(100.0);
     });
 }
 
 fn ui(_: &mut Cx, mut labels: Query<&mut Label>) {
-    labels.for_each(|_, l| {
+    labels.for_each(|_, mut l| {
         work();
         if l.text.len() > 64 {
             l.text.clear();

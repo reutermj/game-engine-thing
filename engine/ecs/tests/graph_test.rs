@@ -260,7 +260,7 @@ mod rows {
         fn copy(_: &mut Cx, mut wet: Query<&mut Frozen, With<Wet>>, mut dry: Query<&Frozen, Without<Wet>>) {
             let mut sum = 0;
             dry.for_each(|_, f| sum += f.n);
-            wet.for_each(|_, f| f.n = sum);
+            wet.for_each(|_, mut f| f.n = sum);
         }
         run(&w, vec![copy.system(&w, "copy")]);
         let values = w.values::<Frozen>().unwrap();

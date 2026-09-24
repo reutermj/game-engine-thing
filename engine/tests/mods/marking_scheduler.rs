@@ -26,7 +26,7 @@ impl Mod for Marking {
 impl Scheduler for Marking {
     fn run_frame(&mut self, _: &mut (), cx: &mut Cx) {
         // Before the frame opens, so the world may be touched directly.
-        cx.world().for_each::<&mut Trace>(|_, trace| trace.lines.push(format!("scheduled by {BUILD}")));
+        cx.world().for_each::<&mut Trace>(|_, mut trace| trace.lines.push(format!("scheduled by {BUILD}")));
         let Some(frame) = scheduler::begin(cx) else { return };
         for (i, node) in frame.plan().nodes.iter().enumerate() {
             frame.run(node.id);

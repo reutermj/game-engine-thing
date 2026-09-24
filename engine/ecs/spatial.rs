@@ -170,6 +170,11 @@ pub struct SpatialPages {
     /// since new rows land on whichever page is last, freed or not.
     free: Vec<u32>,
     pub dirty: bool,
+    /// The world tick the order was last sorted at: rows whose key and
+    /// extent haven't been written since keep their boxes.
+    sorted_tick: u32,
+    /// Rows whose box was recomputed at the last re-sort: for tests.
+    pub rebounded: usize,
 }
 
 impl Default for SpatialPages {
@@ -185,6 +190,8 @@ impl Default for SpatialPages {
             runs: vec![Bounds::EMPTY],
             free: Vec::new(),
             dirty: false,
+            sorted_tick: 0,
+            rebounded: 0,
         }
     }
 }
@@ -310,14 +317,27 @@ pub(crate) struct Resort<'a> {
     pub extent: Option<usize>,
     pub desc: SpatialDesc,
     pub entities: &'a Entities,
+    /// The world's tick as the re-sort starts: every write so far.
+    pub now: u32,
 }
 
 impl Resort<'_> {
     /// Bounds every row, then moves each row that isn't in the page its key
     /// (or its size) says, splitting full pages. Returns rows moved.
     pub fn run(mut self) -> usize {
+        let since = self.pages.sorted_tick;
+        let mut rebounded = 0;
         for p in 0..self.rows.len() {
             for r in 0..self.rows[p].len() {
+                // Only rows new to the table (a placeholder key) or whose key
+                // or extent was written since the last sort: the rest keep
+                // their boxes and keys.
+                let written = |c: usize| self.columns[c][p].ticks()[r] > since;
+                let new = self.pages.keys[p][r] == u64::MAX;
+                if !new && !written(self.key) && !self.extent.is_some_and(written) {
+                    continue;
+                }
+                rebounded += 1;
                 let key = self.columns[self.key][p].value_ptr(r);
                 let extent = self.extent.map_or(std::ptr::null(), |x| self.columns[x][p].value_ptr(r));
                 // SAFETY: `key` is a value of the key's installed layout,
@@ -353,6 +373,8 @@ impl Resort<'_> {
         self.merge();
         self.pages.rebound();
         self.pages.dirty = false;
+        self.pages.sorted_tick = self.now;
+        self.pages.rebounded = rebounded;
         moved
     }
 

@@ -39,7 +39,7 @@ engine_api::mod_state! {
 impl BagMod {
     fn fill(&mut self, _: &mut (), _: &mut Cx, mut bags: Query<&mut Bag>) {
         self.steps += 1;
-        bags.for_each(|_, bag| {
+        bags.for_each(|_, mut bag| {
             bag.words.push(format!("{BUILD}-{}", self.steps));
             #[cfg(feature = "v3")]
             {

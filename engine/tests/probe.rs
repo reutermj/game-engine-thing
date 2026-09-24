@@ -45,5 +45,5 @@ pub fn ensure_trace(cx: &mut engine_api::Cx) {
 /// Appends to the trace through a query: what a system declares.
 pub fn trace<F, C>(q: &mut engine_api::Query<&mut Trace, F, C>, line: impl Into<String>) {
     let line = line.into();
-    q.for_each(|_, trace| trace.lines.push(line.clone()));
+    q.for_each(|_, mut trace| trace.lines.push(line.clone()));
 }

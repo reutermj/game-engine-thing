@@ -126,7 +126,7 @@ impl Mod for Level {
         };
         // A player from the previous map may be inside a wall of this one.
         let start = Position { x: info.spawn_x + PLAYER_WIDTH / 2.0, y: info.spawn_y + PLAYER_HEIGHT / 2.0 };
-        world.for_each::<(&Player, &mut Position, &mut Velocity)>(|_, (_, p, v)| (*p, *v) = (start, Velocity::default()));
+        world.for_each::<(&Player, &mut Position, &mut Velocity)>(|_, (_, mut p, mut v)| (*p, *v) = (start, Velocity::default()));
         self.built = hash;
         cx.log(format!("{BUILT} a {}x{} level", info.width, info.height));
     }

@@ -44,7 +44,41 @@ fn probe(_: &mut Cx, mut q: Query<&At>) {
     out.2 = pairs.len();
 }
 
+/// Visits every position mutably and moves one in a hundred: a blanket
+/// writer over mostly static things, which change detection makes pay only
+/// for what it moved.
+fn sparse_writer(_: &mut Cx, mut q: Query<&mut At>) {
+    q.for_each(|row, mut at| {
+        if row.entity().index % 100 == 0 {
+            at.x += 0.01;
+        }
+    });
+}
+
+fn blanket_writer_frame(n: usize) {
+    let w = World::new();
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let per_row = (n as f32).sqrt() as usize;
+        for k in 0..n {
+            m.spawn((At { x: (k % per_row) as f32 * 2.0, y: (k / per_row) as f32 * 2.0 }, Size { hx: 0.45, hy: 0.45 }));
+        }
+    }
+    let s = Schedule { systems: vec![sparse_writer.system(&w, "writer")] };
+    let frames = 200;
+    let t = Instant::now();
+    for _ in 0..frames {
+        s.run_sequential(&w);
+    }
+    let rebounded: usize = w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum();
+    println!(
+        "{n:>6} rows, writing 1%: {:>7.1} us/frame, the re-sort re-bounding {rebounded} rows",
+        t.elapsed().as_secs_f64() * 1e6 / frames as f64
+    );
+}
+
 fn main() {
+    blanket_writer_frame(10_000);
     for n in [1000usize, 10_000] {
         let w = World::new();
         {

@@ -142,7 +142,7 @@ fn the_world_between_frames_is_refused_in_one() {
 fn a_system_that_panics_holding_a_guard_leaves_it_usable() {
     let (w, _) = world();
     fn boom(_: &mut Cx, mut q: Query<&mut v1::Pos>) {
-        q.for_each(|_, p| p.w = 0);
+        q.for_each(|_, mut p| p.w = 0);
         panic!("the system fails holding its guard");
     }
     let s = Schedule { systems: vec![boom.system(&w, "boom")] };

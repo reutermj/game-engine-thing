@@ -113,7 +113,7 @@ impl Physics {
         let Some(dt) = dt(&mut clocks) else { return };
         self.steps += 1;
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        bodies.for_each(|_, (body, v)| {
+        bodies.for_each(|_, (body, mut v)| {
             if body.kind == DYNAMIC {
                 v.x += g.x * body.gravity_scale * dt;
                 v.y += g.y * body.gravity_scale * dt;
@@ -255,7 +255,7 @@ impl Physics {
         solver::solve(&mut bodies, &mut constraints, dt);
 
         let mut i = 0;
-        moving.for_each(|_, (body, v, p)| {
+        moving.for_each(|_, (body, mut v, mut p)| {
             let b = bodies[i];
             i += 1;
             if body.kind == STATIC {
@@ -268,7 +268,7 @@ impl Physics {
             p.y += step.y * dt;
         });
 
-        touching.for_each(|_, t| *t = Touching::default());
+        touching.for_each(|_, mut t| *t = Touching::default());
         for (c, k) in self.contacts.iter_mut().zip(&constraints) {
             (c.jn, c.jt) = (k.jn, k.jt);
             c.pressed = k.jn > 0.0 || c.depth >= 0.0;
@@ -276,8 +276,8 @@ impl Physics {
                 continue;
             }
             let n = Vec2::new(c.nx, c.ny);
-            touching.with(c.a, |_, t| mark(t, n));
-            touching.with(c.b, |_, t| mark(t, -n));
+            touching.with(c.a, |_, mut t| mark(&mut t, n));
+            touching.with(c.b, |_, mut t| mark(&mut t, -n));
             if !c.was_pressed {
                 contacts.send(Contact { a: c.a, b: c.b, nx: c.nx, ny: c.ny, speed: k.speed });
             }

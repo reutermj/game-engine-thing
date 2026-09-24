@@ -90,7 +90,7 @@ impl Core {
         mut players: Query<&mut Paddle, With<Player>>,
     ) {
         let Some(intent) = steers.read().last().map(|s| s.intent) else { return };
-        players.for_each(|_, paddle| paddle.intent = intent);
+        players.for_each(|_, mut paddle| paddle.intent = intent);
     }
 
     /// Paddles move by their intent, and stop at the court's edges: a
@@ -98,7 +98,7 @@ impl Core {
     fn play(&mut self, _: &mut (), _: &mut Cx, mut clocks: Query<&Clock>, mut paddles: Query<(&Paddle, &Position, &mut Velocity)>) {
         let Some(dt) = clocks.single(|_, c| c.dt) else { return };
         let half = PADDLE_HEIGHT / 2.0;
-        paddles.for_each(|_, (paddle, p, v)| {
+        paddles.for_each(|_, (paddle, p, mut v)| {
             let to = (p.y + paddle.intent.clamp(-1.0, 1.0) * PADDLE_SPEED * dt).clamp(half, HEIGHT - half);
             v.y = (to - p.y) / dt;
         });
@@ -122,7 +122,7 @@ impl Core {
             // Physics sends each pair in entity order: either may be the ball.
             for (ball, other) in [(c.a, c.b), (c.b, c.a)] {
                 let Some(paddle_y) = paddles.with(other, |_, p| p.y) else { continue };
-                balls.with(ball, |_, (p, v)| {
+                balls.with(ball, |_, (p, mut v)| {
                     v.x = (v.x * SPEEDUP).clamp(-MAX_SPEED, MAX_SPEED);
                     v.y = (v.y + (p.y - paddle_y) * SPIN).clamp(-MAX_SPEED, MAX_SPEED);
                 });
@@ -137,7 +137,7 @@ impl Core {
             if balls.with(t.other, |_, _| ()).is_none() {
                 continue;
             }
-            scores.for_each(|_, score| {
+            scores.for_each(|_, mut score| {
                 if lost_by < 0.0 {
                     score.right += 1;
                 } else {
@@ -145,7 +145,7 @@ impl Core {
                 }
                 score.serves += 1;
                 let score = *score;
-                balls.with(t.other, |_, (p, v)| (*p, *v) = serve(&score, lost_by));
+                balls.with(t.other, |_, (mut p, mut v)| (*p, *v) = serve(&score, lost_by));
             });
         }
     }

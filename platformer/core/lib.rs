@@ -42,7 +42,7 @@ impl Core {
     ) {
         let dir = runs.read().last().map(|r| r.dir);
         let jump = !jumps.read().is_empty();
-        inputs.for_each(|_, input| {
+        inputs.for_each(|_, mut input| {
             if let Some(dir) = dir {
                 input.dir = dir;
             }
@@ -59,7 +59,7 @@ impl Core {
         spawner: Spawner<(Player, Input, Position, Velocity, Body, Collider, Touching)>,
     ) {
         let Some(info) = levels.single(|_, i| *i) else { return };
-        let played = players.single(|_, (input, touching, v)| {
+        let played = players.single(|_, (mut input, touching, mut v)| {
             v.x = input.dir.clamp(-1.0, 1.0) * RUN_SPEED;
             // A jump request is used up by the next frame, whether or not
             // the player was standing on something to jump from.
@@ -116,14 +116,14 @@ impl Core {
                 }
             }
         }
-        players.for_each(|_, (player, p, v)| {
+        players.for_each(|_, (mut player, mut p, mut v)| {
             player.coins += collected;
             player.won |= won;
             if let Some(speed) = bounce {
                 v.y = -speed;
             }
             if hurt || p.y > info.height as f32 + 2.0 {
-                respawn(player, p, v, &info);
+                respawn(&mut player, &mut p, &mut v, &info);
             }
         });
     }

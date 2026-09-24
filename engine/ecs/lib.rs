@@ -29,7 +29,7 @@ pub use component::{
 pub use component::{__component_fingerprint, __drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 pub use events::{Event, EventReader, EventWriter};
 pub use query::{
-    Adds, Bundle, Change, ChangeDecl, Changes, Data, Declare, Despawns, Filter, FilterDecl, FrameCx, Log, Param,
+    Adds, Bundle, Change, ChangeDecl, Changes, Data, Declare, Despawns, Filter, FilterDecl, FrameCx, Log, Mut, Param,
     ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without,
 };
 pub use spatial::{Bounds, SpatialKey};

@@ -67,7 +67,7 @@ engine_api::mod_state! {
 
 impl Scene {
     fn run(&mut self, _: &mut (), _: &mut Cx, mut players: Query<(&Touching, &mut Velocity), With<Runner>>) {
-        players.for_each(|_, (touching, v)| {
+        players.for_each(|_, (touching, mut v)| {
             v.x = if self.running { RUN } else { 0.0 };
             if self.jump && touching.below {
                 v.y = -JUMP;
@@ -83,7 +83,7 @@ impl Scene {
         mut walkers: Query<(&Position, &mut Velocity), With<Walker>>,
         mut ground: Spatial<(), Without<Body>>,
     ) {
-        walkers.for_each(|_, (p, v)| {
+        walkers.for_each(|_, (p, mut v)| {
             let dir = if v.x < 0.0 { -1.0 } else { 1.0 };
             // Just past its leading edge, just below its feet.
             let ahead = Vec2::new(p.x + dir * 0.55, p.y + 0.6);

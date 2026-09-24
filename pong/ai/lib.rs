@@ -26,7 +26,7 @@ impl Ai {
     ) {
         let Some((y, vx)) = balls.single(|_, (p, v)| (p.y, v.x)) else { return };
         let target = if vx > 0.0 { y } else { HEIGHT / 2.0 };
-        paddles.for_each(|_, (paddle, p)| {
+        paddles.for_each(|_, (mut paddle, p)| {
             let off = target - p.y;
             paddle.intent = if off.abs() < SLACK { 0.0 } else { off.signum() * EFFORT };
         });

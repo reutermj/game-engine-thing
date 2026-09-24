@@ -144,7 +144,7 @@ static FRAME: AtomicU32 = AtomicU32::new(0);
 fn mover(_: &mut Cx, mut q: Query<&mut At>) {
     let frame = FRAME.fetch_add(1, Ordering::SeqCst) as u64;
     let mut s = frame + 99;
-    q.for_each(|row, at| {
+    q.for_each(|row, mut at| {
         let jump = (row.entity().index as u64 + frame) % 7 == 0;
         let step = if jump { 20.0 } else { 0.6 };
         at.x = (at.x + (lcg(&mut s) - 0.5) * step).rem_euclid(50.0);
@@ -205,7 +205,7 @@ fn everything_moving_at_once_keeps_the_order() {
     // Every row leaves its page in one step: full pages of rows that belong
     // elsewhere, split while they're still there.
     fn shift(_: &mut Cx, mut q: Query<&mut At>) {
-        q.for_each(|_, at| (at.x, at.y) = ((at.x + 25.0) % 50.0, (at.y * 0.5 + 13.0) % 50.0));
+        q.for_each(|_, mut at| (at.x, at.y) = ((at.x + 25.0) % 50.0, (at.y * 0.5 + 13.0) % 50.0));
     }
     let s = Schedule { systems: vec![shift.system(&w, "shift")] };
     for _ in 0..6 {
@@ -222,7 +222,7 @@ fn a_system_does_not_see_its_own_rows_move() {
     let e = w.between_frames(Build::default()).unwrap().spawn((At { x: 5.0, y: 5.0 },));
     static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
     fn teleport(_: &mut Cx, mut q: Query<&mut At>) {
-        q.for_each(|_, at| (at.x, at.y) = (40.0, 40.0));
+        q.for_each(|_, mut at| (at.x, at.y) = (40.0, 40.0));
         let (mut there, mut here) = (0, 0);
         q.in_region(Bounds::around([40.0, 40.0], [1.0, 1.0]), |_, _| there += 1);
         q.in_region(Bounds::around([5.0, 5.0], [1.0, 1.0]), |_, _| here += 1);
@@ -278,7 +278,7 @@ fn writing_an_extent_re_sorts_too() {
     let w = World::new();
     let e = w.between_frames(Build::default()).unwrap().spawn((At { x: 10.0, y: 10.0 }, Size { hx: 0.2, hy: 0.2 }));
     fn grow(_: &mut Cx, mut q: Query<&mut Size>) {
-        q.for_each(|_, s| s.hx = 6.0);
+        q.for_each(|_, mut s| s.hx = 6.0);
     }
     Schedule { systems: vec![grow.system(&w, "grow")] }.run_sequential(&w);
     // Now big, so in a big page; and found from where only its reach gets.
@@ -313,7 +313,7 @@ fn a_re_sort_is_an_apply_node_that_readers_of_the_table_wait_for() {
 fn a_parallel_frame_equals_a_sequential_one() {
     let _s = serial();
     fn tagger(_: &mut Cx, mut q: Query<&mut Tag>) {
-        q.for_each(|_, t| t.n += 1);
+        q.for_each(|_, mut t| t.n += 1);
     }
     let run = |threads: Option<usize>| {
         FRAME.store(0, Ordering::SeqCst);
@@ -339,6 +339,65 @@ fn a_parallel_frame_equals_a_sequential_one() {
     for _ in 0..3 {
         assert!(run(Some(4)) == sequential, "a parallel frame differed");
     }
+}
+
+#[test]
+fn boxes_touching_edge_to_edge_pair() {
+    let _s = serial();
+    let w = World::new();
+    // Unit tiles in a row, each touching the next exactly: what a tile
+    // level is made of. Two rows, so pages hold neighbors from both.
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for y in 0..2 {
+            for x in 0..40 {
+                m.spawn((At { x: x as f32 + 0.5, y: y as f32 * 10.0 + 0.5 }, Size { hx: 0.5, hy: 0.5 }));
+            }
+        }
+    }
+    fn pairs(_: &mut Cx, mut q: Query<&At>) {
+        *PAIRS.lock().unwrap() = q.near_pairs(0.0);
+    }
+    Schedule { systems: vec![pairs.system(&w, "pairs")] }.run_sequential(&w);
+    let got = PAIRS.lock().unwrap().clone();
+    assert_eq!(got.len(), 2 * 39, "every neighbor, edge to edge");
+    assert_eq!(got, brute_pairs(&w, 0.0));
+}
+
+/// Rows whose boxes the last re-sort of each spatial table recomputed.
+fn rebounded(w: &World) -> usize {
+    w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum()
+}
+
+#[test]
+fn a_re_sort_recomputes_only_the_rows_written_through() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 8;
+    let es = populate(&w, 300, &mut seed);
+    static ONE: Mutex<Option<Entity>> = Mutex::new(None);
+    *ONE.lock().unwrap() = Some(es[7]);
+    // Visits every row mutably, reads them all, writes one.
+    fn nudge(_: &mut Cx, mut q: Query<&mut At>) {
+        let one = ONE.lock().unwrap().unwrap();
+        let mut sum = 0.0;
+        q.for_each(|row, mut at| {
+            sum += at.x;
+            if row.entity() == one {
+                at.x = (at.x + 1.0) % 50.0;
+            }
+        });
+        assert!(sum > 0.0);
+    }
+    fn look(_: &mut Cx, mut q: Query<&mut At>) {
+        q.for_each(|_, at| assert!(at.x >= 0.0));
+    }
+    Schedule { systems: vec![nudge.system(&w, "nudge")] }.run_sequential(&w);
+    assert_eq!(rebounded(&w), 1, "one row was written");
+    Schedule { systems: vec![look.system(&w, "look")] }.run_sequential(&w);
+    assert_eq!(rebounded(&w), 0, "reading through a write term writes nothing");
+    check(&w);
+    agrees(&w, &mut seed);
 }
 
 #[test]

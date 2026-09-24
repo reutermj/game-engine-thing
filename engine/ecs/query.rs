@@ -195,11 +195,41 @@ changes_tuple!(A, B, C);
 
 // ---- Query data ----
 
+/// A write to a component's value, handed out by a `&mut T` term: reads as
+/// `&T`, and records the write (a tick on the row) the first time it's
+/// written through, so change detection sees only what really changed.
+pub struct Mut<'a, T> {
+    value: &'a mut T,
+    tick: &'a mut u32,
+    now: u32,
+}
+
+impl<T> std::ops::Deref for Mut<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Mut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        *self.tick = self.now;
+        self.value
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Mut<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
 /// What one term of a query holds while the system runs: a column guard per
-/// matched table, or the component's sparse set.
+/// matched table, or the component's sparse set; and, for a write, the tick
+/// its writes are stamped with.
 pub enum TermState<'w> {
-    Table(Vec<ColumnGuard<'w>>),
-    Sparse(SparseGuard<'w>),
+    Table(Vec<ColumnGuard<'w>>, u32),
+    Sparse(SparseGuard<'w>, u32),
 }
 
 impl<'w> TermState<'w> {
@@ -210,6 +240,7 @@ impl<'w> TermState<'w> {
             "this build has another layout of {} than the one installed; reload it with the rest of the game",
             T::NAME
         );
+        let now = if write { world.next_tick() } else { 0 };
         match T::STORAGE {
             Storage::Table => TermState::Table(
                 tables
@@ -219,23 +250,24 @@ impl<'w> TermState<'w> {
                         ColumnGuard::take(&table.columns[table.column_index(c).expect("a matched table")], write)
                     })
                     .collect(),
+                now,
             ),
-            Storage::Sparse => TermState::Sparse(SparseGuard::take(world.sparse_set(c), write)),
+            Storage::Sparse => TermState::Sparse(SparseGuard::take(world.sparse_set(c), write), now),
         }
     }
 
     /// The entities of this term's sparse set, and how many, if it's sparse.
     fn sparse_entities(&self) -> Option<(usize, Vec<Entity>)> {
         match self {
-            TermState::Sparse(set) => Some((set.set().len(), set.set().entities().to_vec())),
-            TermState::Table(_) => None,
+            TermState::Sparse(set, _) => Some((set.set().len(), set.set().entities().to_vec())),
+            TermState::Table(..) => None,
         }
     }
 
     fn sparse_len(&self) -> Option<usize> {
         match self {
-            TermState::Sparse(set) => Some(set.set().len()),
-            TermState::Table(_) => None,
+            TermState::Sparse(set, _) => Some(set.set().len()),
+            TermState::Table(..) => None,
         }
     }
 }
@@ -244,9 +276,9 @@ impl<'w> TermState<'w> {
 /// page; the set for a sparse term, looked up by entity per row.
 pub enum PageView<'a, T> {
     Read(&'a [T]),
-    Write(&'a mut [T]),
+    Write(&'a mut [T], &'a mut [u32], u32),
     Sparse(&'a SparseSet),
-    SparseMut(&'a mut SparseSet),
+    SparseMut(&'a mut SparseSet, u32),
 }
 
 /// One term: `&T` or `&mut T`, over a table or a sparse component.
@@ -267,14 +299,14 @@ impl<T: Component> Term for &T {
     type Item<'a> = &'a T;
     fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<&'a T> {
         match state {
-            TermState::Table(guards) => Some(&guards[table].pages()[page].as_slice::<T>()[row]),
-            TermState::Sparse(set) => set.set().get::<T>(e),
+            TermState::Table(guards, _) => Some(&guards[table].pages()[page].as_slice::<T>()[row]),
+            TermState::Sparse(set, _) => set.set().get::<T>(e),
         }
     }
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
         match state {
-            TermState::Table(guards) => PageView::Read(guards[table].pages()[page].as_slice::<T>()),
-            TermState::Sparse(set) => PageView::Sparse(set.set()),
+            TermState::Table(guards, _) => PageView::Read(guards[table].pages()[page].as_slice::<T>()),
+            TermState::Sparse(set, _) => PageView::Sparse(set.set()),
         }
     }
     fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<&'b T> {
@@ -289,23 +321,34 @@ impl<T: Component> Term for &T {
 impl<T: Component> Term for &mut T {
     type C = T;
     const WRITE: bool = true;
-    type Item<'a> = &'a mut T;
-    fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<&'a mut T> {
+    type Item<'a> = Mut<'a, T>;
+    fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<Mut<'a, T>> {
         match state {
-            TermState::Table(guards) => Some(&mut guards[table].pages_mut()[page].as_mut_slice::<T>()[row]),
-            TermState::Sparse(set) => set.set_mut().get_mut::<T>(e),
+            TermState::Table(guards, now) => {
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now })
+            }
+            TermState::Sparse(set, now) => {
+                set.set_mut().get_mut_ticked::<T>(e).map(|(value, tick)| Mut { value, tick, now: *now })
+            }
         }
     }
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
         match state {
-            TermState::Table(guards) => PageView::Write(guards[table].pages_mut()[page].as_mut_slice::<T>()),
-            TermState::Sparse(set) => PageView::SparseMut(set.set_mut()),
+            TermState::Table(guards, now) => {
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                PageView::Write(values, ticks, *now)
+            }
+            TermState::Sparse(set, now) => PageView::SparseMut(set.set_mut(), *now),
         }
     }
-    fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<&'b mut T> {
+    fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<Mut<'b, T>> {
         match page {
-            PageView::Write(rows) => Some(&mut rows[row]),
-            PageView::SparseMut(set) => set.get_mut::<T>(e),
+            PageView::Write(values, ticks, now) => Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now }),
+            PageView::SparseMut(set, now) => {
+                let now = *now;
+                set.get_mut_ticked::<T>(e).map(|(value, tick)| Mut { value, tick, now })
+            }
             _ => unreachable!("a write term's view"),
         }
     }
@@ -591,6 +634,88 @@ impl Row<'_> {
     }
 }
 
+/// Sorts pairs as `(Entity, Entity)` would, but by a radix sort of their
+/// indices: live entities never share an index, so indices alone order
+/// them, and a broadphase's tens of thousands of pairs sort in a few
+/// passes instead of `n log n` comparisons. Only the bytes that differ
+/// between keys are passed over.
+fn sort_pairs(pairs: &mut Vec<(Entity, Entity)>) {
+    let key = |(a, b): &(Entity, Entity)| ((a.index as u64) << 32) | b.index as u64;
+    let (mut any, mut all) = (0u64, u64::MAX);
+    for p in pairs.iter() {
+        any |= key(p);
+        all &= key(p);
+    }
+    let differ = any ^ all;
+    let mut buf = pairs.clone();
+    for byte in 0..8 {
+        let shift = byte * 8;
+        if (differ >> shift) & 0xff == 0 {
+            continue;
+        }
+        let mut count = [0usize; 257];
+        for p in pairs.iter() {
+            count[((key(p) >> shift) & 0xff) as usize + 1] += 1;
+        }
+        for i in 1..257 {
+            count[i] += count[i - 1];
+        }
+        for p in pairs.iter() {
+            let d = ((key(p) >> shift) & 0xff) as usize;
+            buf[count[d]] = *p;
+            count[d] += 1;
+        }
+        std::mem::swap(pairs, &mut buf);
+    }
+}
+
+/// Pairs within one page's rows, sorted by left edge: each row meets the
+/// rows after it until one starts past its right edge.
+fn sweep_one(rows: &[(Bounds, Entity)], out: &mut Vec<(Entity, Entity)>) {
+    for (i, (a, e)) in rows.iter().enumerate() {
+        for (b, f) in &rows[i + 1..] {
+            if b.min[0] > a.max[0] {
+                break;
+            }
+            if a.overlaps(b) {
+                out.push((*e.min(f), *e.max(f)));
+            }
+        }
+    }
+}
+
+/// Pairs between two pages' rows, each sorted by left edge: one sweep over
+/// both in order, each row meeting the other side's rows still open.
+fn sweep_two(
+    a: &[(Bounds, Entity)],
+    b: &[(Bounds, Entity)],
+    (open_a, open_b): (&mut Vec<usize>, &mut Vec<usize>),
+    out: &mut Vec<(Entity, Entity)>,
+) {
+    let (mut i, mut j) = (0, 0);
+    open_a.clear();
+    open_b.clear();
+    while i < a.len() || j < b.len() {
+        let from_a = j == b.len() || (i < a.len() && a[i].0.min[0] <= b[j].0.min[0]);
+        let (mine, theirs, open_mine, open_theirs, k) =
+            if from_a { (a, b, &mut *open_a, &mut *open_b, i) } else { (b, a, &mut *open_b, &mut *open_a, j) };
+        let (bx, e) = mine[k];
+        open_theirs.retain(|&t| theirs[t].0.max[0] >= bx.min[0]);
+        for &t in open_theirs.iter() {
+            let (by, f) = theirs[t];
+            if bx.overlaps(&by) {
+                out.push((e.min(f), e.max(f)));
+            }
+        }
+        open_mine.push(k);
+        if from_a {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+}
+
 // ---- Parameters ----
 
 pub struct Query<'w, D: Data, F = (), C = ()> {
@@ -729,18 +854,30 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                 groups.push((t, vec![p], order.bounds[p].grown(grow)));
             }
         }
-        // Every box grown once, by table and page: the pair loops below test
-        // each against many others.
-        let grown: Vec<Vec<Vec<Bounds>>> = rows
+        // Each page's rows that pass the filters, their boxes grown, sorted
+        // by left edge: the pairs of two pages are then a sweep along x,
+        // not every row against every row.
+        let swept: Vec<Vec<Vec<(Bounds, Entity)>>> = rows
             .iter()
             .map(|t| {
                 t.spatial.as_ref().map_or_else(Vec::new, |o| {
-                    o.row_bounds_all().iter().map(|page| page.iter().map(|b| b.grown(grow)).collect()).collect()
+                    (0..t.rows.len())
+                        .map(|p| {
+                            let mut page: Vec<(Bounds, Entity)> = t.rows[p]
+                                .iter()
+                                .zip(&o.row_bounds_all()[p])
+                                .filter(|(e, _)| filters.is_empty() || Self::passes(filters, **e))
+                                .map(|(&e, b)| (b.grown(grow), e))
+                                .collect();
+                            page.sort_by(|a, b| a.0.min[0].total_cmp(&b.0.min[0]));
+                            page
+                        })
+                        .collect()
                 })
             })
             .collect();
-        let filtered = !filters.is_empty();
         let mut out = Vec::new();
+        let (mut open_a, mut open_b) = (Vec::new(), Vec::new());
         for (i, (ta, pa, ba)) in groups.iter().enumerate() {
             for (j, (tb, pb, bb)) in groups.iter().enumerate().skip(i) {
                 if !ba.overlaps(bb) {
@@ -754,25 +891,16 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                         if !page_a.overlaps(&ob.bounds[q].grown(grow)) {
                             continue;
                         }
-                        let (ea, eb) = (&rows[*ta].rows[p], &rows[*tb].rows[q]);
-                        let (ga, gb) = (&grown[*ta][p], &grown[*tb][q]);
-                        for (r, &e) in ea.iter().enumerate() {
-                            if filtered && !Self::passes(filters, e) {
-                                continue;
-                            }
-                            let start = if i == j && p == q { r + 1 } else { 0 };
-                            for (s, &f) in eb.iter().enumerate().skip(start) {
-                                if ga[r].overlaps(&gb[s]) && (!filtered || Self::passes(filters, f)) {
-                                    out.push((e.min(f), e.max(f)));
-                                }
-                            }
+                        if i == j && p == q {
+                            sweep_one(&swept[*ta][p], &mut out);
+                        } else {
+                            sweep_two(&swept[*ta][p], &swept[*tb][q], (&mut open_a, &mut open_b), &mut out);
                         }
                     }
                 }
             }
         }
-        out.sort_unstable();
-        out.dedup();
+        sort_pairs(&mut out);
         out
     }
 

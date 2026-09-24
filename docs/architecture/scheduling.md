@@ -30,7 +30,7 @@ impl Mod for Physics {
 
 impl Physics {
     fn integrate(&mut self, _: &mut (), _: &mut Cx, mut q: Query<(&mut Position, &Velocity)>) {
-        q.for_each(|_, (position, velocity)| position.x += velocity.x * DT);
+        q.for_each(|_, (mut position, velocity)| position.x += velocity.x * DT);
     }
 }
 ```
@@ -57,7 +57,12 @@ declaration can't drift from the code:
   changes the system may make to the rows it yields: `Adds<T>`,
   `Removes<T>`, `Despawns`. Iterated with `q.for_each(|row, items| ..)`,
   looked up with `q.with(entity, ..)`, or `q.single(..)` for a component
-  there's one of.
+  there's one of. A `&mut T` term hands out a `Mut<T>`, which reads as
+  `&T` and records a change tick on the row only when written through, so
+  what reads a component can tell what really changed (spatial tables
+  re-sort only those rows). Its binding needs `mut` to be written
+  through (`|_, mut p| p.x += 1.0`), and a function taking `&mut T` is
+  passed `&mut p`.
 - **`Spawner<B>`**: spawns entities with the bundle `B`'s components.
 - **`EventReader<E>`**, **`EventWriter<E>`**: the events of type `E` this
   system hasn't seen yet, and sending them.

@@ -1,9 +1,8 @@
 # Spatial storage
 
 **Status: built in `engine_ecs`** (`spatial.rs`, get-emj.15) after a spike
-(`spike/spatial`, get-emj.14), with physics on it; its broadphase is
-slower than the grid it replaced ([In the engine](#in-the-engine)), which
-is the open question.
+(`spike/spatial`, get-emj.14), with physics on it, and change detection
+so re-sorts touch only what changed ([In the engine](#in-the-engine)).
 
 Space as a property of storage, rather than an index beside it: a table
 whose rows have a position keeps them in spatial order, so a page is a
@@ -161,12 +160,10 @@ faster than the index's) isn't the problem.
 2026-09-24. `engine_ecs` knows nothing of physics: any component can be a
 spatial key with any extent, and physics is one user. What it assumes:
 
-- **Re-sorting is coarse.** A system writing a key re-sorts every spatial
-  table its query matches, every row, every frame: nothing tracks which
-  rows changed. Physics's statics escape only because its writing query
-  names `Velocity`, which statics lack; a plain `Query<&mut Position>`
-  re-sorts static tables too. Change detection (per page or per row) is
-  what makes this safe for any game code (get-emj.17).
+- **A writer still visits its tables.** A system writing a key logs a
+  re-sort of every spatial table its query matches, and the re-sort scans
+  every row's tick; only rows written through are re-bounded and moved
+  (`Mut<T>`, below).
 - **One order per table**, like a database's clustered index: rows have
   one physical order, so an entity with two positions clusters by one.
   Inherent to storing space as structure.
@@ -176,3 +173,32 @@ spatial key with any extent, and physics is one user. What it assumes:
   key sets), and global page and run sizes (16 and 16).
 - **`near_pairs` returns every pair**, statics' included; physics
   filters them after.
+
+## The broadphase, reworked
+
+2026-09-24 (get-emj.16). `near_pairs` sweeps along x within each meeting
+pair of pages (each page's rows sorted by left edge once per call, a
+merged sweep between two pages) instead of testing every row against
+every row, reuses its buffers, and radix-sorts the pairs by entity index
+(live entities never share one) instead of comparing entity pairs. On
+the dense layout (`//engine/ecs:spatial_bench`): 254 to 98 µs at 1000
+bodies, 3.5 to 1.7 ms at 10 000; the sort had been over a third of it.
+The physics pile's settled frame: 0.42 to 0.35 ms, against 0.33 before
+spatial storage, whose index rebuild is gone. Still open: pairs between
+two pages that haven't changed are the same as last time, and could be
+kept.
+
+## Change detection
+
+2026-09-24 (get-emj.17). Every value in an erased column has a tick, the
+world's counter when it was last written, kept with the value through
+every row operation. A `&mut T` term hands out `Mut<T>` (as Bevy does),
+which reads as `&T` and stamps the row's tick only when written through;
+writes between frames stamp too. A spatial table remembers the tick it
+was last sorted at, and a re-sort re-bounds only rows new to it or whose
+key or extent was written since. A system visiting 10 000 rows mutably
+and moving 1% costs 160 µs a frame, against 268 without, re-bounding 100
+rows instead of all. The cost: a binding written through needs `mut`,
+and every write stamps a tick (the physics pile, where everything moves,
+went from 0.35 to 0.36 ms). Six mutations of it are caught. `Changed<T>`
+filters are the natural next use, and aren't built.

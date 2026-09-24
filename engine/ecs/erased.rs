@@ -67,6 +67,9 @@ pub struct ErasedColumn {
     ptr: NonNull<u8>,
     len: usize,
     cap: usize,
+    /// Per value, the world tick it was last written at: what change
+    /// detection reads. Kept parallel to the values by every row operation.
+    ticks: Vec<u32>,
 }
 
 // SAFETY: the column owns its values like a `Vec<T>` does, and a
@@ -79,7 +82,25 @@ unsafe impl Sync for ErasedColumn {}
 impl ErasedColumn {
     pub fn new(ty: ValueType) -> ErasedColumn {
         let cap = if ty.layout.size() == 0 { usize::MAX } else { 0 };
-        ErasedColumn { ty, ptr: dangling(ty.layout), len: 0, cap }
+        ErasedColumn { ty, ptr: dangling(ty.layout), len: 0, cap, ticks: Vec::new() }
+    }
+
+    /// Each value's last-written tick.
+    pub fn ticks(&self) -> &[u32] {
+        &self.ticks
+    }
+
+    pub fn set_tick(&mut self, row: usize, tick: u32) {
+        self.ticks[row] = tick;
+    }
+
+    /// The values and their ticks, for handing out writes that record
+    /// themselves (`Mut`).
+    pub fn as_mut_slice_ticked<T: Component>(&mut self) -> (&mut [T], &mut [u32]) {
+        self.check::<T>();
+        // SAFETY: as `as_mut_slice`; the ticks are a separate allocation.
+        let values = unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut T, self.len) };
+        (values, &mut self.ticks)
     }
 
     pub fn value_type(&self) -> ValueType {
@@ -110,6 +131,7 @@ impl ErasedColumn {
         // the type was checked.
         unsafe { (self.slot(self.len) as *mut T).write(value) };
         self.len += 1;
+        self.ticks.push(0);
     }
 
     pub fn as_slice<T: Component>(&self) -> &[T] {
@@ -143,6 +165,7 @@ impl ErasedColumn {
             }
             self.fill_from_last(row);
         }
+        self.ticks.swap_remove(row);
     }
 
     /// Moves the value at `row` onto the end of `to` (a column of the same
@@ -161,6 +184,7 @@ impl ErasedColumn {
             to.len += 1;
             self.fill_from_last(row);
         }
+        to.ticks.push(self.ticks.swap_remove(row));
     }
 
     /// Drops the first `n` values and moves the rest down, keeping their
@@ -179,6 +203,7 @@ impl ErasedColumn {
             std::ptr::copy(self.slot(n), self.slot(0), (self.len - n) * self.ty.layout.size());
         }
         self.len -= n;
+        self.ticks.drain(..n);
     }
 
     fn check<T: Component>(&self) {
@@ -213,7 +238,9 @@ impl ErasedColumn {
             out.len += 1;
         }
         // Every value was moved out or dropped: free the buffer, nothing else.
+        // The rows are the same rows, so they keep their ticks.
         self.len = 0;
+        out.ticks = std::mem::take(&mut self.ticks);
         std::mem::swap(self, &mut out);
     }
 
@@ -388,6 +415,24 @@ mod tests {
         let mut c = ErasedColumn::new(ValueType::of::<Small>());
         c.push(Small { n: 1 });
         c.as_slice::<Large>();
+    }
+
+    #[test]
+    fn ticks_follow_their_values() {
+        let mut c = ErasedColumn::new(ValueType::of::<Small>());
+        let mut to = ErasedColumn::new(ValueType::of::<Small>());
+        for n in 0..5 {
+            c.push(Small { n });
+            c.set_tick(n as usize, 10 + n);
+        }
+        // 1 leaves for `to`, 4 fills its place; 0 is dropped, 3 fills it.
+        c.swap_remove_into(1, &mut to);
+        c.swap_remove_drop(0);
+        let pairs: Vec<(u32, u32)> = c.as_slice::<Small>().iter().map(|s| s.n).zip(c.ticks().iter().copied()).collect();
+        assert_eq!(pairs, [(3, 13), (4, 14), (2, 12)]);
+        assert_eq!(to.ticks(), [11]);
+        c.drop_front(1);
+        assert_eq!(c.ticks(), [14, 12]);
     }
 
     #[test]

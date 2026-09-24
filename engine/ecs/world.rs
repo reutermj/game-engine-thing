@@ -309,6 +309,13 @@ impl SparseSet {
         Some(&mut self.values.as_mut_slice::<T>()[slot])
     }
 
+    /// `e`'s value and its tick, for a write that records itself.
+    pub fn get_mut_ticked<T: crate::Component>(&mut self, e: Entity) -> Option<(&mut T, &mut u32)> {
+        let slot = self.slot(e)?;
+        let (values, ticks) = self.values.as_mut_slice_ticked::<T>();
+        Some((&mut values[slot], &mut ticks[slot]))
+    }
+
     fn insert<T: crate::Component>(&mut self, e: Entity, value: T) {
         match self.slots.get(e.index as usize).copied().filter(|&s| s != EMPTY).map(|s| s as usize) {
             // The same entity replaces its value; a dead one's stale entry is
@@ -370,6 +377,9 @@ pub struct World {
     pub entities: Entities,
     frame: AtomicU64,
     frame_open: AtomicBool,
+    /// Stamped on values when written: each query, and each write between
+    /// frames, takes the next.
+    change_tick: AtomicU32,
 }
 
 impl Default for World {
@@ -391,6 +401,7 @@ impl World {
             entities: Entities::new(),
             frame: AtomicU64::new(0),
             frame_open: AtomicBool::new(false),
+            change_tick: AtomicU32::new(1),
         };
         world.table_for(&[]);
         world
@@ -418,6 +429,11 @@ impl World {
                 ));
             }
             return Ok(id);
+        }
+        if desc.spatial.is_some() && desc.storage == Storage::Sparse {
+            // Tables are what's kept in order, and a sparse component isn't
+            // in one.
+            return Err(format!("{} can't be both sparse and a spatial key", desc.name));
         }
         let info = ComponentInfo {
             name: desc.name.into(),
@@ -642,6 +658,16 @@ impl World {
 
     pub fn frame(&self) -> u64 {
         self.frame.load(Ordering::Acquire)
+    }
+
+    /// A tick later than every value written so far, for stamping writes.
+    pub fn next_tick(&self) -> u32 {
+        self.change_tick.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The latest tick handed out: every write so far is at or before it.
+    pub fn current_tick(&self) -> u32 {
+        self.change_tick.load(Ordering::Acquire)
     }
 
     pub fn frame_open(&self) -> bool {
@@ -930,8 +956,11 @@ impl<'w> Structural<'w> {
         let from = world.table(at.table);
         if let Some(i) = from.column_index(c) {
             let moves = world.moves_rows(c);
+            let tick = world.next_tick();
             let t = self.locked(at.table);
-            t.columns[i][at.page as usize].replace(at.row as usize, value);
+            let column = &mut t.columns[i][at.page as usize];
+            column.replace(at.row as usize, value);
+            column.set_tick(at.row as usize, tick);
             if moves {
                 t.touch();
             }
@@ -984,11 +1013,14 @@ impl<'w> Structural<'w> {
         let at = world.entities.location(e)?;
         let t = self.tables.get_mut(&at.table)?;
         let i = t.table.column_index(c)?;
-        // Handed out mutably: if it's a key or an extent, it may be moved.
+        // Handed out mutably: counted as written, and if it's a key or an
+        // extent, its row may move.
         if world.moves_rows(c) {
             t.touch();
         }
-        Some(&mut t.columns[i][at.page as usize].as_mut_slice::<T>()[at.row as usize])
+        let column = &mut t.columns[i][at.page as usize];
+        column.set_tick(at.row as usize, world.next_tick());
+        Some(&mut column.as_mut_slice::<T>()[at.row as usize])
     }
 
     /// Re-sorts spatial table `t` when this drops: after a system that wrote
@@ -1022,6 +1054,7 @@ impl Drop for Structural<'_> {
                 extent,
                 desc,
                 entities: &world.entities,
+                now: world.current_tick(),
             }
             .run();
         }

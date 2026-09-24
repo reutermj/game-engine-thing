@@ -192,7 +192,7 @@ use physics::{Circle, Ray, Spatial};
 // The walkers' ledge check: is there ground just ahead, below?
 fn walk(.., mut walkers: Query<(&Position, &mut Velocity), With<Walker>>,
             mut ground: Spatial<(), With<Tile>>) {
-    walkers.for_each(|_, (p, v)| {
+    walkers.for_each(|_, (p, mut v)| {
         let ahead = Vec2::new(p.x + v.x.signum() * 0.55, p.y + 0.6);
         if !ground.any_at(ahead) {
             v.x = -v.x;
@@ -265,7 +265,7 @@ spawner.spawn((
 
 // `play`, in simulate: run and jump are velocity.
 fn play(.., mut players: Query<(&Input, &Touching, &mut Velocity), With<Player>>) {
-    players.for_each(|_, (input, touching, v)| {
+    players.for_each(|_, (input, touching, mut v)| {
         v.x = input.dir * RUN_SPEED;
         if input.jump && touching.below {
             v.y = -JUMP_SPEED;

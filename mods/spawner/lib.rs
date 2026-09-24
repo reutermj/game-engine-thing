@@ -28,7 +28,7 @@ impl Spawner {
         // The walls and gravity come first, and aren't bodies.
         let bodies_from = self.spawned.len() - BODIES;
         let e = self.spawned[bodies_from + (self.frames / 60) as usize % BODIES];
-        bodies.with(e, |_, v| (v.x, v.y) = (3.0, -14.0));
+        bodies.with(e, |_, mut v| (v.x, v.y) = (3.0, -14.0));
     }
 }
 

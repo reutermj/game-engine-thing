@@ -14,7 +14,7 @@
 //!
 //! impl Physics {
 //!     fn integrate(&mut self, _: &mut (), cx: &mut Cx, mut q: Query<(&mut Position, &Velocity)>) {
-//!         q.for_each(|_, (position, velocity)| position.x += velocity.x * DT);
+//!         q.for_each(|_, (mut position, velocity)| position.x += velocity.x * DT);
 //!     }
 //! }
 //! ```

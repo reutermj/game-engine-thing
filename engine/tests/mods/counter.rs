@@ -76,7 +76,7 @@ impl Counter {
         }
         self.total += BUILD.1;
         let (probe, entity) = (self.probe_value(), self.probe.expect("spawned in load"));
-        probes.with(entity, |_, p| *p = probe);
+        probes.with(entity, |_, mut p| *p = probe);
     }
 }
 

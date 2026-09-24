@@ -12,7 +12,7 @@ engine_api::mod_state! {
 
 impl Builder {
     fn build(&mut self, _: &mut (), _: &mut Cx, mut q: Query<&mut Trace, (), Adds<Probe>>, mut probes: Query<&Probe>) {
-        q.for_each(|row, trace| {
+        q.for_each(|row, mut trace| {
             row.insert(Probe { value: 7, ..Probe::default() });
             trace.lines.push("inserted".into());
         });
