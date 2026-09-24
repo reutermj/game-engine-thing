@@ -20,6 +20,8 @@ monolithic design doc.
   structural change and events without stop-the-world points
 - [spatial-storage.md](spatial-storage.md) — tables kept in
   spatial order, so pages are neighborhoods and region queries are queries
+- [relationships.md](relationships.md) — how entities refer to each
+  other: contacts, colliders and hierarchy, measured
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 
