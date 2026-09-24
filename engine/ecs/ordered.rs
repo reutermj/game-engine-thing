@@ -16,7 +16,9 @@ use crate::world::{Entities, Location, TableId};
 
 /// A component whose tables are kept in order of `key`: declared with
 /// `order = key` in `component!`. Keys order as unsigned integers; ties are
-/// broken by entity, so the order never depends on history.
+/// broken by entity, so the order never depends on history. Mark `key`
+/// `#[inline]`: the glue calls it per row from another crate
+/// (docs/lore/a-trait-impl-the-glue-calls-is-not-inlined-across-crates.md).
 pub trait OrderKey: Component {
     fn key(&self) -> u128;
 }
@@ -62,12 +64,31 @@ pub fn pairs_from(a: Entity) -> std::ops::RangeInclusive<u128> {
 }
 
 /// Each row's key as of the last re-sort, parallel to the table's pages.
-#[derive(Default)]
+/// A row pushed since is keyed `UNKEYED` until then.
 pub struct KeyOrder {
     pub keys: Vec<Vec<u128>>,
     pub dirty: bool,
-    /// Times the rows were rearranged: for tests.
+    /// The world tick the keys were last computed at: a row whose key
+    /// hasn't been written since keeps its key.
+    sorted_tick: u32,
+    /// When the build whose glue computed the keys was loaded: another
+    /// build's glue may key differently, so every row is keyed again.
+    keyed_by: u64,
+    /// Times the rows were rearranged, and rows keyed: for tests.
     pub sorts: usize,
+    pub keyed: usize,
+}
+
+/// What a row pushed since the last re-sort is keyed as, so it's keyed then.
+/// A real key can be this too, and is then keyed at every re-sort: slower,
+/// never wrong.
+const UNKEYED: u128 = u128::MAX;
+
+impl Default for KeyOrder {
+    /// One empty page, as a new table has.
+    fn default() -> KeyOrder {
+        KeyOrder { keys: vec![Vec::new()], dirty: false, sorted_tick: 0, keyed_by: 0, sorts: 0, keyed: 0 }
+    }
 }
 
 impl KeyOrder {
@@ -77,7 +98,7 @@ impl KeyOrder {
 
     /// A row pushed onto `page`: keyed at the next re-sort.
     pub(crate) fn push_row(&mut self, page: usize) {
-        self.keys[page].push(0);
+        self.keys[page].push(UNKEYED);
         self.dirty = true;
     }
 
@@ -126,29 +147,41 @@ pub(crate) struct Resort<'a> {
     pub order: &'a mut KeyOrder,
     pub key: usize,
     pub desc: OrderDesc,
+    /// When the build `desc` is from was loaded.
+    pub desc_loaded_at: u64,
     pub page_rows: usize,
     pub entities: &'a Entities,
+    /// The world's tick as the re-sort starts: every write so far.
+    pub now: u32,
 }
 
 impl Resort<'_> {
-    /// Keys every row, and if they're out of order, rearranges every
-    /// column into pages in order. Keys are cheap to compute, so every row
-    /// is keyed afresh rather than tracking which were written.
+    /// Keys the rows new or written since the last re-sort, and if the
+    /// rows are out of order, rearranges every column into pages in order.
+    /// (History, 2026-09-24: every row was keyed afresh, a glue call each;
+    /// docs/architecture/relationships.md has what that cost.)
     pub fn run(self) {
+        let (since, all) = (self.order.sorted_tick, self.order.keyed_by != self.desc_loaded_at);
         let mut sorted = true;
         let mut last: Option<(u128, Entity)> = None;
+        let mut keyed = 0;
         for p in 0..self.rows.len() {
-            for r in 0..self.rows[p].len() {
-                // SAFETY: a value of the key's installed layout, whose build
-                // the glue came from.
-                let k = unsafe { (self.desc.key)(self.columns[self.key][p].value_ptr(r)) };
-                self.order.keys[p][r] = k;
-                let now = (k, self.rows[p][r]);
+            let (column, keys) = (&self.columns[self.key][p], &mut self.order.keys[p]);
+            assert_eq!(column.len(), keys.len(), "a page's keys are its rows'");
+            for (r, (k, &tick)) in keys.iter_mut().zip(column.ticks()).enumerate() {
+                if all || *k == UNKEYED || tick > since {
+                    // SAFETY: a value of the key's installed layout, whose
+                    // build the glue came from.
+                    *k = unsafe { (self.desc.key)(column.value_ptr(r)) };
+                    keyed += 1;
+                }
+                let now = (*k, self.rows[p][r]);
                 sorted &= last.is_none_or(|l| l < now);
                 last = Some(now);
             }
         }
         self.order.dirty = false;
+        (self.order.sorted_tick, self.order.keyed_by, self.order.keyed) = (self.now, self.desc_loaded_at, keyed);
         // Full pages but the last are what a rearrangement leaves; a sorted
         // table with holes (rows despawned from its end) keeps them.
         if sorted {

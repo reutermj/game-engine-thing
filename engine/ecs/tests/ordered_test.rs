@@ -321,6 +321,81 @@ fn a_re_sort_is_an_apply_node_that_readers_of_the_table_wait_for() {
     assert_eq!(s.blockers(&w, &fs, i), ["apply(reverse)"]);
 }
 
+/// Rows keyed at the last re-sort, over every ordered table.
+fn keyed(w: &World) -> usize {
+    w.tables().filter_map(|t| t.ordered.as_ref()).map(|o| o.order.read().unwrap().keyed).sum()
+}
+
+/// Visits every rank mutably and writes one: a writer over a table whose
+/// keys mostly don't change.
+fn bump_one(_: &mut Cx, mut q: Query<&mut Rank>) {
+    let mut first = true;
+    q.for_each(|_, mut r| {
+        if std::mem::take(&mut first) {
+            r.n += 100;
+        }
+    });
+}
+
+#[test]
+fn a_re_sort_keys_only_the_rows_new_or_written_since() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 4;
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for _ in 0..200 {
+            m.spawn((Rank { n: lcg(&mut seed) % 50 },));
+        }
+    }
+    // Each spawn between frames is a re-sort of its own.
+    assert_eq!(keyed(&w), 1, "a spawn keys only its own row");
+    Schedule { systems: vec![bump_one.system(&w, "bump")] }.run_sequential(&w);
+    assert_eq!(keyed(&w), 1, "one row was written");
+    w.between_frames(Build::default()).unwrap().spawn((Rank { n: 3 },));
+    assert_eq!(keyed(&w), 1, "one row is new");
+    check(&w, &HashMap::new());
+    let walk = Schedule { systems: vec![walk_ordered.system(&w, "walk")] };
+    walk.run_sequential(&w);
+    assert_eq!(seen(), brute(&w));
+}
+
+component! {
+    /// `Rank` as a newer build keys it: the same layout, the other way up.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct RankDown: "test::Rank", order = key { pub n: u32 }
+}
+
+impl OrderKey for RankDown {
+    fn key(&self) -> u128 {
+        (u32::MAX - self.n) as u128
+    }
+}
+
+/// Keys written nowhere can still change: a newer build's glue may key the
+/// same values otherwise, so the next re-sort keys every row again.
+#[test]
+fn a_newer_build_of_the_key_keys_every_row_again() {
+    use engine_ecs::ComponentDesc;
+    let _s = serial();
+    let w = World::new();
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for n in 0..40 {
+            m.spawn((Rank { n },));
+        }
+    }
+    let newer = Build { name: "newer".into(), loaded_at: 1, keepalive: None };
+    w.install(&ComponentDesc::of::<RankDown>(), &newer).unwrap();
+    // A new row marks the table for its next re-sort.
+    w.between_frames(Build::default()).unwrap().spawn((Rank { n: 40 },));
+    assert_eq!(keyed(&w), 41);
+    let t = w.tables().find(|t| t.ordered.is_some()).unwrap();
+    let ranks: HashMap<Entity, Rank> = w.values::<Rank>().unwrap().into_iter().collect();
+    let order: Vec<u32> = t.rows.read().unwrap().iter().flatten().map(|e| ranks[e].n).collect();
+    assert_eq!(order, (0..=40).rev().collect::<Vec<u32>>(), "in the newer build's order");
+}
+
 #[test]
 fn whether_a_component_is_ordered_is_fixed_like_its_storage() {
     use engine_ecs::ComponentDesc;

@@ -397,6 +397,37 @@ fn boxes_touching_edge_to_edge_pair() {
 }
 
 /// Rows whose boxes the last re-sort of each spatial table recomputed.
+/// A page splits at a boundary of the largest block of the Z-order between
+/// its rows' quartiles, so pages tend to be whole blocks: on a grid of a
+/// point per cell, spawned shuffled in batches, a page's box is about a
+/// block's (4 by 4 cells for 16 rows, 4 by 2 for 8). Split at the median,
+/// ranges straddle blocks, and boxes are longer and overlap more.
+#[test]
+fn pages_are_blocks_of_the_order() {
+    let _s = serial();
+    let w = World::new();
+    let (width, height) = (37, 23);
+    let mut cells: Vec<(i32, i32)> = (0..width).flat_map(|x| (0..height).map(move |y| (x, y))).collect();
+    let mut seed = 5;
+    for i in (1..cells.len()).rev() {
+        cells.swap(i, (lcg(&mut seed) * (i + 1) as f32) as usize % (i + 1));
+    }
+    for batch in cells.chunks(40) {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for &(x, y) in batch {
+            m.spawn((At { x: x as f32 + 0.5, y: y as f32 + 0.5 },));
+        }
+    }
+    check(&w);
+    let t = w.tables().find(|t| t.spatial.is_some()).unwrap();
+    let (rows, pages) = (t.rows.read().unwrap(), t.spatial.as_ref().unwrap().pages.read().unwrap());
+    let used: Vec<usize> = pages.order.iter().map(|&p| p as usize).filter(|&p| !rows[p].is_empty()).collect();
+    let span = |p: usize| (pages.bounds[p].max[0] - pages.bounds[p].min[0]) + (pages.bounds[p].max[1] - pages.bounds[p].min[1]);
+    let mean = used.iter().map(|&p| span(p)).sum::<f32>() / used.len() as f32;
+    // 6.2 over 59 pages; 9.5 over 73 split at the median (2026-09-24).
+    assert!(mean < 7.5, "{} pages, of a mean width and height {mean}", used.len());
+}
+
 fn rebounded(w: &World) -> usize {
     w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum()
 }

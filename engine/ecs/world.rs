@@ -610,9 +610,10 @@ impl World {
         info.spatial || info.ordered || self.extents.lock().unwrap().iter().any(|n| *n == info.name)
     }
 
-    /// The glue of ordered key `c`, from the build that installed it.
-    fn order_desc(&self, c: ComponentId) -> Option<OrderDesc> {
-        self.component(c).installed.read().unwrap().as_ref().and_then(|i| i.order)
+    /// The glue of ordered key `c`, and when the build that installed it
+    /// was loaded.
+    fn order_desc(&self, c: ComponentId) -> Option<(OrderDesc, u64)> {
+        self.component(c).installed.read().unwrap().as_ref().and_then(|i| Some((i.order?, i.loaded_at)))
     }
 
     /// The glue of spatial key `c`, from the build that installed it.
@@ -670,7 +671,7 @@ impl World {
         });
         let page_rows = if spatial.is_some() { SPATIAL_PAGE_ROWS } else { PAGE_ROWS };
         let ordered = spatial.is_none().then(|| set.iter().copied().find(|&c| self.component(c).ordered)).flatten().map(|key| {
-            OrderedTable { key, order: RwLock::new(KeyOrder { keys: vec![Vec::new()], ..Default::default() }) }
+            OrderedTable { key, order: RwLock::new(KeyOrder::default()) }
         });
         let table =
             Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial, ordered };
@@ -1121,15 +1122,18 @@ impl Drop for Structural<'_> {
         for t in self.tables.iter_mut().flatten() {
             if let Some(order) = t.ordered.as_mut().filter(|o| o.dirty) {
                 let key = t.table.ordered.as_ref().expect("an ordered table").key;
+                let (desc, desc_loaded_at) = world.order_desc(key).expect("an installed ordered key");
                 ordered::Resort {
                     table: t.table.id,
                     rows: &mut t.rows,
                     columns: t.columns.iter_mut().map(|c| &mut **c).collect(),
                     order,
                     key: t.table.column_index(key).expect("the key's own table"),
-                    desc: world.order_desc(key).expect("an installed ordered key"),
+                    desc,
+                    desc_loaded_at,
                     page_rows: t.table.page_rows,
                     entities: &world.entities,
+                    now: world.current_tick(),
                 }
                 .run();
             }
