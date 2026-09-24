@@ -1461,7 +1461,13 @@ pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) ->
                 return;
             }
             let ma = a.meeting(box_b, grow) & pass_a;
-            if ma != 0 && cross(keys, a, ma, b, mb, grow) {
+            // From the side with fewer rows reaching the other: a wall
+            // reaching a page is one test, not one per row of the page.
+            // Not in the active sweep, where choosing cost more than it
+            // saved (2026-09-24, `spatial_bench`'s dense layout).
+            let fewer = ma.count_ones() <= mb.count_ones();
+            let found = ma != 0 && if fewer { cross(keys, a, ma, b, mb, grow) } else { cross(keys, b, mb, a, ma, grow) };
+            if found {
                 let mut m = mb;
                 while m != 0 {
                     note(&mut generation, table.rows[p][m.trailing_zeros() as usize]);
@@ -1508,13 +1514,10 @@ fn pair_of(a: u32, b: u32) -> u64 {
 }
 
 /// Pairs the rows of `a` in `ma` with the rows of `b` in `mb` whose grown
-/// boxes meet. Returns whether it found any.
+/// boxes meet, a row of `a` at a time against all of `b`'s at once.
+/// Returns whether it found any.
 #[inline(always)]
-fn cross(keys: &mut Vec<u64>, a: &Lanes, ma: u32, b: &Lanes, mb: u32, grow: f32) -> bool {
-    // A row at a time from the side with fewer, each against all of the
-    // other's at once: a wall reaching a page is one test, not one per row
-    // of the page. The test is the same either way round.
-    let (a, mut ma, b, mb) = if ma.count_ones() <= mb.count_ones() { (a, ma, b, mb) } else { (b, mb, a, ma) };
+fn cross(keys: &mut Vec<u64>, a: &Lanes, mut ma: u32, b: &Lanes, mb: u32, grow: f32) -> bool {
     let before = keys.len();
     while ma != 0 {
         let x = ma.trailing_zeros() as usize;

@@ -355,27 +355,35 @@ narrowphase and solver, contacts in the same order, bodies as indices. It
 asserts they end bit for bit the same (they do), so what differs is the
 cost of the world, not different work.
 
-µs per step, `-c opt`, one thread, ECS / arrays, the median of five runs.
+µs per step, `-c opt`, one thread, ECS / arrays, the median of three runs
+(pages as blocks of the order and sleeping as storage both merged).
 Settled is 400 steps after the drop, when every body still creeps 1e-4 to
 1e-2 a step; at rest is 4000, when the pile has stopped bit for bit (1000
 bodies by about step 2800, 10 000 by 3000):
 
 | | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
 |---|---|---|---|---|---|
-| frame | 133 / 125 | 126 / 123 | 730 / 572 | 1350 / 1298 | 1288 / 1289 |
-| gathering colliders | 4 / – | 4 / – | 51 / – | 49 / – | 50 / – |
-| broadphase | 14 / 25 | 14 / 25 | 116 / 205 | 150 / 285 | 150 / 285 |
-| narrowphase | 9 / 18 | 9 / 18 | 37 / 60 | 96 / 185 | 99 / 186 |
-| merging contacts | 4 / 1 | 4 / 1 | 15 / 4 | 36 / 12 | 36 / 12 |
-| solve: gathering | 7 / 3 | 7 / 3 | 54 / 22 | 73 / 31 | 73 / 31 |
-| solver | 75 / 75 | 74 / 74 | 262 / 257 | 780 / 756 | 766 / 746 |
-| writing back | 6 / 2 | 6 / 2 | 49 / 16 | 67 / 20 | 64 / 20 |
-| outside the systems (the spatial re-sort) | 11 / – | 6 / – | 127 / – | 78 / – | 24 / – |
+| frame | 133 / 123 | 126 / 123 | 721 / 564 | 1338 / 1283 | 1263 / 1266 |
+| gravity | 2 / 1 | 2 / 1 | 20 / 10 | 20 / 10 | 21 / 10 |
+| gathering colliders | 4 / – | 4 / – | 51 / – | 49 / – | 49 / – |
+| broadphase | 15 / 25 | 15 / 26 | 121 / 204 | 161 / 285 | 160 / 285 |
+| narrowphase | 9 / 18 | 9 / 18 | 34 / 58 | 100 / 183 | 97 / 180 |
+| merging contacts | 3 / 1 | 3 / 1 | 15 / 3 | 34 / 11 | 34 / 12 |
+| solve: gathering | 7 / 3 | 7 / 3 | 49 / 21 | 67 / 30 | 67 / 30 |
+| solver | 74 / 73 | 73 / 72 | 256 / 252 | 763 / 744 | 750 / 731 |
+| writing back | 6 / 2 | 6 / 2 | 48 / 15 | 65 / 20 | 62 / 19 |
+| outside the systems (the spatial re-sort) | 13 / – | 7 / – | 126 / – | 78 / – | 25 / – |
 
 The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
-1350, 4% over them, where it was 129%, and at rest the two are the same.
-Falling, where bodies change pages every step, it's 28% over (730 against
-572), where it was 62% before pages were made blocks of the order.[^tax]
+1338, 4% over them, where it was 129%, and at rest the two are the same.
+Falling, where bodies change pages every step, it's 28% over (721 against
+564), where it was 62% before pages were made blocks of the order.[^tax]
+The broadphase is about 10 µs slower than before the two-sided
+`near_pairs` that sleeping uses, measured in one session: 150 at 10 000
+settled and 115 falling, against 161 and 121. About 4 of it is the walls
+on the passive side; the rest isn't found (on the dense layout of
+`spatial_bench`, a query's own `near_pairs`, the two are the same, 348
+against 351 µs).[^merged]
 What took it there:
 
 - **The spatial storage, reworked** (upkeep and broadphase:
@@ -467,8 +475,8 @@ What took it there:
   marking static bodies' rows written, and it would defeat writing only
   the positions that change.
 
-**What's left**, of the 10 000 falling frame's 158 µs over the arrays
-(52 settled), before what the broadphase and narrowphase save:
+**What's left**, of the 10 000 falling frame's 157 µs over the arrays
+(55 settled), before what the broadphase and narrowphase save:
 
 1. **Copying in and out, 150 µs** (117 over the arrays falling). Colliders out for detection (which
    makes the narrowphase faster than the arrays', whose bodies are spread
@@ -478,14 +486,14 @@ What took it there:
    index is where it's stored; rows in the world can't be that, since
    spatial order moves them. A walk over bodies still costs about twice a
    `Vec`'s: about 15 ns a page, on spatial pages of 12 rows on average.
-2. **The re-sort**, 127 µs falling (re-bounding every body about 72,
-   moving rows 20), 78 while bodies creep, 24 at rest.
+2. **The re-sort**, 126 µs falling (re-bounding every body about 72,
+   moving rows 20), 78 while bodies creep, 25 at rest.
 3. **The merge**, contacts updated in the world rather than a list
    replaced, 24 µs over the arrays; and, falling, spawning 331 contacts
    and sending 331 `Contact` events a step, about 35 µs applying them,
    each a boxed closure in the system's log.
 
-The broadphase is now about half the arrays'. The
+The broadphase is now 56 to 59% of the arrays'. The
 solver and the narrowphase cost the same either way, since they're the
 same code over the same arrays. The scheduler and frame cost about 7 µs.
 Neither side is parallel yet, and scenes that churn contacts, or bodies
@@ -517,28 +525,27 @@ per body, the prototype) and after:
 | | 1000, before | 1000, after | 10 000, before | 10 000, after |
 |---|---|---|---|---|
 | asleep by step | 630 | 630 | 550 | 550 |
-| frame | 56 / 140 | 10 / 142 | 580 / 1472 | 26 / 1503 |
-| gravity (and waking) | 2 / 2 | 1 / 2 | 22 / 22 | 8 / 23 |
-| gathering colliders | 5 / 5 | 0 / 4 | 51 / 52 | 1 / 54 |
-| broadphase | 20 / 20 | 0 / 21 | 208 / 222 | 2 / 243 |
-| narrowphase | 4 / 9 | 0 / 10 | 51 / 98 | 0 / 114 |
-| merging contacts | 5 / 4 | 0 / 4 | 54 / 36 | 0 / 36 |
-| solve: gathering | 9 / 7 | 0 / 7 | 101 / 78 | 1 / 71 |
-| solver | 0 / 75 | 0 / 74 | 0 / 789 | 0 / 794 |
-| writing back | 6 / 6 | 0 / 6 | 62 / 71 | 1 / 69 |
-| outside the systems | 6 / 13 | 8 / 14 | 25 / 102 | 13 / 103 |
+| frame | 51 / 134 | 9 / 133 | 506 / 1349 | 22 / 1340 |
+| gravity (and waking) | 2 / 2 | 1 / 2 | 20 / 20 | 8 / 20 |
+| gathering colliders | 4 / 4 | 0 / 4 | 49 / 49 | 1 / 49 |
+| broadphase | 14 / 14 | 0 / 15 | 149 / 146 | 2 / 160 |
+| narrowphase | 4 / 9 | 0 / 10 | 48 / 98 | 0 / 107 |
+| merging contacts | 5 / 4 | 0 / 3 | 53 / 36 | 0 / 34 |
+| solve: gathering | 9 / 7 | 0 / 6 | 97 / 71 | 1 / 67 |
+| solver | 0 / 75 | 0 / 74 | 0 / 773 | 0 / 762 |
+| writing back | 6 / 6 | 0 / 6 | 61 / 66 | 1 / 65 |
+| outside the systems | 6 / 11 | 7 / 12 | 25 / 78 | 9 / 78 |
 | deepest overlap | 0.007 / 0.007 | 0.007 / 0.007 | 0.006 / 0.006 | 0.006 / 0.006 |
 
-(The before rows for gravity and gathering are from the awake column and
-the main table: the prototype's table didn't show them, and both walked
-every body asleep or not. Awake numbers drift a few per cent between
-sessions on this machine: the arrays' frame, the same code both times,
-went from 1250 to 1285 at 10 000 at rest.)
+(Before is the prototype on pages as blocks of the order, measured in the
+same session as after. Its gravity and gathering are from the main table:
+its sleeping table didn't show them, and both walked every body asleep or
+not.)[^sleep-first]
 
 What's left asleep at 10 000 is about 8 µs looking for what games changed
 (a look at each sleeping page's ticks, `for_each_written`, over five
-terms), and the frame's fixed cost outside the systems, which grows from 8
-to 13 µs between 1000 and 10 000 for a reason not found (nothing re-sorts,
+terms), and the frame's fixed cost outside the systems, which grows from 7
+to 9 µs between 1000 and 10 000 for a reason not found (nothing re-sorts,
 and nothing outside the systems walks the sleeping rows that we know of).
 
 **The broadphase** is `near_pairs(active, passive, grow)`
@@ -551,9 +558,9 @@ the broadphase pairs with an awake one is gathered then, by lookup. Statics
 went passive too: static against static never made anything (neither
 arrives nor pushes), and static against sleeping would be a resting pair
 found again every step. With nothing asleep that costs the broadphase
-about 5 µs of 220 at 10 000 (the walls tested from their side; within
-about 2% in `spatial_bench`); the whole awake frame is 1 to 2% over
-before, about what the machine drifts, so not measured apart.
+about 4 µs at 10 000 (the walls tested from their side), part of the 10
+µs it is over the one-sided broadphase ([What the ECS
+costs](#what-the-ecs-costs)).
 
 **What wakes an island** (the whole island, as it fell asleep):
 
@@ -782,6 +789,11 @@ frame 508.
     at 10 000 settled, for a reason not found (measured, not read in the
     assembly). The walk was split on it.
 
+[^sleep-first]: *(History, 2026-09-24.)* Measured first before pages
+    were made blocks of the order, µs, asleep / awake: at 1000, frame 56 /
+    140 before and 10 / 142 after; at 10 000, 580 / 1472 and 26 / 1503,
+    the broadphase 208 / 222 and 2 / 243.
+
 [^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
     in the mod's transient state, by entity, and every walk looked each
     body (and each contact's ends) up in it: asleep, the broadphase,
@@ -790,6 +802,14 @@ frame 508.
     write or despawn didn't wake anything; `Touching` on sleeping bodies
     was reset each step. Its test's two surviving mutations (sleeping
     bodies not immovable, and written back) went with the lookups.
+
+[^merged]: *(History, 2026-09-24.)* Before sleeping as storage was merged
+    with pages as blocks of the order, the latter's `:tax`, medians of
+    five: frame 133 / 125, 126 / 123, 730 / 572, 1350 / 1298 and 1288 /
+    1289 (the table's columns in order); broadphase 14, 14, 116, 150, 150.
+    Merged, `near_pairs` first chose per pair of active pages which side
+    to test row by row from: the dense layout went from 351 µs to 375, so
+    only passive pages choose now.
 
 [^tax]: *(History, 2026-09-24.)* When `:tax` was written, at 10 000
     bodies settled: frame 2909 µs against the arrays' 1269, gathering

@@ -213,19 +213,23 @@ ordered pages, with a box) and each big page looks up, by binary search in
 the sweep's order, the active pages that may reach it (from its left edge
 less the widest active page), and only pages of a run some active page
 meets are tested. So a passive table no active page is near costs its
-runs, not its rows. A pair of pages tests the rows of whichever side has
-fewer reaching the other against all of the other's at once: a wall
-reaching a page is one test, not one per row of the page, which took
-walls on the passive side from 2% slower than on the active side (in a
-pile 440 rows wide) to about 1%, and none in a square one. Pairs sort by comparison when there are few for the indices
-they span (under a quarter): a bucket per index costs passes over every
-index, and 800 pairs among 10 000 indices went from 25 µs to 18.
+runs, not its rows. A passive page is tested against an active one from
+whichever side has fewer rows reaching the other, each against all of the
+other's at once: a wall reaching a page is one test, not one per row of
+the page, which took walls on the passive side from 2% slower than on the
+active side (in a pile 440 rows wide) to about 1%. Between two active
+pages it doesn't choose: there it cost the dense layout 7% (351 µs to
+375). Pairs sort by comparison when there are few for the indices they
+span (under a quarter): a bucket per index costs passes over every index,
+and 800 pairs among 10 000 indices went from 25 µs to 18.
 
-`spatial_bench`, 10 000 touching rows and three walls, µs, three runs:
-one query, 658; walls passive, 650; everything passive but 200 rows on
-top, 18 to 19. At 1000: 40, 40, 1.4. A table matched twice (by both sides,
-or two queries of one) is allowed, at the price of making pairs unique
-after, a pass over all of them.
+`spatial_bench`, 10 000 touching rows and three walls, µs, two runs, with
+pages as blocks of the order: one query, 387; walls passive, 387 to 390;
+everything passive but 200 rows on top, 13. At 1000: 36, 36, 1.2. In
+physics's step the two-sided broadphase is about 10 µs over the one-sided
+one at 10 000 (physics.md, "What the ECS costs"). A table matched twice
+(by both sides, or two queries of one) is allowed, at the price of making
+pairs unique after, a pass over all of them.
 
 Tested against brute force (`spatial_test`,
 `pairs_between_sides_agree_with_brute_force`: sides split by a table
