@@ -947,7 +947,7 @@ impl<'w> Structural<'w> {
         values(NewRow { columns: &mut t.columns });
         assert!(t.columns.iter().all(|c| c[page].len() == row + 1), "every column gets a value");
         if let Some(pages) = &mut t.spatial {
-            pages.push_row(page);
+            pages.push_row(page, e);
         }
         if let Some(order) = &mut t.ordered {
             order.push_row(page);
@@ -1008,7 +1008,7 @@ impl<'w> Structural<'w> {
         extra(NewRow { columns: &mut t.columns }, table);
         assert!(t.columns.iter().all(|c| c[page].len() == row + 1), "every column gets a value");
         if let Some(pages) = &mut t.spatial {
-            pages.push_row(page);
+            pages.push_row(page, e);
         }
         if let Some(order) = &mut t.ordered {
             order.push_row(page);
@@ -1151,6 +1151,8 @@ impl Drop for Structural<'_> {
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),
+                hi: Vec::new(),
+                ranges_changed: true,
             }
             .run();
         }

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
-use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Query, SpatialKey, World, component};
+use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Query, SpatialKey, With, Without, World, component};
 
 component! {
     /// A spatial key: its tables are kept in spatial order.
@@ -410,4 +410,95 @@ fn whether_a_component_is_spatial_is_fixed_like_its_storage() {
     w.between_frames(Build::default()).unwrap().spawn((At::default(),));
     let err = w.intern(&ComponentDesc::of::<Flat>()).unwrap_err();
     assert!(err.contains("spatial order"), "{err}");
+}
+
+component! {
+    /// Sparse, so a filter on it is checked row by row, not by table.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Mark: "test::Mark", storage = sparse { pub n: u32 }
+}
+
+fn brute_pairs_of(w: &World, grow: f32, keep: impl Fn(Entity) -> bool) -> Vec<(Entity, Entity)> {
+    brute_pairs(w, grow).into_iter().filter(|&(a, b)| keep(a) && keep(b)).collect()
+}
+
+#[test]
+fn pairs_through_filters_agree_with_brute_force() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 9;
+    let es = populate(&w, 600, &mut seed);
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for &e in es.iter().filter(|e| e.index % 3 == 0) {
+            m.insert(e, Mark { n: 1 });
+        }
+    }
+    static WITH: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    static WITHOUT_TAG: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    fn without(_: &mut Cx, mut q: Query<&At, Without<Mark>>) {
+        *PAIRS.lock().unwrap() = q.near_pairs(0.05);
+    }
+    fn with(_: &mut Cx, mut q: Query<&At, With<Mark>>) {
+        *WITH.lock().unwrap() = q.near_pairs(0.05);
+    }
+    fn without_tag(_: &mut Cx, mut q: Query<&At, Without<Tag>>) {
+        *WITHOUT_TAG.lock().unwrap() = q.near_pairs(0.05);
+    }
+    let s = Schedule {
+        systems: vec![
+            mover.system(&w, "mover"),
+            without.system(&w, "without"),
+            with.system(&w, "with"),
+            without_tag.system(&w, "without_tag"),
+        ],
+    };
+    let marked: std::collections::HashSet<Entity> = w.values::<Mark>().unwrap().into_iter().map(|(e, _)| e).collect();
+    let tagged: std::collections::HashSet<Entity> = w.values::<Tag>().unwrap().into_iter().map(|(e, _)| e).collect();
+    for _ in 0..10 {
+        s.run_sequential(&w);
+        let (unmarked, marked_pairs) = (PAIRS.lock().unwrap().clone(), WITH.lock().unwrap().clone());
+        assert!(!unmarked.is_empty() && !marked_pairs.is_empty());
+        assert_eq!(unmarked, brute_pairs_of(&w, 0.05, |e| !marked.contains(&e)));
+        assert_eq!(marked_pairs, brute_pairs_of(&w, 0.05, |e| marked.contains(&e)));
+        assert_eq!(*WITHOUT_TAG.lock().unwrap(), brute_pairs_of(&w, 0.05, |e| !tagged.contains(&e)));
+    }
+}
+
+#[test]
+fn a_dense_pile_pairs_as_brute_force_says() {
+    let _s = serial();
+    let w = World::new();
+    // Touching boxes in rows, as a settled pile is: full pages, each meeting
+    // its neighbors on every side, most rows reaching into the next page.
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let mut seed = 10;
+        for k in 0..900 {
+            let (col, row) = ((k % 45) as f32, (k / 45) as f32);
+            let at = At { x: col * 0.9 + lcg(&mut seed) * 0.05, y: row * 0.9 + lcg(&mut seed) * 0.05 };
+            m.spawn((at, Size { hx: 0.45, hy: 0.45 }));
+        }
+        // A floor under all of it, in a big page.
+        m.spawn((At { x: 20.0, y: -0.9 }, Size { hx: 21.0, hy: 0.5 }));
+    }
+    fn jiggle(_: &mut Cx, mut q: Query<&mut At, With<Size>>) {
+        let frame = FRAME.fetch_add(1, Ordering::SeqCst) as u64;
+        let mut s = frame + 5;
+        q.for_each(|_, mut at| {
+            at.x += (lcg(&mut s) - 0.5) * 0.04;
+            at.y += (lcg(&mut s) - 0.5) * 0.04;
+        });
+    }
+    fn pairs(_: &mut Cx, mut q: Query<&At>) {
+        *PAIRS.lock().unwrap() = q.near_pairs(0.05);
+    }
+    let s = Schedule { systems: vec![jiggle.system(&w, "jiggle"), pairs.system(&w, "pairs")] };
+    for _ in 0..10 {
+        s.run_sequential(&w);
+        let got = PAIRS.lock().unwrap().clone();
+        assert!(got.len() > 2000, "{} pairs: not dense", got.len());
+        assert_eq!(got, brute_pairs(&w, 0.05));
+        check(&w);
+    }
 }

@@ -133,11 +133,115 @@ fn spread(v: u32) -> u64 {
     (x | (x << 1)) & 0x5555_5555_5555_5555
 }
 
+/// `v.floor() as i64`, exactly, without `floor`: on x86-64's baseline (no
+/// SSE4.1) that's a call into libm, two for every row a re-sort re-bounds.
+/// Truncation rounds toward zero, so a negative value with a fraction is
+/// one more than its floor; an `f32` of 2^24 or more is whole, and converts
+/// back exactly.
+fn floor_i64(v: f32) -> i64 {
+    let t = v as i64;
+    t.saturating_sub((v < t as f32) as i64)
+}
+
 /// The Z-order key of a box's cell. Offset so negative cells sort too.
 fn morton(b: &Bounds, cell: f32) -> u64 {
-    let c = |v: f32| ((v / cell).floor() as i64 + (1 << 20)).clamp(0, u32::MAX as i64) as u32;
+    let c = |v: f32| (floor_i64(v / cell) + (1 << 20)).clamp(0, u32::MAX as i64) as u32;
     let [x, y] = b.center();
     spread(c(x)) | (spread(c(y)) << 1)
+}
+
+/// A page's rows' boxes, by coordinate, with their entities' indices: the
+/// order's one copy of each row's box, kept by coordinate so a box is
+/// tested against every row of a page at once. `meeting` is a mask of which
+/// rows meet it, with no branch per row: in a dense pile each test is about
+/// even odds, so branches on them mispredict. Lanes past the page's rows
+/// hold empty boxes, which meet nothing.
+#[derive(Clone, Copy)]
+pub struct Lanes {
+    min_x: [f32; SPATIAL_PAGE_ROWS],
+    min_y: [f32; SPATIAL_PAGE_ROWS],
+    max_x: [f32; SPATIAL_PAGE_ROWS],
+    max_y: [f32; SPATIAL_PAGE_ROWS],
+    pub index: [u32; SPATIAL_PAGE_ROWS],
+    len: usize,
+}
+
+// Masks are `u32`s.
+const _: () = assert!(SPATIAL_PAGE_ROWS <= 32);
+
+impl Lanes {
+    const EMPTY: Lanes = Lanes {
+        min_x: [f32::INFINITY; SPATIAL_PAGE_ROWS],
+        min_y: [f32::INFINITY; SPATIAL_PAGE_ROWS],
+        max_x: [f32::NEG_INFINITY; SPATIAL_PAGE_ROWS],
+        max_y: [f32::NEG_INFINITY; SPATIAL_PAGE_ROWS],
+        index: [0; SPATIAL_PAGE_ROWS],
+        len: 0,
+    };
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Row `i`'s box.
+    pub fn get(&self, i: usize) -> Bounds {
+        assert!(i < self.len, "row {i} of {}", self.len);
+        Bounds { min: [self.min_x[i], self.min_y[i]], max: [self.max_x[i], self.max_y[i]] }
+    }
+
+    fn set(&mut self, i: usize, b: Bounds) {
+        assert!(i < self.len, "row {i} of {}", self.len);
+        (self.min_x[i], self.min_y[i], self.max_x[i], self.max_y[i]) = (b.min[0], b.min[1], b.max[0], b.max[1]);
+    }
+
+    fn push(&mut self, b: Bounds, index: u32) {
+        self.len += 1;
+        self.set(self.len - 1, b);
+        self.index[self.len - 1] = index;
+    }
+
+    /// Row `i` out, and the last row in its place, as `Vec::swap_remove`.
+    fn swap_remove(&mut self, i: usize) -> (Bounds, u32) {
+        let (b, index, last) = (self.get(i), self.index[i], self.len - 1);
+        self.set(i, self.get(last));
+        self.index[i] = self.index[last];
+        self.set(last, Bounds::EMPTY);
+        self.len -= 1;
+        (b, index)
+    }
+
+    /// The box around every row.
+    fn bounds(&self) -> Bounds {
+        (0..self.len).fold(Bounds::EMPTY, |u, i| u.union(&self.get(i)))
+    }
+
+    /// Row `i`'s box, grown by `grow`: unchecked against `len`, for the
+    /// broadphase's inner loops, which only ask for rows a mask names.
+    #[inline(always)]
+    pub fn grown(&self, i: usize, grow: f32) -> Bounds {
+        Bounds { min: [self.min_x[i], self.min_y[i]], max: [self.max_x[i], self.max_y[i]] }.grown(grow)
+    }
+
+    /// Which rows' boxes, grown by `grow`, meet `b`, as bits by row. Grown
+    /// here rather than stored grown, with the same operations as
+    /// `Bounds::grown`, so the answer is bit for bit that of growing first
+    /// (and a grow of 0 changes nothing).
+    #[inline(always)]
+    pub fn meeting(&self, b: &Bounds, grow: f32) -> u32 {
+        let mut m = 0;
+        for i in 0..SPATIAL_PAGE_ROWS {
+            let hit = ((self.min_x[i] - grow) <= b.max[0])
+                & (b.min[0] <= (self.max_x[i] + grow))
+                & ((self.min_y[i] - grow) <= b.max[1])
+                & (b.min[1] <= (self.max_y[i] + grow));
+            m |= (hit as u32) << i;
+        }
+        m
+    }
 }
 
 /// What a page holds.
@@ -154,7 +258,8 @@ pub enum PageKind {
 
 /// A spatial table's order: per physical page (the table's own pages,
 /// whose indices entity locations hold, so they never change), its kind,
-/// range and box, and each row's box and key, parallel to the page's rows.
+/// range and box, and each row's box (in `lanes`) and key, parallel to the
+/// page's rows.
 pub struct SpatialPages {
     pub kind: Vec<PageKind>,
     /// The lowest key of an ordered page.
@@ -162,7 +267,7 @@ pub struct SpatialPages {
     /// Ordered pages, by `lo`.
     pub order: Vec<u32>,
     pub bounds: Vec<Bounds>,
-    pub row_bounds: Vec<Vec<Bounds>>,
+    pub lanes: Vec<Lanes>,
     keys: Vec<Vec<u64>>,
     /// Boxes over runs of `RUN` pages of `order`.
     pub runs: Vec<Bounds>,
@@ -185,7 +290,7 @@ impl Default for SpatialPages {
             lo: vec![0],
             order: vec![0],
             bounds: vec![Bounds::EMPTY],
-            row_bounds: vec![Vec::new()],
+            lanes: vec![Lanes::EMPTY],
             keys: vec![Vec::new()],
             runs: vec![Bounds::EMPTY],
             free: Vec::new(),
@@ -202,20 +307,20 @@ impl SpatialPages {
         self.kind.push(PageKind::Staging);
         self.lo.push(u64::MAX);
         self.bounds.push(Bounds::EMPTY);
-        self.row_bounds.push(Vec::new());
+        self.lanes.push(Lanes::EMPTY);
         self.keys.push(Vec::new());
     }
 
     /// A row pushed onto `page`: placeholders until the re-sort.
-    pub(crate) fn push_row(&mut self, page: usize) {
-        self.row_bounds[page].push(Bounds::EMPTY);
+    pub(crate) fn push_row(&mut self, page: usize, e: Entity) {
+        self.lanes[page].push(Bounds::EMPTY, e.index);
         self.keys[page].push(u64::MAX);
         self.dirty = true;
     }
 
     /// A row swap-removed from `page`, as the table's own rows are.
     pub(crate) fn swap_remove(&mut self, page: usize, row: usize) {
-        self.row_bounds[page].swap_remove(row);
+        self.lanes[page].swap_remove(row);
         self.keys[page].swap_remove(row);
     }
 
@@ -244,7 +349,7 @@ impl SpatialPages {
     /// rows, nothing is left staged, and page and run boxes hold their rows.
     #[doc(hidden)]
     pub fn check(&self, rows: &[Vec<Entity>], big: f32) -> Result<(), String> {
-        if rows.len() != self.kind.len() || self.row_bounds.iter().map(Vec::len).ne(rows.iter().map(Vec::len)) {
+        if rows.len() != self.kind.len() || self.lanes.iter().map(Lanes::len).ne(rows.iter().map(Vec::len)) {
             return Err("the order's pages don't match the table's".into());
         }
         if let Some(p) = rows.iter().position(|r| r.len() > SPATIAL_PAGE_ROWS) {
@@ -260,7 +365,7 @@ impl SpatialPages {
                 if k < self.lo[p] || (k > hi || (k == hi && hi != self.lo[p])) {
                     return Err(format!("{:?} on page {p} has key {k}, outside {}..{hi}", rows[p][r], self.lo[p]));
                 }
-                if self.row_bounds[p][r].reach() > big {
+                if self.lanes[p].get(r).reach() > big {
                     return Err(format!("{:?} is big, and on ordered page {p}", rows[p][r]));
                 }
             }
@@ -269,17 +374,21 @@ impl SpatialPages {
             if self.kind[p] == PageKind::Staging && !rows[p].is_empty() {
                 return Err(format!("page {p} still has staged rows"));
             }
-            if self.kind[p] == PageKind::Big && self.row_bounds[p].iter().any(|b| b.reach() <= big) {
+            let l = &self.lanes[p];
+            if rows[p].iter().enumerate().any(|(r, e)| l.index[r] != e.index) {
+                return Err(format!("page {p}'s boxes aren't in its rows' order"));
+            }
+            if self.kind[p] == PageKind::Big && (0..l.len()).any(|r| l.get(r).reach() <= big) {
                 return Err(format!("big page {p} holds a row that isn't"));
             }
-            for b in &self.row_bounds[p] {
-                if !contains(&self.bounds[p], b) {
+            for b in (0..l.len()).map(|r| l.get(r)) {
+                if !contains(&self.bounds[p], &b) {
                     return Err(format!("page {p}'s box doesn't hold its row {b:?}"));
                 }
             }
         }
         for (r, run) in self.order.chunks(RUN).enumerate() {
-            if run.iter().any(|&p| !contains(&self.runs[r], &self.bounds[p as usize]) && !self.row_bounds[p as usize].is_empty()) {
+            if run.iter().any(|&p| !contains(&self.runs[r], &self.bounds[p as usize]) && !self.lanes[p as usize].is_empty()) {
                 return Err(format!("run {r}'s box doesn't hold its pages"));
             }
         }
@@ -288,19 +397,26 @@ impl SpatialPages {
 
     /// Row `r` of page `p`'s box, as of the last re-sort.
     pub fn row_bounds(&self, p: usize, r: usize) -> Bounds {
-        self.row_bounds[p][r]
-    }
-
-    /// Every row's box, by page.
-    pub fn row_bounds_all(&self) -> &[Vec<Bounds>] {
-        &self.row_bounds
+        self.lanes[p].get(r)
     }
 
     fn rebound(&mut self) {
-        for (p, rows) in self.row_bounds.iter().enumerate() {
-            self.bounds[p] = rows.iter().fold(Bounds::EMPTY, |b, r| b.union(r));
+        for (p, l) in self.lanes.iter().enumerate() {
+            self.bounds[p] = l.bounds();
         }
         self.runs = self.order.chunks(RUN).map(|run| run.iter().fold(Bounds::EMPTY, |b, &p| b.union(&self.bounds[p as usize]))).collect();
+    }
+}
+
+/// Whether a row is where `Resort::target` would put it, found without
+/// its search: an ordered page's row whose key is below the next page's
+/// `lo` (`hi`), or a big page's big row. Most rows, since motion is small
+/// next to a page.
+fn stays(kind: PageKind, lo: u64, hi: u64, big: bool, key: u64) -> bool {
+    match kind {
+        PageKind::Ordered => !big && lo <= key && key < hi,
+        PageKind::Big => big,
+        PageKind::Staging => false,
     }
 }
 
@@ -319,6 +435,11 @@ pub(crate) struct Resort<'a> {
     pub entities: &'a Entities,
     /// The world's tick as the re-sort starts: every write so far.
     pub now: u32,
+    /// Per physical page, the next ordered page's `lo`: for `stays`. Only
+    /// ordered pages' are read, so a big page made since needn't have one.
+    pub hi: Vec<u64>,
+    /// Set by a split, which moves ranges' ends: `hi` is stale. Pass true.
+    pub ranges_changed: bool,
 }
 
 impl Resort<'_> {
@@ -327,25 +448,33 @@ impl Resort<'_> {
     pub fn run(mut self) -> usize {
         let since = self.pages.sorted_tick;
         let mut rebounded = 0;
-        for p in 0..self.rows.len() {
-            for r in 0..self.rows[p].len() {
+        self.refresh_ranges();
+        // Pages with a row that may not stay: only those are walked. A row
+        // that isn't re-bounded stays, since ranges only change as rows move.
+        let mut unsettled = vec![false; self.rows.len()];
+        let Resort { rows, columns, pages, key, extent, desc, hi, .. } = &mut self;
+        for p in 0..rows.len() {
+            let key_column = &columns[*key][p];
+            let extent_column = extent.map(|x| &columns[x][p]);
+            let (lanes, keys) = (&mut pages.lanes[p], &mut pages.keys[p]);
+            for r in 0..rows[p].len() {
                 // Only rows new to the table (a placeholder key) or whose key
                 // or extent was written since the last sort: the rest keep
                 // their boxes and keys.
-                let written = |c: usize| self.columns[c][p].ticks()[r] > since;
-                let new = self.pages.keys[p][r] == u64::MAX;
-                if !new && !written(self.key) && !self.extent.is_some_and(written) {
+                let new = keys[r] == u64::MAX;
+                if !new && key_column.ticks()[r] <= since && extent_column.is_none_or(|c| c.ticks()[r] <= since) {
                     continue;
                 }
                 rebounded += 1;
-                let key = self.columns[self.key][p].value_ptr(r);
-                let extent = self.extent.map_or(std::ptr::null(), |x| self.columns[x][p].value_ptr(r));
-                // SAFETY: `key` is a value of the key's installed layout,
-                // whose build the glue came from, and `extent` is only passed
+                let k = key_column.value_ptr(r);
+                let x = extent_column.map_or(std::ptr::null(), |c| c.value_ptr(r));
+                // SAFETY: `k` is a value of the key's installed layout,
+                // whose build the glue came from, and `x` is only passed
                 // when installed with the layout the glue reads.
-                let b = unsafe { (self.desc.bounds)(key, extent) };
-                self.pages.row_bounds[p][r] = b;
-                self.pages.keys[p][r] = morton(&b, self.desc.cell);
+                let b = unsafe { (desc.bounds)(k, x) };
+                lanes.set(r, b);
+                keys[r] = morton(&b, desc.cell);
+                unsettled[p] |= !stays(pages.kind[p], pages.lo[p], hi[p], b.reach() > desc.big, keys[r]);
             }
         }
         self.pages.free = (0..self.rows.len())
@@ -353,12 +482,20 @@ impl Resort<'_> {
             .map(|p| p as u32)
             .collect();
         let mut moved = 0;
-        // Pages a split makes are walked too, since they may take rows
-        // that haven't been placed yet.
+        // Pages a split makes are walked too (they're past `unsettled`),
+        // since they may take rows that haven't been placed yet.
         let mut p = 0;
         while p < self.rows.len() {
+            if unsettled.get(p) == Some(&false) {
+                p += 1;
+                continue;
+            }
             let mut r = 0;
             while r < self.rows[p].len() {
+                if self.row_stays(p, r) {
+                    r += 1;
+                    continue;
+                }
                 let target = self.target(p, r);
                 if target == p {
                     r += 1;
@@ -378,9 +515,30 @@ impl Resort<'_> {
         moved
     }
 
+    /// The end of each ordered page's range, `hi`, if a split has changed
+    /// them since they were last found.
+    fn refresh_ranges(&mut self) {
+        if self.ranges_changed {
+            self.hi.clear();
+            self.hi.resize(self.rows.len(), 0);
+            for (i, &q) in self.pages.order.iter().enumerate() {
+                self.hi[q as usize] = self.pages.order.get(i + 1).map_or(u64::MAX, |&n| self.pages.lo[n as usize]);
+            }
+            self.ranges_changed = false;
+        }
+    }
+
+    /// `stays` for row `r` of page `p`.
+    fn row_stays(&mut self, p: usize, r: usize) -> bool {
+        self.refresh_ranges();
+        let big = self.pages.lanes[p].get(r).reach() > self.desc.big;
+        let hi = self.hi.get(p).copied().unwrap_or(0);
+        stays(self.pages.kind[p], self.pages.lo[p], hi, big, self.pages.keys[p][r])
+    }
+
     /// Where row `r` of page `p` belongs, making room there if it's full.
     fn target(&mut self, p: usize, r: usize) -> usize {
-        let b = self.pages.row_bounds[p][r];
+        let b = self.pages.lanes[p].get(r);
         if b.reach() > self.desc.big {
             if self.pages.kind[p] == PageKind::Big {
                 return p;
@@ -444,6 +602,7 @@ impl Resort<'_> {
     /// keys under `k`, one above for keys over it, or another page of `k`
     /// (pages may share a `lo`; the last takes new rows).
     fn split(&mut self, q: usize, key: u64) -> usize {
+        self.ranges_changed = true;
         let at = self.pages.order.iter().position(|&p| p as usize == q).expect("an ordered page");
         // Only the rows already in `q`'s range: the others haven't been
         // placed yet, and will leave for their own pages when walked.
@@ -501,9 +660,9 @@ impl Resort<'_> {
         }
         let e = self.rows[p].swap_remove(r);
         self.rows[q].push(e);
-        let b = self.pages.row_bounds[p].swap_remove(r);
+        let (b, index) = self.pages.lanes[p].swap_remove(r);
         let k = self.pages.keys[p].swap_remove(r);
-        self.pages.row_bounds[q].push(b);
+        self.pages.lanes[q].push(b, index);
         self.pages.keys[q].push(k);
         let place = |e: Entity, page: usize, row: usize| {
             self.entities.place(e, Location { table: self.table, page: page as u32, row: row as u32 })
@@ -512,5 +671,44 @@ impl Resort<'_> {
         if let Some(&swapped) = self.rows[p].get(r) {
             place(swapped, p, r);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_i64_is_floor() {
+        let mut vs = vec![0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0e-45, -2.0e-45, 16_777_215.5, -16_777_215.5];
+        vs.extend([16_777_216.0, -16_777_217.0, 3.0e9, -3.0e9, 9.3e18, -9.3e18, 1.0e30, -1.0e30]);
+        vs.extend([f32::MAX, f32::MIN, f32::INFINITY, f32::NEG_INFINITY, f32::NAN]);
+        vs.extend((-2000..2000).map(|i| i as f32 * 0.37));
+        for v in vs {
+            assert_eq!(floor_i64(v), v.floor() as i64, "{v}");
+        }
+    }
+
+    #[test]
+    fn lanes_meet_as_grown_boxes_overlap() {
+        let mut l = Lanes::EMPTY;
+        let boxes: Vec<Bounds> = (0..SPATIAL_PAGE_ROWS - 3)
+            .map(|i| Bounds::around([i as f32 * 0.7, (i % 3) as f32], [0.3 + (i % 2) as f32 * 0.1, 0.4]))
+            .collect();
+        for (i, b) in boxes.iter().enumerate() {
+            l.push(*b, i as u32);
+        }
+        l.swap_remove(2);
+        let now: Vec<Bounds> = (0..l.len()).map(|i| l.get(i)).collect();
+        assert_eq!(now[2], boxes[boxes.len() - 1], "the last row took the removed one's place");
+        assert_eq!(l.index[2], boxes.len() as u32 - 1);
+        for grow in [0.0, 0.05, 0.3] {
+            for probe in (0..40).map(|i| Bounds::around([i as f32 * 0.25 - 1.0, (i % 5) as f32 * 0.5], [0.2, 0.1])) {
+                let want = now.iter().enumerate().fold(0, |m, (i, b)| m | ((b.grown(grow).overlaps(&probe) as u32) << i));
+                assert_eq!(l.meeting(&probe, grow), want, "{probe:?} grown {grow}");
+            }
+        }
+        // Lanes past the rows, the removed one's included, meet nothing.
+        assert_eq!(l.meeting(&Bounds::new([f32::MIN; 2], [f32::MAX; 2]), 1.0) >> l.len(), 0);
     }
 }

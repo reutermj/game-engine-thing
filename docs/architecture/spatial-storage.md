@@ -190,6 +190,30 @@ spatial storage, whose index rebuild is gone. Still open: pairs between
 two pages that haven't changed are the same as last time, and could be
 kept.
 
+**Note, 2026-09-24 (broadphase against sweep and prune).** Each page's row
+boxes are now kept by coordinate (`Lanes`, the order's only copy of them),
+so a box is tested against a whole page at once as a bit mask, without a
+branch per row. `near_pairs` sweeps pages along x, and in each meeting
+pair tests only rows that reach the other page; pairs are sorted by a
+counting pass over the lesser index. The re-sort walks only pages with a
+row that may have left (an O(1) range test at re-bounding), and computes
+Morton cells without `floor` (a libm call on this target; see lore).
+`./bazel run -c opt //engine/std/physics:tax`, µs a step, ECS / arrays:
+broadphase at 10 000 settled 1000 to 235 / 280 (arrays' sweep sorting
+afresh: 425), falling 726 to 212 / 202; at 1000, 61 to 19 / 25 and 58 to
+19 / 20. The re-sort outside the systems: 352 to 160 settled, 429 to 276
+falling. The 10 000 settled frame: 2911 to 1930, against 1270. On the
+dense layout (`spatial_bench`): 1723 to 616 µs at 10 000, 97 to 32 at 1000;
+the 1% writer 164 to 37 µs.
+What was tried and didn't pay: pages of 8 rows (broadphase twice as slow)
+or 32 (broadphase the same, re-sort cheaper; regions not measured);
+scalar tests for small clipped sets; a global sweep along x, whose sweep
+alone is 126 µs on the pile (400 wide, 36 tall) but 2088 µs on the square dense layout against
+487 for pages, since its work grows with the scene's height. Temporal
+coherence by ticks can't help this scene: every body moves bitwise every
+step, settled or not, while the pair set doesn't change at all from step to
+step, so only slack (fat) boxes could reuse pairs.
+
 ## Change detection
 
 2026-09-24 (get-emj.17). Every value in an erased column has a tick, the

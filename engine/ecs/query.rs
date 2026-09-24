@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::component::{Component, ComponentDesc, Entity, Storage};
 use crate::events::{Event, EventQueue};
 use crate::ordered::OrderKey;
-use crate::spatial::{Bounds, PageKind, RUN};
+use crate::spatial::{Bounds, Lanes};
 use crate::world::{ColumnGuard, ComponentId, NewRow, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, TakeGuard, World};
 
 // ---- Declaring ----
@@ -641,86 +641,46 @@ impl Row<'_> {
     }
 }
 
-/// Sorts pairs as `(Entity, Entity)` would, but by a radix sort of their
-/// indices: live entities never share an index, so indices alone order
-/// them, and a broadphase's tens of thousands of pairs sort in a few
-/// passes instead of `n log n` comparisons. Only the bytes that differ
-/// between keys are passed over.
-fn sort_pairs(pairs: &mut Vec<(Entity, Entity)>) {
-    let key = |(a, b): &(Entity, Entity)| ((a.index as u64) << 32) | b.index as u64;
-    let (mut any, mut all) = (0u64, u64::MAX);
-    for p in pairs.iter() {
-        any |= key(p);
-        all &= key(p);
+/// Sorts pair keys, the lesser entity index high and the greater low, by
+/// counting each key's lesser index into a bucket, then sorting each
+/// bucket's few keys by insertion: three passes, where a broadphase's pairs
+/// would take `n log n` comparisons. `max` is past every index. (History:
+/// 2026-09-24, an LSD radix sort over the bytes that differ between keys,
+/// four passes at 10 000 bodies: on the dense bench's 39 000 pairs, 205 µs
+/// with the entities' lookup after it, against 149 for this.)
+fn sort_pair_keys(keys: &mut Vec<u64>, max: usize) {
+    let mut start = vec![0u32; max + 1];
+    for &k in keys.iter() {
+        start[(k >> 32) as usize + 1] += 1;
     }
-    let differ = any ^ all;
-    let mut buf = pairs.clone();
-    for byte in 0..8 {
-        let shift = byte * 8;
-        if (differ >> shift) & 0xff == 0 {
-            continue;
-        }
-        let mut count = [0usize; 257];
-        for p in pairs.iter() {
-            count[((key(p) >> shift) & 0xff) as usize + 1] += 1;
-        }
-        for i in 1..257 {
-            count[i] += count[i - 1];
-        }
-        for p in pairs.iter() {
-            let d = ((key(p) >> shift) & 0xff) as usize;
-            buf[count[d]] = *p;
-            count[d] += 1;
-        }
-        std::mem::swap(pairs, &mut buf);
+    for i in 1..=max {
+        start[i] += start[i - 1];
     }
+    let mut sorted = vec![0u64; keys.len()];
+    let mut at = start.clone();
+    for &k in keys.iter() {
+        let b = (k >> 32) as usize;
+        sorted[at[b] as usize] = k;
+        at[b] += 1;
+    }
+    for w in start.windows(2) {
+        let bucket = &mut sorted[w[0] as usize..w[1] as usize];
+        for i in 1..bucket.len() {
+            let mut j = i;
+            while j > 0 && bucket[j - 1] > bucket[j] {
+                bucket.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
+    *keys = sorted;
 }
 
-/// Pairs within one page's rows, sorted by left edge: each row meets the
-/// rows after it until one starts past its right edge.
-fn sweep_one(rows: &[(Bounds, Entity)], out: &mut Vec<(Entity, Entity)>) {
-    for (i, (a, e)) in rows.iter().enumerate() {
-        for (b, f) in &rows[i + 1..] {
-            if b.min[0] > a.max[0] {
-                break;
-            }
-            if a.overlaps(b) {
-                out.push((*e.min(f), *e.max(f)));
-            }
-        }
-    }
-}
-
-/// Pairs between two pages' rows, each sorted by left edge: one sweep over
-/// both in order, each row meeting the other side's rows still open.
-fn sweep_two(
-    a: &[(Bounds, Entity)],
-    b: &[(Bounds, Entity)],
-    (open_a, open_b): (&mut Vec<usize>, &mut Vec<usize>),
-    out: &mut Vec<(Entity, Entity)>,
-) {
-    let (mut i, mut j) = (0, 0);
-    open_a.clear();
-    open_b.clear();
-    while i < a.len() || j < b.len() {
-        let from_a = j == b.len() || (i < a.len() && a[i].0.min[0] <= b[j].0.min[0]);
-        let (mine, theirs, open_mine, open_theirs, k) =
-            if from_a { (a, b, &mut *open_a, &mut *open_b, i) } else { (b, a, &mut *open_b, &mut *open_a, j) };
-        let (bx, e) = mine[k];
-        open_theirs.retain(|&t| theirs[t].0.max[0] >= bx.min[0]);
-        for &t in open_theirs.iter() {
-            let (by, f) = theirs[t];
-            if bx.overlaps(&by) {
-                out.push((e.min(f), e.max(f)));
-            }
-        }
-        open_mine.push(k);
-        if from_a {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
+/// `Bounds::overlaps` without branches: a broadphase's box tests are
+/// about even odds in a dense pile, so branches on them mispredict.
+#[inline(always)]
+fn meets(a: &Bounds, b: &Bounds) -> bool {
+    (a.min[0] <= b.max[0]) & (b.min[0] <= a.max[0]) & (a.min[1] <= b.max[1]) & (b.min[1] <= a.max[1])
 }
 
 // ---- Parameters ----
@@ -939,8 +899,12 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
             let Some(order) = &table.spatial else { continue };
             for p in order.pages_near(&region) {
                 let mut pages = D::pages(states, t, p);
-                for (r, &e) in table.rows[p].iter().enumerate() {
-                    if !order.row_bounds[p][r].overlaps(&region) || !Self::passes(filters, e) {
+                let mut meeting = order.lanes[p].meeting(&region, 0.0);
+                while meeting != 0 {
+                    let r = meeting.trailing_zeros() as usize;
+                    meeting &= meeting - 1;
+                    let e = table.rows[p][r];
+                    if !Self::passes(filters, e) {
                         continue;
                     }
                     if let Some(items) = D::at(&mut pages, r, e) {
@@ -954,68 +918,91 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// Every pair of entities the query matches in its spatial tables whose
     /// boxes, grown by `grow`, meet: a broadphase. Each pair once, the
     /// lesser entity first, sorted.
+    ///
+    /// Pages whose boxes meet are found by a sweep along x over the pages,
+    /// and each meeting pair of pages tests only the rows that reach the
+    /// other page, each row against all of the other page's at once
+    /// (`Lanes::meeting`). See docs/architecture/spatial-storage.md.
     pub fn near_pairs(&mut self, grow: f32) -> Vec<(Entity, Entity)> {
         let Query { rows, filters, .. } = self;
-        // Groups of pages to test against each other before their pages:
-        // each run of ordered pages, and each big page on its own.
-        let mut groups: Vec<(usize, Vec<usize>, Bounds)> = Vec::new();
-        for (t, table) in rows.iter().enumerate() {
+        // Each page in use: its rows, which of them pass the filters, and
+        // its box grown. A filtered-out row still widens its page's box,
+        // which only costs a test.
+        let mut pages: Vec<(&Lanes, u32, Bounds)> = Vec::new();
+        let mut max = 0;
+        for table in rows.iter() {
             let Some(order) = &table.spatial else { continue };
-            for (run, b) in order.order.chunks(RUN).zip(&order.runs) {
-                groups.push((t, run.iter().map(|&p| p as usize).collect(), b.grown(grow)));
-            }
-            for p in (0..order.kind.len()).filter(|&p| order.kind[p] != PageKind::Ordered) {
-                groups.push((t, vec![p], order.bounds[p].grown(grow)));
-            }
-        }
-        // Each page's rows that pass the filters, their boxes grown, sorted
-        // by left edge: the pairs of two pages are then a sweep along x,
-        // not every row against every row.
-        let swept: Vec<Vec<Vec<(Bounds, Entity)>>> = rows
-            .iter()
-            .map(|t| {
-                t.spatial.as_ref().map_or_else(Vec::new, |o| {
-                    (0..t.rows.len())
-                        .map(|p| {
-                            let mut page: Vec<(Bounds, Entity)> = t.rows[p]
-                                .iter()
-                                .zip(&o.row_bounds_all()[p])
-                                .filter(|(e, _)| filters.is_empty() || Self::passes(filters, **e))
-                                .map(|(&e, b)| (b.grown(grow), e))
-                                .collect();
-                            page.sort_by(|a, b| a.0.min[0].total_cmp(&b.0.min[0]));
-                            page
-                        })
-                        .collect()
-                })
-            })
-            .collect();
-        let mut out = Vec::new();
-        let (mut open_a, mut open_b) = (Vec::new(), Vec::new());
-        for (i, (ta, pa, ba)) in groups.iter().enumerate() {
-            for (j, (tb, pb, bb)) in groups.iter().enumerate().skip(i) {
-                if !ba.overlaps(bb) {
+            for (p, page) in table.rows.iter().enumerate() {
+                if page.is_empty() {
                     continue;
                 }
-                let (oa, ob) = (rows[*ta].spatial.as_ref().unwrap(), rows[*tb].spatial.as_ref().unwrap());
-                for (x, &p) in pa.iter().enumerate() {
-                    let from = if i == j { x } else { 0 };
-                    let page_a = oa.bounds[p].grown(grow);
-                    for &q in &pb[from..] {
-                        if !page_a.overlaps(&ob.bounds[q].grown(grow)) {
-                            continue;
-                        }
-                        if i == j && p == q {
-                            sweep_one(&swept[*ta][p], &mut out);
-                        } else {
-                            sweep_two(&swept[*ta][p], &swept[*tb][q], (&mut open_a, &mut open_b), &mut out);
-                        }
+                let mut pass = u32::MAX >> (32 - page.len());
+                if !filters.is_empty() {
+                    pass = 0;
+                    for (r, &e) in page.iter().enumerate() {
+                        pass |= (Self::passes(filters, e) as u32) << r;
+                    }
+                    if pass == 0 {
+                        continue;
+                    }
+                }
+                max = page.iter().fold(max, |m, e| m.max(e.index as usize + 1));
+                pages.push((&order.lanes[p], pass, order.bounds[p].grown(grow)));
+            }
+        }
+        pages.sort_unstable_by(|a, b| a.2.min[0].total_cmp(&b.2.min[0]));
+        // Pairs as keys, the lesser index high: live entities never share an
+        // index, so indices alone order pairs.
+        let key = |a: u32, b: u32| ((a.min(b) as u64) << 32) | a.max(b) as u64;
+        let mut keys: Vec<u64> = Vec::new();
+        for (i, &(a, pass_a, box_a)) in pages.iter().enumerate() {
+            let mut rows = pass_a;
+            while rows != 0 {
+                let x = rows.trailing_zeros() as usize;
+                rows &= rows - 1;
+                // Only the rows after `x`: each pair once.
+                let mut m = a.meeting(&a.grown(x, grow), grow) & rows;
+                while m != 0 {
+                    keys.push(key(a.index[x], a.index[m.trailing_zeros() as usize]));
+                    m &= m - 1;
+                }
+            }
+            for &(b, pass_b, box_b) in &pages[i + 1..] {
+                if box_b.min[0] > box_a.max[0] {
+                    break;
+                }
+                if !meets(&box_a, &box_b) {
+                    continue;
+                }
+                // Only rows that reach the other page can pair with its rows.
+                let mut ma = a.meeting(&box_b, grow) & pass_a;
+                if ma == 0 {
+                    continue;
+                }
+                let mb = b.meeting(&box_a, grow) & pass_b;
+                if mb == 0 {
+                    continue;
+                }
+                while ma != 0 {
+                    let x = ma.trailing_zeros() as usize;
+                    ma &= ma - 1;
+                    let mut m = b.meeting(&a.grown(x, grow), grow) & mb;
+                    while m != 0 {
+                        keys.push(key(a.index[x], b.index[m.trailing_zeros() as usize]));
+                        m &= m - 1;
                     }
                 }
             }
         }
-        sort_pairs(&mut out);
-        out
+        sort_pair_keys(&mut keys, max);
+        let mut generation = vec![0u32; max];
+        for table in rows.iter().filter(|t| t.spatial.is_some()) {
+            for e in table.rows.iter().flatten() {
+                generation[e.index as usize] = e.generation;
+            }
+        }
+        let entity = |i: u64| Entity { index: i as u32, generation: generation[i as usize] };
+        keys.iter().map(|&k| (entity(k >> 32), entity(k & 0xffff_ffff))).collect()
     }
 
     /// The row of `e`, if the query matches it: how a system changes an
