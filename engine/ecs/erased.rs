@@ -94,6 +94,15 @@ impl ErasedColumn {
         self.len == 0
     }
 
+    /// The value at `row`, as bytes of this column's type: for glue compiled
+    /// with that type (a component's bounds), which reads it through the
+    /// pointer. Valid until the column is next changed.
+    pub fn value_ptr(&self, row: usize) -> *const u8 {
+        assert!(row < self.len, "row {row} of {}", self.len);
+        // SAFETY: `row` is initialized, so within the allocation.
+        unsafe { self.slot(row) }
+    }
+
     pub fn push<T: Component>(&mut self, value: T) {
         self.check::<T>();
         self.reserve_one();

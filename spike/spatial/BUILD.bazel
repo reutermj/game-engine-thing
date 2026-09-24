@@ -1,0 +1,33 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# A standalone spike of space as storage structure (get-emj.14): nothing in
+# the engine depends on it. See lib.rs.
+rust_library(
+    name = "spatial",
+    srcs = [
+        "baseline.rs",
+        "grid.rs",
+        "layout.rs",
+        "lib.rs",
+        "sim.rs",
+        "zorder.rs",
+        "//engine/std/physics:narrow.rs",
+        "//engine/std/physics:solver.rs",
+    ],
+    compile_data = ["//platformer/level:map.txt"],
+    crate_root = "lib.rs",
+    deps = ["//engine/std/physics:physics_interface"],
+)
+
+rust_test(
+    name = "spatial_test",
+    crate = ":spatial",
+)
+
+rust_binary(
+    name = "bench",
+    srcs = ["bench.rs"],
+    deps = [":spatial"],
+)

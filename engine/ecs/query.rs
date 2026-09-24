@@ -17,6 +17,7 @@ use std::marker::PhantomData;
 use crate::component::{Component, ComponentDesc, Entity, Storage};
 use crate::erased::ErasedColumn;
 use crate::events::{Event, EventQueue};
+use crate::spatial::{Bounds, PageKind, RUN};
 use crate::world::{ColumnGuard, ComponentId, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, World};
 
 // ---- Declaring ----
@@ -425,6 +426,9 @@ pub struct QueryDecl {
     pub terms: Vec<(ComponentId, bool)>,
     pub filter: FilterDecl,
     pub changes: ChangeDecl,
+    /// Writes a spatial key or extent, so its spatial tables re-sort after
+    /// the system: a change like its rows', with an apply node.
+    pub reorders: bool,
 }
 
 impl QueryDecl {
@@ -505,7 +509,7 @@ impl ParamDecl {
     /// Whether this parameter can change the world, needing an apply node.
     pub fn changes(&self) -> bool {
         match self {
-            ParamDecl::Query(q) => !q.changes.is_empty(),
+            ParamDecl::Query(q) => !q.changes.is_empty() || q.reorders,
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
             ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
@@ -526,6 +530,9 @@ pub enum Change {
     Despawn(Entity),
     Spawn { e: Entity, components: Vec<ComponentId>, apply: Apply },
     Event { queue: usize, publish: Publish },
+    /// A spatial table whose keys or extents the system could write, to
+    /// re-sort after it.
+    Reorder(TableId),
 }
 
 impl Change {
@@ -538,6 +545,7 @@ impl Change {
                 let frame = s.world.frame();
                 publish(s.events(queue), frame)
             }
+            Change::Reorder(t) => s.resort(t),
         }
     }
 }
@@ -616,6 +624,20 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         Query { world, decl, table_ids, rows, states, filters, log, _marker: PhantomData }
     }
 
+    /// Logs a re-sort of each spatial table this query can write keys or
+    /// extents in: it writes in place, so its apply node puts rows back in
+    /// order afterwards.
+    pub(crate) fn log_reorders(&self) {
+        if !self.decl.reorders {
+            return;
+        }
+        for &t in &self.table_ids {
+            if self.world.table(t).spatial.is_some() {
+                self.log.borrow_mut().push(Change::Reorder(t));
+            }
+        }
+    }
+
     fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
         filters.iter().all(|(_, with, set)| set.set().contains(e) == *with)
     }
@@ -666,6 +688,92 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                 }
             }
         }
+    }
+
+    /// Every entity the query matches in its spatial tables whose box meets
+    /// `region`, as `for_each` would hand it. Tables that aren't spatial
+    /// have no boxes, and are skipped. Boxes are as of the last re-sort:
+    /// after whoever last wrote the keys, never mid-system.
+    pub fn in_region(&mut self, region: Bounds, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+        let Query { world, decl, rows, states, filters, log, .. } = self;
+        for (t, table) in rows.iter().enumerate() {
+            let Some(order) = &table.spatial else { continue };
+            for p in order.pages_near(&region) {
+                let mut pages = D::pages(states, t, p);
+                for (r, &e) in table.rows[p].iter().enumerate() {
+                    if !order.row_bounds[p][r].overlaps(&region) || !Self::passes(filters, e) {
+                        continue;
+                    }
+                    if let Some(items) = D::at(&mut pages, r, e) {
+                        f(Self::row(world, decl, log, e), items);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every pair of entities the query matches in its spatial tables whose
+    /// boxes, grown by `grow`, meet: a broadphase. Each pair once, the
+    /// lesser entity first, sorted.
+    pub fn near_pairs(&mut self, grow: f32) -> Vec<(Entity, Entity)> {
+        let Query { rows, filters, .. } = self;
+        // Groups of pages to test against each other before their pages:
+        // each run of ordered pages, and each big page on its own.
+        let mut groups: Vec<(usize, Vec<usize>, Bounds)> = Vec::new();
+        for (t, table) in rows.iter().enumerate() {
+            let Some(order) = &table.spatial else { continue };
+            for (run, b) in order.order.chunks(RUN).zip(&order.runs) {
+                groups.push((t, run.iter().map(|&p| p as usize).collect(), b.grown(grow)));
+            }
+            for p in (0..order.kind.len()).filter(|&p| order.kind[p] != PageKind::Ordered) {
+                groups.push((t, vec![p], order.bounds[p].grown(grow)));
+            }
+        }
+        // Every box grown once, by table and page: the pair loops below test
+        // each against many others.
+        let grown: Vec<Vec<Vec<Bounds>>> = rows
+            .iter()
+            .map(|t| {
+                t.spatial.as_ref().map_or_else(Vec::new, |o| {
+                    o.row_bounds_all().iter().map(|page| page.iter().map(|b| b.grown(grow)).collect()).collect()
+                })
+            })
+            .collect();
+        let filtered = !filters.is_empty();
+        let mut out = Vec::new();
+        for (i, (ta, pa, ba)) in groups.iter().enumerate() {
+            for (j, (tb, pb, bb)) in groups.iter().enumerate().skip(i) {
+                if !ba.overlaps(bb) {
+                    continue;
+                }
+                let (oa, ob) = (rows[*ta].spatial.as_ref().unwrap(), rows[*tb].spatial.as_ref().unwrap());
+                for (x, &p) in pa.iter().enumerate() {
+                    let from = if i == j { x } else { 0 };
+                    let page_a = oa.bounds[p].grown(grow);
+                    for &q in &pb[from..] {
+                        if !page_a.overlaps(&ob.bounds[q].grown(grow)) {
+                            continue;
+                        }
+                        let (ea, eb) = (&rows[*ta].rows[p], &rows[*tb].rows[q]);
+                        let (ga, gb) = (&grown[*ta][p], &grown[*tb][q]);
+                        for (r, &e) in ea.iter().enumerate() {
+                            if filtered && !Self::passes(filters, e) {
+                                continue;
+                            }
+                            let start = if i == j && p == q { r + 1 } else { 0 };
+                            for (s, &f) in eb.iter().enumerate().skip(start) {
+                                if ga[r].overlaps(&gb[s]) && (!filtered || Self::passes(filters, f)) {
+                                    out.push((e.min(f), e.max(f)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The row of `e`, if the query matches it: how a system changes an
@@ -749,11 +857,14 @@ impl<D: Data + 'static, F: Filter, C: Changes> Param for Query<'static, D, F, C>
         F::declare(d, &mut filter);
         let mut changes = ChangeDecl::default();
         C::declare(d, &mut changes);
-        ParamDecl::Query(QueryDecl { terms, filter, changes })
+        let reorders = terms.iter().any(|&(c, write)| write && d.world.moves_rows(c));
+        ParamDecl::Query(QueryDecl { terms, filter, changes, reorders })
     }
 
     fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Query<'w, D, F, C> {
-        Query::take(cx.world, decl.query().expect("a query's declaration"), cx.log)
+        let q = Query::take(cx.world, decl.query().expect("a query's declaration"), cx.log);
+        q.log_reorders();
+        q
     }
 }
 

@@ -109,7 +109,7 @@ fn input_and_the_ai_come_before_the_paddles_move() {
         "input: pong::steer\n\
          update: pong_ai::think\n\
          simulate: pong::play\n\
-         physics::step: physics::integrate_velocities, physics::find_contacts, physics::solve, physics::publish_index\n\
+         physics::step: physics::integrate_velocities, physics::find_contacts, physics::solve\n\
          late: pong::rebound"
     );
 }

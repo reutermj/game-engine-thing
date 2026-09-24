@@ -1,12 +1,12 @@
-//! Spatial queries against a hand-built index, run by the ECS harness: what
-//! they find, in what order, and that they follow the `Query` rules (rows,
-//! changes, conflicts).
+//! Spatial queries over positions kept in spatial order, run by the ECS
+//! harness: what they find, in what order, and that they follow the `Query`
+//! rules (rows, changes, conflicts).
 
 use std::sync::Mutex;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
 use engine_ecs::{Despawns, Entity, Query, With, World};
-use physics::{Collider, Position, Ray, Spatial, SpatialIndex, Vec2, build_index, circle, rect};
+use physics::{Collider, Position, Ray, Spatial, Vec2, circle, rect};
 
 engine_api::component! {
     #[derive(Debug, Default, Copy)]
@@ -14,7 +14,7 @@ engine_api::component! {
 }
 
 /// A row of unit tiles centered at x = 0.5 .. 5.5, y = 0.5, the third one
-/// lava, indexed as a physics step would leave them.
+/// lava. Positions are a spatial key, so spawning them sorts them in.
 fn world() -> (World, Vec<Entity>) {
     let w = World::new();
     let mut m = w.between_frames(Default::default()).unwrap();
@@ -24,13 +24,6 @@ fn world() -> (World, Vec<Entity>) {
             if x == 2 { m.spawn((at, Collider::rect(0.5, 0.5), Lava {})) } else { m.spawn((at, Collider::rect(0.5, 0.5))) }
         })
         .collect();
-    let mut shapes = Vec::new();
-    m.for_each::<(&Position, &Collider)>(|e, (p, c)| {
-        shapes.push((e, physics::Placed { shape: physics::Shape::of(c), at: Vec2::new(p.x, p.y) }))
-    });
-    let mut index = SpatialIndex::default();
-    build_index(2.0, shapes, &mut index);
-    m.spawn((index,));
     drop(m);
     (w, tiles)
 }
@@ -114,17 +107,19 @@ fn rows_from_a_spatial_query_change_the_world_after_the_system() {
 }
 
 #[test]
-fn shapes_are_the_index_s_and_items_are_current() {
+fn a_move_between_frames_is_where_the_next_query_looks() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (w, tiles) = world();
+    // Re-sorted as it's written: there's no index to rebuild first.
     w.between_frames(Default::default()).unwrap().insert(tiles[0], Position { x: 50.0, y: 50.0 });
     fn probe(_: &mut Cx, mut all: Spatial<&Position>) {
-        let mut xs = Vec::new();
-        all.overlapping(rect(Vec2::new(0.5, 0.5), Vec2::new(0.1, 0.1)), |_, p| xs.push(p.x));
-        say(format!("{xs:?}"));
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        all.overlapping(rect(Vec2::new(0.5, 0.5), Vec2::new(0.1, 0.1)), |_, p| old.push(p.x));
+        all.overlapping(rect(Vec2::new(50.0, 50.0), Vec2::new(0.1, 0.1)), |_, p| new.push(p.x));
+        say(format!("{old:?} {new:?}"));
     }
     run(&w, probe, "probe");
-    assert_eq!(seen(), ["[50.0]"], "found where the index saw it, with where it is now");
+    assert_eq!(seen(), ["[] [50.0]"]);
 }
 
 #[test]

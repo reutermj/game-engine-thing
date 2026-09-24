@@ -86,6 +86,10 @@ changing the ABI, the reload sequence or the Bazel rules.
     and their change log; `EventReader` and `EventWriter`.
   - `graph.rs` — footprints and the overlap rules the schedule's edges
     come from.
+  - `spatial.rs` — spatial tables: a key component keeps its tables'
+    pages in Z-order with boxes, re-sorted when a `Structural` drops;
+    what `Query::in_region` and `near_pairs` walk. See
+    [docs/architecture/spatial-storage.md](docs/architecture/spatial-storage.md).
   - `between.rs` — `WorldMut`, the whole world for hooks and message
     handlers, refused while a frame is open.
   - `harness.rs` — sequential and parallel executors over plain functions,

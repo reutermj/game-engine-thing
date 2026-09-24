@@ -18,6 +18,8 @@ monolithic design doc.
   system's parameters declare, events, and the steps toward multithreading
 - [storage.md](storage.md) — archetype tables in pages, sparse sets, and
   structural change and events without stop-the-world points
+- [spatial-storage.md](spatial-storage.md) — tables kept in
+  spatial order, so pages are neighborhoods and region queries are queries
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 

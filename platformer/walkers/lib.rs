@@ -53,13 +53,6 @@ impl Walkers {
         let player = players.single(|_, (p, v)| Seen { x: p.x, y: p.y, vy: v.y });
         let mut meeting = Meeting::None;
         walkers.for_each(|walker, (w, v, touching)| {
-            if v.x == 0.0 {
-                // A new walker sets off right, without looking: on the first
-                // frame the spatial index is empty, since no physics step has
-                // published it yet, and it would see a ledge everywhere.
-                v.x = WALK_SPEED;
-                return;
-            }
             let dir = if v.x < 0.0 { -1.0 } else { 1.0 };
             // Just past its leading edge, and just below its feet.
             let ahead = Vec2::new(w.x + dir * 0.55, w.y + 0.6);

@@ -122,6 +122,14 @@ fn table_only(world: &World, ids: &[ComponentId]) -> Vec<ComponentId> {
 pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
     let mut fp = Footprint::default();
     for p in ParamDecl::leaves(params) {
+        // A reorder rearranges the whole of each spatial table it matched.
+        if let ParamDecl::Query(q) = p
+            && q.reorders
+        {
+            for t in world.tables().filter(|t| t.spatial.is_some() && q.matches(world, &t.components)) {
+                fp.add(Shape::exactly(t.components.clone()));
+            }
+        }
         match p {
             ParamDecl::Query(q) if !q.changes.is_empty() => {
                 for &c in q.changes.adds.iter().chain(&q.changes.removes) {
@@ -210,6 +218,7 @@ pub fn exact(world: &World, log: &[Change]) -> Footprint {
                 current(world, &mut fp, &mut shapes, *e);
             }
             Change::Event { queue, .. } => fp.add_events(*queue),
+            Change::Reorder(t) => fp.add(Shape::exactly(world.table(*t).components.clone())),
             Change::Spawn { e, components, .. } => {
                 let set = sorted(table_only(world, components));
                 fp.add(Shape::exactly(set.clone()));

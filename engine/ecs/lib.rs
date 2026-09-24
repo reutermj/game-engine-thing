@@ -18,6 +18,7 @@ pub mod graph;
 pub mod harness;
 pub mod query;
 pub mod schema;
+pub mod spatial;
 pub mod world;
 
 pub use between::WorldMut;
@@ -31,4 +32,5 @@ pub use query::{
     Adds, Bundle, Change, ChangeDecl, Changes, Data, Declare, Despawns, Filter, FilterDecl, FrameCx, Log, Param,
     ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without,
 };
+pub use spatial::{Bounds, SpatialKey};
 pub use world::{Build, ComponentId, Keepalive, Structural, TableId, World};

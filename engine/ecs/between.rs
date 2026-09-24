@@ -110,10 +110,18 @@ impl<'w> WorldMut<'w> {
         for desc in &d.components {
             self.install(desc);
         }
-        let decl = QueryDecl { terms, filter, changes: Default::default() };
+        let reorders = terms.iter().any(|&(c, write)| write && self.world.moves_rows(c));
+        let decl = QueryDecl { terms, filter, changes: Default::default(), reorders };
         let log = Log::default();
         let mut q: Query<'_, D> = Query::take(self.world, &decl, &log);
+        q.log_reorders();
         q.for_each(|row, items| f(row.entity(), items));
+        drop(q);
+        // Nothing else runs between frames: the writes re-sort at once.
+        let mut s = Structural::new(self.world);
+        for change in log.into_inner() {
+            change.apply(&mut s);
+        }
     }
 
     /// The first entity with all of `D`'s components, and its values copied

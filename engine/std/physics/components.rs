@@ -4,7 +4,7 @@
 //! Axes follow both games' screens: y grows downward, so `Touching::below`
 //! is the +y side and gravity is usually positive y.
 
-use engine_api::{Entity, component, event};
+use engine_api::{Bounds, Entity, SpatialKey, component, event};
 
 mod shapes;
 mod spatial;
@@ -24,11 +24,22 @@ pub const BOX: u8 = 0;
 pub const CIRCLE: u8 = 1;
 
 component! {
-    /// Where a body is: its collider's center.
+    /// Where a body is: its collider's center. Tables of positions are kept
+    /// in spatial order (docs/architecture/spatial-storage.md), so region
+    /// queries and the broadphase walk only nearby pages.
     #[derive(Debug, Default, PartialEq, Copy)]
-    pub struct Position: "physics::Position" {
+    pub struct Position: "physics::Position", order = spatial {
         pub x: f32,
         pub y: f32,
+    }
+}
+
+/// A position's box is its collider's, or a point without one.
+impl SpatialKey for Position {
+    type Extent = Collider;
+    fn bounds(&self, collider: Option<&Collider>) -> Bounds {
+        let half = collider.map_or([0.0, 0.0], |c| if c.shape == BOX { [c.hx, c.hy] } else { [c.hx, c.hx] });
+        Bounds::around([self.x, self.y], half)
     }
 }
 

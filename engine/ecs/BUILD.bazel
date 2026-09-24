@@ -15,6 +15,7 @@ rust_library(
         "lib.rs",
         "query.rs",
         "schema.rs",
+        "spatial.rs",
         "world.rs",
     ],
     crate_name = "engine_ecs",
@@ -73,4 +74,18 @@ rust_binary(
         ":ecs",
         ":game",
     ],
+)
+
+# Spatial tables against brute force, and in the scheduler.
+rust_test(
+    name = "spatial_test",
+    srcs = ["tests/spatial_test.rs"],
+    deps = [":ecs"],
+)
+
+#   ./bazel run -c opt //engine/ecs:spatial_bench
+rust_binary(
+    name = "spatial_bench",
+    srcs = ["tests/spatial_bench.rs"],
+    deps = [":ecs"],
 )

@@ -1,5 +1,7 @@
 load("//engine:defs.bzl", "engine_mod")
 
+exports_files(["map.txt"])
+
 # The level. Edit map.txt and `./bazel run //platformer/level` to swap it in
 # live.
 engine_mod(

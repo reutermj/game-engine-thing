@@ -1,8 +1,6 @@
 //! The physics mod's pure parts, compiled on their own for their unit
 //! tests: the mod itself is a cdylib.
 
-#[path = "../broad.rs"]
-mod broad;
 #[path = "../narrow.rs"]
 mod narrow;
 #[path = "../solver.rs"]

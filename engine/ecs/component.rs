@@ -62,6 +62,8 @@ pub struct ComponentDesc {
     /// Makes this build's `Default`: the starting point of every migrated
     /// value, so fields the old layout lacks get their default.
     pub default: DefaultFn,
+    /// For a spatial key, its extent and bounds glue.
+    pub spatial: Option<crate::spatial::SpatialDesc>,
 }
 
 impl ComponentDesc {
@@ -77,6 +79,7 @@ impl ComponentDesc {
             field_count: T::FIELDS.len(),
             drop: __drop_fn::<T>(),
             default: __write_default::<T>,
+            spatial: T::SPATIAL,
         }
     }
 }
@@ -361,12 +364,14 @@ tuple_field_types! { (A, B), (A, B, C), (A, B, C, D) }
 /// different units, say), bump the version so values are cleared instead:
 /// `pub struct Position: "game::Position", version = 1 { ... }`. A component
 /// added and removed often is better sparse: `pub struct Burning:
-/// "game::Burning", storage = sparse { ... }`.
+/// "game::Burning", storage = sparse { ... }`. A position whose tables should
+/// be kept in spatial order says `order = spatial`, and implements
+/// [`SpatialKey`](crate::spatial::SpatialKey).
 #[macro_export]
 macro_rules! component {
     (
         $(#[$meta:meta])*
-        $vis:vis struct $name:ident : $id:literal $(, version = $version:literal)? $(, storage = $storage:ident)? {
+        $vis:vis struct $name:ident : $id:literal $(, version = $version:literal)? $(, storage = $storage:ident)? $(, order = $order:ident)? {
             $($(#[$fmeta:meta])* $fvis:vis $field:ident : $ty:ty),* $(,)?
         }
     ) => {
@@ -383,6 +388,7 @@ macro_rules! component {
             const NAME: &'static str = $id;
             $(const VERSION: u32 = $version;)?
             $(const STORAGE: $crate::Storage = $crate::__storage!($storage);)?
+            $(const SPATIAL: ::std::option::Option<$crate::spatial::SpatialDesc> = $crate::__order!($order, $name);)?
             const FIELDS: &'static [$crate::FieldDesc] = &[
                 $($crate::FieldDesc::new::<$ty>(stringify!($field), ::std::mem::offset_of!($name, $field))),*
             ];
@@ -443,12 +449,23 @@ pub unsafe trait Component: Default + Send + Sync + 'static {
     const VERSION: u32 = 0;
     const FIELDS: &'static [FieldDesc] = &[];
     const STORAGE: Storage = Storage::Table;
+    /// For a spatial key (`order = spatial`, with `SpatialKey`
+    /// implemented), what keeps its tables in spatial order.
+    const SPATIAL: Option<crate::spatial::SpatialDesc> = None;
     /// Checked on every typed access to stored values, so a build can't
     /// read a layout it wasn't compiled for.
     const FINGERPRINT: u64 =
         __component_fingerprint(Self::NAME, Self::VERSION, size_of::<Self>(), align_of::<Self>(), Self::FIELDS);
 }
 
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __order {
+    (spatial, $name:ident) => {
+        ::std::option::Option::Some($crate::spatial::SpatialDesc::of::<$name>())
+    };
+}
 
 #[doc(hidden)]
 #[macro_export]

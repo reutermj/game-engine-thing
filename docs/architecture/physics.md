@@ -147,9 +147,9 @@ contacts in `late`:
    corrected by a split impulse, so correction doesn't add energy. It also
    moves the bodies (the split impulse's pseudo velocities exist only
    here), updates `Touching`, and sends `Contact` for pairs that weren't
-   pressing last step.
-4. **`publish_index`**: the [spatial index](#spatial-queries), rebuilt
-   from where the bodies ended up.
+   pressing last step. Writing positions makes its apply node re-sort
+   them ([Broadphase](#broadphase)), so every system after the step
+   finds bodies where they are.
 
 Each system is a plain system over queries, so the pipeline is the ECS
 doing what it's for, and step 3 gathers bodies into local arrays, solves
@@ -170,28 +170,21 @@ libm differ).
 
 ## Broadphase
 
-A uniform grid, rebuilt each step: every collider's box goes into each
-cell it covers, and a pair is a candidate when it shares a cell. Cells are
-a sorted `Vec` of (cell, entity), not a hash map, so iteration order is
-deterministic, and a pair seen in several cells is kept once. The cell
-size is the mod's constant (two units, about a player), which fits both
-games; a game with very different scales would want it configurable.
-
-Rebuilding costs the same for static bodies as for moving ones, and in the
-games the static ones (tiles, walls) are most of them. At a few hundred
-colliders that's cheap; the stress demo is where a separate static grid,
-rebuilt only when static bodies change, would show whether it's worth it.
-
-The grid is also the spatial index queries use, published at the end of
-the step.
+`Position` is a spatial key, with `Collider` as its extent, so the ECS
+keeps every table of positions in spatial order
+([spatial-storage.md](spatial-storage.md)). The broadphase is
+`near_pairs` over a query of positions and colliders: pairs whose boxes,
+grown by the speculative margin, meet, found page by page. There is no
+index to rebuild, and static bodies' pages never change.[^grid]
 
 ## Spatial queries
 
-A spatial query is a `Query` whose entities come from the spatial index
-instead of the tables, the way a query walks its smallest sparse set
-instead of every table. It takes the same `Data`, `Filter` and `Changes`,
-hands the same rows and items to the same closures, and declares the same
-footprint, plus a read of the index.
+A spatial query is a `Query` whose entities are found by where their
+colliders are: a region query over positions and colliders
+(`Query::in_region`), then an exact test of each shape. It takes the same
+`Data`, `Filter` and `Changes`, hands the same rows and items to the same
+closures, and declares the same footprint, plus reads of `Position` and
+`Collider`; so its `Data` can't write those two.
 
 ```rust
 use physics::{Circle, Ray, Spatial};
@@ -237,26 +230,23 @@ fn look(.., mut blockers: Spatial<&Collider>) {
   solver's business.
 - **Changes go through rows**, as `Changes` declares, landing at the
   system's apply node.
-- **Shapes are as of the last physics step; items are current.** The
-  index holds each collider's box from the end of the step, so a system
-  sees the shapes every other system that frame sees, whatever moved
-  since. Systems after the physics step see this step's index, and
-  systems before it the last step's: the visibility rule for every other
-  change (storage.md).
+- **Shapes are where the last writer left them.** Positions are re-sorted
+  at the apply node of whatever wrote them, so a system sees every move
+  made before it in the plan, including a game's respawn, and none made
+  after: the visibility rule for every other change (storage.md).
 
-`Spatial` lives in physics's interface, not in `engine_ecs`: the ECS
-doesn't know about shapes. The query code therefore compiles into each
-caller, so changing it is an interface change (a game reload), while the
-solver stays an implementation change.
+`Spatial` lives in physics's interface, not in `engine_ecs`: the ECS knows
+boxes, not shapes. The query code therefore compiles into each caller, so
+changing it is an interface change (a game reload), while the solver stays
+an implementation change.
 
 ### Parameters made of parameters
 
-A `Spatial` is two parameters: a query, and a query of the index. Today a
-parameter declares one thing (`ParamDecl`); `engine_ecs` gains
-`ParamDecl::Group`, a parameter made of others, whose footprint is their
-union and whose conflicts are checked among its members and against the
-system's other parameters. Any crate can then build a parameter from
-existing ones, and `Spatial` is the first.
+A `Spatial` is two parameters: a query, and a query of positions and
+colliders. `ParamDecl::Group` is a parameter made of others, whose
+footprint is their union and whose conflicts are checked among its
+members and against the system's other parameters; any crate can build a
+parameter from existing ones this way, and `Spatial` was the first.
 
 ## Walkthroughs
 
@@ -464,3 +454,10 @@ frame 508.
 - **The first frame has no spatial index**, as the spike found: a walker
   set off the wrong way. Walkers start without looking; the index built at
   load is still to do.
+
+[^grid]: *(History, 2026-09-24.)* The broadphase was a uniform grid built
+    from every collider each step, and the step's last system,
+    `publish_index`, built a second grid as the `SpatialIndex` component
+    that spatial queries read: shapes as of the last step, empty on the
+    first frame, and invisible to the scheduler as a dependency on
+    positions. Both went when positions became a spatial key.

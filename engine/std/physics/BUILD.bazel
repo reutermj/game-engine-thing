@@ -2,13 +2,18 @@ load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "engine_game", "engine_mod")
 
+# The pure parts, for spikes that run the real solver outside the mod.
+exports_files([
+    "narrow.rs",
+    "solver.rs",
+])
+
 # 2D rigid bodies, with every piece of state in the world or this mod's
 # state, so the solver hot-reloads under a running simulation. A game uses
 # it by naming it in a mod's mod_deps. See docs/architecture/physics.md.
 
 PHYSICS_SRCS = [
     "lib.rs",
-    "broad.rs",
     "narrow.rs",
     "solver.rs",
 ]
@@ -76,11 +81,10 @@ rust_test(
     crate = ":physics_interface",
 )
 
-# The broadphase, narrowphase and solver alone, and whole steps over arrays.
+# The narrowphase and solver alone, and whole steps over arrays.
 rust_test(
     name = "core_test",
     srcs = [
-        "broad.rs",
         "narrow.rs",
         "solver.rs",
         "tests/core_test.rs",

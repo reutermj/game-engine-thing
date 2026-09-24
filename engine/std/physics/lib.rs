@@ -1,11 +1,13 @@
 //! The physics step, as a pipeline of systems in the `physics::step` phase:
-//! gravity into velocities, contacts, the solver (which also moves bodies),
-//! then the spatial index. See docs/architecture/physics.md.
+//! gravity into velocities, contacts, then the solver (which also moves
+//! bodies). Positions are kept in spatial order by the ECS, so the
+//! broadphase is `near_pairs` and moving bodies re-sorts them at the
+//! solver's apply node. See docs/architecture/physics.md.
+
 //!
 //! Everything a step carries to the next is in the world or in this mod's
 //! state, so a reload swaps the solver under a running simulation.
 
-mod broad;
 mod narrow;
 mod solver;
 
@@ -14,13 +16,11 @@ use std::time::Instant;
 use clock::Clock;
 use engine_api::{Cx, Entity, EventWriter, Mod, Query, Systems, Without, export_mod, field_struct, phase};
 use physics::{
-    Aabb, Body, Collider, Contact, DYNAMIC, Gravity, KINEMATIC, Placed, Position, STATIC, Shape, SpatialIndex,
-    Touching, Trigger, Vec2, Velocity, build_index,
+    Body, Collider, Contact, DYNAMIC, Gravity, KINEMATIC, Placed, Position, STATIC, Shape, Touching, Trigger, Vec2,
+    Velocity,
 };
 use solver::{Constraint, SolverBody};
 
-/// Grid cells for the broadphase and the index: about a player.
-const CELL: f32 = 2.0;
 /// A stalled frame slows the simulation rather than tunneling.
 const MAX_DT: f32 = 1.0 / 30.0;
 
@@ -67,7 +67,6 @@ field_struct! {
         gravity: u64,
         contacts: u64,
         solve: u64,
-        index: u64,
     }
 }
 
@@ -131,6 +130,7 @@ impl Physics {
         mut bodies: Query<(&Position, &Collider, &Body)>,
         mut statics: Query<(&Position, &Collider), Without<Body>>,
         mut velocities: Query<&Velocity>,
+        mut shapes: Query<(&Position, &Collider)>,
         triggers: EventWriter<Trigger>,
     ) {
         let start = Instant::now();
@@ -149,8 +149,8 @@ impl Physics {
         // which table a body is in.
         items.sort_by_key(|i| i.entity);
 
-        let boxes: Vec<Aabb> = items.iter().map(|i| i.placed.aabb()).collect();
-        let pairs = broad::pairs(CELL, &boxes, |a, b| {
+        let index = |e: Entity| items.binary_search_by_key(&e, |i| i.entity).expect("a collider has a position") as u32;
+        let wanted = |a: usize, b: usize| {
             let (a, b) = (&items[a], &items[b]);
             let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
             // Contacts need something to push; a sensor needs something to
@@ -159,7 +159,15 @@ impl Physics {
             let pushes = a.body.kind == DYNAMIC || b.body.kind == DYNAMIC;
             let arrives = a.body.kind != STATIC || b.body.kind != STATIC;
             meets && if a.collider.sensor || b.collider.sensor { arrives } else { pushes }
-        });
+        };
+        // The storage's own order is the broadphase: pairs whose boxes, grown
+        // by the speculative margin, meet. In entity order, lesser first.
+        let pairs: Vec<(u32, u32)> = shapes
+            .near_pairs(narrow::MARGIN)
+            .into_iter()
+            .map(|(a, b)| (index(a), index(b)))
+            .filter(|&(a, b)| wanted(a as usize, b as usize))
+            .collect();
 
         let previous = std::mem::take(&mut self.contacts);
         let mut sensing = Vec::new();
@@ -276,21 +284,6 @@ impl Physics {
         }
         self.time.solve += nanos(start);
     }
-
-    fn publish_index(
-        &mut self,
-        _: &mut (),
-        _: &mut Cx,
-        mut shapes: Query<(&Position, &Collider)>,
-        mut index: Query<&mut SpatialIndex>,
-    ) {
-        let start = Instant::now();
-        let mut colliders = Vec::new();
-        shapes.for_each(|row, (p, c)| colliders.push((row.entity(), placed(p, c))));
-        colliders.sort_by_key(|(e, _)| *e);
-        index.single(|_, index| build_index(CELL, colliders, index));
-        self.time.index += nanos(start);
-    }
 }
 
 fn placed(p: &Position, c: &Collider) -> Placed {
@@ -324,14 +317,6 @@ impl Mod for Physics {
         s.add("integrate_velocities", Self::integrate_velocities).phase(STEP);
         s.add("find_contacts", Self::find_contacts).phase(STEP).after("physics::integrate_velocities");
         s.add("solve", Self::solve).phase(STEP).after("physics::find_contacts");
-        s.add("publish_index", Self::publish_index).phase(STEP).after("physics::solve");
-    }
-
-    fn load(&mut self, _: &mut (), cx: &mut Cx) {
-        let mut world = cx.world();
-        if world.single::<&SpatialIndex, ()>(|_, _| ()).is_none() {
-            world.spawn((SpatialIndex::default(),));
-        }
     }
 
     /// `stats`: the build, steps run, contacts held, and time per system.
@@ -341,13 +326,12 @@ impl Mod for Physics {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
                 let t = self.time;
                 Ok(format!(
-                    "build {BUILD} steps {} contacts {} us/step gravity {:.1} contacts {:.1} solve {:.1} index {:.1}",
+                    "build {BUILD} steps {} contacts {} us/step gravity {:.1} contacts {:.1} solve {:.1}",
                     self.steps,
                     self.contacts.len(),
                     per(t.gravity),
                     per(t.contacts),
-                    per(t.solve),
-                    per(t.index)
+                    per(t.solve)
                 ))
             }
             "reset_timings" => {
