@@ -246,6 +246,20 @@ component! {
 }
 
 component! {
+    /// Sleeping, on one entity; no entity, no sleeping. An island (dynamic
+    /// bodies joined by contacts) all of whose bodies have been slower than
+    /// `speed` for `time` seconds falls asleep: its bodies stop, and aren't
+    /// simulated until a moving body touches one, or `physics` is sent
+    /// `wake`. It changes the simulation, so it's off unless a game asks.
+    /// See docs/architecture/physics.md, "Sleeping".
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Sleep: "physics::Sleep" {
+        pub speed: f32,
+        pub time: f32,
+    }
+}
+
+component! {
     /// Which sides of a body touched something solid on the last step. Kept
     /// up to date on the bodies that have it.
     #[derive(Debug, Default, PartialEq, Copy)]

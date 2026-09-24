@@ -80,7 +80,7 @@ fn check(w: &World) {
         let Some(spatial) = &t.spatial else { continue };
         let rows = t.rows.read().unwrap();
         let pages = spatial.pages.read().unwrap();
-        pages.check(&rows, BIG).unwrap_or_else(|e| panic!("table {:?}: {e}", t.id));
+        pages.check(&rows, BIG, 1.0).unwrap_or_else(|e| panic!("table {:?}: {e}", t.id));
         for (p, page) in rows.iter().enumerate() {
             for (r, e) in page.iter().enumerate() {
                 assert_eq!(pages.row_bounds(p, r), now[e], "{e:?}'s stored box");
@@ -209,6 +209,38 @@ fn everything_moving_at_once_keeps_the_order() {
     }
     let s = Schedule { systems: vec![shift.system(&w, "shift")] };
     for _ in 0..6 {
+        s.run_sequential(&w);
+        check(&w);
+        agrees(&w, &mut seed);
+    }
+}
+
+/// Many rows to a cell, so pages fill with rows of one key: the splits
+/// around a key half a page shares, which a spread-out table never makes.
+#[test]
+fn crowded_cells_keep_the_order() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 11;
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for _ in 0..600 {
+            let at = At { x: lcg(&mut seed) * 5.0, y: lcg(&mut seed) * 5.0 };
+            m.spawn((at, Size { hx: 0.1 + lcg(&mut seed) * 0.2, hy: 0.1 }));
+        }
+    }
+    check(&w);
+    static FRAME: AtomicU32 = AtomicU32::new(0);
+    // Every row a step within the square, a different one each frame.
+    fn jitter(_: &mut Cx, mut q: Query<&mut At>) {
+        let mut seed = FRAME.fetch_add(1, Ordering::Relaxed) as u64;
+        q.for_each(|_, mut at| {
+            let (dx, dy) = (lcg(&mut seed) - 0.5, lcg(&mut seed) - 0.5);
+            (at.x, at.y) = ((at.x + dx).clamp(0.0, 5.0), (at.y + dy).clamp(0.0, 5.0));
+        });
+    }
+    let s = Schedule { systems: vec![jitter.system(&w, "jitter")] };
+    for _ in 0..20 {
         s.run_sequential(&w);
         check(&w);
         agrees(&w, &mut seed);

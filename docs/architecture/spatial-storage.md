@@ -112,9 +112,11 @@ Pages hold 16 rows. `Structural` keeps the order: pushing a row into a
 spatial table, writing a key or extent (a query writing one logs a
 `Reorder`, so it has an apply node, and the footprint covers the table),
 or handing one out mutably marks the table, and it's re-sorted when the
-`Structural` drops. A re-sort bounds every row through the glue, moves
-the rows whose keys left their page's range (splitting full pages, big
-rows to big pages), then merges neighboring pages that fit in one.
+`Structural` drops. A re-sort bounds the rows written since the last
+through the glue, a page at a time, moves the rows whose keys left their
+page's range (splitting full pages, big rows to big pages), then merges
+neighboring pages that fit in three quarters of one
+([Upkeep, reworked](#upkeep-reworked)).
 `Query::in_region` walks runs, pages, then rows; `Query::near_pairs` pairs
 runs, then pages, then rows, across the query's spatial tables.
 
@@ -204,3 +206,66 @@ rows instead of all. The cost: a binding written through needs `mut`,
 and every write stamps a tick (the physics pile, where everything moves,
 went from 0.35 to 0.36 ms). Six mutations of it are caught. `Changed<T>`
 filters are the natural next use, and aren't built.
+
+## Upkeep, reworked
+
+2026-09-24. With change detection, a settled pile still re-sorted every
+body every step (the solver writes them all, and a settled pile creeps:
+every body 1e-4 to 1e-2 a step, none still bit for bit until about step
+3000), at 352 µs a step for 10 000 bodies. Measured by stage, before: 198
+µs re-bounding and re-keying rows, 146 µs looking for rows to move, which
+found none, 17 µs re-boxing every page. What changed, each measured:
+
+- **Rows stay unless their page's range excludes them.** Each row was
+  looked up in the order (a binary search over the pages) to see where it
+  belonged; now it's checked against its own page's range first, and only
+  pages with a row out of place are walked at all. Rows not re-bounded
+  are where the last sort left them, and no range changes between sorts,
+  so only re-bounded rows can be out of place.
+- **The bounds glue takes a page**, the rows to bound and their boxes, not
+  a row: the call can't be inlined, and one per row, with the caller's
+  state saved around it, was a third of re-bounding. (`BoundsFn` changed,
+  so `API_VERSION` did.)
+- **A row keeps its key while it keeps its cell.** Each row's cell (both
+  axes, packed) is kept beside its key; interleaving bits for the key was
+  most of re-keying a row, and a creeping row almost never changes cell.
+  The cell is truncated after an offset rather than floored: `floor` is a
+  function call on the default target
+  ([lore](../lore/f32-floor-is-a-function-call-on-the-default-target.md)).
+- **Pages re-box only when a row moved in, out or was re-bounded**, the
+  last while its boxes are still in cache; runs only when a page's box may
+  have changed.
+- **Merging waits for pages to fit in three quarters of one**, so a merged
+  page has room before it splits again: falling, 10 000 bodies split 26
+  pages a step and merged 184 rows back; now 7 and 48.
+- **Nothing to move or merge, nothing done** but the scan of ticks: a pile
+  at rest (and physics writes a position only when it changes) costs the
+  scan alone.
+
+`:tax`'s "outside the systems", almost all the re-sort, µs per step:
+
+| | 1000, falling | 1000, settled | 10 000, falling | 10 000, settled | 10 000, at rest |
+|---|---|---|---|---|---|
+| before | 40 | 31 | 421 | 345 | 344 |
+| after | 24 | 12 | 191 | 107 | 26 |
+
+`//engine/ecs:spatial_bench` (every row of 10 000 moved a hair: 303 to 70
+µs; a hundred rows of 10 000 written: 168 to 26). Settled, re-bounding is
+now most of it, about 7 ns a row warm and 10 in the physics step: the tick
+checks, the glue, the cell and the range check, for rows that all changed.
+The one way under that is fewer rows written: at rest, or
+[sleeping](physics.md#sleeping).
+
+Two bugs in the order were found on the way, both in how a range of one
+key is kept: a page of exactly one key shared with the next page could be
+merged into a page of another range, leaving its rows at that page's
+upper bound, outside it; and a split around a key half a page shares
+narrowed the page's range without moving the rows the new page's range
+took. Walking only some pages made them fail
+`everything_moving_at_once_keeps_the_order`. `crowded_cells_keep_the_order`
+(600 rows over 25 cells) covers the split, and the re-sort before this
+rework never finishes on it (the test times out): crowded cells weren't
+safe before either. `SpatialPages::check` now checks every row's key
+against its box, and that page boxes are exact unless marked stale.
+Thirteen mutations of the rework are caught by `spatial_test` and the
+unit tests of `cell`.
