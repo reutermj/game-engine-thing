@@ -2,7 +2,9 @@
 
 **Status: built** as `//engine/std/physics`, after a spike (results
 [below](#spike-results)), and both games run on it
-([The games on it](#the-games-on-it)).
+([The games on it](#the-games-on-it)). What the work showed about the
+design's flaws is in the
+[physics retrospective](../retrospectives/2026-09-23-physics.md).
 The third part of the MVP, after the mod loader and the ECS: 2D rigid-body
 physics as an engine mod, `//engine/std/physics`, whose every piece of
 state is in the world.
