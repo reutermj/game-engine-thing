@@ -9,6 +9,7 @@
 //! state, so a reload swaps the solver under a running simulation.
 
 mod narrow;
+mod sleep;
 mod solver;
 
 use std::time::Instant;
@@ -16,8 +17,9 @@ use std::time::Instant;
 use engine_api::{Cx, Despawns, Dt, Entity, EventWriter, Mod, Query, Spawner, Systems, Without, export_mod, field_struct, phase};
 use physics::{
     Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, STATIC, Shape, Touching, Trigger, Vec2, Velocity,
+    Response, STATIC, Shape, Sleep, Touching, Trigger, Vec2, Velocity,
 };
+use sleep::Sleepers;
 use solver::{Constraint, SolverBody};
 
 
@@ -92,7 +94,7 @@ struct Item {
 impl Physics {
     fn integrate_velocities(
         &mut self,
-        _: &mut (),
+        sleep: &mut Sleepers,
         _: &mut Cx,
         dt: Dt,
         mut gravity: Query<&Gravity>,
@@ -102,8 +104,8 @@ impl Physics {
         let dt = *dt;
         self.steps += 1;
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        bodies.for_each(|_, (body, mut v)| {
-            if body.kind == DYNAMIC {
+        bodies.for_each(|row, (body, mut v)| {
+            if body.kind == DYNAMIC && !sleep.is_asleep(row.entity()) {
                 v.x += g.x * body.gravity_scale * dt;
                 v.y += g.y * body.gravity_scale * dt;
             }
@@ -118,7 +120,7 @@ impl Physics {
     #[allow(clippy::type_complexity)]
     fn find_contacts(
         &mut self,
-        _: &mut (),
+        sleep: &mut Sleepers,
         _: &mut Cx,
         (mut bodies, mut statics): (Query<(&Position, &Collider, &Body)>, Query<(&Position, &Collider), Without<Body>>),
         mut velocities: Query<&Velocity>,
@@ -155,6 +157,10 @@ impl Physics {
         let senses = |a: &Item, b: &Item| {
             (a.collider.senses & b.collider.layer != 0 || b.collider.senses & a.collider.layer != 0) && arrives(a, b)
         };
+        // Neither end moves: a static or a sleeping body. A contact between
+        // two is kept as it was, and not looked for again.
+        let inert = |i: &Item| i.body.kind == STATIC || sleep.is_asleep(i.entity);
+        let resting = |a: &Item, b: &Item| sleep.asleep > 0 && inert(a) && inert(b);
         // The storage's own order is the broadphase: pairs whose boxes, grown
         // by the speculative margin, meet. In entity order, lesser first.
         let gathered = Instant::now();
@@ -167,7 +173,7 @@ impl Physics {
         for (i, j) in pairs {
             let (a, b) = (&items[i as usize], &items[j as usize]);
             let (collide, sense) = (collides(a, b), senses(a, b));
-            if !collide && !sense {
+            if !collide && !sense || collide && !sense && resting(a, b) {
                 continue;
             }
             let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { continue };
@@ -198,6 +204,9 @@ impl Physics {
             while found.get(next).is_some_and(|f| key(&f.0) < key(pair)) {
                 spawn(found[next]);
                 next += 1;
+            }
+            if sleep.asleep > 0 && resting(&items[index(pair.a) as usize], &items[index(pair.b) as usize]) {
+                return;
             }
             match found.get(next) {
                 Some(f) if f.0 == *pair => {
@@ -239,11 +248,13 @@ impl Physics {
         t.contacts += nanos(start);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
-        _: &mut (),
+        sleep: &mut Sleepers,
         _: &mut Cx,
         dt: Dt,
+        mut config: Query<&Sleep>,
         mut moving: Query<(&Body, &mut Velocity, &mut Position)>,
         mut touching: Query<&mut Touching>,
         mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse)>,
@@ -253,17 +264,28 @@ impl Physics {
         let dt = *dt;
         let mut entities = Vec::new();
         let mut bodies = Vec::new();
+        // Per body: whether it moves this step (not static, not asleep), and
+        // is dynamic.
+        let mut kinds: Vec<(bool, u8)> = Vec::new();
         moving.for_each(|row, (body, v, _)| {
             entities.push(row.entity());
-            let inv_mass = if body.kind == DYNAMIC { body.inv_mass } else { 0.0 };
-            bodies.push(SolverBody { v: Vec2::new(v.x, v.y), inv_mass, pseudo: Vec2::ZERO });
+            let asleep = sleep.is_asleep(row.entity());
+            let inv_mass = if body.kind == DYNAMIC && !asleep { body.inv_mass } else { 0.0 };
+            let v = if asleep { Vec2::ZERO } else { Vec2::new(v.x, v.y) };
+            bodies.push(SolverBody { v, inv_mass, pseudo: Vec2::ZERO });
+            kinds.push((body.kind != STATIC && !asleep, body.kind));
         });
         // Bodies with no velocity (statics) all stand for one immovable
         // body at the end.
         let slots = Slots::of(entities.iter().copied());
         let still = bodies.len() as u32;
         bodies.push(SolverBody::default());
+        kinds.push((false, STATIC));
         let index_of = |e: Entity| slots.get(e).unwrap_or(still);
+        // As in `find_contacts`: a contact neither end of which moves is
+        // left as it is, impulses and all, for when they wake.
+        let any_asleep = sleep.asleep > 0;
+        let resting = |p: &ContactPair| any_asleep && !kinds[index_of(p.a) as usize].0 && !kinds[index_of(p.b) as usize].0;
 
         // In pair order, which storage keeps: the solve doesn't depend on
         // when each contact began. Copied out, then mapped: building
@@ -271,7 +293,7 @@ impl Physics {
         // contacts (2026-09-24).
         let mut live: Vec<(ContactPair, Manifold, Response, Impulse)> = Vec::new();
         contacts.for_each_ordered(|_, (pair, m, r, j)| {
-            if !r.disabled {
+            if !r.disabled && !resting(pair) {
                 live.push((*pair, *m, *r, *j));
             }
         });
@@ -290,21 +312,32 @@ impl Physics {
             })
             .collect();
         let gathered = Instant::now();
+        let config = config.single(|_, c| *c);
+        let sleeping = config.is_some();
+        if !sleeping && sleep.asleep > 0 {
+            sleep.wake_all();
+        }
         solver::solve(&mut bodies, &mut constraints, dt);
         let after_solver = Instant::now();
 
         let mut i = 0;
         moving.for_each(|_, (body, mut v, mut p)| {
-            let b = bodies[i];
+            let (b, moves) = (bodies[i], kinds[i].0);
             i += 1;
-            if body.kind == STATIC {
+            if !moves {
                 return;
             }
             (v.x, v.y) = (b.v.x, b.v.y);
             // A kinematic body gets no pseudo velocity: nothing pushes it.
             let step = if body.kind == KINEMATIC { b.v } else { b.v + b.pseudo };
-            p.x += step.x * dt;
-            p.y += step.y * dt;
+            // Written only when it moves: a write marks the row for the
+            // spatial re-sort to re-bound, and a pile at rest comes to rest
+            // bit for bit (the pile's 10 000 do by step 3000), when the
+            // re-sort then has nothing to do.
+            let to = (p.x + step.x * dt, p.y + step.y * dt);
+            if (to.0.to_bits(), to.1.to_bits()) != (p.x.to_bits(), p.y.to_bits()) {
+                (p.x, p.y) = to;
+            }
         });
 
         // Most bodies don't ask (the pile's none), and a failed lookup per
@@ -316,9 +349,13 @@ impl Physics {
         });
         let asking = Slots::of(asking.iter().copied());
         let mut solved = constraints.iter();
+        let mut links = Vec::new();
         contacts.for_each_ordered(|_, (pair, mut m, r, mut j)| {
             if r.disabled {
                 (m.pressed, *j) = (false, Impulse::default());
+                return;
+            }
+            if resting(pair) {
                 return;
             }
             let k = solved.next().expect("a constraint per contact solved");
@@ -326,6 +363,9 @@ impl Physics {
             m.pressed = k.jn > 0.0 || m.depth >= 0.0;
             if !m.pressed {
                 return;
+            }
+            if sleeping {
+                links.push((pair.a, pair.b));
             }
             let n = Vec2::new(m.nx, m.ny);
             for (e, n) in [(pair.a, n), (pair.b, -n)] {
@@ -337,6 +377,9 @@ impl Physics {
                 began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
             }
         });
+        if let Some(c) = config {
+            self.fall_asleep(sleep, &c, dt, &entities, &bodies, &kinds, &links, &mut moving);
+        }
         let t = &mut self.time;
         t.solve_gather += (gathered - start).as_nanos() as u64;
         t.solver += (after_solver - gathered).as_nanos() as u64;
@@ -345,6 +388,43 @@ impl Physics {
     }
 }
 
+
+impl Physics {
+    /// Sleeping's bookkeeping after a step: see `Sleepers::update`. Links
+    /// between dynamic bodies make islands; a kinematic body moving into a
+    /// sleeping one wakes it.
+    #[allow(clippy::too_many_arguments)]
+    fn fall_asleep(
+        &mut self,
+        sleep: &mut Sleepers,
+        c: &Sleep,
+        dt: f32,
+        entities: &[Entity],
+        bodies: &[SolverBody],
+        kinds: &[(bool, u8)],
+        links: &[(Entity, Entity)],
+        moving: &mut Query<(&Body, &mut Velocity, &mut Position)>,
+    ) {
+        let slots = Slots::of(entities.iter().copied());
+        let kind = |e: Entity| slots.get(e).map_or((false, STATIC), |k| kinds[k as usize]);
+        let awake: Vec<(Entity, f32)> = (0..entities.len())
+            .filter(|&k| kinds[k] == (true, DYNAMIC))
+            .map(|k| (entities[k], bodies[k].v.x.hypot(bodies[k].v.y)))
+            .collect();
+        let mut between = Vec::with_capacity(links.len());
+        for &(a, b) in links {
+            match (kind(a).1, kind(b).1) {
+                (DYNAMIC, DYNAMIC) => between.push((a, b)),
+                (KINEMATIC, _) if kind(a).0 && bodies[slots.get(a).unwrap() as usize].v != Vec2::ZERO => sleep.wake(b),
+                (_, KINEMATIC) if kind(b).0 && bodies[slots.get(b).unwrap() as usize].v != Vec2::ZERO => sleep.wake(a),
+                _ => {}
+            }
+        }
+        for e in sleep.update(dt, c.speed, c.time, &awake, &between) {
+            moving.with(e, |_, (_, mut v, _)| *v = Velocity::default());
+        }
+    }
+}
 
 fn placed(p: &Position, c: &Collider) -> Placed {
     Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
@@ -369,7 +449,7 @@ fn mark(t: &mut Touching, n: Vec2) {
 }
 
 impl Mod for Physics {
-    type Transient = ();
+    type Transient = Sleepers;
 
     fn systems(s: &mut Systems<Self>) {
         const STEP: &str = "physics::step";
@@ -382,7 +462,7 @@ impl Mod for Physics {
     }
 
     /// `stats`: the build, steps run, contacts held, and time per system.
-    fn message(&mut self, _: &mut (), cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, sleep: &mut Sleepers, cx: &mut Cx, message: &str) -> Result<String, String> {
         match message.trim() {
             "stats" => {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
@@ -411,6 +491,11 @@ impl Mod for Physics {
                     per(t.solver),
                     per(t.write_back)
                 ))
+            }
+            "sleeping" => Ok(format!("asleep {}", sleep.asleep)),
+            "wake" => {
+                sleep.wake_all();
+                Ok("awake".into())
             }
             "reset_timings" => {
                 (self.time, self.steps) = (Timings::default(), 0);

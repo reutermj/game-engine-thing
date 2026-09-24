@@ -1151,8 +1151,6 @@ impl Drop for Structural<'_> {
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),
-                hi: Vec::new(),
-                ranges_changed: true,
             }
             .run();
         }

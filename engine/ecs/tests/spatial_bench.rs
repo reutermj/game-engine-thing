@@ -1,3 +1,4 @@
+//! The re-sort after writers (every row moved a hair, and 1% moved), and
 //! `near_pairs` and `in_region` on a pile-like layout, without physics:
 //! `./bazel run -c opt //engine/ecs:spatial_bench`.
 
@@ -23,6 +24,11 @@ impl SpatialKey for At {
         let s = size.copied().unwrap_or_default();
         Bounds::around([self.x, self.y], [s.hx, s.hy])
     }
+}
+
+component! {
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Vel: "bench::Vel" { pub x: f32, pub y: f32 }
 }
 
 static OUT: Mutex<(u128, u128, usize)> = Mutex::new((0, 0, 0));
@@ -77,7 +83,49 @@ fn blanket_writer_frame(n: usize) {
     );
 }
 
+static WRITING: Mutex<u128> = Mutex::new(0);
+
+/// Moves every body a hair, as a settled pile's solver does (every body
+/// creeps by 1e-4 to 1e-2 a step, measured 2026-09-24): every row is
+/// re-bounded, and almost none changes cell or page.
+fn creeper(_: &mut Cx, mut q: Query<(&Size, &mut Vel, &mut At)>) {
+    let t = Instant::now();
+    q.for_each(|row, (_, mut v, mut at)| {
+        let d = if row.entity().index % 2 == 0 { 1e-3 } else { -1e-3 };
+        v.x = d;
+        at.x += d;
+    });
+    *WRITING.lock().unwrap() += t.elapsed().as_nanos();
+}
+
+fn creeping_frame(n: usize) {
+    let w = World::new();
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let per_row = (n as f32).sqrt() as usize * 4 / 3;
+        for k in 0..n {
+            let (col, row) = (k % per_row, k / per_row);
+            m.spawn((At { x: 0.5 + col as f32 * 0.9, y: 30.0 - row as f32 * 0.9 }, Size { hx: 0.45, hy: 0.45 }, Vel::default()));
+        }
+    }
+    let s = Schedule { systems: vec![creeper.system(&w, "creeper")] };
+    for _ in 0..10 {
+        s.run_sequential(&w);
+    }
+    *WRITING.lock().unwrap() = 0;
+    let frames = 200;
+    let t = Instant::now();
+    for _ in 0..frames {
+        s.run_sequential(&w);
+    }
+    let frame = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
+    let writing = *WRITING.lock().unwrap() as f64 / frames as f64 / 1e3;
+    println!("{n:>6} rows creeping: {frame:>7.1} us/frame, writing {writing:.1}, the rest (the re-sort) {:.1}", frame - writing);
+}
+
 fn main() {
+    creeping_frame(1000);
+    creeping_frame(10_000);
     blanket_writer_frame(10_000);
     for n in [1000usize, 10_000] {
         let w = World::new();

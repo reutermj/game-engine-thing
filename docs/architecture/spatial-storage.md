@@ -112,11 +112,14 @@ Pages hold 16 rows. `Structural` keeps the order: pushing a row into a
 spatial table, writing a key or extent (a query writing one logs a
 `Reorder`, so it has an apply node, and the footprint covers the table),
 or handing one out mutably marks the table, and it's re-sorted when the
-`Structural` drops. A re-sort bounds every row through the glue, moves
-the rows whose keys left their page's range (splitting full pages, big
-rows to big pages), then merges neighboring pages that fit in one.
-`Query::in_region` walks runs, pages, then rows; `Query::near_pairs` pairs
-runs, then pages, then rows, across the query's spatial tables.
+`Structural` drops. A re-sort bounds the rows written since the last
+through the glue, a page at a time, moves the rows whose keys left their
+page's range (splitting full pages, big rows to big pages), then merges
+neighboring pages that fit in three quarters of one
+([Upkeep, reworked](#upkeep-reworked)).
+`Query::in_region` walks runs, pages, then rows; `Query::near_pairs` sweeps
+pages along x, then tests rows a page at a time, across the query's
+spatial tables ([Against sweep and prune](#against-sweep-and-prune)).
 
 Tested against brute force (`//engine/ecs:spatial_test`: regions and
 pairs after random moves, spawns, table changes and a move of every row
@@ -190,30 +193,6 @@ spatial storage, whose index rebuild is gone. Still open: pairs between
 two pages that haven't changed are the same as last time, and could be
 kept.
 
-**Note, 2026-09-24 (broadphase against sweep and prune).** Each page's row
-boxes are now kept by coordinate (`Lanes`, the order's only copy of them),
-so a box is tested against a whole page at once as a bit mask, without a
-branch per row. `near_pairs` sweeps pages along x, and in each meeting
-pair tests only rows that reach the other page; pairs are sorted by a
-counting pass over the lesser index. The re-sort walks only pages with a
-row that may have left (an O(1) range test at re-bounding), and computes
-Morton cells without `floor` (a libm call on this target; see lore).
-`./bazel run -c opt //engine/std/physics:tax`, µs a step, ECS / arrays:
-broadphase at 10 000 settled 1000 to 235 / 280 (arrays' sweep sorting
-afresh: 425), falling 726 to 212 / 202; at 1000, 61 to 19 / 25 and 58 to
-19 / 20. The re-sort outside the systems: 352 to 160 settled, 429 to 276
-falling. The 10 000 settled frame: 2911 to 1930, against 1270. On the
-dense layout (`spatial_bench`): 1723 to 616 µs at 10 000, 97 to 32 at 1000;
-the 1% writer 164 to 37 µs.
-What was tried and didn't pay: pages of 8 rows (broadphase twice as slow)
-or 32 (broadphase the same, re-sort cheaper; regions not measured);
-scalar tests for small clipped sets; a global sweep along x, whose sweep
-alone is 126 µs on the pile (400 wide, 36 tall) but 2088 µs on the square dense layout against
-487 for pages, since its work grows with the scene's height. Temporal
-coherence by ticks can't help this scene: every body moves bitwise every
-step, settled or not, while the pair set doesn't change at all from step to
-step, so only slack (fat) boxes could reuse pairs.
-
 ## Change detection
 
 2026-09-24 (get-emj.17). Every value in an erased column has a tick, the
@@ -228,3 +207,108 @@ rows instead of all. The cost: a binding written through needs `mut`,
 and every write stamps a tick (the physics pile, where everything moves,
 went from 0.35 to 0.36 ms). Six mutations of it are caught. `Changed<T>`
 filters are the natural next use, and aren't built.
+
+## Upkeep, reworked
+
+2026-09-24. With change detection, a settled pile still re-sorted every
+body every step (the solver writes them all, and a settled pile creeps:
+every body 1e-4 to 1e-2 a step, none still bit for bit until about step
+3000), at 352 µs a step for 10 000 bodies. Measured by stage, before: 198
+µs re-bounding and re-keying rows, 146 µs looking for rows to move, which
+found none, 17 µs re-boxing every page. What changed, each measured:
+
+- **Rows stay unless their page's range excludes them.** Each row was
+  looked up in the order (a binary search over the pages) to see where it
+  belonged; now it's checked against its own page's range first, and only
+  pages with a row out of place are walked at all. Rows not re-bounded
+  are where the last sort left them, and no range changes between sorts,
+  so only re-bounded rows can be out of place.
+- **The bounds glue takes a page**, the rows to bound and their boxes, not
+  a row: the call can't be inlined, and one per row, with the caller's
+  state saved around it, was a third of re-bounding. (`BoundsFn` changed,
+  so `API_VERSION` did.)
+- **A row keeps its key while it keeps its cell.** Each row's cell (both
+  axes, packed) is kept beside its key; interleaving bits for the key was
+  most of re-keying a row, and a creeping row almost never changes cell.
+  The cell is truncated after an offset rather than floored: `floor` is a
+  function call on the default target
+  ([lore](../lore/f32-floor-is-a-function-call-on-the-default-target.md)).
+- **Pages re-box only when a row moved in, out or was re-bounded**, the
+  last while its boxes are still in cache; runs only when a page's box may
+  have changed.
+- **Merging waits for pages to fit in three quarters of one**, so a merged
+  page has room before it splits again: falling, 10 000 bodies split 26
+  pages a step and merged 184 rows back; now 7 and 48.
+- **Nothing to move or merge, nothing done** but the scan of ticks: a pile
+  at rest (and physics writes a position only when it changes) costs the
+  scan alone.
+
+`:tax`'s "outside the systems", almost all the re-sort, µs per step:
+
+| | 1000, falling | 1000, settled | 10 000, falling | 10 000, settled | 10 000, at rest |
+|---|---|---|---|---|---|
+| before | 40 | 31 | 421 | 345 | 344 |
+| after | 24 | 12 | 191 | 107 | 26 |
+
+`//engine/ecs:spatial_bench` (every row of 10 000 moved a hair: 303 to 70
+µs; a hundred rows of 10 000 written: 168 to 26). Settled, re-bounding is
+now most of it, about 7 ns a row warm and 10 in the physics step: the tick
+checks, the glue, the cell and the range check, for rows that all changed.
+The one way under that is fewer rows written: at rest, or
+[sleeping](physics.md#sleeping).
+
+Two bugs in the order were found on the way, both in how a range of one
+key is kept: a page of exactly one key shared with the next page could be
+merged into a page of another range, leaving its rows at that page's
+upper bound, outside it; and a split around a key half a page shares
+narrowed the page's range without moving the rows the new page's range
+took. Walking only some pages made them fail
+`everything_moving_at_once_keeps_the_order`. `crowded_cells_keep_the_order`
+(600 rows over 25 cells) covers the split, and the re-sort before this
+rework never finishes on it (the test times out): crowded cells weren't
+safe before either. `SpatialPages::check` now checks every row's key
+against its box, and that page boxes are exact unless marked stale.
+Thirteen mutations of the rework are caught by `spatial_test` and the
+unit tests of `cell`.
+
+## Against sweep and prune
+
+2026-09-24. `:tax` compares the broadphase with sweep and prune on
+arrays, which keeps its x order between steps: `near_pairs` was 1000 µs a
+step at 10 000 settled against the arrays' 276. Profiled: 150 µs building
+and sorting each page's rows every call, 790 in page pairs (5400 of them,
+146 ns each, mostly mispredicted branches on box tests, which in a dense
+pile are about even odds), 77 sorting pairs. What changed, each measured:
+
+- **Rows' boxes by coordinate** (`Lanes`, the order's only copy of each
+  row's box, kept by the re-sort and by rows leaving): a box is tested
+  against a whole page at once, as a mask of the rows it meets, with no
+  branch per row. `in_region` uses the same masks.
+- **Pages swept along x**, and in each meeting pair only the rows that
+  reach the other page's box tested against it.
+- **Pairs as keys of the two indices, sorted by counting the lesser**,
+  then insertion within each bucket.
+
+µs a step, ECS / arrays, three runs (with the upkeep rework above):
+
+| | 1000 falling | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
+|---|---|---|---|---|---|---|
+| broadphase, before | 58 / 20 | 61 / 25 | | 726 / 202 | 1000 / 276 | |
+| broadphase, after | 19–20 / 19 | 19–20 / 24 | 19–20 / 24 | 218–221 / 200–205 | 227–244 / 274–281 | 213–217 / 276–280 |
+| frame, after | 109–111 / 53 | 172–175 / 122 | 163–167 / 120 | 1118–1134 / 561–570 | 1849–1907 / 1264–1290 | 1734–1760 / 1259–1281 |
+
+The arrays' sweep sorting afresh each step is 425 µs at 10 000. On the
+dense layout (`spatial_bench`), `near_pairs` went from 1723 to about 600 µs
+at 10 000 and from 97 to 32 at 1000. What's left is the masks themselves,
+about 28 000 a step at 10 000, a few ns each on the baseline target (four
+lanes wide).
+
+What didn't pay: pages of 8 rows (broadphase twice as slow) or 32 (about
+the same; region queries not measured); scalar tests for small clipped
+sets (branches again); dropping the second page's clip. A global sweep
+along x, as the arrays do, sweeps the pile (400 wide, 36 tall) in 126 µs,
+but the square dense layout in 2088 against 487 for pages: its work grows
+with the scene's extent across the sweep, so it isn't a primitive for
+storage to keep. Temporal coherence by ticks can't help a settled pile:
+every body moves every step, while the pair set stays the same from step to
+step, so only slack (fat) boxes and a cache of pairs could reuse them.
