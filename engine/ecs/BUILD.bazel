@@ -97,3 +97,19 @@ rust_test(
     srcs = ["tests/ordered_test.rs"],
     deps = [":ecs"],
 )
+
+# Page walks and table walks against brute force, and what their writes
+# stamp.
+rust_test(
+    name = "page_test",
+    srcs = ["tests/page_test.rs"],
+    deps = [":ecs"],
+)
+
+# A query's cost per row, by how it's walked:
+#   ./bazel run -c opt //engine/ecs:query_bench
+rust_binary(
+    name = "query_bench",
+    srcs = ["tests/query_bench.rs"],
+    deps = [":ecs"],
+)

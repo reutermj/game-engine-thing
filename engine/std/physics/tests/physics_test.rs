@@ -59,6 +59,21 @@ mod pile {
         settled(&e);
     }
 
+    /// Physics gathers colliders with a body and a velocity, with one and
+    /// not the other, and with neither, apart: a shelf of either odd kind
+    /// has to hold what falls on it.
+    #[test]
+    fn a_shelf_without_a_velocity_or_without_a_body_holds_what_lands_on_it() {
+        let e = game("PILE", "shelves");
+        send(&e, "pile", "shelves");
+        step(&e, 120);
+        // Dropped from 9, they fall to rest on the shelves' tops at 10: a
+        // step that stopped (physics failing on a collider it didn't
+        // gather) would leave them where they started.
+        let resting = positions(&e).into_iter().filter(|&(x, y)| (0.0..40.0).contains(&x) && (y - 9.55).abs() < 0.02);
+        assert_eq!(resting.count(), 38, "every body dropped on a shelf rests on it");
+    }
+
     #[test]
     fn the_same_drop_settles_the_same_way() {
         let run = |test| {

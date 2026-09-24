@@ -56,8 +56,11 @@ declaration can't drift from the code:
   `Filter` (`With<T>`, `Without<T>`). `Changes` declares the structural
   changes the system may make to the rows it yields: `Adds<T>`,
   `Removes<T>`, `Despawns`. Iterated with `q.for_each(|row, items| ..)`,
-  looked up with `q.with(entity, ..)`, or `q.single(..)` for a component
-  there's one of. A `&mut T` term hands out a `Mut<T>`, which reads as
+  or a page at a time with `q.for_each_page(|page, columns| ..)` (and
+  `for_each_ordered_page`), each term its column on the page: `&[T]`, or
+  a `ColumnMut<T>` that stamps a row written on `set`, or the whole page
+  on `write_all`. Looked up with `q.with(entity, ..)`, or `q.single(..)`
+  for a component there's one of. A `&mut T` term hands out a `Mut<T>`, which reads as
   `&T` and records a change tick on the row only when written through, so
   what reads a component can tell what really changed (spatial tables
   re-sort only those rows). Its binding needs `mut` to be written

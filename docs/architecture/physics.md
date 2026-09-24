@@ -353,40 +353,87 @@ narrowphase and solver, contacts in the same order, bodies as indices. It
 asserts they end bit for bit the same (they do), so what differs is the
 cost of the world, not different work.
 
-µs per step, settled pile, `-c opt`, one thread, ECS / arrays:
+µs per step, settled pile, `-c opt`, one thread, ECS / arrays (the median
+of three runs):
 
 | | 1000 bodies | 10 000 bodies |
 |---|---|---|
-| frame | 233 / 124 | 2909 / 1269 |
-| gathering colliders | 10 / – | 144 / – |
-| broadphase | 57 / 25 | 996 / 277 |
-| narrowphase | 9 / 18 | 110 / 182 |
-| merging contacts | 12 / 1 | 113 / 11 |
-| solve: gathering | 18 / 3 | 179 / 29 |
-| solver | 75 / 74 | 793 / 739 |
-| writing back | 18 / 2 | 184 / 19 |
-| outside the systems (the spatial re-sort) | 32 / – | 352 / – |
+| frame | 196 / 125 | 2521 / 1295 |
+| gathering colliders | 4 / – | 53 / – |
+| broadphase | 60 / 26 | 1013 / 288 |
+| narrowphase | 9 / 18 | 108 / 186 |
+| merging contacts | 3 / 1 | 34 / 12 |
+| solve: gathering | 6 / 3 | 65 / 30 |
+| solver | 75 / 75 | 797 / 755 |
+| writing back | 6 / 2 | 60 / 20 |
+| outside the systems (the spatial re-sort) | 32 / – | 363 / – |
 
-Before two fixes found this way, the 10 000 frame was 4738 µs. The mod
-mapped entities to array indices by sorting and binary search, three times
-a step; entity ids are small dense integers, so a vector by index does it
-in O(1) (`Slots`). And writing back looked up `Touching` on both ends of
-every contact, though most bodies don't have one.
+Copying in and out (gathering, merging, the solver's gathering and writing
+back) was 633 µs of the 10 000 frame and is 212, against 62 on arrays; the
+frame went from 2955 to 2521.[^copies] Most of it was the query's own cost
+per row, not the copies:
+
+- **`for_each` over table terms walks slices.** A query with only table
+  terms and no sparse filter matches every row of every page, so it takes
+  each term's slice once a page and indexes it, with no per-row dispatch on
+  the kind of term. With the per-row calls inlined, a row went from 5.4 ns
+  to 2.1 on a spatial table and 1.0 on 256-row pages, where a `Vec` of the
+  same values copies at 0.4 to 1.4 (`./bazel run -c opt
+  //engine/ecs:query_bench`). This alone, with the mod unchanged, took the
+  frame to about 2760 µs.
+- **Page walks** (`for_each_page`, `for_each_ordered_page`) hand a system
+  each page's columns whole: `&[T]`, or a `ColumnMut<T>` that stamps a
+  row's tick on `set` or the whole page's on `write_all`. Merging and
+  writing back contacts write every row, so they stamp by page: 54 µs to 34
+  for the merge at 10 000, against `for_each_ordered` and `Mut`. Where rows
+  are only read, a page walk is no faster than `for_each` now, and physics
+  uses `for_each`.
+- **Colliders are gathered by four queries**, one for each of with or
+  without a `Body` and a `Velocity`, instead of one and then a second walk
+  filling in velocities by entity: queries have no optional terms. And the
+  gathered item holds only what a pair is tested with, not whole
+  `Collider`s and `Body`s: writing items out was most of gathering (44 µs
+  against 64).
+
+**Tried, and slower:**
+
+- **Solving in place**, the solver reading and writing `Velocity` in the
+  world's columns (as cells, since two ends of a contact can share a page)
+  through a vector of references by body, generic over where bodies are
+  kept and bit for bit the same: the solver went from 801 to 882 µs, and
+  building the references cost more than copying the values (42 µs
+  against 27). The solver touches each body a dozen times per contact per
+  iteration, so an indirection per touch costs more than one copy in and
+  one out; and positions have to be written after anyway, so the walk over
+  bodies stays. Pages are separate allocations, so there's no flat index
+  into the world's memory to solve over.
+- **Mapping entities to rows by their locations**, instead of a vector by
+  entity index built from the walk (`Slots`): 7.1 ns a pair against 1.2,
+  the map's building included. A location is two dependent loads into
+  segments of atomics, and then a lookup by page.
+- **Testing each pair where the merge reaches it**, so a persisting
+  contact takes its geometry straight from the narrowphase with no list in
+  between: narrowphase and merge together went from 133 to 149 µs.
+- **Stamping bodies by page** in writing back: 34 to 32 µs, not worth
+  marking static bodies' rows written.
 
 **What's left:**
 
-1. **Spatial storage, about two thirds of the gap.** `near_pairs` (pairs of
-   Z-order pages, swept) is 3.6× a sweep and prune on arrays that keeps its
-   x order between steps, and 2.3× one that sorts afresh every step (425
-   µs). On top of that, keeping the order costs 352 µs a step: `solve`
+1. **Spatial storage, most of the gap.** `near_pairs` (pairs of Z-order
+   pages, swept) is 3.5× a sweep and prune on arrays that keeps its x
+   order between steps. Keeping the order costs 363 µs a step: `solve`
    writes every body, at rest or not, and each write re-bounds its row.
-2. **Copying in and out, about a quarter.** Colliders out for detection,
-   bodies and contacts into the solver's arrays, and results back. Arrays
-   skip it because a body's index is where it's stored. Rows in the world
-   can't be that, since spatial order moves them every step: the same cause
-   as the first.
-3. **The merge**, contacts updated through a query rather than assigned,
-   about 100 µs.
+   Its pages are also why a walk over bodies still costs twice a `Vec`'s:
+   about 15 ns a page, on pages of 12 rows on average.
+2. **Copying in and out, 150 µs.** Colliders out for detection (which
+   makes the narrowphase faster than the arrays', whose bodies are spread
+   over four arrays: gathering and narrowphase together are 161 µs against
+   186), bodies and contacts into the solver's arrays and back, and the
+   entity-to-body map, built twice a step. Arrays skip it because a body's
+   index is where it's stored; rows in the world can't be that, since
+   spatial order moves them every step.
+3. **The merge**, contacts updated in the world rather than a list
+   replaced, 22 µs over the arrays.
 
 The solver and the narrowphase cost the same either way, since they're
 the same code over the same arrays. The scheduler and frame cost about 7
@@ -554,3 +601,12 @@ frame 508.
     by `Clock::dt`, capped at 1/30 s, since systems ran once a frame: a
     real-time game's simulation depended on its frame rate, which only
     lockstep hid. Fixed-rate phases replaced it.
+
+[^copies]: *(History, 2026-09-24.)* Before, at 10 000 bodies settled:
+    gathering colliders 144 µs, merging 113, the solver's gathering 179
+    and writing back 184, against the arrays' 11, 29 and 19. And before
+    that the 10 000 frame was 4738 µs, until two fixes: the mod mapped
+    entities to array indices by sorting and binary search, three times a
+    step, where entity ids are small dense integers and a vector by index
+    does it in O(1) (`Slots`); and writing back looked up `Touching` on
+    both ends of every contact, though most bodies don't have one.

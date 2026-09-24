@@ -80,13 +80,30 @@ fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
 
-/// A collider as the step sees it.
+/// A collider as the step sees it: only what pairs are tested with, since
+/// gathering is writing every collider out, and with a whole `Collider`
+/// and `Body` it took 64 µs at 10 000 against 44 (2026-09-24).
 struct Item {
     entity: Entity,
     placed: Placed,
-    collider: Collider,
-    body: Body,
+    collider: Layers,
+    body: Material,
     v: Vec2,
+}
+
+/// A `Collider`'s layers and roles.
+struct Layers {
+    layer: u32,
+    mask: u32,
+    senses: u32,
+    sensor: bool,
+}
+
+/// A `Body`'s part in a pair.
+struct Material {
+    kind: u8,
+    friction: f32,
+    restitution: f32,
 }
 
 impl Physics {
@@ -120,8 +137,16 @@ impl Physics {
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        (mut bodies, mut statics): (Query<(&Position, &Collider, &Body)>, Query<(&Position, &Collider), Without<Body>>),
-        mut velocities: Query<&Velocity>,
+        // Every collider, by whether it has a body and a velocity: queries
+        // have no optional terms, and one query per case gathers each in one
+        // walk, where filling velocities in after was a second walk and a
+        // lookup per collider.
+        (mut moving, mut held, mut drifting, mut statics): (
+            Query<(&Position, &Collider, &Body, &Velocity)>,
+            Query<(&Position, &Collider, &Body), Without<Velocity>>,
+            Query<(&Position, &Collider, &Velocity), Without<Body>>,
+            Query<(&Position, &Collider), Without<(Body, Velocity)>>,
+        ),
         mut shapes: Query<(&Position, &Collider)>,
         (mut contacts, new_contacts): (
             Query<(&ContactPair, &mut Manifold, &mut Response), (), Despawns>,
@@ -131,15 +156,13 @@ impl Physics {
         triggers: EventWriter<Trigger>,
     ) {
         let start = Instant::now();
-        let mut items = Vec::new();
-        bodies.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b)));
-        statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed())));
+        let mut items = Vec::with_capacity(moving.len() + held.len() + drifting.len() + statics.len());
+        let v = |v: &Velocity| Vec2::new(v.x, v.y);
+        moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u))));
+        held.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b, Vec2::ZERO)));
+        drifting.for_each(|row, (p, c, u)| items.push(item(row.entity(), p, c, Body::fixed(), v(u))));
+        statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO)));
         let slots = Slots::of(items.iter().map(|i| i.entity));
-        velocities.for_each(|row, v| {
-            if let Some(k) = slots.get(row.entity()) {
-                items[k as usize].v = Vec2::new(v.x, v.y);
-            }
-        });
         // Pairs come in entity order, so what's found doesn't depend on the
         // order items were gathered in.
         let index = |e: Entity| slots.get(e).expect("a collider has a position");
@@ -194,18 +217,24 @@ impl Physics {
         let spawn = |(pair, m, r): (ContactPair, Manifold, Response)| {
             new_contacts.spawn((pair, m, r, Impulse::default()));
         };
-        contacts.for_each_ordered(|row, (pair, mut m, mut r)| {
-            while found.get(next).is_some_and(|f| key(&f.0) < key(pair)) {
-                spawn(found[next]);
-                next += 1;
-            }
-            match found.get(next) {
-                Some(f) if f.0 == *pair => {
-                    *m = Manifold { was_pressed: m.pressed, ..f.1 };
-                    *r = f.2;
+        // Every contact is either written or despawned, so each page is
+        // stamped written as a whole, not row by row: 54 µs to 34 at 10 000
+        // contacts, against `for_each_ordered` and `Mut` (2026-09-24).
+        contacts.for_each_ordered_page(|page, (pair, mut m, mut r)| {
+            let (m, r) = (m.write_all(), r.write_all());
+            for i in page.rows() {
+                while found.get(next).is_some_and(|f| key(&f.0) < key(&pair[i])) {
+                    spawn(found[next]);
                     next += 1;
                 }
-                _ => row.despawn(),
+                match found.get(next) {
+                    Some(f) if f.0 == pair[i] => {
+                        m[i] = Manifold { was_pressed: m[i].pressed, ..f.1 };
+                        r[i] = f.2;
+                        next += 1;
+                    }
+                    _ => page.row(i).despawn(),
+                }
             }
         });
         found[next..].iter().copied().for_each(spawn);
@@ -251,8 +280,8 @@ impl Physics {
     ) {
         let start = Instant::now();
         let dt = *dt;
-        let mut entities = Vec::new();
-        let mut bodies = Vec::new();
+        let mut bodies = Vec::with_capacity(moving.len() + 1);
+        let mut entities = Vec::with_capacity(moving.len());
         moving.for_each(|row, (body, v, _)| {
             entities.push(row.entity());
             let inv_mass = if body.kind == DYNAMIC { body.inv_mass } else { 0.0 };
@@ -260,24 +289,21 @@ impl Physics {
         });
         // Bodies with no velocity (statics) all stand for one immovable
         // body at the end.
-        let slots = Slots::of(entities.iter().copied());
         let still = bodies.len() as u32;
         bodies.push(SolverBody::default());
+        let slots = Slots::of(entities.iter().copied());
         let index_of = |e: Entity| slots.get(e).unwrap_or(still);
 
         // In pair order, which storage keeps: the solve doesn't depend on
-        // when each contact began. Copied out, then mapped: building
-        // constraints in the walk's closure measured 11 µs slower at 1000
-        // contacts (2026-09-24).
-        let mut live: Vec<(ContactPair, Manifold, Response, Impulse)> = Vec::new();
+        // when each contact began. (History, 2026-09-24: contacts were
+        // copied out of the walk and mapped after, which measured faster
+        // until `for_each` walked slices.)
+        let mut constraints: Vec<Constraint> = Vec::with_capacity(contacts.len());
         contacts.for_each_ordered(|_, (pair, m, r, j)| {
-            if !r.disabled {
-                live.push((*pair, *m, *r, *j));
+            if r.disabled {
+                return;
             }
-        });
-        let mut constraints: Vec<Constraint> = live
-            .iter()
-            .map(|(pair, m, r, j)| Constraint {
+            constraints.push(Constraint {
                 a: index_of(pair.a),
                 b: index_of(pair.b),
                 normal: Vec2::new(m.nx, m.ny),
@@ -287,8 +313,8 @@ impl Physics {
                 jn: j.normal,
                 jt: j.tangent,
                 speed: 0.0,
-            })
-            .collect();
+            });
+        });
         let gathered = Instant::now();
         solver::solve(&mut bodies, &mut constraints, dt);
         let after_solver = Instant::now();
@@ -316,25 +342,31 @@ impl Physics {
         });
         let asking = Slots::of(asking.iter().copied());
         let mut solved = constraints.iter();
-        contacts.for_each_ordered(|_, (pair, mut m, r, mut j)| {
-            if r.disabled {
-                (m.pressed, *j) = (false, Impulse::default());
-                return;
-            }
-            let k = solved.next().expect("a constraint per contact solved");
-            *j = Impulse { normal: k.jn, tangent: k.jt };
-            m.pressed = k.jn > 0.0 || m.depth >= 0.0;
-            if !m.pressed {
-                return;
-            }
-            let n = Vec2::new(m.nx, m.ny);
-            for (e, n) in [(pair.a, n), (pair.b, -n)] {
-                if asking.get(e).is_some() {
-                    touching.with(e, |_, mut t| mark(&mut t, n));
+        // Every contact's impulse and pressing are written, so pages are
+        // stamped whole, as in the merge.
+        contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j)| {
+            let (m, j) = (m.write_all(), j.write_all());
+            for i in page.rows() {
+                if r[i].disabled {
+                    (m[i].pressed, j[i]) = (false, Impulse::default());
+                    continue;
                 }
-            }
-            if !m.was_pressed {
-                began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+                let k = solved.next().expect("a constraint per contact solved");
+                j[i] = Impulse { normal: k.jn, tangent: k.jt };
+                m[i].pressed = k.jn > 0.0 || m[i].depth >= 0.0;
+                if !m[i].pressed {
+                    continue;
+                }
+                let (pair, m) = (pair[i], m[i]);
+                let n = Vec2::new(m.nx, m.ny);
+                for (e, n) in [(pair.a, n), (pair.b, -n)] {
+                    if asking.get(e).is_some() {
+                        touching.with(e, |_, mut t| mark(&mut t, n));
+                    }
+                }
+                if !m.was_pressed {
+                    began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+                }
             }
         });
         let t = &mut self.time;
@@ -350,8 +382,14 @@ fn placed(p: &Position, c: &Collider) -> Placed {
     Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
 }
 
-fn item(entity: Entity, p: &Position, c: &Collider, body: Body) -> Item {
-    Item { entity, placed: placed(p, c), collider: *c, body, v: Vec2::ZERO }
+fn item(entity: Entity, p: &Position, c: &Collider, body: Body, v: Vec2) -> Item {
+    Item {
+        entity,
+        placed: placed(p, c),
+        collider: Layers { layer: c.layer, mask: c.mask, senses: c.senses, sensor: c.sensor },
+        body: Material { kind: body.kind, friction: body.friction, restitution: body.restitution },
+        v,
+    }
 }
 
 /// Marks the side of a body its contact is on: `n` points from it toward

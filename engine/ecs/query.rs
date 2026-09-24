@@ -228,6 +228,53 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Mut<'_, T> {
     }
 }
 
+/// A write term's column on one page, for `for_each_page`: reads as a
+/// slice, and records writes as `Mut` does, per row (`set`, `get_mut`) or
+/// for the whole page at once (`write_all`), which change detection then
+/// sees as every row written. A plain `&mut [T]` would skip the ticks, and
+/// the spatial re-sort and change detection read them.
+pub struct ColumnMut<'a, T> {
+    values: &'a mut [T],
+    ticks: &'a mut [u32],
+    now: u32,
+}
+
+impl<T> ColumnMut<'_, T> {
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.values
+    }
+
+    pub fn get_mut(&mut self, row: usize) -> Mut<'_, T> {
+        Mut { value: &mut self.values[row], tick: &mut self.ticks[row], now: self.now }
+    }
+
+    pub fn set(&mut self, row: usize, value: T) {
+        self.values[row] = value;
+        self.ticks[row] = self.now;
+    }
+
+    /// Every row, stamped written now whether or not it changes.
+    pub fn write_all(&mut self) -> &mut [T] {
+        self.ticks.fill(self.now);
+        self.values
+    }
+}
+
+impl<T> std::ops::Index<usize> for ColumnMut<'_, T> {
+    type Output = T;
+    fn index(&self, row: usize) -> &T {
+        &self.values[row]
+    }
+}
+
 /// What one term of a query holds while the system runs: a column guard per
 /// matched table, or the component's sparse set; and, for a write, the tick
 /// its writes are stamped with.
@@ -295,6 +342,19 @@ pub trait Term {
     /// The term's view of one page, for walking its rows in order.
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, Self::C>;
     fn at<'b>(page: &'b mut PageView<'_, Self::C>, row: usize, e: Entity) -> Option<Self::Item<'b>>;
+    /// The term's column on one page, whole: for `for_each_page`, over
+    /// table components only.
+    type Slice<'a>;
+    fn slice<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> Self::Slice<'a>;
+    /// A table component's: every matched table has its column, so a walk
+    /// can take the term's slices with no per-row check.
+    const TABLE: bool = matches!(<Self::C as Component>::STORAGE, Storage::Table);
+    /// The term's value on `row` of a page's slice.
+    fn item_of<'b>(slice: &'b mut Self::Slice<'_>, row: usize) -> Self::Item<'b>;
+}
+
+fn not_paged<T: Component>() -> ! {
+    panic!("{} is sparse, and a page walk is over table components", T::NAME)
 }
 
 impl<T: Component> Term for &T {
@@ -307,17 +367,34 @@ impl<T: Component> Term for &T {
             TermState::Sparse(set, _) => set.set().get::<T>(e),
         }
     }
+    // Forced, here and in every per-row step of a walk: called through the
+    // tuple impls from the crate that monomorphizes them, they stayed calls,
+    // and were half a row's cost (docs/lore/a-query-row-cost-its-dispatch-
+    // not-its-data.md).
+    #[inline(always)]
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
         match state {
             TermState::Table(guards, _) => PageView::Read(guards[table].pages()[page].as_slice::<T>()),
             TermState::Sparse(set, _) => PageView::Sparse(set.set()),
         }
     }
+    #[inline(always)]
     fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<&'b T> {
         match page {
             PageView::Read(rows) => Some(&rows[row]),
             PageView::Sparse(set) => set.get::<T>(e),
             _ => unreachable!("a read term's view"),
+        }
+    }
+    type Slice<'a> = &'a [T];
+    #[inline(always)]
+    fn item_of<'b>(slice: &'b mut &[T], row: usize) -> &'b T {
+        &slice[row]
+    }
+    fn slice<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> &'a [T] {
+        match state {
+            TermState::Table(guards, _) => guards[table].pages()[page].as_slice::<T>(),
+            TermState::Sparse(..) => not_paged::<T>(),
         }
     }
 }
@@ -337,6 +414,7 @@ impl<T: Component> Term for &mut T {
             }
         }
     }
+    #[inline(always)]
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
         match state {
             TermState::Table(guards, now) => {
@@ -346,6 +424,7 @@ impl<T: Component> Term for &mut T {
             TermState::Sparse(set, now) => PageView::SparseMut(set.set_mut(), *now),
         }
     }
+    #[inline(always)]
     fn at<'b>(page: &'b mut PageView<'_, T>, row: usize, e: Entity) -> Option<Mut<'b, T>> {
         match page {
             PageView::Write(values, ticks, now) => Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now }),
@@ -354,6 +433,20 @@ impl<T: Component> Term for &mut T {
                 set.get_mut_ticked::<T>(e).map(|(value, tick)| Mut { value, tick, now })
             }
             _ => unreachable!("a write term's view"),
+        }
+    }
+    type Slice<'a> = ColumnMut<'a, T>;
+    #[inline(always)]
+    fn item_of<'b>(slice: &'b mut ColumnMut<'_, T>, row: usize) -> Mut<'b, T> {
+        slice.get_mut(row)
+    }
+    fn slice<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> ColumnMut<'a, T> {
+        match state {
+            TermState::Table(guards, now) => {
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                ColumnMut { values, ticks, now: *now }
+            }
+            TermState::Sparse(..) => not_paged::<T>(),
         }
     }
 }
@@ -372,6 +465,13 @@ pub trait Data {
     /// The entities of its smallest sparse term, and how many: what a query
     /// walks instead of its tables when that's fewer.
     fn driver(states: &Self::States<'_>) -> Option<(usize, Vec<Entity>)>;
+    type Slices<'a>;
+    /// The terms' columns on one page, whole.
+    fn slices<'a>(states: &'a mut Self::States<'_>, table: usize, page: usize) -> Self::Slices<'a>;
+    /// Every term is a table component's.
+    const TABLE: bool;
+    /// The items of `row`, from a page's slices.
+    fn items_of<'b>(slices: &'b mut Self::Slices<'_>, row: usize) -> Self::Items<'b>;
 }
 
 impl Data for () {
@@ -385,13 +485,20 @@ impl Data for () {
     fn fetch<'a>(_: &'a mut (), _: usize, _: usize, _: usize, _: Entity) -> Option<()> {
         Some(())
     }
+    #[inline(always)]
     fn pages<'a>(_: &'a mut (), _: usize, _: usize) {}
+    #[inline(always)]
     fn at<'b>(_: &'b mut (), _: usize, _: Entity) -> Option<()> {
         Some(())
     }
     fn driver(_: &()) -> Option<(usize, Vec<Entity>)> {
         None
     }
+    type Slices<'a> = ();
+    fn slices<'a>(_: &'a mut (), _: usize, _: usize) {}
+    const TABLE: bool = true;
+    #[inline(always)]
+    fn items_of<'b>(_: &'b mut (), _: usize) {}
 }
 
 impl<A: Term> Data for A {
@@ -407,14 +514,25 @@ impl<A: Term> Data for A {
     fn fetch<'a>(s: &'a mut TermState<'_>, t: usize, p: usize, r: usize, e: Entity) -> Option<A::Item<'a>> {
         A::item(s, t, p, r, e)
     }
+    #[inline(always)]
     fn pages<'a>(s: &'a mut TermState<'_>, t: usize, p: usize) -> PageView<'a, A::C> {
         A::page(s, t, p)
     }
+    #[inline(always)]
     fn at<'b>(page: &'b mut PageView<'_, A::C>, r: usize, e: Entity) -> Option<A::Item<'b>> {
         A::at(page, r, e)
     }
     fn driver(s: &TermState<'_>) -> Option<(usize, Vec<Entity>)> {
         s.sparse_entities()
+    }
+    type Slices<'a> = A::Slice<'a>;
+    fn slices<'a>(s: &'a mut TermState<'_>, t: usize, p: usize) -> A::Slice<'a> {
+        A::slice(s, t, p)
+    }
+    const TABLE: bool = A::TABLE;
+    #[inline(always)]
+    fn items_of<'b>(slice: &'b mut A::Slice<'_>, row: usize) -> A::Item<'b> {
+        A::item_of(slice, row)
     }
 }
 
@@ -436,10 +554,12 @@ macro_rules! data_tuple {
                 let ($($s,)+) = states;
                 Some(($($t::item($s, t, p, r, e)?,)+))
             }
+            #[inline(always)]
             fn pages<'a>(states: &'a mut Self::States<'_>, t: usize, p: usize) -> Self::Pages<'a> {
                 let ($($s,)+) = states;
                 ($($t::page($s, t, p),)+)
             }
+            #[inline(always)]
             fn at<'b>(pages: &'b mut Self::Pages<'_>, r: usize, e: Entity) -> Option<Self::Items<'b>> {
                 let ($($s,)+) = pages;
                 Some(($($t::at($s, r, e)?,)+))
@@ -451,6 +571,17 @@ macro_rules! data_tuple {
                     .flatten()
                     .min_by_key(|(n, _)| *n)?;
                 smallest.1.sparse_entities()
+            }
+            type Slices<'a> = ($($t::Slice<'a>,)+);
+            fn slices<'a>(states: &'a mut Self::States<'_>, t: usize, p: usize) -> Self::Slices<'a> {
+                let ($($s,)+) = states;
+                ($($t::slice($s, t, p),)+)
+            }
+            const TABLE: bool = $($t::TABLE &&)+ true;
+            #[inline(always)]
+            fn items_of<'b>(slices: &'b mut Self::Slices<'_>, row: usize) -> Self::Items<'b> {
+                let ($($s,)+) = slices;
+                ($($t::item_of($s, row),)+)
             }
         }
     };
@@ -641,6 +772,53 @@ impl Row<'_> {
     }
 }
 
+/// Rows of one page, in a page walk (`for_each_page`): its entities, and
+/// a row for each, indexed as every term's column on the page is. A walk
+/// in key order hands out runs of a page (`rows`).
+pub struct Page<'a> {
+    entities: &'a [Entity],
+    rows: std::ops::Range<usize>,
+    world: &'a World,
+    changes: &'a ChangeDecl,
+    log: &'a Log,
+}
+
+impl<'a> Page<'a> {
+    /// The rows this call covers, as indices into the page's columns.
+    pub fn rows(&self) -> std::ops::Range<usize> {
+        self.rows.clone()
+    }
+
+    /// Every entity on the page, by row.
+    pub fn entities(&self) -> &'a [Entity] {
+        self.entities
+    }
+
+    pub fn entity(&self, row: usize) -> Entity {
+        self.entities[row]
+    }
+
+    /// The row through which `row`'s entity is changed, as `for_each`'s.
+    pub fn row(&self, row: usize) -> Row<'a> {
+        Row { entity: self.entities[row], world: self.world, changes: self.changes, log: self.log }
+    }
+}
+
+/// Every row of `ordered` tables, as (key, entity, table, page, row), in
+/// key order and then entity order across them.
+fn merged(rows: &[TableRead<'_>], ordered: &[usize]) -> Vec<(u128, Entity, u32, u32, u32)> {
+    let mut all: Vec<(u128, Entity, u32, u32, u32)> = Vec::new();
+    for &t in ordered {
+        let (table, order) = (&rows[t], rows[t].ordered.as_ref().expect("ordered"));
+        for (p, page) in table.rows.iter().enumerate() {
+            all.extend(page.iter().enumerate().map(|(r, &e)| (order.keys[p][r], e, t as u32, p as u32, r as u32)));
+        }
+    }
+    // One sorted run per table: a stable sort merges them.
+    all.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+    all
+}
+
 /// Sorts pairs as `(Entity, Entity)` would, but by a radix sort of their
 /// indices: live entities never share an index, so indices alone order
 /// them, and a broadphase's tens of thousands of pairs sort in a few
@@ -771,10 +949,12 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         }
     }
 
+    #[inline(always)]
     fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
         filters.iter().all(|(_, with, set)| set.set().contains(e) == *with)
     }
 
+    #[inline(always)]
     fn row<'a>(world: &'a World, decl: &'a QueryDecl, log: &'a Log, e: Entity) -> Row<'a> {
         Row { entity: e, world, changes: &decl.changes, log }
     }
@@ -807,17 +987,43 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
             }
             return;
         }
-        for (t, table_rows) in rows.iter().enumerate() {
-            for (p, page) in table_rows.rows.iter().enumerate() {
-                // Each term's slice once per page, then plain indexing.
-                let mut pages = D::pages(states, t, p);
+        for (t, table) in rows.iter().enumerate() {
+            Self::walk((world, decl, log, filters), t, table, states, &mut f);
+        }
+    }
+
+    /// Every row of matched table `t` that passes the filters, in page order.
+    fn walk<'s>(
+        (world, decl, log, filters): (&World, &QueryDecl, &Log, &[(ComponentId, bool, SparseGuard<'_>)]),
+        t: usize,
+        table: &TableRead<'_>,
+        states: &mut D::States<'s>,
+        f: &mut impl FnMut(Row<'_>, D::Items<'_>),
+    ) {
+        // Table terms and no sparse filter: every row of every page
+        // matches, so each is its terms' slices indexed, with no check per
+        // row. Half the cost of the general walk below, or less
+        // (query_bench, 2026-09-24).
+        if D::TABLE && filters.is_empty() {
+            for (p, page) in table.rows.iter().enumerate() {
+                if page.is_empty() {
+                    continue;
+                }
+                let mut slices = D::slices(states, t, p);
                 for (r, &e) in page.iter().enumerate() {
-                    if !Self::passes(filters, e) {
-                        continue;
-                    }
-                    if let Some(items) = D::at(&mut pages, r, e) {
-                        f(Self::row(world, decl, log, e), items);
-                    }
+                    f(Self::row(world, decl, log, e), D::items_of(&mut slices, r));
+                }
+            }
+            return;
+        }
+        for (p, page) in table.rows.iter().enumerate() {
+            // Each term's view once per page, then plain indexing.
+            let mut pages = D::pages(states, t, p);
+            for (r, &e) in page.iter().enumerate() {
+                if Self::passes(filters, e)
+                    && let Some(items) = D::at(&mut pages, r, e)
+                {
+                    f(Self::row(world, decl, log, e), items);
                 }
             }
         }
@@ -880,43 +1086,17 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// aren't ordered come after, in their own order.
     pub fn for_each_ordered(&mut self, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
         let Query { world, decl, rows, states, filters, log, .. } = self;
-        // Not `for_each`, which may walk a sparse set's order instead.
-        fn walk<'w, D: Data, F, C>(
-            (world, decl, log, filters): (&World, &QueryDecl, &Log, &[(ComponentId, bool, SparseGuard<'_>)]),
-            t: usize,
-            table: &TableRead<'_>,
-            states: &mut D::States<'w>,
-            f: &mut impl FnMut(Row<'_>, D::Items<'_>),
-        ) {
-            for (p, page) in table.rows.iter().enumerate() {
-                let mut pages = D::pages(states, t, p);
-                for (r, &e) in page.iter().enumerate() {
-                    if Query::<D, F, C>::passes(filters, e)
-                        && let Some(items) = D::at(&mut pages, r, e)
-                    {
-                        f(Query::<D, F, C>::row(world, decl, log, e), items);
-                    }
-                }
-            }
-        }
+        // Tables walked as `for_each` walks them, never by a sparse set's
+        // order, which `for_each` may take instead.
         let cx = (*world, *decl, *log, filters.as_slice());
         let ordered: Vec<usize> = (0..rows.len()).filter(|&t| rows[t].ordered.is_some()).collect();
         if ordered.len() <= 1 {
             // One sorted run already: no merge.
             for &t in &ordered {
-                walk::<D, F, C>(cx, t, &rows[t], states, &mut f);
+                Self::walk(cx, t, &rows[t], states, &mut f);
             }
         } else {
-            let mut all: Vec<(u128, Entity, u32, u32, u32)> = Vec::new();
-            for &t in &ordered {
-                let (table, order) = (&rows[t], rows[t].ordered.as_ref().expect("ordered"));
-                for (p, page) in table.rows.iter().enumerate() {
-                    all.extend(page.iter().enumerate().map(|(r, &e)| (order.keys[p][r], e, t as u32, p as u32, r as u32)));
-                }
-            }
-            // One sorted run per table: a stable sort merges them.
-            all.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
-            for (_, e, t, p, r) in all {
+            for (_, e, t, p, r) in merged(rows, &ordered) {
                 if Self::passes(filters, e)
                     && let Some(items) = D::fetch(states, t as usize, p as usize, r as usize, e)
                 {
@@ -925,8 +1105,82 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
             }
         }
         for t in (0..rows.len()).filter(|&t| rows[t].ordered.is_none()) {
-            walk::<D, F, C>(cx, t, &rows[t], states, &mut f);
+            Self::walk(cx, t, &rows[t], states, &mut f);
         }
+    }
+
+    /// Every page of the query's rows, with each term's column on it whole:
+    /// `&[T]` for a read, `ColumnMut` for a write, so a system that writes
+    /// every row can stamp a page at once (`write_all`) rather than a row
+    /// at a time. In the order `for_each` walks them. Table components
+    /// only, and no sparse filters: a sparse term or filter has no slice.
+    pub fn for_each_page(&mut self, mut f: impl FnMut(Page<'_>, D::Slices<'_>)) {
+        self.paged();
+        let Query { world, decl, rows, states, log, .. } = self;
+        for (t, table) in rows.iter().enumerate() {
+            for (p, page) in table.rows.iter().enumerate() {
+                if !page.is_empty() {
+                    let page_rows = Page { entities: page, rows: 0..page.len(), world, changes: &decl.changes, log };
+                    f(page_rows, D::slices(states, t, p));
+                }
+            }
+        }
+    }
+
+    /// `for_each_ordered`, a run at a time: each call is a run of rows
+    /// consecutive on one page and in key order, with the page's columns
+    /// whole (index them by `Page::rows`). One ordered table is a run per
+    /// page; several are merged, and each row where the merge changes
+    /// table ends a run. Tables that aren't ordered come after, a page at a
+    /// time. As `for_each_page`, table components only.
+    pub fn for_each_ordered_page(&mut self, mut f: impl FnMut(Page<'_>, D::Slices<'_>)) {
+        self.paged();
+        let Query { world, decl, rows, states, log, .. } = self;
+        let changes = &decl.changes;
+        let ordered: Vec<usize> = (0..rows.len()).filter(|&t| rows[t].ordered.is_some()).collect();
+        let whole = |t: usize, p: usize| (t, p, 0..rows[t].rows[p].len());
+        let mut runs: Vec<(usize, usize, std::ops::Range<usize>)> = Vec::new();
+        if ordered.len() <= 1 {
+            for &t in &ordered {
+                runs.extend((0..rows[t].rows.len()).map(|p| whole(t, p)));
+            }
+        } else {
+            for (_, _, t, p, r) in merged(rows, &ordered) {
+                let (t, p, r) = (t as usize, p as usize, r as usize);
+                // A table's rows are in key order, so a run breaks where the
+                // merge changes table or page; the row check keeps a run to
+                // rows the merge visited should that ever not hold.
+                match runs.last_mut() {
+                    Some((lt, lp, run)) if *lt == t && *lp == p && run.end == r => run.end += 1,
+                    _ => runs.push((t, p, r..r + 1)),
+                }
+            }
+        }
+        for t in (0..rows.len()).filter(|&t| rows[t].ordered.is_none()) {
+            runs.extend((0..rows[t].rows.len()).map(|p| whole(t, p)));
+        }
+        for (t, p, run) in runs {
+            if run.is_empty() {
+                continue;
+            }
+            let page = Page { entities: &rows[t].rows[p], rows: run, world, changes, log };
+            f(page, D::slices(states, t, p));
+        }
+    }
+
+    /// How many rows the query's tables hold: the length of a page walk.
+    pub fn len(&self) -> usize {
+        self.rows.iter().map(|t| t.rows.iter().map(Vec::len).sum::<usize>()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Page walks see every row of a table, so a sparse filter, which
+    /// would skip some, has no place in them.
+    fn paged(&self) {
+        assert!(self.filters.is_empty(), "a page walk is over whole pages, and this query filters by a sparse component");
     }
 
     /// Every entity the query matches in its spatial tables whose box meets

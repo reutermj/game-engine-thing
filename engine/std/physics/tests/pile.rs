@@ -4,12 +4,17 @@
 //!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
 //!   stats      how many bodies, how many at rest, the deepest overlap
 //!              between two of them, and how many got out of the box
+//!   shelves    two shelves across the box at `SHELF`, one a body with no
+//!              velocity and one a velocity with no body, and a row of
+//!              bodies dropped on each: colliders physics gathers apart
 
 use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
 use physics::{Body, Collider, Gravity, Placed, Position, Shape, Vec2, Velocity};
 
 pub const WIDTH: f32 = 40.0;
 pub const HEIGHT: f32 = 30.0;
+/// Where `shelves` puts its shelves' tops.
+pub const SHELF: f32 = 10.0;
 const RADIUS: f32 = 0.45;
 /// Below this speed a body counts as at rest.
 const REST: f32 = 0.1;
@@ -127,7 +132,20 @@ impl Mod for Pile {
                 Ok(format!("dropped {n}"))
             }
             None if message.trim() == "stats" => Ok(stats(&mut world, self.width())),
-            _ => Err("commands: drop <n> | stats".into()),
+            None if message.trim() == "shelves" => {
+                let w = self.width();
+                let half = Collider::rect(w / 4.0 - 0.5, 0.25);
+                let (left, right) = (Position { x: w / 4.0, y: SHELF + 0.25 }, Position { x: w * 0.75, y: SHELF + 0.25 });
+                world.spawn((left, half, Body::kinematic()));
+                world.spawn((right, half, Velocity::default()));
+                let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
+                for k in 0..(w as u32 - 2) {
+                    let at = Position { x: 1.5 + k as f32, y: SHELF - 1.0 };
+                    world.spawn((at, Velocity::default(), body, Collider::rect(RADIUS, RADIUS)));
+                }
+                Ok("shelved".into())
+            }
+            _ => Err("commands: widen <w> | drop <n> | stats | shelves".into()),
         }
     }
 }
