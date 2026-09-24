@@ -1,7 +1,11 @@
-//! Prints every position once a second, so a reload elsewhere is visible here.
+//! Prints once a second how many bodies are moving, and where the first one
+//! is, so a reload elsewhere is visible here.
 
 use engine_api::{Cx, Mod, Query, Systems, export_mod, phase};
-use transform::Position;
+use physics::{Position, Velocity};
+
+/// Slower than this counts as still.
+const STILL: f32 = 0.1;
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -11,18 +15,22 @@ engine_api::mod_state! {
 }
 
 impl Reporter {
-    fn report(&mut self, _: &mut (), cx: &mut Cx, mut positions: Query<&Position>) {
+    fn report(&mut self, _: &mut (), cx: &mut Cx, mut bodies: Query<(&Position, &Velocity)>) {
         self.frames += 1;
         if self.frames % 60 != 0 {
             return;
         }
-        let mut any = false;
-        positions.for_each(|row, p| {
-            cx.log(format!("entity {}: {p:?}", row.entity().index));
-            any = true;
+        let (mut n, mut moving, mut first) = (0, 0, None);
+        bodies.for_each(|row, (p, v)| {
+            n += 1;
+            if v.x.hypot(v.y) >= STILL {
+                moving += 1;
+            }
+            first.get_or_insert((row.entity().index, *p));
         });
-        if !any {
-            cx.log("no positions");
+        match first {
+            Some((e, p)) => cx.log(format!("{moving} of {n} bodies moving; entity {e} at ({:.2}, {:.2})", p.x, p.y)),
+            None => cx.log("no bodies"),
         }
     }
 }
@@ -31,7 +39,6 @@ impl Mod for Reporter {
     type Transient = ();
 
     fn systems(s: &mut Systems<Self>) {
-        // After the frame's movement.
         s.add("report", Self::report).phase(phase::LATE);
     }
 }

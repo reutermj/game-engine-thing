@@ -3,9 +3,6 @@ load("//engine:defs.bzl", "engine_mod")
 engine_mod(
     name = "spawner",
     srcs = ["lib.rs"],
-    mod_deps = [
-        "//mods/physics",
-        "//mods/transform",
-    ],
+    mod_deps = ["//engine/std/physics"],
     visibility = ["//visibility:public"],
 )

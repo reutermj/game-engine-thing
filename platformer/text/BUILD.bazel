@@ -5,6 +5,7 @@ engine_mod(
     srcs = ["lib.rs"],
     mod_deps = [
         "//engine/std/clock",
+        "//engine/std/physics",
         "//platformer/core",
         "//platformer/walkers",
     ],

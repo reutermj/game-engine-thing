@@ -15,8 +15,8 @@ them with little or no state of their own. So in this engine:
 
 - **Components live in the loader's world.** They outlive every build of
   every mod, and every mod sees the same entities.
-- **Systems are mods.** `mods/physics` has no state at all; reloading it
-  changes how entities move, and nothing else.
+- **Systems are mods.** `//engine/std/physics` keeps only a contact cache
+  of its own; reloading it changes how bodies move, and nothing else.
 - **Per-mod state (`Mod`) remains** for data genuinely private to one mod,
   such as `mods/spawner`'s list of the entities it owns.
 

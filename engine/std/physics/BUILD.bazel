@@ -1,0 +1,134 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_game", "engine_mod")
+
+# 2D rigid bodies, with every piece of state in the world or this mod's
+# state, so the solver hot-reloads under a running simulation. A game uses
+# it by naming it in a mod's mod_deps. See docs/architecture/physics.md.
+
+PHYSICS_SRCS = [
+    "lib.rs",
+    "broad.rs",
+    "narrow.rs",
+    "solver.rs",
+]
+
+PHYSICS_INTERFACE = [
+    "components.rs",
+    "shapes.rs",
+    "spatial.rs",
+]
+
+engine_mod(
+    name = "physics",
+    srcs = PHYSICS_SRCS,
+    interface = PHYSICS_INTERFACE,
+    mod_deps = ["//engine/std/clock"],
+    visibility = ["//visibility:public"],
+)
+
+# The same mod under another build name, for the test that swaps the solver
+# under a running simulation.
+engine_mod(
+    name = "physics_v2",
+    srcs = PHYSICS_SRCS,
+    crate_features = ["v2"],
+    interface = PHYSICS_INTERFACE,
+    mod_deps = ["//engine/std/clock"],
+    mod_name = "physics",
+)
+
+# Test scenes, apart from the demos in //mods: a walled box to drop bodies
+# into, and a platformer in miniature. See the sources.
+engine_mod(
+    name = "pile",
+    srcs = ["tests/pile.rs"],
+    crate_root = "tests/pile.rs",
+    mod_deps = [":physics"],
+)
+
+engine_mod(
+    name = "runner",
+    srcs = ["tests/runner.rs"],
+    crate_root = "tests/runner.rs",
+    mod_deps = [":physics"],
+)
+
+#   ./bazel run //engine/std/physics:pile_game
+#   bazel-bin/engine/modctl/modctl send pile drop 300
+#   bazel-bin/engine/modctl/modctl send lockstep step 300
+#   bazel-bin/engine/modctl/modctl send pile stats
+engine_game(
+    name = "pile_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":pile"],
+)
+
+engine_game(
+    name = "runner_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":runner"],
+)
+
+# The shapes' tests, in the interface crate.
+rust_test(
+    name = "shapes_test",
+    crate = ":physics_interface",
+)
+
+# The broadphase, narrowphase and solver alone, and whole steps over arrays.
+rust_test(
+    name = "core_test",
+    srcs = [
+        "broad.rs",
+        "narrow.rs",
+        "solver.rs",
+        "tests/core_test.rs",
+    ],
+    crate_root = "tests/core_test.rs",
+    deps = [":physics_interface"],
+)
+
+# Spatial queries on a world driven by the ECS harness, without the loader.
+rust_test(
+    name = "spatial_test",
+    srcs = ["tests/spatial_test.rs"],
+    deps = [
+        ":physics_interface",
+        "//engine/api",
+        "//engine/ecs",
+    ],
+)
+
+TEST_DATA = {
+    "PILE": ":pile_game",
+    "RUNNER": ":runner_game",
+    "PHYSICS_V2": ":physics_v2",
+}
+
+# The mod in a running engine, on the test scenes.
+rust_test(
+    name = "physics_test",
+    srcs = ["tests/physics_test.rs"],
+    data = TEST_DATA.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()},
+    deps = [
+        ":physics_interface",
+        "//engine/control",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+#   ./bazel run -c opt //engine/std/physics:bench
+rust_binary(
+    name = "bench",
+    srcs = ["tests/bench.rs"],
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)

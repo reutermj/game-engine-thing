@@ -8,11 +8,7 @@ pub const WALK_SPEED: f32 = 3.0;
 pub const STOMP_BOUNCE: f32 = 12.0;
 
 component! {
+    /// Marks a walker. Its one-tile box is physics's.
     #[derive(Debug, Default, Copy)]
-    pub struct Walker: "walkers::Walker" {
-        /// Top-left corner of its one-tile box.
-        pub x: f32,
-        pub y: f32,
-        pub vx: f32,
-    }
+    pub struct Walker: "walkers::Walker" {}
 }

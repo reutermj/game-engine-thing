@@ -30,12 +30,12 @@ pub struct SystemView<'a> {
 
 impl SystemView<'_> {
     fn queries(&self) -> impl Iterator<Item = &QueryDecl> {
-        self.params.iter().filter_map(ParamDecl::query)
+        ParamDecl::leaves(self.params).into_iter().filter_map(ParamDecl::query)
     }
 
     fn events(&self) -> Vec<(usize, bool)> {
-        self.params
-            .iter()
+        ParamDecl::leaves(self.params)
+            .into_iter()
             .filter_map(|p| match p {
                 ParamDecl::Events { queue, write } => Some((*queue, *write)),
                 _ => None,
@@ -121,7 +121,7 @@ fn table_only(world: &World, ids: &[ComponentId]) -> Vec<ComponentId> {
 /// changing queries match, with any subset of their changes.
 pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
     let mut fp = Footprint::default();
-    for p in params {
+    for p in ParamDecl::leaves(params) {
         match p {
             ParamDecl::Query(q) if !q.changes.is_empty() => {
                 for &c in q.changes.adds.iter().chain(&q.changes.removes) {
@@ -154,6 +154,7 @@ pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
             }
             ParamDecl::Events { queue, write: true } => fp.add_events(*queue),
             ParamDecl::Query(_) | ParamDecl::Events { .. } => {}
+            ParamDecl::Group(_) => unreachable!("leaves are flattened"),
         }
     }
     fp

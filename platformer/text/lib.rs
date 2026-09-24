@@ -11,6 +11,7 @@
 
 use clock::Clock;
 use engine_api::{Cx, Mod, WorldMut, export_mod};
+use physics::{Position, Touching, Velocity};
 use platformer::{
     Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile,
 };
@@ -32,14 +33,26 @@ fn send(cx: &mut Cx, event: impl engine_api::Event) -> Result<(), String> {
     Ok(())
 }
 
+/// A body, as `state` reports it: its box's top-left corner, as the map
+/// is written, and its velocity.
+#[derive(Clone, Copy)]
+struct Seen {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+}
+
 struct Snapshot {
     frame: u64,
     info: LevelInfo,
     player: Player,
+    body: Seen,
+    on_ground: bool,
     input: Input,
     tiles: Vec<Tile>,
     coins: Vec<Coin>,
-    walkers: Vec<Walker>,
+    walkers: Vec<Seen>,
 }
 
 /// Every `T` in the world, copied out.
@@ -52,17 +65,18 @@ fn all<T: engine_api::Component + Copy>(world: &mut WorldMut) -> Vec<T> {
 fn snapshot(world: &mut WorldMut) -> Result<Snapshot, String> {
     let frame = clock::now(world).map_or(0, |c: Clock| c.frame);
     let info = world.single::<&LevelInfo, _>(|_, i| *i).ok_or("no level loaded")?;
-    let (input, player) =
-        world.single::<(&Input, &Player), _>(|_, (i, p)| (*i, *p)).ok_or("no player yet: try `step`")?;
-    Ok(Snapshot {
-        frame,
-        info,
-        player,
-        input,
-        tiles: all(world),
-        coins: all(world),
-        walkers: all(world),
-    })
+    let (input, player, body, on_ground) = world
+        .single::<(&Input, &Player, &Position, &Velocity, &Touching), _>(|_, (i, p, at, v, t)| {
+            (*i, *p, seen(at, v, PLAYER_WIDTH, PLAYER_HEIGHT), t.below)
+        })
+        .ok_or("no player yet: try `step`")?;
+    let mut walkers = Vec::new();
+    world.for_each::<(&Walker, &Position, &Velocity)>(|_, (_, at, v)| walkers.push(seen(at, v, 1.0, 1.0)));
+    Ok(Snapshot { frame, info, player, body, on_ground, input, tiles: all(world), coins: all(world), walkers })
+}
+
+fn seen(at: &Position, v: &Velocity, w: f32, h: f32) -> Seen {
+    Seen { x: at.x - w / 2.0, y: at.y - h / 2.0, vx: v.x, vy: v.y }
 }
 
 fn header(s: &Snapshot) -> String {
@@ -99,7 +113,7 @@ fn draw(s: &Snapshot) -> String {
     for walker in &s.walkers {
         put((walker.x + 0.5).floor() as i32, (walker.y + 0.5).floor() as i32, 'E');
     }
-    let p = &s.player;
+    let p = &s.body;
     put((p.x + PLAYER_WIDTH / 2.0).floor() as i32, (p.y + PLAYER_HEIGHT / 2.0).floor() as i32, '@');
 
     let mut out = header(s) + "\n";
@@ -111,11 +125,11 @@ fn draw(s: &Snapshot) -> String {
 }
 
 fn describe(s: &Snapshot) -> String {
-    let p = &s.player;
+    let p = &s.body;
     let mut out = header(s) + "\n";
     out += &format!(
         "player x {:.2} y {:.2} vx {:.2} vy {:.2} on_ground {}\ninput dir {} jump {}\n",
-        p.x, p.y, p.vx, p.vy, p.on_ground, s.input.dir, s.input.jump
+        p.x, p.y, p.vx, p.vy, s.on_ground, s.input.dir, s.input.jump
     );
     for w in &s.walkers {
         out += &format!("walker x {:.2} y {:.2} vx {:.2}\n", w.x, w.y, w.vx);

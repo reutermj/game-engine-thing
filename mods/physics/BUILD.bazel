@@ -1,9 +1,0 @@
-load("//engine:defs.bzl", "engine_mod")
-
-engine_mod(
-    name = "physics",
-    srcs = ["lib.rs"],
-    interface = ["components.rs"],
-    mod_deps = ["//mods/transform"],
-    visibility = ["//visibility:public"],
-)

@@ -107,21 +107,23 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/std/` — the mods the engine ships, which `engine_game` uses by
   default: `realtime` (the frame loop in real time) and `lockstep` (frames
   only when sent `step N`), both resident bootstraps; `clock` (the `Clock`
-  both publish); and `sequential`, the default scheduler.
-- `mods/` — demo mods: `counter` (per-mod state across reloads), `hello` (loaded live, not in the manifest), and the ECS
-  demo: `transform` declares `Position` and runs nothing, `physics` declares
-  `Velocity` and moves things, `spawner` creates entities, `reporter` prints
-  positions. Their `mod_deps` are the dependency example.
+  both publish); `sequential`, the default scheduler; and `physics`, 2D
+  rigid bodies with spatial queries, which a game gets by depending on it
+  (see [docs/architecture/physics.md](docs/architecture/physics.md)).
+- `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
+  (loaded live, not in the manifest), and the physics demo: `spawner`
+  drops bodies into a box and `reporter` prints what's moving, both on
+  `//engine/std/physics`. Their `mod_deps` are the dependency example.
 - `engine/tests/` — integration and e2e tests, and the test mods they load.
   The test mods are separate from `mods/` so editing a demo never changes
   what a test proves. See the testing conventions below.
 - `game/` — the `engine_game` target listing the mods loaded at startup,
   and its `reload` target.
-- `platformer/` — the second game: `core` (the player and the rules, mod
+- `platformer/` — the second game, on `//engine/std/physics`: `core` (the player and the rules, mod
   `platformer`), `walkers` (enemies), `level` (the map, `map.txt`, rebuilt
   live when it changes), `text`, and `platformer_test`, which replays routes
   an agent played.
-- `pong/` — the first real game: `core` (the rules, mod `pong`), `ai`,
+- `pong/` — the first real game, on `//engine/std/physics`: `core` (the rules, mod `pong`), `ai`,
   `text` (commands and drawing over messages), the game target on the
   lockstep bootstrap, and `pong_test`, which plays it through messages.
 - `bazel` — runs a pinned, checksummed bazelisk so a fresh checkout needs no

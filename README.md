@@ -14,10 +14,10 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 
 ```sh
 ./bazel run //game                  # terminal 1: engine + the mods in game/BUILD.bazel
-# edit mods/physics/lib.rs (say, add gravity), then:
-./bazel run //mods/physics          # terminal 2: rebuild and hot-reload; entities keep moving
-# edit mods/physics/components.rs, which spawner also uses, then:
-./bazel run //game:reload           # reloads physics and spawner together, nothing else
+# edit engine/std/physics/lib.rs (say, flip gravity in integrate_velocities), then:
+./bazel run //engine/std/physics    # terminal 2: rebuild and hot-reload; bodies keep moving
+# edit engine/std/physics/components.rs, which spawner and reporter also use, then:
+./bazel run //game:reload           # reloads the three together, nothing else
 # edit mods/counter/lib.rs, then:
 ./bazel run //mods/counter          # per-mod state carries over too
 ./bazel run //mods/hello            # load a mod the running game didn't ship with

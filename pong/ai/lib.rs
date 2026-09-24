@@ -2,7 +2,8 @@
 //! to the middle while it's going away. Slower than the ball can get, so it
 //! can be beaten with angled hits.
 
-use engine_api::{Cx, Mod, Query, Systems, export_mod};
+use engine_api::{Cx, Mod, Query, Systems, With, export_mod};
+use physics::{Position, Velocity};
 use pong::{Ball, HEIGHT, Opponent, Paddle};
 
 /// Fraction of full paddle speed the AI uses.
@@ -16,11 +17,17 @@ engine_api::mod_state! {
 }
 
 impl Ai {
-    fn think(&mut self, _: &mut (), _: &mut Cx, mut balls: Query<&Ball>, mut paddles: Query<(&Opponent, &mut Paddle)>) {
-        let Some(ball) = balls.single(|_, b| *b) else { return };
-        let target = if ball.vx > 0.0 { ball.y } else { HEIGHT / 2.0 };
-        paddles.for_each(|_, (_, paddle)| {
-            let off = target - paddle.y;
+    fn think(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut balls: Query<(&Position, &Velocity), With<Ball>>,
+        mut paddles: Query<(&mut Paddle, &Position), With<Opponent>>,
+    ) {
+        let Some((y, vx)) = balls.single(|_, (p, v)| (p.y, v.x)) else { return };
+        let target = if vx > 0.0 { y } else { HEIGHT / 2.0 };
+        paddles.for_each(|_, (paddle, p)| {
+            let off = target - p.y;
             paddle.intent = if off.abs() < SLACK { 0.0 } else { off.signum() * EFFORT };
         });
     }

@@ -1,5 +1,7 @@
 //! Pong's world. Units are text cells: the court is `WIDTH` columns by
-//! `HEIGHT` rows, with y growing downward, which is how `pong_text` draws it.
+//! `HEIGHT` rows, with y growing downward, which is how `pong_text` draws it
+//! and physics's convention. Where the ball and paddles are and how they
+//! move is physics's (`physics::Position`, `Velocity`).
 
 use engine_api::{component, event};
 
@@ -12,24 +14,23 @@ pub const RIGHT_FACE: f32 = WIDTH - 2.0;
 /// Cells per second.
 pub const PADDLE_SPEED: f32 = 16.0;
 pub const SERVE_SPEED: f32 = 16.0;
+/// The ball's radius. Everything it bounces off stands a radius back from
+/// the lines the court is drawn by (the faces, the top and bottom), so the
+/// ball's center turns on them.
+pub const BALL_RADIUS: f32 = 0.25;
 
 component! {
+    /// Marks the ball, a physics body.
     #[derive(Debug, Default, Copy)]
-    pub struct Ball: "pong::Ball" {
-        pub x: f32,
-        pub y: f32,
-        pub vx: f32,
-        pub vy: f32,
-    }
+    pub struct Ball: "pong::Ball" {}
 }
 
 component! {
+    /// A paddle, a kinematic physics body centered on its `Position`.
     #[derive(Debug, Default, Copy)]
     pub struct Paddle: "pong::Paddle" {
         /// The paddle's face column (`LEFT_FACE` or `RIGHT_FACE`).
         pub face: f32,
-        /// The paddle's center.
-        pub y: f32,
         /// -1 moves up at full speed, 1 down, 0 stays. Set by whoever
         /// controls the paddle.
         pub intent: f32,

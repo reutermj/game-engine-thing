@@ -45,6 +45,8 @@ fn an_unreturned_serve_scores_for_the_ai() {
     // misses it.
     play(&e, "stay", 120);
     assert!(state(&e).contains("score you 0 ai 1"), "{}", state(&e));
+    // Served again, to the player, who lost the point.
+    assert!((0.0..40.0).contains(&ball(&e, "x")) && ball(&e, "vx") < 0.0, "{}", state(&e));
 }
 
 #[test]
@@ -56,6 +58,10 @@ fn meeting_the_serve_returns_it() {
     play(&e, "stay", 46);
     assert!(ball(&e, "vx") > 0.0, "the ball should be heading back:\n{}", state(&e));
     assert!(state(&e).contains("score you 0 ai 0"), "{}", state(&e));
+    // Faster by the speed-up, and spun by where it met the paddle: the serve
+    // came in at 5.6 down.
+    assert!((ball(&e, "vx") - 16.0 * 1.05).abs() < 0.01, "{}", state(&e));
+    assert!((ball(&e, "vy") - 5.6).abs() > 0.05, "no spin:\n{}", state(&e));
 }
 
 #[test]
@@ -98,5 +104,12 @@ fn input_and_the_ai_come_before_the_paddles_move() {
     // The pong retrospective's complaint: in load order, the AI moved on the
     // previous frame's ball.
     let e = game("schedule");
-    assert_eq!(e.schedule().unwrap(), "input: pong::steer\nupdate: pong_ai::think\nsimulate: pong::play");
+    assert_eq!(
+        e.schedule().unwrap(),
+        "input: pong::steer\n\
+         update: pong_ai::think\n\
+         simulate: pong::play\n\
+         physics::step: physics::integrate_velocities, physics::find_contacts, physics::solve, physics::publish_index\n\
+         late: pong::rebound"
+    );
 }

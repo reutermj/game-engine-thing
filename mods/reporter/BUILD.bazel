@@ -3,6 +3,6 @@ load("//engine:defs.bzl", "engine_mod")
 engine_mod(
     name = "reporter",
     srcs = ["lib.rs"],
-    mod_deps = ["//mods/transform"],
+    mod_deps = ["//engine/std/physics"],
     visibility = ["//visibility:public"],
 )

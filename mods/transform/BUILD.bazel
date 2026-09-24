@@ -1,9 +1,0 @@
-load("//engine:defs.bzl", "engine_mod")
-
-# Declares components and runs nothing: other mods depend on its interface.
-engine_mod(
-    name = "transform",
-    srcs = ["lib.rs"],
-    interface = ["components.rs"],
-    visibility = ["//visibility:public"],
-)

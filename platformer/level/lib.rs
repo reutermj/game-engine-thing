@@ -8,7 +8,10 @@
 //! alone, so collected coins stay collected.
 
 use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
-use platformer::{Coin, GOAL, LevelInfo, Player, SOLID, SPIKE, Tile};
+use physics::{Body, Collider, Position, Touching, Velocity};
+use platformer::{
+    Coin, GOAL, LevelInfo, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SENSORS, SOLID, SPIKE, TILES, Tile, WALKERS,
+};
 use walkers::Walker;
 
 /// The map: `#` solid, `^` spikes, `G` goal, `C` coin, `E` walker, `P` player
@@ -54,12 +57,23 @@ impl Level {
         for (y, row) in map.iter().enumerate() {
             for (x, c) in row.chars().enumerate() {
                 let (x, y) = (x as i32, y as i32);
+                // Everything is one cell, centered in it.
+                let at = Position { x: x as f32 + 0.5, y: y as f32 + 0.5 };
+                let solid = Collider::rect(0.5, 0.5).on(TILES, u32::MAX);
+                let sensor = Collider::rect(0.5, 0.5).on(SENSORS, PLAYER).sensor();
                 let e = match c {
-                    '#' => world.spawn((Tile { x, y, kind: SOLID },)),
-                    '^' => world.spawn((Tile { x, y, kind: SPIKE },)),
-                    'G' => world.spawn((Tile { x, y, kind: GOAL },)),
-                    'C' => world.spawn((Coin { x, y },)),
-                    'E' => world.spawn((Walker { x: x as f32, y: y as f32, vx: 0.0 },)),
+                    '#' => world.spawn((Tile { x, y, kind: SOLID }, at, solid)),
+                    '^' => world.spawn((Tile { x, y, kind: SPIKE }, at, sensor)),
+                    'G' => world.spawn((Tile { x, y, kind: GOAL }, at, sensor)),
+                    'C' => world.spawn((Coin { x, y }, at, sensor)),
+                    'E' => world.spawn((
+                        Walker {},
+                        at,
+                        Velocity::default(),
+                        Body { friction: 0.0, ..Body::default() },
+                        Collider::rect(0.5, 0.5).on(WALKERS, TILES),
+                        Touching::default(),
+                    )),
                     'P' => {
                         // Standing on the floor of its cell.
                         spawn = Some((x as f32 + 0.1, y as f32 + 1.0 - platformer::PLAYER_HEIGHT));
@@ -73,6 +87,11 @@ impl Level {
         }
         let (spawn_x, spawn_y) = spawn.ok_or("the map has no P")?;
         let info = LevelInfo { width: width as i32, height: map.len() as i32, spawn_x, spawn_y };
+        // The level's sides are walls, however high the player jumps.
+        let (w, h) = (width as f32, map.len() as f32);
+        for x in [-0.5, w + 0.5] {
+            self.entities.push(world.spawn((Position { x, y: h / 2.0 }, Collider::rect(0.5, h * 4.0).on(TILES, u32::MAX))));
+        }
         self.entities.push(world.spawn((info,)));
         Ok(info)
     }
@@ -106,7 +125,8 @@ impl Mod for Level {
             }
         };
         // A player from the previous map may be inside a wall of this one.
-        world.for_each::<&mut Player>(|_, p| *p = Player { x: info.spawn_x, y: info.spawn_y, vx: 0.0, vy: 0.0, ..*p });
+        let start = Position { x: info.spawn_x + PLAYER_WIDTH / 2.0, y: info.spawn_y + PLAYER_HEIGHT / 2.0 };
+        world.for_each::<(&Player, &mut Position, &mut Velocity)>(|_, (_, p, v)| (*p, *v) = (start, Velocity::default()));
         self.built = hash;
         cx.log(format!("{BUILT} a {}x{} level", info.width, info.height));
     }

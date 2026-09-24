@@ -135,7 +135,7 @@ mod readiness {
 
 mod rows {
     use engine_ecs::harness::{Cx, IntoSystem, SystemDecl};
-    use engine_ecs::{Adds, Entity, Query, Removes, Without, component};
+    use engine_ecs::{Adds, Entity, Query, Removes, With, Without, component};
 
     use super::*;
 
@@ -252,11 +252,115 @@ mod rows {
     }
 
     #[test]
+    fn queries_kept_apart_by_their_filters_may_share_a_written_component() {
+        let (w, es) = world();
+        w.between_frames(Default::default()).unwrap().insert(es[0], Wet { n: 7 });
+        // The wet one takes the dry ones' numbers: one query writes Frozen,
+        // the other reads it, on tables no entity can be in both of.
+        fn copy(_: &mut Cx, mut wet: Query<&mut Frozen, With<Wet>>, mut dry: Query<&Frozen, Without<Wet>>) {
+            let mut sum = 0;
+            dry.for_each(|_, f| sum += f.n);
+            wet.for_each(|_, f| f.n = sum);
+        }
+        run(&w, vec![copy.system(&w, "copy")]);
+        let values = w.values::<Frozen>().unwrap();
+        assert_eq!(values.iter().find(|(e, _)| *e == es[0]).unwrap().1, Frozen { n: 1 + 2 + 3 });
+    }
+
+    #[test]
+    #[should_panic(expected = "two queries access Frozen and one writes it")]
+    fn filters_that_could_both_match_an_entity_keep_them_apart_from_nothing() {
+        let (w, _) = world();
+        fn both(_: &mut Cx, _a: Query<&mut Frozen, With<Wet>>, _b: Query<&Frozen, With<Mark>>) {}
+        both.system(&w, "both");
+    }
+
+    #[test]
+    #[should_panic(expected = "two queries access Sparse and one writes it")]
+    fn filters_dont_keep_apart_two_queries_of_a_sparse_component() {
+        component! {
+            #[derive(Debug, Default, PartialEq)]
+            struct Sparse: "Sparse", storage = sparse { n: u32 }
+        }
+        let (w, _) = world();
+        fn both(_: &mut Cx, _a: Query<&mut Sparse, With<Wet>>, _b: Query<&Sparse, Without<Wet>>) {}
+        both.system(&w, "both");
+    }
+
+    #[test]
     #[should_panic(expected = "two queries access Frozen and one writes it")]
     fn a_system_whose_queries_conflict_is_refused() {
         let (w, _) = world();
         fn both(_: &mut Cx, _a: Query<&mut Frozen>, _b: Query<&Frozen>) {}
         both.system(&w, "both");
+    }
+}
+
+/// Parameters made of parameters: a tuple of them, which is how a crate
+/// builds its own (physics's `Spatial`). The rules see the members.
+mod groups {
+    use engine_ecs::harness::{Cx, IntoSystem};
+    use engine_ecs::{Adds, Query, Without, component};
+
+    use super::*;
+
+    component! {
+        #[derive(Debug, Default, PartialEq)]
+        struct Frozen: "Frozen" { n: u32 }
+    }
+
+    component! {
+        #[derive(Debug, Default, PartialEq)]
+        struct Mark: "Mark" {}
+    }
+
+    fn world() -> World {
+        let w = World::new();
+        let mut m = w.between_frames(Default::default()).unwrap();
+        m.id::<Mark>();
+        for n in 0..4 {
+            m.spawn((Frozen { n },));
+        }
+        w
+    }
+
+    fn marked(w: &World) -> usize {
+        let mark = w.id("Mark").unwrap();
+        w.tables()
+            .filter(|t| t.components.contains(&mark))
+            .map(|t| t.rows.read().unwrap().iter().map(Vec::len).sum::<usize>())
+            .sum()
+    }
+
+    #[test]
+    fn a_group_works_like_its_members_and_its_changes_are_applied() {
+        let w = world();
+        fn mark(_: &mut Cx, (mut ice, mut seen): (Query<&Frozen, Without<Mark>, Adds<Mark>>, Query<&Frozen>)) {
+            ice.for_each(|row, _| row.insert(Mark {}));
+            let mut n = 0;
+            seen.for_each(|_, _| n += 1);
+            assert_eq!(n, 4);
+        }
+        Schedule { systems: vec![mark.system(&w, "mark")] }.run_sequential(&w);
+        assert_eq!(marked(&w), 4, "the group's changing query got an apply node");
+    }
+
+    #[test]
+    #[should_panic(expected = "two queries access Frozen and one writes it")]
+    fn a_group_cannot_hide_a_conflict_with_another_parameter() {
+        let w = world();
+        fn both(_: &mut Cx, _g: (Query<&mut Frozen>,), _b: Query<&Frozen>) {}
+        both.system(&w, "both");
+    }
+
+    #[test]
+    fn a_groups_write_orders_it_before_a_later_reader() {
+        let w = world();
+        fn write(_: &mut Cx, _g: (Query<&Mark>, Query<&mut Frozen>)) {}
+        fn read(_: &mut Cx, _q: Query<&Frozen>) {}
+        let s = Schedule { systems: vec![write.system(&w, "write"), read.system(&w, "read")] };
+        let fs = s.frame();
+        assert_eq!(blockers(&w, &s, &fs, "read"), ["write"]);
     }
 }
 

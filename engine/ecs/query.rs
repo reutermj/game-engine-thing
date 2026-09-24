@@ -310,7 +310,7 @@ impl<T: Component> Term for &mut T {
     }
 }
 
-/// A query's data: `()`, a term, or a tuple of up to four.
+/// A query's data: `()`, a term, or a tuple of up to eight.
 pub trait Data {
     type Items<'a>;
     type States<'w>;
@@ -412,6 +412,10 @@ data_tuple!(A: a: 0);
 data_tuple!(A: a: 0, B: b: 1);
 data_tuple!(A: a: 0, B: b: 1, C: c: 2);
 data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3, E: e_: 4);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3, E: e_: 4, F: f: 5);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3, E: e_: 4, F: f: 5, G: g: 6);
+data_tuple!(A: a: 0, B: b: 1, C: c: 2, D: d: 3, E: e_: 4, F: f: 5, G: g: 6, H: h: 7);
 
 // ---- Declarations ----
 
@@ -472,9 +476,25 @@ pub enum ParamDecl {
     Spawner { components: Vec<ComponentId> },
     /// An event queue, read or written.
     Events { queue: usize, write: bool },
+    /// A parameter made of others (a tuple of parameters, or a crate's own
+    /// parameter built from them): its footprint is its members'.
+    Group(Vec<ParamDecl>),
 }
 
 impl ParamDecl {
+    /// Every parameter `params` declare, groups flattened: what footprints
+    /// and conflict checks look at, so a group is never a way around them.
+    pub fn leaves(params: &[ParamDecl]) -> Vec<&ParamDecl> {
+        let mut out = Vec::new();
+        for p in params {
+            match p {
+                ParamDecl::Group(members) => out.extend(ParamDecl::leaves(members)),
+                p => out.push(p),
+            }
+        }
+        out
+    }
+
     pub fn query(&self) -> Option<&QueryDecl> {
         match self {
             ParamDecl::Query(q) => Some(q),
@@ -488,6 +508,7 @@ impl ParamDecl {
             ParamDecl::Query(q) => !q.changes.is_empty(),
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
+            ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
         }
     }
 }
@@ -749,19 +770,61 @@ impl<B: Bundle> Param for Spawner<'static, B> {
     }
 }
 
-/// Refuses two queries of one system that would take conflicting guards.
+/// A tuple of parameters is a parameter: how a crate builds its own from
+/// existing ones (declare the tuple, fetch it, wrap the items), without
+/// touching the footprint rules, which see the members.
+macro_rules! param_tuple {
+    ($($p:ident),+) => {
+        impl<$($p: Param),+> Param for ($($p,)+) {
+            type Item<'w> = ($($p::Item<'w>,)+);
+
+            fn declare(d: &mut Declare<'_>) -> ParamDecl {
+                ParamDecl::Group(vec![$($p::declare(d)),+])
+            }
+
+            #[allow(non_snake_case)]
+            fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Self::Item<'w> {
+                let ParamDecl::Group(members) = decl else { panic!("a tuple's declaration") };
+                let mut members = members.iter();
+                ($($p::fetch(cx, members.next().expect("one declaration per member")),)+)
+            }
+        }
+    };
+}
+param_tuple!(A);
+param_tuple!(A, B);
+param_tuple!(A, B, C);
+param_tuple!(A, B, C, D);
+
+/// Whether no table can match both queries: one requires a table-stored
+/// component the other excludes. Their guards on a shared table-stored
+/// component are then on different tables' columns, so they never meet.
+/// A sparse component doesn't count: a sparse set is one guard for every
+/// entity in it, whatever tables they're in.
+fn disjoint(world: &World, a: &QueryDecl, b: &QueryDecl) -> bool {
+    let table = |c: &ComponentId| world.storage(*c) == Storage::Table;
+    let requires = |q: &QueryDecl, c: ComponentId| q.terms.iter().any(|&(t, _)| t == c) || q.filter.with.contains(&c);
+    let excludes = |x: &QueryDecl, y: &QueryDecl| x.filter.without.iter().filter(|c| table(c)).any(|&c| requires(y, c));
+    excludes(a, b) || excludes(b, a)
+}
+
+/// Refuses two queries of one system that would take conflicting guards:
+/// both on one component, one writing, and not kept apart by their filters
+/// (`With<A>` and `Without<A>`; see `disjoint`).
 pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Result<(), String> {
-    let queries: Vec<&QueryDecl> = params.iter().filter_map(ParamDecl::query).collect();
+    let leaves = ParamDecl::leaves(params);
+    let queries: Vec<&QueryDecl> = leaves.iter().filter_map(|p| p.query()).collect();
     for (i, a) in queries.iter().enumerate() {
         for b in &queries[i + 1..] {
             for &(c, wa) in &a.terms {
-                if b.terms.iter().any(|&(d, wb)| c == d && (wa || wb)) {
+                let apart = world.storage(c) == Storage::Table && disjoint(world, a, b);
+                if !apart && b.terms.iter().any(|&(d, wb)| c == d && (wa || wb)) {
                     return Err(format!("{name}: two queries access {} and one writes it", world.name(c)));
                 }
             }
         }
     }
-    let queues: Vec<(usize, bool)> = params
+    let queues: Vec<(usize, bool)> = leaves
         .iter()
         .filter_map(|p| match p {
             ParamDecl::Events { queue, write } => Some((*queue, *write)),
@@ -778,7 +841,8 @@ pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Resul
 
 // ---- Spawning ----
 
-/// A bundle of components to spawn with: a tuple of one to four.
+/// A bundle of components to spawn with: a tuple of one to eight. A
+/// physics body alone is four (position, velocity, body, collider).
 pub trait Bundle: Send + 'static {
     fn components(d: &mut Declare<'_>) -> Vec<ComponentId>;
     fn put(self, sink: &mut BundleSink<'_, '_>);
@@ -832,6 +896,10 @@ bundle!(A);
 bundle!(A, B);
 bundle!(A, B, C);
 bundle!(A, B, C, D);
+bundle!(A, B, C, D, E);
+bundle!(A, B, C, D, E, F);
+bundle!(A, B, C, D, E, F, G);
+bundle!(A, B, C, D, E, F, G, H);
 
 impl<'w> Structural<'w> {
     /// Places reserved entity `e` with `bundle`'s components, `ids` being

@@ -4,10 +4,10 @@
         name = "physics",
         srcs = ["lib.rs"],
         interface = ["components.rs"],
-        mod_deps = ["//mods/transform"],
+        mod_deps = ["//engine/std/clock"],
     )
 
-builds `libphysics_mod.so`. `bazel run //mods/physics` sends it to the running
+builds `libphysics_mod.so`. `bazel run //engine/std/physics` sends it to the running
 engine, which loads it, or hot-reloads it if it's already running.
 
 A mod's `interface` is what other mods may use (its components); `mod_deps`

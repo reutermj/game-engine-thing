@@ -1,7 +1,7 @@
 load("//engine:defs.bzl", "engine_game")
 
 # `bazel run //game` starts the engine with these mods, plus the mods they
-# depend on (transform) and the defaults from //engine/std (the real-time
+# depend on (physics, and the clock it reads) and the defaults from //engine/std (the real-time
 # bootstrap and the sequential scheduler), and `bazel run //game:reload`
 # reloads whichever of them changed.
 engine_game(
@@ -9,7 +9,6 @@ engine_game(
     mods = [
         "//mods/counter",
         "//mods/spawner",
-        "//mods/physics",
         "//mods/reporter",
     ],
 )

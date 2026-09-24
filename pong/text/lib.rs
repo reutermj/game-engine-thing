@@ -9,6 +9,7 @@
 
 use clock::Clock;
 use engine_api::{Cx, Mod, WorldMut, export_mod};
+use physics::{Position, Velocity};
 use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, Steer, WIDTH};
 
 const HELP: &str = "commands: up | down | stay | show | state";
@@ -26,18 +27,34 @@ fn steer(cx: &mut Cx, intent: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// The ball and paddles, gathered from their bodies.
+struct BallView {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+}
+
+struct PaddleView {
+    face: f32,
+    y: f32,
+    intent: f32,
+}
+
 struct Snapshot {
     frame: u64,
-    ball: Ball,
-    paddles: Vec<Paddle>,
+    ball: BallView,
+    paddles: Vec<PaddleView>,
     score: Score,
 }
 
 fn snapshot(world: &mut WorldMut) -> Result<Snapshot, String> {
     let frame = clock::now(world).map_or(0, |c: Clock| c.frame);
-    let ball = world.single::<&Ball, _>(|_, b| *b).ok_or("no ball: is pong loaded?")?;
+    let ball = world
+        .single::<(&Ball, &Position, &Velocity), _>(|_, (_, p, v)| BallView { x: p.x, y: p.y, vx: v.x, vy: v.y })
+        .ok_or("no ball: is pong loaded?")?;
     let mut paddles = Vec::new();
-    world.for_each::<&Paddle>(|_, p| paddles.push(*p));
+    world.for_each::<(&Paddle, &Position)>(|_, (p, at)| paddles.push(PaddleView { face: p.face, y: at.y, intent: p.intent }));
     let score = world.single::<&Score, _>(|_, s| *s).unwrap_or_default();
     Ok(Snapshot { frame, ball, paddles, score })
 }

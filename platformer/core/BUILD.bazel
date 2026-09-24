@@ -1,12 +1,12 @@
 load("//engine:defs.bzl", "engine_mod")
 
-# The player and the rules: movement, tile collision, coins, spikes, the
-# goal. The level itself comes from the `level` mod.
+# The player and the rules, over physics: running and jumping, coins,
+# spikes, the goal. The level itself comes from the `level` mod.
 engine_mod(
     name = "core",
     srcs = ["lib.rs"],
     interface = ["components.rs"],
-    mod_deps = ["//engine/std/clock"],
+    mod_deps = ["//engine/std/physics"],
     mod_name = "platformer",
     visibility = ["//visibility:public"],
 )

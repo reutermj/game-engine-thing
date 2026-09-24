@@ -1,6 +1,10 @@
 //! The platformer's world. Units are tiles, with y growing downward, which is
-//! how the level is written and how `platformer_text` draws it. A tile at
-//! `(x, y)` covers `[x, x + 1) × [y, y + 1)`.
+//! how the level is written, how `platformer_text` draws it, and physics's
+//! convention. A tile at `(x, y)` covers `[x, x + 1) × [y, y + 1)`.
+//!
+//! Where things are and how they move is physics's (`physics::Position`,
+//! the center of a collider, and `Velocity`); these components hold the
+//! game's own state.
 
 use engine_api::{component, event};
 
@@ -10,9 +14,17 @@ pub const GRAVITY: f32 = 40.0;
 pub const JUMP_SPEED: f32 = 18.0;
 pub const RUN_SPEED: f32 = 7.0;
 pub const MAX_FALL: f32 = 30.0;
-/// The player's box, anchored at its top-left corner.
+/// The player's box.
 pub const PLAYER_WIDTH: f32 = 0.8;
 pub const PLAYER_HEIGHT: f32 = 0.95;
+
+/// Collision layers. Pickups, spikes and the goal are sensors, which only
+/// the player sets off; walkers meet the player through a spatial query,
+/// not a collision, so each can tell a stomp from a touch.
+pub const TILES: u32 = 1;
+pub const PLAYER: u32 = 2;
+pub const WALKERS: u32 = 4;
+pub const SENSORS: u32 = 8;
 
 /// `Tile::kind` values.
 pub const SOLID: u8 = 0;
@@ -42,19 +54,16 @@ component! {
     pub struct LevelInfo: "platformer::LevelInfo" {
         pub width: i32,
         pub height: i32,
+        /// Where the player's box starts: its top-left corner.
         pub spawn_x: f32,
         pub spawn_y: f32,
     }
 }
 
 component! {
+    /// The player's progress. Its body is physics's.
     #[derive(Debug, Default, Copy)]
     pub struct Player: "platformer::Player" {
-        pub x: f32,
-        pub y: f32,
-        pub vx: f32,
-        pub vy: f32,
-        pub on_ground: bool,
         pub coins: u32,
         pub deaths: u32,
         /// Set once the player touches the goal.

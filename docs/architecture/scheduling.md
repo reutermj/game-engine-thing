@@ -52,7 +52,7 @@ A system's parameters are both what it reads and what it declares, so the
 declaration can't drift from the code:
 
 - **`Query<Data, Filter, Changes>`**: every entity with `Data`'s
-  components, `&T` or `&mut T` or a tuple of up to four, that passes
+  components, `&T` or `&mut T` or a tuple of up to eight, that passes
   `Filter` (`With<T>`, `Without<T>`). `Changes` declares the structural
   changes the system may make to the rows it yields: `Adds<T>`,
   `Removes<T>`, `Despawns`. Iterated with `q.for_each(|row, items| ..)`,
@@ -68,9 +68,12 @@ handlers, between frames. So a system's footprint is exactly its
 parameters, which is what lets the scheduler decide what may run together,
 and it's why a service called from a system can't touch the world either
 (storage.md, "Services don't touch the world"). Two queries of one system
-that would take conflicting guards (two writing one component) are refused
-when it's added. A system that needs to reach further (exclusive systems)
-is deferred until something needs one.
+that would take conflicting guards (both on one component, one writing) are
+refused when it's added, unless their filters keep them apart: one requires
+a table-stored component the other excludes, as in `Query<&mut Velocity,
+With<Walker>>` beside `Query<&Velocity, (With<Player>, Without<Walker>)>`.
+A system that needs to reach further (exclusive systems) is deferred until
+something needs one.
 
 ### Structural changes go through rows
 

@@ -22,8 +22,8 @@ dependent's inputs are unchanged, so its library is byte-for-byte the same.
 Editing `physics/components.rs` rebuilds `physics` and every mod that
 compiled against its interface.
 
-A mod that only declares components, such as `mods/transform`, has an
-implementation of one line: `engine_api::export_mod!(engine_api::Inert);`.
+A mod that only declares components has an implementation of one line:
+`engine_api::export_mod!(engine_api::Inert);`.
 
 Component names are namespaced by the declaring mod
 (`"physics::Velocity"`) by convention. The engine doesn't enforce it.
@@ -98,7 +98,7 @@ access by the new builds.
 dependencies the game didn't list.
 
 The per-mod command can't do the game's job because Bazel's graph only
-points one way: `//mods/physics` knows what `physics` depends on, but not
+points one way: `//engine/std/physics` knows what `physics` depends on, but not
 what depends on `physics`. Only a target above every mod, the game, sees
 which mods an interface change reaches.
 
