@@ -534,3 +534,69 @@ fn a_dense_pile_pairs_as_brute_force_says() {
         check(&w);
     }
 }
+
+/// Pairs between two sides (`engine_ecs::near_pairs`): every pair with an
+/// end among the active side's rows, and none of two passive ones, whatever
+/// has moved; a table on both sides counts once. Passive here is tagged
+/// (every big row is), then marked (a sparse filter, checked by row), then
+/// both. Some tagged rows are of reused indices, whose generations a pair
+/// must carry.
+#[test]
+fn pairs_between_sides_agree_with_brute_force() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 12;
+    let mut es = populate(&w, 700, &mut seed);
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for e in es.drain(..60) {
+            m.despawn(e);
+        }
+        for _ in 0..60 {
+            let at = At { x: lcg(&mut seed) * 50.0, y: lcg(&mut seed) * 50.0 };
+            es.push(m.spawn((at, Size { hx: 0.4, hy: 0.4 }, Tag { n: 0 })));
+        }
+        assert!(es.iter().any(|e| e.generation > 0), "indices reused");
+        for &e in es.iter().filter(|e| e.index % 4 == 0) {
+            m.insert(e, Mark { n: 1 });
+        }
+    }
+    static MARKED: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    static TAGGED_MARKED: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    static BOTH: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    static NONE_ACTIVE: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
+    fn sides(
+        _: &mut Cx,
+        (untagged, tagged): (Query<&At, Without<Tag>>, Query<&At, With<Tag>>),
+        (unmarked, marked): (Query<&At, Without<Mark>>, Query<&At, With<Mark>>),
+        (all, tagged_marked): (Query<&At>, Query<&At, (With<Tag>, With<Mark>)>),
+    ) {
+        *PAIRS.lock().unwrap() = engine_ecs::near_pairs(&untagged, &tagged, 0.05);
+        *MARKED.lock().unwrap() = engine_ecs::near_pairs(&unmarked, &marked, 0.05);
+        // Passive tables no active query matches, filtered row by row.
+        *TAGGED_MARKED.lock().unwrap() = engine_ecs::near_pairs(&untagged, &tagged_marked, 0.05);
+        // Every table on both sides: as if all were active.
+        *BOTH.lock().unwrap() = engine_ecs::near_pairs(&(&untagged, &tagged), &all, 0.05);
+        *NONE_ACTIVE.lock().unwrap() = engine_ecs::near_pairs(&(), &all, 0.05);
+    }
+    let s = Schedule { systems: vec![mover.system(&w, "mover"), sides.system(&w, "sides")] };
+    let tagged: std::collections::HashSet<Entity> = w.values::<Tag>().unwrap().into_iter().map(|(e, _)| e).collect();
+    let marked: std::collections::HashSet<Entity> = w.values::<Mark>().unwrap().into_iter().map(|(e, _)| e).collect();
+    for _ in 0..10 {
+        s.run_sequential(&w);
+        let not_both = |set: &std::collections::HashSet<Entity>| brute_pairs_of_any(&w, 0.05, |a, b| !(set.contains(&a) && set.contains(&b)));
+        let got = PAIRS.lock().unwrap().clone();
+        assert!(got.iter().any(|(a, b)| tagged.contains(a) || tagged.contains(b)), "some pairs cross the sides");
+        assert_eq!(got, not_both(&tagged));
+        assert_eq!(*MARKED.lock().unwrap(), not_both(&marked));
+        let seen = |e: &Entity| !tagged.contains(e) || marked.contains(e);
+        let want = brute_pairs_of_any(&w, 0.05, |a, b| seen(&a) && seen(&b) && !(tagged.contains(&a) && tagged.contains(&b)));
+        assert_eq!(*TAGGED_MARKED.lock().unwrap(), want);
+        assert_eq!(*BOTH.lock().unwrap(), brute_pairs(&w, 0.05));
+        assert_eq!(*NONE_ACTIVE.lock().unwrap(), []);
+    }
+}
+
+fn brute_pairs_of_any(w: &World, grow: f32, keep: impl Fn(Entity, Entity) -> bool) -> Vec<(Entity, Entity)> {
+    brute_pairs(w, grow).into_iter().filter(|&(a, b)| keep(a, b)).collect()
+}

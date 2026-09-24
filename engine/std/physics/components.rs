@@ -249,9 +249,10 @@ component! {
     /// Sleeping, on one entity; no entity, no sleeping. An island (dynamic
     /// bodies joined by contacts) all of whose bodies have been slower than
     /// `speed` for `time` seconds falls asleep: its bodies stop, and aren't
-    /// simulated until a moving body touches one, or `physics` is sent
-    /// `wake`. It changes the simulation, so it's off unless a game asks.
-    /// See docs/architecture/physics.md, "Sleeping".
+    /// simulated until something moves against one, what one rests on goes,
+    /// a game writes to one, or `physics` is sent `wake`. It changes the
+    /// simulation, so it's off unless a game asks. See
+    /// docs/architecture/physics.md, "Sleeping".
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Sleep: "physics::Sleep" {
         pub speed: f32,
@@ -260,8 +261,30 @@ component! {
 }
 
 component! {
+    /// On a sleeping body, put there by physics as its island falls asleep
+    /// and taken off as it wakes: so sleeping bodies are tables of their
+    /// own, which the step's walks skip by what they match rather than
+    /// looking each body up. `island` is the bodies it wakes with. A game
+    /// wakes a body by removing it, or by writing its velocity, position,
+    /// collider or body.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Asleep: "physics::Asleep" {
+        pub island: u32,
+    }
+}
+
+component! {
+    /// On a contact neither end of which moves, one of them asleep: kept as
+    /// it is, impulses and all (the warm start for when they wake), and not
+    /// looked for, merged or solved until an end wakes.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Resting: "physics::Resting" {}
+}
+
+component! {
     /// Which sides of a body touched something solid on the last step. Kept
-    /// up to date on the bodies that have it.
+    /// up to date on the bodies that have it; a sleeping body's is as it
+    /// was when it fell asleep.
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Touching: "physics::Touching" {
         /// -x

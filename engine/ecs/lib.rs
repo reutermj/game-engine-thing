@@ -31,7 +31,7 @@ pub use component::{__component_fingerprint, __drop, __drop_fn, __fingerprint, _
 pub use events::{Event, EventReader, EventWriter};
 pub use query::{
     Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Data, Declare, Despawns, Dt, Filter, FilterDecl, FrameCx, Log, Mut,
-    Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without,
+    NearSide, Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs,
 };
 pub use ordered::{ChildOf, OrderKey, children_of, entity_key, pair_key, pairs_from};
 pub use spatial::{Bounds, SpatialKey};

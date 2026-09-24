@@ -329,10 +329,11 @@ impl SparseSet {
         Some(&mut self.values.as_mut_slice::<T>()[slot])
     }
 
-    /// `e`'s value and its tick, for a write that records itself.
-    pub fn get_mut_ticked<T: crate::Component>(&mut self, e: Entity) -> Option<(&mut T, &mut u32)> {
+    /// `e`'s value and its tick, for a write at tick `now` that records
+    /// itself.
+    pub fn get_mut_ticked<T: crate::Component>(&mut self, e: Entity, now: u32) -> Option<(&mut T, &mut u32)> {
         let slot = self.slot(e)?;
-        let (values, ticks) = self.values.as_mut_slice_ticked::<T>();
+        let (values, ticks) = self.values.as_mut_slice_ticked::<T>(now);
         Some((&mut values[slot], &mut ticks[slot]))
     }
 

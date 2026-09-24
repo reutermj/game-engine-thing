@@ -394,8 +394,8 @@ The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
 - **Page walks** (`for_each_page`, `for_each_ordered_page`) hand a system
   each page's columns whole: `&[T]`, or a `ColumnMut<T>` that stamps a
   row's tick on `set` or the whole page's on `write_all`. Merging and
-  writing back contacts write every contact (a resting one while something
-  sleeps is stamped with its page), so they stamp by page: the merge went
+  writing back contacts write every contact they walk, so they stamp by
+  page: the merge went
   from 54 µs to 34 at 10 000 against `for_each_ordered` and `Mut`. Where
   rows are only read, a page walk is no faster than `for_each`, which
   physics uses there.
@@ -404,11 +404,10 @@ The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
   filling in velocities by entity: queries have no optional terms. The
   gathered item holds only what a pair is tested with, not whole
   `Collider`s and `Body`s (44 µs against 64 writing them out).
-- **The solve looks for resting contacts only while something sleeps.**
-  The test is always false when nothing does, yet made per contact in the
-  gathering walk it cost 30 µs of 75 at 10 000 settled; the walk is split
-  on it instead. Why the dead test cost so much isn't known (measured, not
-  read in the assembly).
+- **No test per contact for sleeping.** A resting contact is in a table
+  the merge and the solve don't match ([Sleeping](#sleeping)), and the
+  narrowphase's tests for resting pairs are split off when nothing sleeps:
+  always false then, they cost about 7 µs of 110 at 10 000.[^dead-test]
 
 **Tried, and slower:**
 
@@ -455,58 +454,125 @@ carrying many game components, aren't measured.
 
 ## Sleeping
 
-**Status: a prototype, off unless a game spawns `Sleep`** (2026-09-24,
-`sleep.rs`). An island, dynamic bodies joined by pressed contacts, whose
-bodies have all been slower than `Sleep::speed` for `Sleep::time` falls
-asleep: its velocities are zeroed, and until it wakes, gravity skips it,
-the solver treats it as immovable, its contacts with other sleeping or
-static bodies are kept as they are (impulses too) without being looked
-for, and nothing is written, so change detection leaves its rows alone.
-A moving body pressing on a sleeping one wakes its island (a still one
-waits to fall asleep in its own), as does a kinematic body moving into
-it, or `physics` sent `wake`; removing `Sleep` wakes everything.
+**Status: off unless a game spawns `Sleep`; sleeping is storage**
+(2026-09-24, `sleep.rs`, get-emj.27). An island, dynamic bodies joined by
+pressed contacts, whose bodies have all been slower than `Sleep::speed`
+for `Sleep::time` falls asleep: its velocities are zeroed and each body
+gets `Asleep { island }`, which moves it to a table of its own, and each
+contact neither end of which moves, one of them asleep, gets `Resting`
+the same way. The step's queries exclude both (`Without<Asleep>`,
+`Without<Resting>`), so a sleeping body is skipped by the table it's in,
+not looked up: gravity, gathering, the merge, the solver and writing back
+never see it, and change detection leaves its rows alone. A resting
+contact is kept as it was, impulses and all, the warm start for when its
+ends wake. Falling asleep and waking are structural changes, at the apply
+node of the system that decided them, and happen only as islands do.
 
 It changes the simulation (a body stops when a threshold says so, not
 when the solver does), which is why it's opt in, and why `:tax` measures
 it apart, the ECS alone, with no arrays to agree with. From when the whole
 pile is asleep, against the same pile awake at the same step (speed 0.05,
-0.5 s), µs per step:
+0.5 s), µs per step, medians of three runs, before (sleeping as a lookup
+per body, the prototype) and after:
 
-| | 1000 bodies | 10 000 bodies |
-|---|---|---|
-| asleep by step | 630 | 550 |
-| frame | 57 / 141 | 584 / 1461 |
-| broadphase | 20 / 20 | 211 / 212 |
-| narrowphase | 4 / 9 | 51 / 103 |
-| merging contacts | 5 / 4 | 54 / 36 |
-| solve: gathering | 10 / 7 | 101 / 76 |
-| solver | 0 / 75 | 0 / 792 |
-| writing back | 6 / 6 | 62 / 70 |
-| outside the systems | 6 / 13 | 25 / 98 |
-| deepest overlap | 0.007 / 0.007 | 0.006 / 0.006 |
+| | 1000, before | 1000, after | 10 000, before | 10 000, after |
+|---|---|---|---|---|
+| asleep by step | 630 | 630 | 550 | 550 |
+| frame | 56 / 140 | 10 / 142 | 580 / 1472 | 26 / 1503 |
+| gravity (and waking) | 2 / 2 | 1 / 2 | 22 / 22 | 8 / 23 |
+| gathering colliders | 5 / 5 | 0 / 4 | 51 / 52 | 1 / 54 |
+| broadphase | 20 / 20 | 0 / 21 | 208 / 222 | 2 / 243 |
+| narrowphase | 4 / 9 | 0 / 10 | 51 / 98 | 0 / 114 |
+| merging contacts | 5 / 4 | 0 / 4 | 54 / 36 | 0 / 36 |
+| solve: gathering | 9 / 7 | 0 / 7 | 101 / 78 | 1 / 71 |
+| solver | 0 / 75 | 0 / 74 | 0 / 789 | 0 / 794 |
+| writing back | 6 / 6 | 0 / 6 | 62 / 71 | 1 / 69 |
+| outside the systems | 6 / 13 | 8 / 14 | 25 / 102 | 13 / 103 |
+| deepest overlap | 0.007 / 0.007 | 0.007 / 0.007 | 0.006 / 0.006 | 0.006 / 0.006 |
 
-(Medians of three runs, with the query and page-walk work merged in.
-Merging and the solver's gathering cost more asleep than awake: while
-anything sleeps each contact's ends are looked up to find the resting
-ones.)
+(The before rows for gravity and gathering are from the awake column and
+the main table: the prototype's table didn't show them, and both walked
+every body asleep or not. Awake numbers drift a few per cent between
+sessions on this machine: the arrays' frame, the same code both times,
+went from 1250 to 1285 at 10 000 at rest.)
 
-The solver and the re-sort go; everything that walks every body or
-contact stays, since a sleeping body is still a row every query visits:
-the broadphase, gathering, merging (which checks each contact's ends) and
-writing back. Sleeping as storage, a tag that moves sleeping bodies to a
-table of their own, would let those walks skip them by what they match,
-and `near_pairs` keep the pairs between pages that haven't changed; the
-prototype does neither.
+What's left asleep at 10 000 is about 8 µs looking for what games changed
+(a look at each sleeping page's ticks, `for_each_written`, over five
+terms), and the frame's fixed cost outside the systems, which grows from 8
+to 13 µs between 1000 and 10 000 for a reason not found (nothing re-sorts,
+and nothing outside the systems walks the sleeping rows that we know of).
 
-What it doesn't do: carry sleep across a reload (it's the mod's transient
-state, so a reload wakes everything, which is safe, not free); wake bodies
-when what they rest on is despawned or moved by a game, or when a game
-sets a sleeping body's velocity; keep `Touching` on sleeping bodies. Its
-test (`physics_test`) covers falling asleep, staying put with contacts
-kept, waking where a body lands, and settling again; two of seven
-mutations survive it, both close to equivalent: sleeping bodies not
-immovable (a moving body touching one wakes it that step anyway), and
-sleeping bodies written back (with zero velocities, which writes nothing).
+**The broadphase** is `near_pairs(active, passive, grow)`
+([spatial-storage.md](spatial-storage.md#two-sides)): awake colliders that
+can move on one side, statics and sleeping bodies on the other. Pairs of
+two passive rows aren't looked for, and a passive page no active page is
+near isn't looked at: 200 bodies falling onto 10 000 asleep pair in 18 µs,
+where all of them awake take 650 (`spatial_bench`). A sleeping collider
+the broadphase pairs with an awake one is gathered then, by lookup. Statics
+went passive too: static against static never made anything (neither
+arrives nor pushes), and static against sleeping would be a resting pair
+found again every step. With nothing asleep that costs the broadphase
+about 5 µs of 220 at 10 000 (the walls tested from their side; within
+about 2% in `spatial_bench`); the whole awake frame is 1 to 2% over
+before, about what the machine drifts, so not measured apart.
+
+**What wakes an island** (the whole island, as it fell asleep):
+
+- a moving awake body pressing on one of its bodies (a still one waits to
+  fall asleep in its own island), or a kinematic body moving into one;
+- a contact one of its bodies pressed on ending: what it rested on was
+  despawned or moved away;
+- a game writing one of its bodies' `Velocity`, `Position`, `Collider` or
+  `Body`: found by page ticks since the last step
+  ([change detection](spatial-storage.md#change-detection)), so it costs
+  a look per sleeping page, not a scan of velocities;
+- a game despawning one of its bodies, or removing its `Asleep`: the count
+  of sleeping bodies in the world no longer matches physics's;
+- a game moving a static into it or out from under it (a static written
+  since the last step), despawning one under it (the count of statics
+  changes, and every resting contact's ends are checked), or making a
+  static it rests on move (the pair is found again, not resting, while
+  its `Resting` contact is there);
+- `physics` sent `wake`, or `Sleep` despawned: everything.
+
+**A reload keeps it asleep.** Who's asleep is in the world, so a new build
+reads it at load (`Sleepers`, the mod's copy by entity index, is rebuilt
+from `Asleep`), and the tick after the last solve is in the mod's state, so
+the new build doesn't take the old one's writes for a game's. Only how
+long each awake body has been still is lost, which makes those take
+`Sleep::time` longer to sleep.
+
+**`Touching`** on a sleeping body is as it fell asleep: its query excludes
+sleeping bodies, so it isn't reset. A side touched by something that
+arrives while it sleeps (a still body settling against it) isn't marked.
+
+What it doesn't do:
+
+- **A static spawned into sleeping bodies doesn't wake them**, nor does
+  one despawned in the step another is spawned (the count of statics is
+  the same). The count and page ticks are what's cheap to watch; spawns
+  have no tick.
+- **A sleeping body despawned in the step a game puts another to sleep**
+  (adding `Asleep`) passes the count check. Only physics should add
+  `Asleep`.
+- **Waking in `find_contacts`** (a support gone, a static changed) takes
+  effect from the next step: the bodies stay in their sleeping tables, and
+  immovable, for the rest of the step that noticed.
+
+Its tests (`physics_test`, `pile::`): falling asleep into tables of their
+own with every contact resting and overlaps kept; staying put with nothing
+written; waking where a body lands, a kinematic body pushes, a static
+moves in, or the floor goes (despawned, lowered, or made a body); a game's
+velocity or shape change; a body despawned from under others; `Touching`
+kept; a reload keeping it all asleep; turning it off; bodies asleep on
+shelves that aren't statics (on the active side, but not moving) keeping
+one contact per pair. Of 24 mutations, three survive: statics on the
+active side and resting pairs sent to the narrowphase, both only slower;
+and treating a body woken in the same step as still when marking resting
+contacts, which now only delays its contact a step (the next step finds
+the pair moving and wakes it through its `Resting` contact), and whose
+setup, an island waking as a body touching it falls asleep, the tests
+don't make.[^prototype]
 
 ## What changes elsewhere
 
@@ -669,6 +735,22 @@ frame 508.
     by `Clock::dt`, capped at 1/30 s, since systems ran once a frame: a
     real-time game's simulation depended on its frame rate, which only
     lockstep hid. Fixed-rate phases replaced it.
+
+[^dead-test]: *(History, 2026-09-24.)* Before sleeping was storage, the
+    solve looked each contact's ends up to skip resting ones, and did so
+    only while something slept: the test is always false when nothing
+    does, yet made per contact in the gathering walk it cost 30 µs of 75
+    at 10 000 settled, for a reason not found (measured, not read in the
+    assembly). The walk was split on it.
+
+[^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
+    in the mod's transient state, by entity, and every walk looked each
+    body (and each contact's ends) up in it: asleep, the broadphase,
+    gathering and writing back cost what they did awake, and the merge
+    and the solver's gathering more. A reload woke everything; a game's
+    write or despawn didn't wake anything; `Touching` on sleeping bodies
+    was reset each step. Its test's two surviving mutations (sleeping
+    bodies not immovable, and written back) went with the lookups.
 
 [^tax]: *(History, 2026-09-24.)* When `:tax` was written, at 10 000
     bodies settled: frame 2909 µs against the arrays' 1269, gathering

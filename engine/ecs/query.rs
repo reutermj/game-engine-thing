@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::component::{Component, ComponentDesc, Entity, Storage};
 use crate::events::{Event, EventQueue};
 use crate::ordered::OrderKey;
-use crate::spatial::{Bounds, Lanes};
+use crate::spatial::{Bounds, Lanes, PageKind, RUN, SpatialPages};
 use crate::world::{ColumnGuard, ComponentId, NewRow, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, TakeGuard, World};
 
 // ---- Declaring ----
@@ -307,6 +307,18 @@ impl<'w> TermState<'w> {
         }
     }
 
+    /// When page `p` of matched table `t` was last written, or its row
+    /// `row` if given: table components only, as page walks are.
+    fn written(&self, t: usize, p: usize, row: Option<usize>) -> u32 {
+        match self {
+            TermState::Table(guards, _) => {
+                let column = &guards[t].pages()[p];
+                row.map_or(column.written(), |r| column.ticks()[r])
+            }
+            TermState::Sparse(..) => panic!("a walk for what changed is over table components"),
+        }
+    }
+
     /// The entities of this term's sparse set, and how many, if it's sparse.
     fn sparse_entities(&self) -> Option<(usize, Vec<Entity>)> {
         match self {
@@ -406,11 +418,11 @@ impl<T: Component> Term for &mut T {
     fn item<'a>(state: &'a mut TermState<'_>, table: usize, page: usize, row: usize, e: Entity) -> Option<Mut<'a, T>> {
         match state {
             TermState::Table(guards, now) => {
-                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>(*now);
                 Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now })
             }
             TermState::Sparse(set, now) => {
-                set.set_mut().get_mut_ticked::<T>(e).map(|(value, tick)| Mut { value, tick, now: *now })
+                set.set_mut().get_mut_ticked::<T>(e, *now).map(|(value, tick)| Mut { value, tick, now: *now })
             }
         }
     }
@@ -418,7 +430,7 @@ impl<T: Component> Term for &mut T {
     fn page<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> PageView<'a, T> {
         match state {
             TermState::Table(guards, now) => {
-                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>(*now);
                 let n = values.len();
                 PageView::Write(values, &mut ticks[..n], *now)
             }
@@ -431,7 +443,7 @@ impl<T: Component> Term for &mut T {
             PageView::Write(values, ticks, now) => Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now }),
             PageView::SparseMut(set, now) => {
                 let now = *now;
-                set.get_mut_ticked::<T>(e).map(|(value, tick)| Mut { value, tick, now })
+                set.get_mut_ticked::<T>(e, now).map(|(value, tick)| Mut { value, tick, now })
             }
             _ => unreachable!("a write term's view"),
         }
@@ -444,7 +456,7 @@ impl<T: Component> Term for &mut T {
     fn slice<'a>(state: &'a mut TermState<'_>, table: usize, page: usize) -> ColumnMut<'a, T> {
         match state {
             TermState::Table(guards, now) => {
-                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>();
+                let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>(*now);
                 ColumnMut { values, ticks, now: *now }
             }
             TermState::Sparse(..) => not_paged::<T>(),
@@ -473,6 +485,9 @@ pub trait Data {
     const TABLE: bool;
     /// The items of `row`, from a page's slices.
     fn items_of<'b>(slices: &'b mut Self::Slices<'_>, row: usize) -> Self::Items<'b>;
+    /// The latest tick any term was written at on a page, or on one of its
+    /// rows.
+    fn written(states: &Self::States<'_>, table: usize, page: usize, row: Option<usize>) -> u32;
 }
 
 impl Data for () {
@@ -500,6 +515,9 @@ impl Data for () {
     const TABLE: bool = true;
     #[inline(always)]
     fn items_of<'b>(_: &'b mut (), _: usize) {}
+    fn written(_: &(), _: usize, _: usize, _: Option<usize>) -> u32 {
+        0
+    }
 }
 
 impl<A: Term> Data for A {
@@ -534,6 +552,9 @@ impl<A: Term> Data for A {
     #[inline(always)]
     fn items_of<'b>(slice: &'b mut A::Slice<'_>, row: usize) -> A::Item<'b> {
         A::item_of(slice, row)
+    }
+    fn written(s: &TermState<'_>, t: usize, p: usize, row: Option<usize>) -> u32 {
+        s.written(t, p, row)
     }
 }
 
@@ -583,6 +604,10 @@ macro_rules! data_tuple {
             fn items_of<'b>(slices: &'b mut Self::Slices<'_>, row: usize) -> Self::Items<'b> {
                 let ($($s,)+) = slices;
                 ($($t::item_of($s, row),)+)
+            }
+            fn written(states: &Self::States<'_>, t: usize, p: usize, row: Option<usize>) -> u32 {
+                let ($($s,)+) = states;
+                0 $(.max($s.written(t, p, row)))+
             }
         }
     };
@@ -828,6 +853,14 @@ fn merged(rows: &[TableRead<'_>], ordered: &[usize]) -> Vec<(u128, Entity, u32, 
 /// four passes at 10 000 bodies: on the dense bench's 39 000 pairs, 205 µs
 /// with the entities' lookup after it, against 149 for this.)
 fn sort_pair_keys(keys: &mut Vec<u64>, max: usize) {
+    // A bucket per index costs passes over every index, where the few
+    // pairs of a broadphase that's mostly passive sort faster by comparison:
+    // 800 pairs among 10 000 indices, 25 µs to 18 (2026-09-24). The same
+    // order either way.
+    if keys.len() * 4 < max {
+        keys.sort_unstable();
+        return;
+    }
     let mut start = vec![0u32; max + 1];
     for &k in keys.iter() {
         start[(k >> 32) as usize + 1] += 1;
@@ -853,6 +886,11 @@ fn sort_pair_keys(keys: &mut Vec<u64>, max: usize) {
         }
     }
     *keys = sorted;
+}
+
+#[inline(always)]
+fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
+    filters.is_empty() || filters.iter().all(|(_, with, set)| set.set().contains(e) == *with)
 }
 
 /// `Bounds::overlaps` without branches: a broadphase's box tests are
@@ -916,7 +954,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// faster with it (2026-09-24).
     #[inline(always)]
     fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
-        filters.is_empty() || filters.iter().all(|(_, with, set)| set.set().contains(e) == *with)
+        passes(filters, e)
     }
 
     #[inline(always)]
@@ -1133,6 +1171,38 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         }
     }
 
+    /// The world's change tick while this query holds its guards: every
+    /// write to what it matches so far is at or before it, and any after,
+    /// later. What `for_each_written` takes to see what's changed since.
+    pub fn now(&self) -> u32 {
+        self.world.current_tick()
+    }
+
+    /// Every row the query matches any term of which was written after tick
+    /// `since` (a `now` from before), in page order: change detection. A
+    /// page none of whose terms was written since is skipped whole, by its
+    /// own tick, so a walk over things at rest costs a look per page, not
+    /// per row. Rows only moved (between tables or pages) keep their ticks;
+    /// a spawned row's are 0. Table components only, as page walks are.
+    pub fn for_each_written(&mut self, since: u32, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+        let Query { world, decl, rows, states, filters, log, .. } = self;
+        for (t, table) in rows.iter().enumerate() {
+            for (p, page) in table.rows.iter().enumerate() {
+                if page.is_empty() || D::written(states, t, p, None) <= since {
+                    continue;
+                }
+                for (r, &e) in page.iter().enumerate() {
+                    if D::written(states, t, p, Some(r)) > since
+                        && Self::passes(filters, e)
+                        && let Some(items) = D::fetch(states, t, p, r, e)
+                    {
+                        f(Self::row(world, decl, log, e), items);
+                    }
+                }
+            }
+        }
+    }
+
     /// How many rows the query's tables hold: the length of a page walk.
     pub fn len(&self) -> usize {
         self.rows.iter().map(|t| t.rows.iter().map(Vec::len).sum::<usize>()).sum()
@@ -1176,92 +1246,9 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
 
     /// Every pair of entities the query matches in its spatial tables whose
     /// boxes, grown by `grow`, meet: a broadphase. Each pair once, the
-    /// lesser entity first, sorted.
-    ///
-    /// Pages whose boxes meet are found by a sweep along x over the pages,
-    /// and each meeting pair of pages tests only the rows that reach the
-    /// other page, each row against all of the other page's at once
-    /// (`Lanes::meeting`). See docs/architecture/spatial-storage.md.
+    /// lesser entity first, sorted. `near_pairs` with no passive side.
     pub fn near_pairs(&mut self, grow: f32) -> Vec<(Entity, Entity)> {
-        let Query { rows, filters, .. } = self;
-        // Each page in use: its rows, which of them pass the filters, and
-        // its box grown. A filtered-out row still widens its page's box,
-        // which only costs a test.
-        let mut pages: Vec<(&Lanes, u32, Bounds)> = Vec::new();
-        let mut max = 0;
-        for table in rows.iter() {
-            let Some(order) = &table.spatial else { continue };
-            for (p, page) in table.rows.iter().enumerate() {
-                if page.is_empty() {
-                    continue;
-                }
-                let mut pass = u32::MAX >> (32 - page.len());
-                if !filters.is_empty() {
-                    pass = 0;
-                    for (r, &e) in page.iter().enumerate() {
-                        pass |= (Self::passes(filters, e) as u32) << r;
-                    }
-                    if pass == 0 {
-                        continue;
-                    }
-                }
-                max = page.iter().fold(max, |m, e| m.max(e.index as usize + 1));
-                pages.push((&order.lanes[p], pass, order.bounds[p].grown(grow)));
-            }
-        }
-        pages.sort_unstable_by(|a, b| a.2.min[0].total_cmp(&b.2.min[0]));
-        // Pairs as keys, the lesser index high: live entities never share an
-        // index, so indices alone order pairs.
-        let key = |a: u32, b: u32| ((a.min(b) as u64) << 32) | a.max(b) as u64;
-        let mut keys: Vec<u64> = Vec::new();
-        for (i, &(a, pass_a, box_a)) in pages.iter().enumerate() {
-            let mut rows = pass_a;
-            while rows != 0 {
-                let x = rows.trailing_zeros() as usize;
-                rows &= rows - 1;
-                // Only the rows after `x`: each pair once.
-                let mut m = a.meeting(&a.grown(x, grow), grow) & rows;
-                while m != 0 {
-                    keys.push(key(a.index[x], a.index[m.trailing_zeros() as usize]));
-                    m &= m - 1;
-                }
-            }
-            for &(b, pass_b, box_b) in &pages[i + 1..] {
-                if box_b.min[0] > box_a.max[0] {
-                    break;
-                }
-                if !meets(&box_a, &box_b) {
-                    continue;
-                }
-                // Only rows that reach the other page can pair with its rows.
-                let mut ma = a.meeting(&box_b, grow) & pass_a;
-                if ma == 0 {
-                    continue;
-                }
-                let mb = b.meeting(&box_a, grow) & pass_b;
-                if mb == 0 {
-                    continue;
-                }
-                while ma != 0 {
-                    let x = ma.trailing_zeros() as usize;
-                    ma &= ma - 1;
-                    let mut m = b.meeting(&a.grown(x, grow), grow) & mb;
-                    while m != 0 {
-                        keys.push(key(a.index[x], b.index[m.trailing_zeros() as usize]));
-                        m &= m - 1;
-                    }
-                }
-            }
-        }
-        sort_pair_keys(&mut keys, max);
-        let mut generation = vec![0u32; max];
-        for table in rows.iter().filter(|t| t.spatial.is_some()) {
-            for e in table.rows.iter().flatten() {
-                generation[e.index as usize] = e.generation;
-            }
-        }
-        let entity = |i: u64| Entity { index: i as u32, generation: generation[i as usize] };
-        keys.iter().map(|&k| (entity(k >> 32), entity(k & 0xffff_ffff))).collect()
+        near_pairs(&*self, &(), grow)
     }
 
     /// The row of `e`, if the query matches it: how a system changes an
@@ -1304,6 +1291,241 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         });
         out
     }
+}
+
+// ---- The broadphase ----
+
+/// One side of a broadphase (`near_pairs`): a query, or a tuple of
+/// queries, as the spatial tables it matches and the sparse filters its
+/// rows must pass. What the queries read doesn't matter, only what they
+/// match.
+pub trait NearSide {
+    #[doc(hidden)]
+    fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>);
+}
+
+/// A spatial table as a broadphase sees it.
+#[doc(hidden)]
+pub struct SideTable<'a> {
+    id: TableId,
+    rows: &'a [Vec<Entity>],
+    order: &'a SpatialPages,
+    filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
+}
+
+impl SideTable<'_> {
+    /// Which rows of page `p` pass the filters, as bits by row.
+    fn pass(&self, p: usize) -> u32 {
+        let page = &self.rows[p];
+        if page.is_empty() {
+            return 0;
+        }
+        if self.filters.is_empty() {
+            return u32::MAX >> (32 - page.len());
+        }
+        page.iter().enumerate().fold(0, |m, (r, &e)| m | (passes(self.filters, e) as u32) << r)
+    }
+}
+
+impl<D: Data, F, C> NearSide for Query<'_, D, F, C> {
+    fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>) {
+        for (t, table) in self.rows.iter().enumerate() {
+            if let Some(order) = &table.spatial {
+                out.push(SideTable { id: self.table_ids[t], rows: &table.rows, order, filters: &self.filters });
+            }
+        }
+    }
+}
+
+impl NearSide for () {
+    fn spatial_tables<'a>(&'a self, _: &mut Vec<SideTable<'a>>) {}
+}
+
+impl<A: NearSide + ?Sized> NearSide for &A {
+    fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>) {
+        (**self).spatial_tables(out)
+    }
+}
+
+macro_rules! near_side_tuple {
+    ($($s:ident),+) => {
+        impl<$($s: NearSide),+> NearSide for ($($s,)+) {
+            #[allow(non_snake_case)]
+            fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>) {
+                let ($($s,)+) = self;
+                $($s.spatial_tables(out);)+
+            }
+        }
+    };
+}
+near_side_tuple!(A, B);
+near_side_tuple!(A, B, C);
+near_side_tuple!(A, B, C, D);
+
+/// Every pair of rows whose boxes, grown by `grow`, meet, and at least one
+/// of which is in `active`'s tables: a broadphase in which pairs of two
+/// `passive` rows (things at rest, which meet as they did last time) cost
+/// nothing. Each pair once, the lesser entity first, sorted. A row is
+/// active if any of `active`'s queries matches it, whatever else does.
+///
+/// Active pages are swept along x against each other, and each meeting
+/// pair of pages tests only the rows that reach the other page, each row
+/// against all of the other page's at once (`Lanes::meeting`). Passive
+/// pages are met with the active ones through their tables' runs, so a
+/// passive page no active one is near is never looked at. See
+/// docs/architecture/spatial-storage.md.
+pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) -> Vec<(Entity, Entity)> {
+    let (mut act, mut pas) = (Vec::new(), Vec::new());
+    active.spatial_tables(&mut act);
+    passive.spatial_tables(&mut pas);
+    // A table matched twice (by two queries of a side, or by both sides)
+    // pairs its rows twice, and a row in both with itself: the pairs are
+    // made unique after, only then, since it's a pass over all of them.
+    let mut ids: Vec<TableId> = act.iter().chain(&pas).map(|t| t.id).collect();
+    ids.sort_unstable();
+    let twice = ids.windows(2).any(|w| w[0] == w[1]);
+    // Each active page in use: its rows, which of them pass the filters, and
+    // its box grown. A filtered-out row still widens its page's box, which
+    // only costs a test.
+    let mut pages: Vec<(&Lanes, u32, Bounds)> = Vec::new();
+    // Each paired row's generation, by index: pairs are keyed by indices.
+    let mut generation: Vec<u32> = Vec::new();
+    let note = |generation: &mut Vec<u32>, e: Entity| {
+        let i = e.index as usize;
+        if generation.len() <= i {
+            generation.resize(i + 1, 0);
+        }
+        generation[i] = e.generation;
+    };
+    for table in &act {
+        for p in 0..table.rows.len() {
+            let pass = table.pass(p);
+            if pass == 0 {
+                continue;
+            }
+            for &e in &table.rows[p] {
+                note(&mut generation, e);
+            }
+            pages.push((&table.order.lanes[p], pass, table.order.bounds[p].grown(grow)));
+        }
+    }
+    pages.sort_unstable_by(|a, b| a.2.min[0].total_cmp(&b.2.min[0]));
+    let mut keys: Vec<u64> = Vec::new();
+    for (i, &(a, pass_a, box_a)) in pages.iter().enumerate() {
+        let mut rows = pass_a;
+        while rows != 0 {
+            let x = rows.trailing_zeros() as usize;
+            rows &= rows - 1;
+            // Only the rows after `x`: each pair once.
+            let mut m = a.meeting(&a.grown(x, grow), grow) & rows;
+            while m != 0 {
+                keys.push(pair_of(a.index[x], a.index[m.trailing_zeros() as usize]));
+                m &= m - 1;
+            }
+        }
+        for &(b, pass_b, box_b) in &pages[i + 1..] {
+            if box_b.min[0] > box_a.max[0] {
+                break;
+            }
+            if !meets(&box_a, &box_b) {
+                continue;
+            }
+            // Only rows that reach the other page can pair with its rows.
+            let ma = a.meeting(&box_b, grow) & pass_a;
+            if ma == 0 {
+                continue;
+            }
+            let mb = b.meeting(&box_a, grow) & pass_b;
+            if mb != 0 {
+                cross(&mut keys, a, ma, b, mb, grow);
+            }
+        }
+    }
+    // Each passive unit (a run of consecutive ordered pages, or a page out
+    // of the order, a big one) is met with the active pages near it along
+    // x, found by search in their sweep order: a passive table is mostly far
+    // from what's active, and a unit no active page is near costs a search.
+    // The widest active page bounds how far left of a unit one can start.
+    let widest = pages.iter().fold(0.0f32, |w, p| w.max(p.2.max[0] - p.2.min[0]));
+    for table in &pas {
+        let order = table.order;
+        // Passive page `p` (its box grown, `box_b`) against an active page
+        // whose box meets it.
+        let mut visit = |keys: &mut Vec<u64>, (a, pass_a, box_a): (&Lanes, u32, Bounds), p: usize, box_b: &Bounds| {
+            // The passive page's rows that reach the active one first: a big
+            // page (a level's walls) meets every page near it, and few of
+            // its rows reach any one of them.
+            let b = &order.lanes[p];
+            let mb = b.meeting(&box_a, grow) & table.pass(p);
+            if mb == 0 {
+                return;
+            }
+            let ma = a.meeting(box_b, grow) & pass_a;
+            if ma != 0 && cross(keys, a, ma, b, mb, grow) {
+                let mut m = mb;
+                while m != 0 {
+                    note(&mut generation, table.rows[p][m.trailing_zeros() as usize]);
+                    m &= m - 1;
+                }
+            }
+        };
+        let near = |unit: Bounds| {
+            let from = pages.partition_point(|p| p.2.min[0] < unit.min[0] - widest);
+            pages[from..].iter().take_while(move |p| p.2.min[0] <= unit.max[0]).filter(move |p| meets(&p.2, &unit))
+        };
+        for (r, run) in order.runs.iter().enumerate() {
+            let run_pages = &order.order[r * RUN..((r + 1) * RUN).min(order.order.len())];
+            for &active in near(run.grown(grow)) {
+                for &p in run_pages {
+                    let box_b = order.bounds[p as usize].grown(grow);
+                    if !table.rows[p as usize].is_empty() && meets(&active.2, &box_b) {
+                        visit(&mut keys, active, p as usize, &box_b);
+                    }
+                }
+            }
+        }
+        for p in (0..order.kind.len()).filter(|&p| order.kind[p] != PageKind::Ordered && !table.rows[p].is_empty()) {
+            let box_b = order.bounds[p].grown(grow);
+            for &active in near(box_b) {
+                visit(&mut keys, active, p, &box_b);
+            }
+        }
+    }
+    sort_pair_keys(&mut keys, generation.len());
+    if twice {
+        keys.dedup();
+        keys.retain(|&k| k >> 32 != k & 0xffff_ffff);
+    }
+    let entity = |i: u64| Entity { index: i as u32, generation: generation[i as usize] };
+    keys.iter().map(|&k| (entity(k >> 32), entity(k & 0xffff_ffff))).collect()
+}
+
+/// A pair as a key, the lesser index high: live entities never share an
+/// index, so indices alone order pairs.
+#[inline(always)]
+fn pair_of(a: u32, b: u32) -> u64 {
+    ((a.min(b) as u64) << 32) | a.max(b) as u64
+}
+
+/// Pairs the rows of `a` in `ma` with the rows of `b` in `mb` whose grown
+/// boxes meet. Returns whether it found any.
+#[inline(always)]
+fn cross(keys: &mut Vec<u64>, a: &Lanes, ma: u32, b: &Lanes, mb: u32, grow: f32) -> bool {
+    // A row at a time from the side with fewer, each against all of the
+    // other's at once: a wall reaching a page is one test, not one per row
+    // of the page. The test is the same either way round.
+    let (a, mut ma, b, mb) = if ma.count_ones() <= mb.count_ones() { (a, ma, b, mb) } else { (b, mb, a, ma) };
+    let before = keys.len();
+    while ma != 0 {
+        let x = ma.trailing_zeros() as usize;
+        ma &= ma - 1;
+        let mut m = b.meeting(&a.grown(x, grow), grow) & mb;
+        while m != 0 {
+            keys.push(pair_of(a.index[x], b.index[m.trailing_zeros() as usize]));
+            m &= m - 1;
+        }
+    }
+    keys.len() > before
 }
 
 /// Spawns entities with the components `B` names.

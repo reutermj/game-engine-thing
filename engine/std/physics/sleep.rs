@@ -1,11 +1,11 @@
-//! Sleeping (opt in, with a `Sleep` entity): which bodies are asleep, and
-//! the islands that fall asleep and wake together. See
-//! docs/architecture/physics.md, "Sleeping".
+//! Sleeping (opt in, with a `Sleep` entity): the islands that fall asleep
+//! and wake together. See docs/architecture/physics.md, "Sleeping".
 //!
-//! Kept in the mod's transient state, by entity index, not in the world: a
-//! prototype. So a reload wakes everything, which is safe (sleeping bodies
-//! are at rest) but not free, and a body despawned asleep stays counted in
-//! `asleep` until its index is reused.
+//! The world says who's asleep: a sleeping body has `Asleep`, which puts
+//! it in tables of its own. This is the mod's copy of that by entity index,
+//! with each awake body's time spent still, so the step can ask about any
+//! entity in O(1): rebuilt from the world at load, so a reload keeps
+//! everything asleep and forgets only how long awake bodies have been still.
 
 use engine_api::Entity;
 
@@ -23,9 +23,18 @@ struct Slot {
 #[derive(Default)]
 pub struct Sleepers {
     slots: Vec<Slot>,
+    /// The last island made: ids must stay unique across reloads, since a
+    /// sleeping body's is in the world.
     islands: u32,
-    /// Bodies asleep: when none are, the step skips every check.
+    /// Bodies asleep, as this copy has them: a count in the world that
+    /// differs means a game despawned one or woke it.
     pub asleep: usize,
+    /// Bodies woken since the step last moved them out of their sleeping
+    /// tables (`Physics::move_woken`).
+    pub woken: Vec<Entity>,
+    /// Statics there were last step: fewer or more, and one may have gone
+    /// from under a sleeping body.
+    pub statics: usize,
 }
 
 impl Sleepers {
@@ -49,14 +58,27 @@ impl Sleepers {
         s
     }
 
+    /// `e` is asleep in `island`, as the world says: at load, or when a
+    /// game put it to sleep.
+    pub fn adopt(&mut self, e: Entity, island: u32) {
+        let s = self.slot(e);
+        if !s.asleep {
+            (s.asleep, s.island) = (true, island);
+            self.asleep += 1;
+        }
+        self.islands = self.islands.max(island);
+    }
+
+    /// Every sleeping body, woken.
     pub fn wake_all(&mut self) {
-        for s in &mut self.slots {
+        for s in self.slots.iter_mut().filter(|s| s.live && s.asleep) {
             (s.asleep, s.still) = (false, 0.0);
         }
         self.asleep = 0;
     }
 
-    /// Wakes `e`'s island, if it's asleep: a kinematic body moving into it.
+    /// Wakes `e`'s island, if it's asleep: a kinematic body moving into it,
+    /// a game setting its velocity, or its support gone.
     pub fn wake(&mut self, e: Entity) {
         if self.is_asleep(e) {
             let island = self.slots[e.index as usize].island;
@@ -64,10 +86,35 @@ impl Sleepers {
         }
     }
 
+    /// Wakes the islands of every body this copy has asleep that `alive`
+    /// (by entity) doesn't: despawned, or woken by a game removing its
+    /// `Asleep`. The bodies they rest on or under may no longer be where
+    /// they were.
+    pub fn wake_missing(&mut self, alive: impl Fn(Entity) -> bool) {
+        let mut islands: Vec<u32> = Vec::new();
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if s.live && s.asleep && !alive(Entity { index: i as u32, generation: s.generation }) {
+                islands.push(s.island);
+                (s.asleep, s.live) = (false, false);
+                self.asleep -= 1;
+                self.woken.push(Entity { index: i as u32, generation: s.generation });
+            }
+        }
+        islands.sort_unstable();
+        islands.dedup();
+        self.wake_islands(&islands);
+    }
+
     fn wake_islands(&mut self, islands: &[u32]) {
-        for s in self.slots.iter_mut().filter(|s| s.live && s.asleep && islands.contains(&s.island)) {
-            (s.asleep, s.still) = (false, 0.0);
-            self.asleep -= 1;
+        if islands.is_empty() {
+            return;
+        }
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if s.live && s.asleep && islands.contains(&s.island) {
+                (s.asleep, s.still) = (false, 0.0);
+                self.asleep -= 1;
+                self.woken.push(Entity { index: i as u32, generation: s.generation });
+            }
         }
     }
 
@@ -75,8 +122,9 @@ impl Sleepers {
     /// `links` the pressed contacts between dynamic bodies. Updates how long
     /// each has been still, wakes the islands a moving body touched, and
     /// puts to sleep each island still for `time`. Returns the bodies that
-    /// fell asleep, whose velocities the caller zeroes.
-    pub fn update(&mut self, dt: f32, speed: f32, time: f32, awake: &[(Entity, f32)], links: &[(Entity, Entity)]) -> Vec<Entity> {
+    /// fell asleep and their islands, which the caller stops and moves to
+    /// their sleeping tables.
+    pub fn update(&mut self, dt: f32, speed: f32, time: f32, awake: &[(Entity, f32)], links: &[(Entity, Entity)]) -> Vec<(Entity, u32)> {
         for &(e, v) in awake {
             let s = self.slot(e);
             s.still = if v < speed { s.still + dt } else { 0.0 };
@@ -139,7 +187,7 @@ impl Sleepers {
             let s = self.slot(e);
             (s.asleep, s.island) = (true, island[r]);
             self.asleep += 1;
-            fell.push(e);
+            fell.push((e, island[r]));
         }
         fell
     }

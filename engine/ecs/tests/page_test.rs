@@ -3,13 +3,14 @@
 //! row brute force says the query matches, with its own values, in the
 //! order `for_each` and `for_each_ordered` do; writes through a page stamp
 //! exactly the rows they say, as the spatial re-sort reads them back; rows
-//! from a page change the world; sparse terms and filters are refused.
+//! from a page change the world; sparse terms and filters are refused; a
+//! walk for what changed sees exactly the rows written since.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Despawns, Entity, OrderKey, Query, SpatialKey, Without, World, component};
+use engine_ecs::{Bounds, Build, Despawns, Entity, OrderKey, Query, SpatialKey, With, Without, World, component};
 
 component! {
     /// A spatial key, so some rows are in pages of a dozen or so.
@@ -305,4 +306,80 @@ fn a_page_walk_refuses_a_sparse_term() {
         q.for_each_page(|_, _| {});
     }
     run(&w, walk, "walk");
+}
+
+
+component! {
+    /// Moves an entity to a table nothing has walked.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Moved: "test::Moved" {}
+}
+
+static SINCE: Mutex<u32> = Mutex::new(0);
+static WROTE: Mutex<Vec<Entity>> = Mutex::new(Vec::new());
+static CHANGED: Mutex<Vec<Entity>> = Mutex::new(Vec::new());
+
+/// Change detection (`Query::for_each_written`): exactly the rows written
+/// after a `now`, by a system through `Mut` or between frames, in either
+/// term, wherever they've moved since; nothing once they're older than the
+/// `now`. The writes between frames are to tables the system didn't walk,
+/// whose pages then say they're written only if the write told them.
+#[test]
+fn a_walk_for_what_changed_sees_exactly_the_rows_written_since() {
+    let _s = serial();
+    let w = World::new();
+    let live = populate(&w, &mut 9);
+    fn mark(_: &mut Cx, q: Query<&Val>) {
+        *SINCE.lock().unwrap() = q.now();
+    }
+    // Visits every ranked row mutably, and writes every 13th.
+    fn write_some(_: &mut Cx, mut q: Query<&mut Val, With<Rank>>) {
+        let mut wrote = WROTE.lock().unwrap();
+        q.for_each(|row, mut v| {
+            if v.n % 13 == 0 {
+                v.n += 13 * 7;
+                wrote.push(row.entity());
+            } else {
+                assert!(v.n > 0, "a read through `Mut` isn't a write");
+            }
+        });
+    }
+    // Two terms, either written: tables with `At`, and the rest.
+    fn changed(_: &mut Cx, mut q: Query<(&Val, &At)>, mut vals: Query<&Val, Without<At>>) {
+        let since = *SINCE.lock().unwrap();
+        let mut seen = CHANGED.lock().unwrap();
+        q.for_each_written(since, |row, _| seen.push(row.entity()));
+        vals.for_each_written(since, |row, _| seen.push(row.entity()));
+    }
+    let changed_now = || {
+        run(&w, changed, "changed");
+        let mut seen = std::mem::take(&mut *CHANGED.lock().unwrap());
+        seen.sort();
+        seen
+    };
+    run(&w, mark, "mark");
+    assert_eq!(changed_now(), [], "nothing written since");
+    run(&w, write_some, "write_some");
+    let mut want = std::mem::take(&mut *WROTE.lock().unwrap());
+    assert!(want.len() > 20);
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        // Written rows moved to a table no one walked keep their ticks.
+        for &e in want.iter().step_by(3) {
+            m.insert(e, Moved {});
+        }
+        // And unranked rows (in tables `write_some` didn't walk) written
+        // between frames, some their `Val`, some their `At`.
+        let unranked: Vec<Entity> = live.iter().copied().filter(|&e| m.get::<Rank>(e).is_none()).step_by(10).collect();
+        for (i, e) in unranked.into_iter().enumerate() {
+            let wrote = if i % 2 == 0 { m.with_mut::<Val, _>(e, |v| v.n += 1) } else { m.with_mut::<At, _>(e, |a| a.x += 0.0) };
+            if wrote.is_some() {
+                want.push(e);
+            }
+        }
+    }
+    want.sort();
+    assert_eq!(changed_now(), want);
+    run(&w, mark, "mark");
+    assert_eq!(changed_now(), [], "all of it older than the `now`");
 }

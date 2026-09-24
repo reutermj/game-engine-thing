@@ -70,6 +70,13 @@ pub struct ErasedColumn {
     /// Per value, the world tick it was last written at: what change
     /// detection reads. Kept parallel to the values by every row operation.
     ticks: Vec<u32>,
+    /// At least the latest of `ticks`, and of any value's that has left: so
+    /// a walk for what changed skips a page none of whose values did, where
+    /// the ticks alone cost a look at every row. Stamped when writes are
+    /// handed out, whether or not any is made, and never lowered: either
+    /// only costs a look at a page for nothing, where stamping it with each
+    /// write cost 1.2 ns a row in a loop writing every row (2026-09-24).
+    written: u32,
 }
 
 // SAFETY: the column owns its values like a `Vec<T>` does, and a
@@ -82,7 +89,7 @@ unsafe impl Sync for ErasedColumn {}
 impl ErasedColumn {
     pub fn new(ty: ValueType) -> ErasedColumn {
         let cap = if ty.layout.size() == 0 { usize::MAX } else { 0 };
-        ErasedColumn { ty, ptr: dangling(ty.layout), len: 0, cap, ticks: Vec::new() }
+        ErasedColumn { ty, ptr: dangling(ty.layout), len: 0, cap, ticks: Vec::new(), written: 0 }
     }
 
     /// Each value's last-written tick.
@@ -90,14 +97,21 @@ impl ErasedColumn {
         &self.ticks
     }
 
-    pub fn set_tick(&mut self, row: usize, tick: u32) {
-        self.ticks[row] = tick;
+    /// The latest tick any value here was written at, or later.
+    pub fn written(&self) -> u32 {
+        self.written
     }
 
-    /// The values and their ticks, for handing out writes that record
-    /// themselves (`Mut`).
-    pub fn as_mut_slice_ticked<T: Component>(&mut self) -> (&mut [T], &mut [u32]) {
+    pub fn set_tick(&mut self, row: usize, tick: u32) {
+        self.ticks[row] = tick;
+        self.written = self.written.max(tick);
+    }
+
+    /// The values and their ticks, for handing out writes at tick `now`
+    /// that record themselves (`Mut`): the column counts as written then.
+    pub fn as_mut_slice_ticked<T: Component>(&mut self, now: u32) -> (&mut [T], &mut [u32]) {
         self.check::<T>();
+        self.written = self.written.max(now);
         // SAFETY: as `as_mut_slice`; the ticks are a separate allocation.
         let values = unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut T, self.len) };
         (values, &mut self.ticks)
@@ -184,7 +198,9 @@ impl ErasedColumn {
             to.len += 1;
             self.fill_from_last(row);
         }
-        to.ticks.push(self.ticks.swap_remove(row));
+        let tick = self.ticks.swap_remove(row);
+        to.ticks.push(tick);
+        to.written = to.written.max(tick);
     }
 
     /// Drops the first `n` values and moves the rest down, keeping their
@@ -245,6 +261,7 @@ impl ErasedColumn {
                 unsafe { std::ptr::copy_nonoverlapping(pages[p].slot(r), column.slot(column.len), size) };
                 column.len += 1;
                 column.ticks.push(pages[p].ticks[r]);
+                column.written = column.written.max(pages[p].ticks[r]);
             }
             out.push(column);
         }
@@ -279,6 +296,7 @@ impl ErasedColumn {
         // The rows are the same rows, so they keep their ticks.
         self.len = 0;
         out.ticks = std::mem::take(&mut self.ticks);
+        out.written = self.written;
         std::mem::swap(self, &mut out);
     }
 
@@ -474,6 +492,8 @@ mod tests {
         let pairs: Vec<(u32, u32)> = c.as_slice::<Small>().iter().map(|s| s.n).zip(c.ticks().iter().copied()).collect();
         assert_eq!(pairs, [(3, 13), (4, 14), (2, 12)]);
         assert_eq!(to.ticks(), [11]);
+        // A page's tick is its latest, even of a value that left.
+        assert_eq!((c.written(), to.written()), (14, 11));
         c.drop_front(1);
         assert_eq!(c.ticks(), [14, 12]);
     }
@@ -484,6 +504,7 @@ mod tests {
         for n in 0..10 {
             c.push(Small { n });
         }
+        c.set_tick(3, 7);
         // SAFETY: reads each u32 and writes a whole u64; nothing to drop.
         unsafe {
             c.migrate(ValueType::of::<Large>(), |old, new| {
@@ -491,6 +512,8 @@ mod tests {
             })
         };
         assert_eq!(c.as_slice::<Large>().iter().map(|l| l.n).sum::<u64>(), 90);
+        // The same rows, written when they were.
+        assert_eq!((c.ticks()[3], c.written()), (7, 7));
     }
 
     #[test]

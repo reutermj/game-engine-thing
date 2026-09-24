@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Query, SpatialKey, World, component};
+use engine_ecs::{Bounds, Build, Query, SpatialKey, With, Without, World, component, near_pairs};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -29,6 +29,19 @@ impl SpatialKey for At {
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Vel: "bench::Vel" { pub x: f32, pub y: f32 }
+}
+
+component! {
+    /// A wall: the pile's floor and sides, big rows in a table of their own.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Wall: "bench::Wall" {}
+}
+
+component! {
+    /// At rest: a body on the passive side of a broadphase, as sleeping
+    /// ones are physics's.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Still: "bench::Still" {}
 }
 
 static OUT: Mutex<(u128, u128, usize)> = Mutex::new((0, 0, 0));
@@ -123,7 +136,72 @@ fn creeping_frame(n: usize) {
     println!("{n:>6} rows creeping: {frame:>7.1} us/frame, writing {writing:.1}, the rest (the re-sort) {:.1}", frame - writing);
 }
 
+static SIDES: Mutex<[(u128, usize); 3]> = Mutex::new([(0, 0); 3]);
+
+/// The broadphase three ways over one pile with walls: one query over
+/// everything; walls passive; and everything passive but the bodies not
+/// `Still` (the top rows, falling onto a sleeping pile).
+#[allow(clippy::type_complexity)]
+fn sides(
+    _: &mut Cx,
+    mut all: Query<&At>,
+    (moving, walls): (Query<&At, Without<(Wall, Still)>>, Query<&At, With<Wall>>),
+    still: Query<&At, With<Still>>,
+) {
+    let mut out = SIDES.lock().unwrap();
+    let t = Instant::now();
+    let n = all.near_pairs(0.05).len();
+    out[0] = (out[0].0 + t.elapsed().as_nanos(), n);
+    let t = Instant::now();
+    let n = near_pairs(&(&moving, &still), &walls, 0.05).len();
+    out[1] = (out[1].0 + t.elapsed().as_nanos(), n);
+    let t = Instant::now();
+    let n = near_pairs(&moving, &(&walls, &still), 0.05).len();
+    out[2] = (out[2].0 + t.elapsed().as_nanos(), n);
+}
+
+fn sides_frame(n: usize, awake: usize) {
+    let w = World::new();
+    let per_row = (n as f32).sqrt() as usize * 4 / 3;
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for k in 0..n {
+            let (col, row) = (k % per_row, k / per_row);
+            let at = At { x: 0.5 + col as f32 * 0.9, y: 30.0 - row as f32 * 0.9 };
+            if k + awake >= n {
+                m.spawn((at, Size { hx: 0.45, hy: 0.45 }));
+            } else {
+                m.spawn((at, Size { hx: 0.45, hy: 0.45 }, Still {}));
+            }
+        }
+        let width = per_row as f32 * 0.9;
+        m.spawn((At { x: width / 2.0, y: 31.0 }, Size { hx: width / 2.0 + 1.0, hy: 0.5 }, Wall {}));
+        m.spawn((At { x: -0.5, y: 15.0 }, Size { hx: 0.5, hy: 30.0 }, Wall {}));
+        m.spawn((At { x: width + 0.5, y: 15.0 }, Size { hx: 0.5, hy: 30.0 }, Wall {}));
+    }
+    let s = Schedule { systems: vec![sides.system(&w, "sides")] };
+    *SIDES.lock().unwrap() = [(0, 0); 3];
+    let frames = 200;
+    for _ in 0..frames {
+        s.run_sequential(&w);
+    }
+    let out = *SIDES.lock().unwrap();
+    let us = |i: usize| out[i].0 as f64 / frames as f64 / 1e3;
+    println!(
+        "{n:>6} rows and walls: near_pairs {:>7.1} us ({} pairs); walls passive {:>7.1} us ({}); all but {awake} passive {:>7.1} us ({})",
+        us(0),
+        out[0].1,
+        us(1),
+        out[1].1,
+        us(2),
+        out[2].1
+    );
+}
+
 fn main() {
+    for n in [1000usize, 10_000] {
+        sides_frame(n, n / 50);
+    }
     creeping_frame(1000);
     creeping_frame(10_000);
     blanket_writer_frame(10_000);

@@ -176,8 +176,10 @@ spatial key with any extent, and physics is one user. What it assumes:
   colliders per body (the physics retrospective's first flaw).
 - **2D, boxes, two size classes** (ordered and big, at a threshold the
   key sets), and global page and run sizes (16 and 16).
-- **`near_pairs` returns every pair**, statics' included; physics
-  filters them after.
+- **A query's `near_pairs` returns every pair**, statics' included;
+  `near_pairs(active, passive, grow)` leaves out pairs of two passive
+  rows ([Two sides](#two-sides)), which is how physics skips statics
+  against statics and sleeping bodies against both.
 
 ## The broadphase, reworked
 
@@ -193,6 +195,42 @@ spatial storage, whose index rebuild is gone. Still open: pairs between
 two pages that haven't changed are the same as last time, and could be
 kept.
 
+## Two sides
+
+2026-09-24 (get-emj.27). `engine_ecs::near_pairs(active, passive, grow)`
+takes two sides, each a query or a tuple of them, and returns every pair
+at least one end of which is active: pairs of two passive rows (things at
+rest, which meet as they did last step) aren't looked for. Physics's
+active side is its awake colliders that can move, its passive side
+statics and sleeping bodies, each in tables of their own
+([physics.md](physics.md#sleeping)); a query's own `near_pairs` is one
+active side and nothing passive.
+
+Active pages are swept against each other as before. Passive pages are
+found from the other end: each run of a passive table (16 consecutive
+ordered pages, with a box) and each big page looks up, by binary search in
+the sweep's order, the active pages that may reach it (from its left edge
+less the widest active page), and only pages of a run some active page
+meets are tested. So a passive table no active page is near costs its
+runs, not its rows. A pair of pages tests the rows of whichever side has
+fewer reaching the other against all of the other's at once: a wall
+reaching a page is one test, not one per row of the page, which took
+walls on the passive side from 2% slower than on the active side (in a
+pile 440 rows wide) to about 1%, and none in a square one. Pairs sort by comparison when there are few for the indices
+they span (under a quarter): a bucket per index costs passes over every
+index, and 800 pairs among 10 000 indices went from 25 µs to 18.
+
+`spatial_bench`, 10 000 touching rows and three walls, µs, three runs:
+one query, 658; walls passive, 650; everything passive but 200 rows on
+top, 18 to 19. At 1000: 40, 40, 1.4. A table matched twice (by both sides,
+or two queries of one) is allowed, at the price of making pairs unique
+after, a pass over all of them.
+
+Tested against brute force (`spatial_test`,
+`pairs_between_sides_agree_with_brute_force`: sides split by a table
+component, by a sparse one, by both, a table on both sides, reused
+indices' generations); eight mutations of it are caught.
+
 ## Change detection
 
 2026-09-24 (get-emj.17). Every value in an erased column has a tick, the
@@ -205,8 +243,25 @@ key or extent was written since. A system visiting 10 000 rows mutably
 and moving 1% costs 160 µs a frame, against 268 without, re-bounding 100
 rows instead of all. The cost: a binding written through needs `mut`,
 and every write stamps a tick (the physics pile, where everything moves,
-went from 0.35 to 0.36 ms). Six mutations of it are caught. `Changed<T>`
-filters are the natural next use, and aren't built.
+went from 0.35 to 0.36 ms). Six mutations of it are caught.
+
+**Walking what changed** (2026-09-24, get-emj.27):
+`Query::for_each_written(since, f)` is every row any of whose terms was
+written after tick `since`, a `Query::now()` taken before (the world's
+tick while that query held its guards, so every write to what it matched
+is on one side of it). Each page's column keeps a tick of its own, at
+least the latest of its rows', so a page none of whose terms was written
+since is skipped with a look: physics looks for a game's write to any of
+five components of 10 000 sleeping bodies in 8 µs, where reading every
+velocity (one of them) took 15. The
+page's tick is stamped when writes are handed out (a page view, a slice,
+a row's `Mut`), whether or not one is made, and raised by a row moving in:
+conservative, so it only ever costs a look at a page for nothing. Stamping
+it per write instead cost 1.2 ns a row in a loop writing every row
+([lore](../lore/a-second-store-per-write-cost-a-nanosecond-a-row.md)).
+Table components only, as page walks are. A `Changed<T>` filter, which
+would need a tick to compare against in the query's declaration, isn't
+built.
 
 ## Upkeep, reworked
 

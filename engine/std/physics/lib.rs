@@ -2,7 +2,9 @@
 //! gravity into velocities, contacts, then the solver (which also moves
 //! bodies). Positions are kept in spatial order by the ECS, so the
 //! broadphase is `near_pairs` and moving bodies re-sorts them at the
-//! solver's apply node. See docs/architecture/physics.md.
+//! solver's apply node. Sleeping bodies and their resting contacts are in
+//! tables of their own (`Asleep`, `Resting`), which the step's queries
+//! exclude. See docs/architecture/physics.md.
 
 //!
 //! Everything a step carries to the next is in the world or in this mod's
@@ -14,10 +16,13 @@ mod solver;
 
 use std::time::Instant;
 
-use engine_api::{Cx, Despawns, Dt, Entity, EventWriter, Mod, Query, Spawner, Systems, Without, export_mod, field_struct, phase};
+use engine_api::{
+    Adds, Cx, Despawns, Dt, Entity, EventWriter, Mod, OrderKey, Query, Removes, SpatialKey, Spawner, Systems, With, Without,
+    export_mod, field_struct, phase,
+};
 use physics::{
-    Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, STATIC, Shape, Sleep, Touching, Trigger, Vec2, Velocity,
+    Asleep, Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
+    Response, Resting, STATIC, Shape, Sleep, Touching, Trigger, Vec2, Velocity,
 };
 use sleep::Sleepers;
 use solver::{Constraint, SolverBody};
@@ -53,6 +58,10 @@ engine_api::mod_state! {
     #[derive(Default)]
     struct Physics {
         steps: u64,
+        /// The world's tick after the last solve: what games wrote to a
+        /// sleeping body since then woke it. Carried across reloads, so a
+        /// new build doesn't take its own step's writes for a game's.
+        since: u32,
         time: Timings,
     }
 }
@@ -75,6 +84,14 @@ impl Slots {
 
     fn get(&self, e: Entity) -> Option<u32> {
         self.0.get(e.index as usize).filter(|(g, k)| *g == e.generation && *k != u32::MAX).map(|(_, k)| *k)
+    }
+
+    fn insert(&mut self, e: Entity, k: u32) {
+        let i = e.index as usize;
+        if self.0.len() <= i {
+            self.0.resize(i + 1, (u32::MAX, u32::MAX));
+        }
+        self.0[i] = (e.generation, k);
     }
 }
 
@@ -101,12 +118,26 @@ struct Layers {
     sensor: bool,
 }
 
-/// A `Body`'s part in a pair.
+/// A `Body`'s part in a pair, and the collider's in the step.
 struct Material {
     kind: u8,
     friction: f32,
     restitution: f32,
+    /// The solver moves it: a body with a velocity, not static, awake.
+    moves: bool,
+    asleep: bool,
+    /// On the broadphase's passive side (static or asleep): pairs of two
+    /// passive colliders aren't looked for.
+    passive: bool,
 }
+
+/// Sleeping bodies, as the systems that wake them see them: woken is
+/// `Asleep` removed. Its terms are what a game writes to wake one.
+type SleepingBodies<'w, 'a> =
+    Query<'w, (&'a Asleep, &'a Velocity, &'a Position, &'a Collider, &'a Body), (), Removes<Asleep>>;
+/// Contacts kept as they are while their ends sleep: an end woken is
+/// `Resting` removed.
+type RestingContacts<'w, 'a> = Query<'w, &'a ContactPair, With<Resting>, Removes<Resting>>;
 
 impl Physics {
     fn integrate_velocities(
@@ -115,19 +146,75 @@ impl Physics {
         _: &mut Cx,
         dt: Dt,
         mut gravity: Query<&Gravity>,
-        mut bodies: Query<(&Body, &mut Velocity)>,
+        mut bodies: Query<(&Body, &mut Velocity), Without<Asleep>>,
+        (mut config, mut sleeping, mut resting): (Query<&Sleep>, SleepingBodies<'_, '_>, RestingContacts<'_, '_>),
     ) {
         let start = Instant::now();
         let dt = *dt;
         self.steps += 1;
+        if sleep.asleep > 0 || !sleeping.is_empty() {
+            Self::wake_by_games(sleep, config.single(|_, _| ()).is_some(), self.since, &mut sleeping);
+            Self::move_woken(sleep, &mut sleeping, &mut resting);
+        }
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        bodies.for_each(|row, (body, mut v)| {
-            if body.kind == DYNAMIC && !sleep.is_asleep(row.entity()) {
+        bodies.for_each(|_, (body, mut v)| {
+            if body.kind == DYNAMIC {
                 v.x += g.x * body.gravity_scale * dt;
                 v.y += g.y * body.gravity_scale * dt;
             }
         });
         self.time.gravity += nanos(start);
+    }
+
+    /// Wakes what games changed under sleeping bodies since the last step:
+    /// everything if sleeping was turned off; a body a game despawned or
+    /// woke (removing its `Asleep`), and its island; a body a game wrote
+    /// (its velocity, position, collider or body) after tick `since`, found
+    /// by pages written (`for_each_written`), so at rest it costs a look
+    /// per page.
+    fn wake_by_games(sleep: &mut Sleepers, on: bool, since: u32, sleeping: &mut SleepingBodies<'_, '_>) {
+        if !on {
+            sleep.wake_all();
+            sleeping.for_each(|row, _| sleep.woken.push(row.entity()));
+            return;
+        }
+        let there = sleeping.len();
+        if there != sleep.asleep {
+            let mut alive = Vec::with_capacity(there);
+            sleeping.for_each(|row, (a, ..)| alive.push((row.entity(), a.island)));
+            let slots = Slots::of(alive.iter().map(|(e, _)| *e));
+            sleep.wake_missing(|e| slots.get(e).is_some());
+            // Put to sleep by a game: taken as it is.
+            for (e, island) in alive {
+                sleep.adopt(e, island);
+            }
+        }
+        let mut set = Vec::new();
+        sleeping.for_each_written(since, |row, _| set.push(row.entity()));
+        for e in set {
+            sleep.wake(e);
+        }
+    }
+
+    /// Moves the bodies woken since this last ran out of their sleeping
+    /// tables, and the resting contacts they're an end of (or whose end is
+    /// gone) back into the step. Rare, so walking every resting contact is
+    /// fine.
+    fn move_woken(sleep: &mut Sleepers, sleeping: &mut SleepingBodies<'_, '_>, resting: &mut RestingContacts<'_, '_>) {
+        if sleep.woken.is_empty() {
+            return;
+        }
+        let woken = Slots::of(sleep.woken.iter().copied());
+        for e in sleep.woken.drain(..) {
+            if let Some(row) = sleeping.get(e) {
+                row.remove::<Asleep>();
+            }
+        }
+        resting.for_each(|row, pair| {
+            if woken.get(pair.a).is_some() || woken.get(pair.b).is_some() {
+                row.remove::<Resting>();
+            }
+        });
     }
 
     /// Finds this step's contacts and overlaps, and brings the world's in
@@ -139,19 +226,21 @@ impl Physics {
         &mut self,
         sleep: &mut Sleepers,
         _: &mut Cx,
-        // Every collider, by whether it has a body and a velocity: queries
-        // have no optional terms, and one query per case gathers each in one
-        // walk, where filling velocities in after was a second walk and a
-        // lookup per collider.
+        // Every awake collider, by whether it has a body and a velocity:
+        // queries have no optional terms, and one query per case gathers
+        // each in one walk, where filling velocities in after was a second
+        // walk and a lookup per collider.
         (mut moving, mut held, mut drifting, mut statics): (
-            Query<(&Position, &Collider, &Body, &Velocity)>,
-            Query<(&Position, &Collider, &Body), Without<Velocity>>,
-            Query<(&Position, &Collider, &Velocity), Without<Body>>,
+            Query<(&Position, &Collider, &Body, &Velocity), Without<Asleep>>,
+            Query<(&Position, &Collider, &Body), Without<(Velocity, Asleep)>>,
+            Query<(&Position, &Collider, &Velocity), Without<(Body, Asleep)>>,
             Query<(&Position, &Collider), Without<(Body, Velocity)>>,
         ),
-        mut shapes: Query<(&Position, &Collider)>,
+        // Sleeping ones, looked up only where an awake one meets them, and
+        // the contacts they rest on.
+        (mut asleep, mut resting): (Query<(&Position, &Collider, &Body), With<Asleep>>, Query<&ContactPair, With<Resting>>),
         (mut contacts, new_contacts): (
-            Query<(&ContactPair, &mut Manifold, &mut Response), (), Despawns>,
+            Query<(&ContactPair, &mut Manifold, &mut Response), Without<Resting>, Despawns>,
             Spawner<(ContactPair, Manifold, Response, Impulse)>,
         ),
         (mut overlaps, new_overlaps): (Query<&Overlap, (), Despawns>, Spawner<(Overlap,)>),
@@ -160,14 +249,38 @@ impl Physics {
         let start = Instant::now();
         let mut items = Vec::with_capacity(moving.len() + held.len() + drifting.len() + statics.len());
         let v = |v: &Velocity| Vec2::new(v.x, v.y);
-        moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u))));
-        held.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b, Vec2::ZERO)));
-        drifting.for_each(|row, (p, c, u)| items.push(item(row.entity(), p, c, Body::fixed(), v(u))));
-        statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO)));
-        let slots = Slots::of(items.iter().map(|i| i.entity));
-        // Pairs come in entity order, so what's found doesn't depend on the
-        // order items were gathered in.
-        let index = |e: Entity| slots.get(e).expect("a collider has a position");
+        moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
+        held.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
+        drifting.for_each(|row, (p, c, u)| items.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
+        statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
+        let mut slots = Slots::of(items.iter().map(|i| i.entity));
+        if sleep.asleep > 0 {
+            self.wake_on_statics(sleep, &mut statics, &mut asleep, &mut resting, &slots);
+        }
+        // The storage's own order is the broadphase: pairs whose boxes, grown
+        // by the speculative margin, meet, and one of which is awake and can
+        // move. In entity order, lesser first, so what's found doesn't
+        // depend on the order items were gathered in.
+        let gathered = Instant::now();
+        let near = engine_api::near_pairs(&(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN);
+        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
+        // A sleeping collider is gathered only when an awake one meets it.
+        let mut fetch = |e: Entity, items: &mut Vec<Item>, slots: &mut Slots| {
+            let k = items.len() as u32;
+            let mut it = asleep.with(e, |_, (p, c, b)| item(e, p, c, *b, Vec2::ZERO, false, true)).expect("a collider has a position");
+            it.body.asleep = true;
+            items.push(it);
+            slots.insert(e, k);
+            k
+        };
+        for (a, b) in near {
+            let (i, j) = (slots.get(a), slots.get(b));
+            let i = i.unwrap_or_else(|| fetch(a, &mut items, &mut slots));
+            let j = j.unwrap_or_else(|| fetch(b, &mut items, &mut slots));
+            pairs.push((i, j));
+        }
+        let paired = Instant::now();
+        let index = |e: Entity| slots.get(e).expect("a paired collider");
         let arrives = |a: &Item, b: &Item| a.body.kind != STATIC || b.body.kind != STATIC;
         let collides = |a: &Item, b: &Item| {
             let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
@@ -180,31 +293,39 @@ impl Physics {
         let senses = |a: &Item, b: &Item| {
             (a.collider.senses & b.collider.layer != 0 || b.collider.senses & a.collider.layer != 0) && arrives(a, b)
         };
-        // Neither end moves: a static or a sleeping body. A contact between
-        // two is kept as it was, and not looked for again.
-        let inert = |i: &Item| i.body.kind == STATIC || sleep.is_asleep(i.entity);
-        let resting = |a: &Item, b: &Item| sleep.asleep > 0 && inert(a) && inert(b);
-        // The storage's own order is the broadphase: pairs whose boxes, grown
-        // by the speculative margin, meet. In entity order, lesser first.
-        let gathered = Instant::now();
-        let pairs: Vec<(u32, u32)> = shapes.near_pairs(narrow::MARGIN).into_iter().map(|(a, b)| (index(a), index(b))).collect();
-        let paired = Instant::now();
+        // Neither end moves, and one sleeps: their contact is `Resting`,
+        // kept as it was, and not looked for again.
+        let rests = |a: &Item, b: &Item| (a.body.asleep || b.body.asleep) && !a.body.moves && !b.body.moves;
 
         let mut found: Vec<(ContactPair, Manifold, Response)> = Vec::new();
         // Each overlap, and whether it's a sensor's, which triggers.
         let mut overlapping: Vec<(Overlap, bool)> = Vec::new();
-        for (i, j) in pairs {
-            let (a, b) = (&items[i as usize], &items[j as usize]);
+        let any_asleep = sleep.asleep > 0;
+        // `sleeping`: something does, so a pair may rest.
+        let mut test = |a: &Item, b: &Item, sleeping: bool| {
             let (collide, sense) = (collides(a, b), senses(a, b));
-            if !collide && !sense || collide && !sense && resting(a, b) {
-                continue;
+            let rest = sleeping && rests(a, b);
+            if !sense && (!collide || rest) {
+                return;
             }
-            let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { continue };
+            let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { return };
             let sensor = collide && (a.collider.sensor || b.collider.sensor);
             if (sensor || sense) && m.depth >= 0.0 {
                 overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
             }
-            if collide && !sensor {
+            // A pair that rested and now moves (a static a game made a body,
+            // a shelf given a velocity) still has its `Resting` contact:
+            // not a new one, but that one woken, back from the next step.
+            let mut woke = || {
+                let key = ContactPair { a: a.entity, b: b.entity }.key();
+                let mut kept = false;
+                resting.in_keys::<ContactPair>(key..=key, |_, _| kept = true);
+                kept
+            };
+            if sleeping && collide && !sensor && !rest && (a.body.asleep || b.body.asleep) && woke() {
+                sleep.wake(a.entity);
+                sleep.wake(b.entity);
+            } else if collide && !sensor && !rest {
                 found.push((
                     ContactPair { a: a.entity, b: b.entity },
                     Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, pressed: false, was_pressed: false },
@@ -215,6 +336,17 @@ impl Physics {
                     },
                 ));
             }
+        };
+        // Split on whether anything sleeps, so a step with nothing asleep
+        // tests nothing for it: the always-false tests cost about 7 µs of
+        // 110 at 10 000 settled and at rest (2026-09-24, against the arrays'
+        // narrowphase over six runs each), as a dead test once did in the
+        // solve (physics.md, "What the ECS costs").
+        let pair = |&(i, j): &(u32, u32)| (&items[i as usize], &items[j as usize]);
+        if any_asleep {
+            pairs.iter().map(pair).for_each(|(a, b)| test(a, b, true));
+        } else {
+            pairs.iter().map(pair).for_each(|(a, b)| test(a, b, false));
         }
 
         let narrowed = Instant::now();
@@ -223,11 +355,12 @@ impl Physics {
         let spawn = |(pair, m, r): (ContactPair, Manifold, Response)| {
             new_contacts.spawn((pair, m, r, Impulse::default()));
         };
-        // Every contact is written or despawned (or, resting, left as it
-        // is), so each page is stamped written as a whole, not row by row:
-        // 54 µs to 34 at 10 000 contacts, against `for_each_ordered` and
-        // `Mut` (2026-09-24). A resting contact is stamped with the rest,
-        // as `write_all` says.
+        // Contacts pressed last step that ended: an end asleep has lost
+        // what it rested on or against, and wakes.
+        let mut ended = Vec::new();
+        // Every contact is written or despawned, so each page is stamped
+        // written as a whole, not row by row: 54 µs to 34 at 10 000
+        // contacts, against `for_each_ordered` and `Mut` (2026-09-24).
         contacts.for_each_ordered_page(|page, (pair, mut m, mut r)| {
             let (m, r) = (m.write_all(), r.write_all());
             for i in page.rows() {
@@ -235,20 +368,26 @@ impl Physics {
                     spawn(found[next]);
                     next += 1;
                 }
-                if sleep.asleep > 0 && resting(&items[index(pair[i].a) as usize], &items[index(pair[i].b) as usize]) {
-                    continue;
-                }
                 match found.get(next) {
                     Some(f) if f.0 == pair[i] => {
                         m[i] = Manifold { was_pressed: m[i].pressed, ..f.1 };
                         r[i] = f.2;
                         next += 1;
                     }
-                    _ => page.row(i).despawn(),
+                    _ => {
+                        if sleep.asleep > 0 && m[i].pressed {
+                            ended.push(pair[i]);
+                        }
+                        page.row(i).despawn();
+                    }
                 }
             }
         });
         found[next..].iter().copied().for_each(spawn);
+        for pair in ended {
+            sleep.wake(pair.a);
+            sleep.wake(pair.b);
+        }
 
         let key = |o: &Overlap| (o.a, o.b);
         let mut next = 0;
@@ -259,6 +398,9 @@ impl Physics {
                 triggers.send(Trigger { sensor, other });
             }
         };
+        // An overlap of two passive colliders (a sleeping body in a static
+        // sensor) isn't looked for, so it lasts while they stay so.
+        let mut passive = |e: Entity| slots.get(e).map_or_else(|| asleep.with(e, |_, _| ()).is_some(), |k| items[k as usize].body.passive);
         overlaps.for_each_ordered(|row, o| {
             while overlapping.get(next).is_some_and(|f| key(&f.0) < key(o)) {
                 begin(overlapping[next]);
@@ -266,7 +408,7 @@ impl Physics {
             }
             if overlapping.get(next).is_some_and(|f| f.0 == *o) {
                 next += 1;
-            } else {
+            } else if !(sleep.asleep > 0 && passive(o.a) && passive(o.b)) {
                 row.despawn();
             }
         });
@@ -279,6 +421,47 @@ impl Physics {
         t.contacts += nanos(start);
     }
 
+    /// Wakes sleeping bodies whose statics a game changed: moved one into
+    /// or out from under them (a static written since the last step), or
+    /// despawned one under them (when there are fewer or more statics than
+    /// the last step). Statics and sleeping bodies are both passive, so the
+    /// broadphase would never pair them again. `alive` is every awake
+    /// collider and static.
+    fn wake_on_statics(
+        &mut self,
+        sleep: &mut Sleepers,
+        statics: &mut Query<(&Position, &Collider), Without<(Body, Velocity)>>,
+        asleep: &mut Query<(&Position, &Collider, &Body), With<Asleep>>,
+        resting: &mut Query<&ContactPair, With<Resting>>,
+        alive: &Slots,
+    ) {
+        let mut moved = Vec::new();
+        statics.for_each_written(self.since, |row, (p, c)| moved.push((row.entity(), p.bounds(Some(c)).grown(narrow::MARGIN))));
+        let recount = std::mem::replace(&mut sleep.statics, statics.len()) != sleep.statics;
+        if moved.is_empty() && !recount {
+            return;
+        }
+        for &(_, around) in &moved {
+            asleep.in_region(around, |row, _| sleep.wake(row.entity()));
+        }
+        let moved = Slots::of(moved.iter().map(|(e, _)| *e));
+        let mut gone = Vec::new();
+        resting.for_each(|_, pair| {
+            for (end, other) in [(pair.a, pair.b), (pair.b, pair.a)] {
+                if moved.get(end).is_some() {
+                    sleep.wake(other);
+                } else if recount && alive.get(end).is_none() && asleep.with(end, |_, _| ()).is_none() {
+                    gone.push((end, other));
+                }
+            }
+        });
+        for (end, other) in gone {
+            sleep.wake(other);
+            // So its contacts leave `Resting`, and end in the next merge.
+            sleep.woken.push(end);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
@@ -286,76 +469,57 @@ impl Physics {
         _: &mut Cx,
         dt: Dt,
         mut config: Query<&Sleep>,
-        mut moving: Query<(&Body, &mut Velocity, &mut Position)>,
-        mut touching: Query<&mut Touching>,
-        mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse)>,
+        // Awake bodies only: a sleeping one is immovable, and in tables of
+        // its own, so walks over bodies skip it by what they match.
+        mut moving: Query<(&Body, &mut Velocity, &mut Position), Without<Asleep>, Adds<Asleep>>,
+        // A sleeping body's is left as it fell asleep.
+        mut touching: Query<&mut Touching, Without<Asleep>>,
+        mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse), Without<Resting>, Adds<Resting>>,
+        (mut sleeping, mut resting): (SleepingBodies<'_, '_>, RestingContacts<'_, '_>),
         began: EventWriter<Contact>,
     ) {
         let start = Instant::now();
         let dt = *dt;
         let mut bodies = Vec::with_capacity(moving.len() + 1);
         let mut entities = Vec::with_capacity(moving.len());
-        // Per body: whether it moves this step (not static, not asleep), and
-        // is dynamic.
+        // Per body: whether it moves (isn't static), and its kind.
         let mut kinds: Vec<(bool, u8)> = Vec::with_capacity(moving.len() + 1);
         moving.for_each(|row, (body, v, _)| {
             entities.push(row.entity());
-            let asleep = sleep.is_asleep(row.entity());
-            let inv_mass = if body.kind == DYNAMIC && !asleep { body.inv_mass } else { 0.0 };
-            let v = if asleep { Vec2::ZERO } else { Vec2::new(v.x, v.y) };
-            bodies.push(SolverBody { v, inv_mass, pseudo: Vec2::ZERO });
-            kinds.push((body.kind != STATIC && !asleep, body.kind));
+            let inv_mass = if body.kind == DYNAMIC { body.inv_mass } else { 0.0 };
+            bodies.push(SolverBody { v: Vec2::new(v.x, v.y), inv_mass, pseudo: Vec2::ZERO });
+            kinds.push((body.kind != STATIC, body.kind));
         });
-        // Bodies with no velocity (statics) all stand for one immovable
-        // body at the end.
+        // Bodies with no velocity (statics) and sleeping ones all stand for
+        // one immovable body at the end.
         let still = bodies.len() as u32;
         bodies.push(SolverBody::default());
         kinds.push((false, STATIC));
         let slots = Slots::of(entities.iter().copied());
         let index_of = |e: Entity| slots.get(e).unwrap_or(still);
-        // As in `find_contacts`: a contact neither end of which moves is
-        // left as it is, impulses and all, for when they wake. Looked up
-        // only while something sleeps: checked on every contact, a test
-        // that's always false cost 30 µs of 65 at 10 000 (2026-09-24).
-        let any_asleep = sleep.asleep > 0;
-        let moves = |e: Entity| kinds[slots.get(e).unwrap_or(still) as usize].0;
-        let resting = |p: &ContactPair| any_asleep && !moves(p.a) && !moves(p.b);
 
         // In pair order, which storage keeps: the solve doesn't depend on
         // when each contact began. (History, 2026-09-24: contacts were
         // copied out of the walk and mapped after, which measured faster
         // until `for_each` walked slices.)
         let mut constraints: Vec<Constraint> = Vec::with_capacity(contacts.len());
-        let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse| Constraint {
-            a: index_of(pair.a),
-            b: index_of(pair.b),
-            normal: Vec2::new(m.nx, m.ny),
-            depth: m.depth,
-            friction: r.friction,
-            restitution: r.restitution,
-            jn: j.normal,
-            jt: j.tangent,
-            speed: 0.0,
-        };
-        if any_asleep {
-            contacts.for_each_ordered(|_, (pair, m, r, j)| {
-                if !r.disabled && !resting(pair) {
-                    constraints.push(constraint(pair, &m, r, &j));
-                }
-            });
-        } else {
-            contacts.for_each_ordered(|_, (pair, m, r, j)| {
-                if !r.disabled {
-                    constraints.push(constraint(pair, &m, r, &j));
-                }
-            });
-        }
+        contacts.for_each_ordered(|_, (pair, m, r, j)| {
+            if !r.disabled {
+                constraints.push(Constraint {
+                    a: index_of(pair.a),
+                    b: index_of(pair.b),
+                    normal: Vec2::new(m.nx, m.ny),
+                    depth: m.depth,
+                    friction: r.friction,
+                    restitution: r.restitution,
+                    jn: j.normal,
+                    jt: j.tangent,
+                    speed: 0.0,
+                });
+            }
+        });
         let gathered = Instant::now();
         let config = config.single(|_, c| *c);
-        let sleeping = config.is_some();
-        if !sleeping && sleep.asleep > 0 {
-            sleep.wake_all();
-        }
         solver::solve(&mut bodies, &mut constraints, dt);
         let after_solver = Instant::now();
 
@@ -389,17 +553,13 @@ impl Physics {
         let asking = Slots::of(asking.iter().copied());
         let mut solved = constraints.iter();
         let mut links = Vec::new();
-        // Every contact's impulse and pressing are written (a resting one's
-        // left as it is, and stamped with its page), so pages are stamped
-        // whole, as in the merge.
+        // Every contact's impulse and pressing are written, so pages are
+        // stamped whole, as in the merge.
         contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j)| {
             let (m, j) = (m.write_all(), j.write_all());
             for i in page.rows() {
                 if r[i].disabled {
                     (m[i].pressed, j[i]) = (false, Impulse::default());
-                    continue;
-                }
-                if resting(&pair[i]) {
                     continue;
                 }
                 let k = solved.next().expect("a constraint per contact solved");
@@ -409,7 +569,7 @@ impl Physics {
                     continue;
                 }
                 let (pair, m) = (pair[i], m[i]);
-                if sleeping {
+                if config.is_some() {
                     links.push((pair.a, pair.b));
                 }
                 let n = Vec2::new(m.nx, m.ny);
@@ -424,8 +584,12 @@ impl Physics {
             }
         });
         if let Some(c) = config {
-            self.fall_asleep(sleep, &c, dt, &entities, &bodies, &kinds, &links, &mut moving);
+            self.fall_asleep(sleep, &c, dt, &entities, &bodies, &kinds, &links, &mut moving, &mut contacts);
+            Self::move_woken(sleep, &mut sleeping, &mut resting);
         }
+        // After every write of the step's, the stopping of bodies that fell
+        // asleep included.
+        self.since = sleeping.now();
         let t = &mut self.time;
         t.solve_gather += (gathered - start).as_nanos() as u64;
         t.solver += (after_solver - gathered).as_nanos() as u64;
@@ -438,7 +602,8 @@ impl Physics {
 impl Physics {
     /// Sleeping's bookkeeping after a step: see `Sleepers::update`. Links
     /// between dynamic bodies make islands; a kinematic body moving into a
-    /// sleeping one wakes it.
+    /// sleeping one wakes it. The bodies that fall asleep stop and move to
+    /// their sleeping tables, and so do the contacts that then rest.
     #[allow(clippy::too_many_arguments)]
     fn fall_asleep(
         &mut self,
@@ -449,26 +614,49 @@ impl Physics {
         bodies: &[SolverBody],
         kinds: &[(bool, u8)],
         links: &[(Entity, Entity)],
-        moving: &mut Query<(&Body, &mut Velocity, &mut Position)>,
+        moving: &mut Query<(&Body, &mut Velocity, &mut Position), Without<Asleep>, Adds<Asleep>>,
+        contacts: &mut Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse), Without<Resting>, Adds<Resting>>,
     ) {
         let slots = Slots::of(entities.iter().copied());
-        let kind = |e: Entity| slots.get(e).map_or((false, STATIC), |k| kinds[k as usize]);
+        // Sleeping bodies aren't among the step's, but are all dynamic.
+        let kind = |e: Entity| slots.get(e).map_or(if sleep.is_asleep(e) { (false, DYNAMIC) } else { (false, STATIC) }, |k| kinds[k as usize]);
         let awake: Vec<(Entity, f32)> = (0..entities.len())
             .filter(|&k| kinds[k] == (true, DYNAMIC))
             .map(|k| (entities[k], bodies[k].v.x.hypot(bodies[k].v.y)))
             .collect();
         let mut between = Vec::with_capacity(links.len());
+        let mut kinematic = Vec::new();
         for &(a, b) in links {
             match (kind(a).1, kind(b).1) {
                 (DYNAMIC, DYNAMIC) => between.push((a, b)),
-                (KINEMATIC, _) if kind(a).0 && bodies[slots.get(a).unwrap() as usize].v != Vec2::ZERO => sleep.wake(b),
-                (_, KINEMATIC) if kind(b).0 && bodies[slots.get(b).unwrap() as usize].v != Vec2::ZERO => sleep.wake(a),
+                (KINEMATIC, _) if kind(a).0 && bodies[slots.get(a).unwrap() as usize].v != Vec2::ZERO => kinematic.push(b),
+                (_, KINEMATIC) if kind(b).0 && bodies[slots.get(b).unwrap() as usize].v != Vec2::ZERO => kinematic.push(a),
                 _ => {}
             }
         }
-        for e in sleep.update(dt, c.speed, c.time, &awake, &between) {
-            moving.with(e, |_, (_, mut v, _)| *v = Velocity::default());
+        for e in kinematic {
+            sleep.wake(e);
         }
+        let fell = sleep.update(dt, c.speed, c.time, &awake, &between);
+        if fell.is_empty() {
+            return;
+        }
+        for &(e, island) in &fell {
+            moving.with(e, |row, (_, mut v, _)| {
+                *v = Velocity::default();
+                row.insert(Asleep { island });
+            });
+        }
+        // A contact rests once neither end moves and one sleeps. A body
+        // woken this step moves from the next, though it was still in this
+        // one.
+        let woken = Slots::of(sleep.woken.iter().copied());
+        let moves = |e: Entity| !sleep.is_asleep(e) && (woken.get(e).is_some() || slots.get(e).is_some_and(|k| kinds[k as usize].0));
+        contacts.for_each(|row, (pair, _, _, _)| {
+            if (sleep.is_asleep(pair.a) || sleep.is_asleep(pair.b)) && !moves(pair.a) && !moves(pair.b) {
+                row.insert(Resting {});
+            }
+        });
     }
 }
 
@@ -476,12 +664,12 @@ fn placed(p: &Position, c: &Collider) -> Placed {
     Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
 }
 
-fn item(entity: Entity, p: &Position, c: &Collider, body: Body, v: Vec2) -> Item {
+fn item(entity: Entity, p: &Position, c: &Collider, body: Body, v: Vec2, moves: bool, passive: bool) -> Item {
     Item {
         entity,
         placed: placed(p, c),
         collider: Layers { layer: c.layer, mask: c.mask, senses: c.senses, sensor: c.sensor },
-        body: Material { kind: body.kind, friction: body.friction, restitution: body.restitution },
+        body: Material { kind: body.kind, friction: body.friction, restitution: body.restitution, moves, asleep: false, passive },
         v,
     }
 }
@@ -502,6 +690,12 @@ fn mark(t: &mut Touching, n: Vec2) {
 
 impl Mod for Physics {
     type Transient = Sleepers;
+
+    /// Who's asleep is in the world, so a new build (a reload) picks
+    /// sleeping bodies up where they are, rather than waking them all.
+    fn load(&mut self, sleep: &mut Sleepers, cx: &mut Cx) {
+        cx.world().for_each::<&Asleep>(|e, a| sleep.adopt(e, a.island));
+    }
 
     fn systems(s: &mut Systems<Self>) {
         const STEP: &str = "physics::step";
@@ -534,7 +728,8 @@ impl Mod for Physics {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
                 let t = self.time;
                 Ok(format!(
-                    "gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
+                    "gravity {:.1} gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
+                    per(t.gravity),
                     per(t.gather),
                     per(t.broadphase),
                     per(t.narrowphase),
@@ -547,6 +742,13 @@ impl Mod for Physics {
             "sleeping" => Ok(format!("asleep {}", sleep.asleep)),
             "wake" => {
                 sleep.wake_all();
+                let mut world = cx.world();
+                let mut asleep = Vec::new();
+                world.for_each::<&Asleep>(|e, _| asleep.push(e));
+                let mut resting = Vec::new();
+                world.for_each::<(&ContactPair, &Resting)>(|e, _| resting.push(e));
+                asleep.into_iter().for_each(|e| world.remove::<Asleep>(e));
+                resting.into_iter().for_each(|e| world.remove::<Resting>(e));
                 Ok("awake".into())
             }
             "reset_timings" => {

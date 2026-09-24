@@ -377,8 +377,8 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
     const SPEED: f32 = 0.05;
     const TIME: f32 = 0.5;
     println!("\nSleeping (speed {SPEED}, {TIME} s), ECS only: µs per step, asleep / awake at the same step\n");
-    println!("| bodies | asleep at step | frame | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| bodies | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (n, width) in [(1000u32, 40.0f32), (10000, 400.0)] {
         let run = |sleep: bool, until: Option<u32>| {
             let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-sleep-{sleep}", std::process::id()));
@@ -418,7 +418,9 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
         let (_, frame_awake, stages_awake, outside_awake, deepest_awake) = run(false, Some(at));
         let pair = |k: &str| format!("{:.0} / {:.0}", field(&stages, k), field(&stages_awake, k));
         println!(
-            "| {n} | {at} | {frame:.0} / {frame_awake:.0} | {} | {} | {} | {} | {} | {} | {outside:.0} / {outside_awake:.0} | {deepest:.3} / {deepest_awake:.3} |",
+            "| {n} | {at} | {frame:.0} / {frame_awake:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {outside:.0} / {outside_awake:.0} | {deepest:.3} / {deepest_awake:.3} |",
+            pair("gravity"),
+            pair("gather"),
             pair("broadphase"),
             pair("narrowphase"),
             pair("merge"),
