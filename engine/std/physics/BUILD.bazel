@@ -28,7 +28,6 @@ engine_mod(
     name = "physics",
     srcs = PHYSICS_SRCS,
     interface = PHYSICS_INTERFACE,
-    mod_deps = ["//engine/std/clock"],
     visibility = ["//visibility:public"],
 )
 
@@ -39,7 +38,6 @@ engine_mod(
     srcs = PHYSICS_SRCS,
     crate_features = ["v2"],
     interface = PHYSICS_INTERFACE,
-    mod_deps = ["//engine/std/clock"],
     mod_name = "physics",
 )
 

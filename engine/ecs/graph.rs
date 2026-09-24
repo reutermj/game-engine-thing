@@ -161,7 +161,7 @@ pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
                 }
             }
             ParamDecl::Events { queue, write: true } => fp.add_events(*queue),
-            ParamDecl::Query(_) | ParamDecl::Events { .. } => {}
+            ParamDecl::Query(_) | ParamDecl::Events { .. } | ParamDecl::Dt => {}
             ParamDecl::Group(_) => unreachable!("leaves are flattened"),
         }
     }

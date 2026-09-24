@@ -36,8 +36,10 @@ pub mod phase {
     pub const INPUT: &str = "input";
     /// Game logic. The default.
     pub const UPDATE: &str = "update";
-    /// Physics and other integration over the frame's intent.
+    /// Physics and other integration over the frame's intent. Fixed-rate,
+    /// at `SIMULATE_HZ`: it runs once per step, however many the frame has.
     pub const SIMULATE: &str = "simulate";
+    pub const SIMULATE_HZ: f32 = 60.0;
     /// Reacting to the frame's outcome.
     pub const LATE: &str = "late";
     /// Producing output from the settled world.
@@ -81,6 +83,10 @@ pub struct PhaseDesc {
     pub name: String,
     pub after: Vec<String>,
     pub before: Vec<String>,
+    /// Steps per second, for a fixed-rate phase: it runs as many times a
+    /// frame as the frame's time accumulates steps (none, one, or several).
+    /// `None` runs once a frame.
+    pub fixed_hz: Option<f32>,
 }
 
 /// Where a mod declares its systems and phases: the argument to
@@ -118,7 +124,7 @@ impl<T: Mod> Systems<'_, T> {
     /// Name it after the mod (`"pong::serve"`); several mods may declare the
     /// same phase, and its constraints add up.
     pub fn phase(&mut self, name: &str) -> PhaseBuilder<'_> {
-        self.decls.phases.push(PhaseDesc { name: name.into(), after: Vec::new(), before: Vec::new() });
+        self.decls.phases.push(PhaseDesc { name: name.into(), after: Vec::new(), before: Vec::new(), fixed_hz: None });
         PhaseBuilder { desc: self.decls.phases.last_mut().unwrap() }
     }
 }
@@ -158,6 +164,15 @@ impl PhaseBuilder<'_> {
 
     pub fn before(self, phase: &str) -> Self {
         self.desc.before.push(phase.into());
+        self
+    }
+
+    /// Makes the phase fixed-rate, at `hz` steps a second. `simulate` is
+    /// already, at 60. Consecutive phases at one rate repeat together, step
+    /// by step. A system reads its step's length with a `Dt` parameter.
+    pub fn fixed_hz(self, hz: f32) -> Self {
+        assert!(hz > 0.0, "a rate is steps per second");
+        self.desc.fixed_hz = Some(hz);
         self
     }
 }

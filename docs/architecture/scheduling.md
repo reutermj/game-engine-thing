@@ -121,6 +121,39 @@ and leaves the running builds untouched, as a broken interface is.
 
 `modctl schedule` prints the plan.
 
+## Fixed rates
+
+Decided 2026-09-24. A phase can run at a fixed rate:
+`s.phase("ai::think").fixed_hz(10.0)`. `simulate` does, at 60 Hz, and so
+does physics's step, so they form one group. Consecutive phases at one
+rate are a group, and a frame runs each group as many times as its time
+has accumulated steps: none, one, or several, capped at 8 (after a
+longer stall the owed steps are dropped, and the simulation slows rather
+than spiralling). Phases without a rate run once a frame, as rendering
+will.
+
+- **The bootstrap says how long a frame is:** `cx.run_frame_for(seconds)`.
+  `realtime` passes the time the last frame took, so a slow frame is
+  caught up in steps; `lockstep` passes 1/60 (or `step N at FPS`), so
+  runs replay exactly. A frame whose time isn't given is 1/60 s. Time
+  policy stays the bootstrap's; the loader only keeps each group's
+  accumulated time, with the plan, by the group's first phase, so it
+  survives reloads.
+- **A system reads its step's length with a `Dt` parameter:** its group's
+  step (1/60 in `simulate`), or the frame's time outside a group. The
+  same system works at any rate or none. `Clock` stays the frame's
+  counter and real time.
+- **Repetition is the node list, repeated.** A group's systems and apply
+  nodes appear once per step in the frame's plan, so schedulers walk
+  nodes as before, and each step sees the steps before it: its writes,
+  events and structural changes, by the ordinary rules. Events sent
+  between frames are read by the first step; held input belongs in
+  components, which every step sees.
+
+Tested in `reload_test`'s `rates` (rates, long and short frames, the cap,
+a reload mid-step) and by the physics pile settling bit-identically at
+20, 30, 60 and 120 frames a second.
+
 ## Events
 
 An event is a value one mod sends and others react to, without either

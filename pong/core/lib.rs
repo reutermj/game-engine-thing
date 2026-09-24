@@ -9,8 +9,7 @@
 //! the court is set up. A reload, or a state reset, then never sets up a second
 //! court.
 
-use clock::Clock;
-use engine_api::{Cx, Entity, EventReader, Mod, Query, Systems, With, Without, WorldMut, export_mod, phase};
+use engine_api::{Cx, Dt, Entity, EventReader, Mod, Query, Systems, With, Without, WorldMut, export_mod, phase};
 use physics::{Body, Collider, Contact, Position, Trigger, Velocity};
 use pong::{
     BALL_RADIUS, Ball, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
@@ -95,8 +94,8 @@ impl Core {
 
     /// Paddles move by their intent, and stop at the court's edges: a
     /// kinematic body goes where its velocity takes it, walls or not.
-    fn play(&mut self, _: &mut (), _: &mut Cx, mut clocks: Query<&Clock>, mut paddles: Query<(&Paddle, &Position, &mut Velocity)>) {
-        let Some(dt) = clocks.single(|_, c| c.dt) else { return };
+    fn play(&mut self, _: &mut (), _: &mut Cx, dt: Dt, mut paddles: Query<(&Paddle, &Position, &mut Velocity)>) {
+        let dt = *dt;
         let half = PADDLE_HEIGHT / 2.0;
         paddles.for_each(|_, (paddle, p, mut v)| {
             let to = (p.y + paddle.intent.clamp(-1.0, 1.0) * PADDLE_SPEED * dt).clamp(half, HEIGHT - half);

@@ -59,6 +59,13 @@ pub struct Engine {
     quitting: Cell<bool>,
     /// The order systems run in, rebuilt after the builds change.
     plan: RefCell<Option<Rc<Plan>>>,
+    /// The time the next frame covers, as its bootstrap said
+    /// (`run_frame_for`), and reset to `DEFAULT_FRAME` by it.
+    frame_time: Cell<f32>,
+    /// Seconds each fixed-rate group has accumulated toward its next step,
+    /// by the group's first phase: bookkeeping like the plan's, kept across
+    /// reloads. Time policy (real or lockstep) is the bootstrap's.
+    accumulated: RefCell<HashMap<String, f64>>,
 
 }
 
@@ -73,11 +80,18 @@ struct OpenFrame {
 
 #[derive(Clone, Copy)]
 enum FrameNode {
-    /// A system, by its id in the plan.
-    System(usize),
-    /// A system's apply node.
-    Apply(usize),
+    /// A system, by its id in the plan, and the seconds its run covers.
+    System(usize, f32),
+    /// A system's apply node: the system's id, and the node that ran it,
+    /// whose log it applies (a fixed-rate system runs more than once).
+    Apply(usize, usize),
 }
+
+/// A frame whose time its bootstrap didn't give.
+const DEFAULT_FRAME: f32 = 1.0 / 60.0;
+/// Steps a fixed-rate group may take in one frame: after a long stall, the
+/// simulation slows rather than spiralling into ever longer frames.
+const MAX_STEPS: u32 = 8;
 
 /// A control request waiting for the engine, and how to answer it.
 pub struct Pending {
@@ -177,6 +191,7 @@ impl Engine {
                 begin_frame: host_begin_frame,
                 run_node: host_run_node,
                 end_frame: host_end_frame,
+                set_frame_time: host_set_frame_time,
                 world: std::ptr::null(),
                 keepalive: host_keepalive,
             },
@@ -195,6 +210,8 @@ impl Engine {
             inbox,
             quitting: Cell::new(false),
             plan: RefCell::new(None),
+            frame_time: Cell::new(DEFAULT_FRAME),
+            accumulated: RefCell::new(HashMap::new()),
         });
         engine.host.userdata = &*engine as *const Engine as *mut c_void;
         engine.host.world = &engine.world;
@@ -746,18 +763,34 @@ impl Engine {
                 return None;
             }
         };
+        let frame_time = self.frame_time.replace(DEFAULT_FRAME);
         let mut nodes = Vec::new();
-        for phase in &plan.phases {
-            for s in &phase.systems {
-                nodes.push((FrameNode::System(s.id), s.name.clone()));
-                let changes = mods
-                    .iter()
-                    .find(|m| *m.name == s.module)
-                    .is_some_and(|m| m.systems[s.index].params.iter().any(|p| p.changes()));
-                if changes {
-                    nodes.push((FrameNode::Apply(s.id), format!("apply({})", s.name)));
+        let mut i = 0;
+        while i < plan.phases.len() {
+            // A group: consecutive phases at one rate, or one phase that
+            // runs once a frame.
+            let hz = plan.phases[i].fixed_hz;
+            let end = if hz.is_some() { i + plan.phases[i..].iter().take_while(|p| p.fixed_hz == hz).count() } else { i + 1 };
+            let (steps, dt) = match hz {
+                None => (1, frame_time),
+                Some(hz) => (self.steps(&plan.phases[i].name, hz, frame_time), 1.0 / hz),
+            };
+            for _ in 0..steps {
+                for phase in &plan.phases[i..end] {
+                    for s in &phase.systems {
+                        let at = nodes.len();
+                        nodes.push((FrameNode::System(s.id, dt), s.name.clone()));
+                        let changes = mods
+                            .iter()
+                            .find(|m| *m.name == s.module)
+                            .is_some_and(|m| m.systems[s.index].params.iter().any(|p| p.changes()));
+                        if changes {
+                            nodes.push((FrameNode::Apply(s.id, at), format!("apply({})", s.name)));
+                        }
+                    }
                 }
             }
+            i = end;
         }
         drop(mods);
         self.world.begin_frame();
@@ -769,6 +802,31 @@ impl Engine {
     /// Runs node `id` of the open frame. A system of a mod that is already
     /// running (the bootstrap, the scheduler, a caller up the stack) is
     /// skipped: its state is borrowed.
+    /// How many steps of `hz` a group starting at `phase` takes in a frame of
+    /// `seconds`, carrying the remainder to the next frame.
+    fn steps(&self, phase: &str, hz: f32, seconds: f32) -> u32 {
+        let mut accumulated = self.accumulated.borrow_mut();
+        let acc = accumulated.entry(phase.to_string()).or_insert(0.0);
+        *acc += seconds as f64;
+        let step = 1.0 / hz as f64;
+        // A hair of slack: sixty frames of 1/60 must make sixty steps, not
+        // fifty-nine and a rounding error.
+        let steps = ((*acc / step) + 1e-6).floor() as u32;
+        let taken = steps.min(MAX_STEPS);
+        *acc = (*acc - taken as f64 * step).max(0.0);
+        if steps > MAX_STEPS {
+            // Behind by more than the cap allows: drop the whole steps owed,
+            // keeping only the part of one, so the next frame runs as normal.
+            *acc = acc.rem_euclid(step);
+        }
+        taken
+    }
+
+    /// The time the next frame covers: what fixed-rate phases step by.
+    pub fn set_frame_time(&self, seconds: f32) {
+        self.frame_time.set(seconds.max(0.0));
+    }
+
     fn run_node(&self, id: usize) -> Ran {
         let (node, plan) = {
             let frame = self.frame.borrow();
@@ -777,25 +835,25 @@ impl Engine {
             (node, frame.plan.clone())
         };
         match node {
-            FrameNode::System(s) => {
+            FrameNode::System(s, dt) => {
                 let Some(planned) = plan.system(s) else { return Ran::Refused };
                 let Ok(mods) = self.mods.try_borrow() else { return Ran::Refused };
                 let Some(m) = mods.iter().find(|m| *m.name == planned.module) else { return Ran::Skipped };
                 if m.failed.get() || m.running.get() {
                     return Ran::Skipped;
                 }
-                match self.run_system(m, planned.index, &planned.name) {
+                match self.run_system(m, planned.index, &planned.name, dt) {
                     Some(log) => {
                         if let Some(frame) = self.frame.borrow_mut().as_mut() {
-                            frame.logs.insert(s, log);
+                            frame.logs.insert(id, log);
                         }
                         Ran::Ran
                     }
                     None => Ran::Failed,
                 }
             }
-            FrameNode::Apply(s) => {
-                let log = self.frame.borrow_mut().as_mut().and_then(|f| f.logs.remove(&s));
+            FrameNode::Apply(s, ran) => {
+                let log = self.frame.borrow_mut().as_mut().and_then(|f| f.logs.remove(&ran));
                 let Some(log) = log else { return Ran::Skipped };
                 self.apply(log, &plan.system(s).map(|p| p.module.clone()).unwrap_or_default());
                 Ran::Ran
@@ -811,10 +869,10 @@ impl Engine {
 
     /// Runs one system; its log, or `None` if it failed, in which case its
     /// changes are discarded with it.
-    fn run_system(&self, m: &Loaded, index: usize, name: &str) -> Option<Vec<Change>> {
+    fn run_system(&self, m: &Loaded, index: usize, name: &str, dt: f32) -> Option<Vec<Change>> {
         let desc = &m.systems[index];
         let log = Log::default();
-        let frame = FrameCx { world: &self.world, log: &log, system: name };
+        let frame = FrameCx { world: &self.world, log: &log, system: name, dt };
         let was_running = m.running.replace(true);
         let status = unsafe { (desc.run)(m.ctx, &frame, &desc.params) };
         m.running.set(was_running);
@@ -1287,6 +1345,10 @@ unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {
 unsafe fn host_begin_frame(ctx: *const ModContext) -> Option<FramePlan> {
     let nodes = unsafe { engine_of(ctx) }.begin_frame()?;
     Some(FramePlan { nodes: nodes.into_iter().map(|(id, name)| PlannedNode { id, name }).collect() })
+}
+
+unsafe fn host_set_frame_time(ctx: *const ModContext, seconds: f32) {
+    unsafe { engine_of(ctx) }.set_frame_time(seconds)
 }
 
 unsafe fn host_run_node(ctx: *const ModContext, node: usize) -> Ran {

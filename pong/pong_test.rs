@@ -108,8 +108,8 @@ fn input_and_the_ai_come_before_the_paddles_move() {
         e.schedule().unwrap(),
         "input: pong::steer\n\
          update: pong_ai::think\n\
-         simulate: pong::play\n\
-         physics::step: physics::integrate_velocities, physics::find_contacts, physics::solve\n\
+         simulate (60 Hz): pong::play\n\
+         physics::step (60 Hz): physics::integrate_velocities, physics::find_contacts, physics::solve\n\
          late: pong::rebound"
     );
 }

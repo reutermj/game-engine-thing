@@ -97,8 +97,18 @@ impl Drop for Frame<'_> {
 }
 
 impl Cx<'_> {
+    /// Runs one frame covering `seconds`: each fixed-rate phase runs as many
+    /// steps as its time has accumulated. What a real-time bootstrap passes
+    /// is the time the last frame took; a lockstep one, a constant. See
+    /// docs/architecture/scheduling.md, "Fixed rates".
+    pub fn run_frame_for(&mut self, seconds: f32) -> Status {
+        unsafe { ((*self.raw.host).set_frame_time)(self.raw, seconds) };
+        self.run_frame()
+    }
+
     /// Runs one frame: through the loaded [`Scheduler`], or, if none is
-    /// loaded, the loader's own sequential frame. What a bootstrap calls.
+    /// loaded, the loader's own sequential frame. What a bootstrap calls. A
+    /// frame whose time isn't given (`run_frame_for`) is 1/60 s.
     pub fn run_frame(&mut self) -> Status {
         match run_frame(self) {
             Ok(()) => Status::OK,

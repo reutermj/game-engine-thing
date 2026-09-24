@@ -121,13 +121,11 @@ mod's, and game components keep only game state (coins, deaths, score).
 
 ## The step
 
-Physics steps once per frame, by the frame's `Clock::dt`, capped at
-1/30 s so a stalled frame slows the simulation rather than tunneling.
-Under the lockstep bootstrap `dt` is fixed, so replays are exact. A
-real-time game at a varying frame rate gets varying steps: a true fixed
-step would run the pipeline several times in one frame, which systems
-that each run once per frame can't do (see
-[Open questions](#open-questions)).
+Physics steps at a fixed 60 Hz, whatever the frame rate: its phase and
+`simulate` are fixed-rate ([scheduling.md](scheduling.md#fixed-rates)), so
+a frame runs them once per 1/60 s its time accumulates, and each system
+reads the step with a `Dt` parameter. The same inputs give the same
+simulation at any frame rate, on the same machine.[^onestep]
 
 The step is a pipeline of the physics mod's systems in its own phase,
 `physics::step`, after `simulate` and before `late`, so a game sets
@@ -320,10 +318,6 @@ couple of dozen bodies. It's also the scene system parallelism and
   no friction is the simplest thing that works; a dedicated character
   controller (slopes, steps, one-way platforms) is the usual next step and
   waits for a game that needs it.
-- **Fixed steps in real time.** Running the physics phase several times
-  in one frame (an accumulator of real time, stepped at 1/60 s) is a
-  scheduler feature: a phase with a repeat count the plan honors. Until
-  then a real-time game's simulation depends on its frame rate.
 - **Tunneling.** No continuous collision: a body moving more than its own
   size per step can pass through a thin collider. Pong's ball tops out at
   40 cells/s, 0.67 cells a step against paddles a cell thick, which is
@@ -461,3 +455,8 @@ frame 508.
     that spatial queries read: shapes as of the last step, empty on the
     first frame, and invisible to the scheduler as a dependency on
     positions. Both went when positions became a spatial key.
+
+[^onestep]: *(History, 2026-09-24.)* Physics first stepped once per frame
+    by `Clock::dt`, capped at 1/30 s, since systems ran once a frame: a
+    real-time game's simulation depended on its frame rate, which only
+    lockstep hid. Fixed-rate phases replaced it.

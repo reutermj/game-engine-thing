@@ -218,6 +218,18 @@ engine_mod(
     "panic",
 ]]
 
+[engine_mod(
+    name = "rates_" + build,
+    srcs = ["mods/rates.rs"],
+    crate_features = [build],
+    crate_root = "mods/rates.rs",
+    mod_name = "rates",
+    deps = [":probe"],
+) for build in [
+    "v1",
+    "v2",
+]]
+
 engine_mod(
     name = "builder",
     srcs = ["mods/builder.rs"],
@@ -267,6 +279,8 @@ TEST_MODS = {
     "SCHEDULER_PANIC": ":scheduler_panic",
     "SEQUENTIAL": "//engine/std/sequential",
     "BUILDER": ":builder",
+    "RATES_V1": ":rates_v1",
+    "RATES_V2": ":rates_v2",
     "PINGER": ":pinger",
     "LISTENER_V1": ":listener_v1",
     "LISTENER_V2": ":listener_v2",

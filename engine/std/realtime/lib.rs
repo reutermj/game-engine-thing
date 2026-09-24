@@ -1,6 +1,7 @@
 //! Owns the frame loop in real time: paces frames at a fixed rate, publishes
-//! the `Clock`, steps every other mod, and hands the loader control once a
-//! frame to serve requests and swap builds.
+//! the `Clock`, runs each frame for the time the last one took (so
+//! fixed-rate phases catch up after a slow frame), and hands the loader
+//! control once a frame to serve requests and swap builds.
 //!
 //! The whole session is this mod's `Bootstrap::run`, which returns when the engine
 //! is asked to quit. It's resident, so the loader never swaps it out while
@@ -35,11 +36,16 @@ impl Bootstrap for Realtime {
     fn run(&mut self, _: &mut (), cx: &mut Cx) -> Status {
         cx.log("running the frame loop");
         let mut next_frame = Instant::now();
+        let mut last = Instant::now();
         loop {
             self.frame += 1;
-            let clock = Clock { frame: self.frame, dt: FRAME.as_secs_f32() };
-            clock::publish(&mut cx.world(), &mut self.clock, clock);
-            cx.run_frame();
+            let now = Instant::now();
+            // What this frame covers: the real time since the last began.
+            // The loader caps how many fixed steps that can buy.
+            let dt = (now - last).as_secs_f32();
+            last = now;
+            clock::publish(&mut cx.world(), &mut self.clock, Clock { frame: self.frame, dt });
+            cx.run_frame_for(dt);
 
             // Between frames, where nothing but this mod is running.
             match cx.pump_loader(Duration::ZERO, |_, _| Err("bootstrap doesn't take messages".into())) {
@@ -56,7 +62,8 @@ impl Bootstrap for Realtime {
             if next_frame > now {
                 std::thread::sleep(next_frame - now);
             } else {
-                // Fell behind (e.g. paused in a debugger); don't try to catch up.
+                // Fell behind: the next frame starts now, and covers the time
+                // lost, which fixed-rate phases catch up in steps.
                 next_frame = now;
             }
         }

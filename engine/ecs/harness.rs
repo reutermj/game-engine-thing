@@ -208,7 +208,8 @@ impl Schedule {
                 let mut cx = Cx::default();
                 // The parameters, and their guards, are dropped when `run`
                 // returns: before the node is marked done.
-                let frame = FrameCx { world, log: &log, system: &decl.name };
+                // The harness has no clock: a frame is 1/60 s.
+                let frame = FrameCx { world, log: &log, system: &decl.name, dt: 1.0 / 60.0 };
                 (decl.run)(&frame, &decl.params, &mut cx);
                 Some(log.into_inner())
             }

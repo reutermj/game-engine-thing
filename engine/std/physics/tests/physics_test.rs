@@ -71,6 +71,22 @@ mod pile {
     }
 
     #[test]
+    fn the_same_pile_settles_the_same_at_any_frame_rate() {
+        // Two seconds of frames at each rate: 120 physics steps each.
+        let run = |test, frames: u32, fps: u32| {
+            let e = game("PILE", test);
+            send(&e, "pile", "drop 200");
+            send(&e, "lockstep", &format!("step {frames} at {fps}"));
+            assert_eq!(field(&send(&e, "physics", "stats"), "steps"), 120.0, "at {fps} fps");
+            positions(&e)
+        };
+        let at_60 = run("rate_60", 120, 60);
+        assert_eq!(run("rate_30", 60, 30), at_60);
+        assert_eq!(run("rate_20", 40, 20), at_60);
+        assert_eq!(run("rate_120", 240, 120), at_60);
+    }
+
+    #[test]
     fn the_solver_reloads_under_a_moving_pile() {
         let e = game("PILE", "reload");
         send(&e, "pile", "drop 300");

@@ -13,16 +13,13 @@ mod solver;
 
 use std::time::Instant;
 
-use clock::Clock;
-use engine_api::{Cx, Entity, EventWriter, Mod, Query, Systems, Without, export_mod, field_struct, phase};
+use engine_api::{Cx, Dt, Entity, EventWriter, Mod, Query, Systems, Without, export_mod, field_struct, phase};
 use physics::{
     Body, Collider, Contact, DYNAMIC, Gravity, KINEMATIC, Placed, Position, STATIC, Shape, Touching, Trigger, Vec2,
     Velocity,
 };
 use solver::{Constraint, SolverBody};
 
-/// A stalled frame slows the simulation rather than tunneling.
-const MAX_DT: f32 = 1.0 / 30.0;
 
 #[cfg(not(feature = "v2"))]
 const BUILD: &str = "v1";
@@ -83,10 +80,6 @@ engine_api::mod_state! {
     }
 }
 
-fn dt(clocks: &mut Query<&Clock>) -> Option<f32> {
-    clocks.single(|_, c| c.dt.min(MAX_DT)).filter(|&dt| dt > 0.0)
-}
-
 fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
@@ -105,12 +98,12 @@ impl Physics {
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        mut clocks: Query<&Clock>,
+        dt: Dt,
         mut gravity: Query<&Gravity>,
         mut bodies: Query<(&Body, &mut Velocity)>,
     ) {
         let start = Instant::now();
-        let Some(dt) = dt(&mut clocks) else { return };
+        let dt = *dt;
         self.steps += 1;
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
         bodies.for_each(|_, (body, mut v)| {
@@ -126,7 +119,6 @@ impl Physics {
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        mut clocks: Query<&Clock>,
         mut bodies: Query<(&Position, &Collider, &Body)>,
         mut statics: Query<(&Position, &Collider), Without<Body>>,
         mut velocities: Query<&Velocity>,
@@ -134,9 +126,6 @@ impl Physics {
         triggers: EventWriter<Trigger>,
     ) {
         let start = Instant::now();
-        if dt(&mut clocks).is_none() {
-            return;
-        }
         let mut items = Vec::new();
         bodies.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b)));
         statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed())));
@@ -213,13 +202,13 @@ impl Physics {
         &mut self,
         _: &mut (),
         _: &mut Cx,
-        mut clocks: Query<&Clock>,
+        dt: Dt,
         mut moving: Query<(&Body, &mut Velocity, &mut Position)>,
         mut touching: Query<&mut Touching>,
         contacts: EventWriter<Contact>,
     ) {
         let start = Instant::now();
-        let Some(dt) = dt(&mut clocks) else { return };
+        let dt = *dt;
         let mut entities = Vec::new();
         let mut bodies = Vec::new();
         moving.for_each(|row, (body, v, _)| {
@@ -313,7 +302,9 @@ impl Mod for Physics {
 
     fn systems(s: &mut Systems<Self>) {
         const STEP: &str = "physics::step";
-        s.phase(STEP).after(phase::SIMULATE).before(phase::LATE);
+        // At `simulate`'s rate, so the two make one group: a game's rules,
+        // then the step, once per step.
+        s.phase(STEP).after(phase::SIMULATE).before(phase::LATE).fixed_hz(phase::SIMULATE_HZ);
         s.add("integrate_velocities", Self::integrate_velocities).phase(STEP);
         s.add("find_contacts", Self::find_contacts).phase(STEP).after("physics::integrate_velocities");
         s.add("solve", Self::solve).phase(STEP).after("physics::find_contacts");

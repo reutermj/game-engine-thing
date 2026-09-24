@@ -67,6 +67,9 @@ pub struct FrameCx<'w> {
     pub log: &'w Log,
     /// `mod::system`: whose event cursors a reader advances.
     pub system: &'w str,
+    /// Seconds this run covers: its phase's step if fixed-rate, else the
+    /// frame's time. What `Dt` hands out.
+    pub dt: f32,
 }
 
 /// Components named by type, one or a tuple: `Adds<Burning>`, `With<(A, B)>`.
@@ -526,6 +529,8 @@ pub enum ParamDecl {
     /// A parameter made of others (a tuple of parameters, or a crate's own
     /// parameter built from them): its footprint is its members'.
     Group(Vec<ParamDecl>),
+    /// The run's length in time: touches nothing.
+    Dt,
 }
 
 impl ParamDecl {
@@ -556,6 +561,7 @@ impl ParamDecl {
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
             ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
+            ParamDecl::Dt => false,
         }
     }
 }
@@ -1045,6 +1051,30 @@ fn disjoint(world: &World, a: &QueryDecl, b: &QueryDecl) -> bool {
     let requires = |q: &QueryDecl, c: ComponentId| q.terms.iter().any(|&(t, _)| t == c) || q.filter.with.contains(&c);
     let excludes = |x: &QueryDecl, y: &QueryDecl| x.filter.without.iter().filter(|c| table(c)).any(|&c| requires(y, c));
     excludes(a, b) || excludes(b, a)
+}
+
+/// Seconds this run of the system covers: in a fixed-rate phase its step
+/// (1/60 in `simulate`), else the frame's time. Reads as an `f32`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dt(pub f32);
+
+impl std::ops::Deref for Dt {
+    type Target = f32;
+    fn deref(&self) -> &f32 {
+        &self.0
+    }
+}
+
+impl Param for Dt {
+    type Item<'w> = Dt;
+
+    fn declare(_: &mut Declare<'_>) -> ParamDecl {
+        ParamDecl::Dt
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Dt {
+        Dt(cx.dt)
+    }
 }
 
 /// Refuses two queries of one system that would take conflicting guards:

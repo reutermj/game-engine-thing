@@ -35,7 +35,7 @@ pub use system::__declare;
 /// The ECS, shared with the loader as Rust types: see `engine_ecs`.
 pub use engine_ecs;
 pub use engine_ecs::{
-    Adds, Bounds, Bundle, Component, ComponentDesc, Crossing, DefaultFn, Despawns, DropFn, Entity, Event, EventReader,
+    Adds, Bounds, Bundle, Component, ComponentDesc, Dt, Crossing, DefaultFn, Despawns, DropFn, Entity, Event, EventReader,
     EventWriter, FieldDesc, FieldKind, FieldType, Mut, Query, Removes, Row, SpatialKey, Spawner, Storage, With, Without,
     World,
     WorldMut, component, event, field_struct,
@@ -49,7 +49,7 @@ pub use service::{
 pub use service::{__begin_call, __end_call, __serve};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
-pub const API_VERSION: u32 = 17;
+pub const API_VERSION: u32 = 18;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -185,6 +185,9 @@ pub struct Host {
     pub begin_frame: unsafe fn(ctx: *const ModContext) -> Option<scheduler::FramePlan>,
     pub run_node: unsafe fn(ctx: *const ModContext, node: usize) -> scheduler::Ran,
     pub end_frame: unsafe fn(ctx: *const ModContext),
+    /// Sets how much time the next frame covers, in seconds: what fixed-rate
+    /// phases accumulate steps from.
+    pub set_frame_time: unsafe fn(ctx: *const ModContext, seconds: f32),
     /// The world every mod shares, which the loader owns. Mods reach it
     /// through their systems' parameters, and `Cx::world` between frames.
     pub world: *const World,
@@ -656,7 +659,7 @@ mod tests {
         assert!(unsafe { __declare::<Tracked>(&mut decls as *mut Declarations as *mut c_void, &world as *const World) });
         assert_eq!(decls.systems.len(), 1);
         let log = engine_ecs::Log::default();
-        let frame = engine_ecs::FrameCx { world: &world, log: &log, system: "t::tick" };
+        let frame = engine_ecs::FrameCx { world: &world, log: &log, system: "t::tick", dt: 1.0 / 60.0 };
         unsafe { (decls.systems[0].run)(ctx, &frame, &decls.systems[0].params) }
     }
 

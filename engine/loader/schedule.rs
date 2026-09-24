@@ -14,17 +14,19 @@ pub struct ModDecls<'a> {
     pub phases: &'a [PhaseDesc],
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Plan {
     pub phases: Vec<PlannedPhase>,
     /// By id: the phase and position of each system.
     index: Vec<(usize, usize)>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct PlannedPhase {
     pub name: String,
     pub systems: Vec<Planned>,
+    /// Steps per second, if fixed-rate: the frame runs it once per step.
+    pub fixed_hz: Option<f32>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -53,7 +55,8 @@ impl Plan {
             .filter(|p| !p.systems.is_empty())
             .map(|p| {
                 let names: Vec<&str> = p.systems.iter().map(|s| s.name.as_str()).collect();
-                format!("{}: {}", p.name, names.join(", "))
+                let rate = p.fixed_hz.map_or(String::new(), |hz| format!(" ({hz} Hz)"));
+                format!("{}{rate}: {}", p.name, names.join(", "))
             })
             .collect();
         if lines.is_empty() { "no systems".into() } else { lines.join("\n") }
@@ -117,8 +120,15 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
         format!("the systems {} are ordered in a cycle", names.join(", "))
     })?;
 
+    // `simulate` is fixed-rate, and any phase a mod declares so (the first
+    // declaration with a rate wins).
+    let rate = |name: &str| {
+        mods.iter().flat_map(|m| m.phases).filter(|p| p.name == name).find_map(|p| p.fixed_hz).or_else(|| {
+            (name == phase::SIMULATE).then_some(phase::SIMULATE_HZ)
+        })
+    };
     let mut planned: Vec<PlannedPhase> =
-        phases.iter().map(|name| PlannedPhase { name: name.clone(), systems: Vec::new() }).collect();
+        phases.iter().map(|name| PlannedPhase { name: name.clone(), systems: Vec::new(), fixed_hz: rate(name) }).collect();
     for i in order {
         planned[nodes[i].phase].systems.push(nodes[i].planned.clone());
     }
@@ -207,6 +217,7 @@ mod tests {
             name: name.into(),
             after: after.iter().map(|s| s.to_string()).collect(),
             before: before.iter().map(|s| s.to_string()).collect(),
+            fixed_hz: None,
         }
     }
 

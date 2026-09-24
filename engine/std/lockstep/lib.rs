@@ -28,30 +28,46 @@ engine_api::mod_state! {
 }
 
 impl Lockstep {
-    fn run_frame(&mut self, cx: &mut Cx) {
+    /// One frame covering `dt` seconds: fixed-rate phases take as many
+    /// steps as that makes.
+    fn run_frame(&mut self, cx: &mut Cx, dt: f32) {
         self.frame += 1;
-        clock::publish(&mut cx.world(), &mut self.clock, Clock { frame: self.frame, dt: DT });
-        cx.run_frame();
+        clock::publish(&mut cx.world(), &mut self.clock, Clock { frame: self.frame, dt });
+        cx.run_frame_for(dt);
     }
 
     fn handle(&mut self, cx: &mut Cx, message: &str) -> Result<String, String> {
         let mut words = message.split_whitespace();
-        match (words.next(), words.next(), words.next()) {
-            (Some("step"), n, None) => {
+        match (words.next(), words.next(), words.next(), words.next()) {
+            // `step N at FPS`: frames of another length, as a game at that
+            // frame rate would run them. Fixed-rate phases take the same
+            // steps whatever the frames are.
+            (Some("step"), n, at, fps) => {
                 let n: u64 = match n {
                     None => 1,
                     Some(n) => n.parse().map_err(|_| format!("not a frame count: {n:?}"))?,
+                };
+                let dt = match (at, fps) {
+                    (None, None) => DT,
+                    (Some("at"), Some(fps)) => {
+                        let fps: f32 = fps.parse().map_err(|_| format!("not a frame rate: {fps:?}"))?;
+                        if fps <= 0.0 {
+                            return Err("a frame rate is frames per second".into());
+                        }
+                        1.0 / fps
+                    }
+                    _ => return Err("usage: step [frames] [at fps] | frame".into()),
                 };
                 if n > MAX_STEPS {
                     return Err(format!("at most {MAX_STEPS} frames per step"));
                 }
                 for _ in 0..n {
-                    self.run_frame(cx);
+                    self.run_frame(cx, dt);
                 }
                 Ok(format!("frame {}", self.frame))
             }
-            (Some("frame"), None, None) => Ok(format!("frame {}", self.frame)),
-            _ => Err("usage: step [frames] | frame".into()),
+            (Some("frame"), None, None, None) => Ok(format!("frame {}", self.frame)),
+            _ => Err("usage: step [frames] [at fps] | frame".into()),
         }
     }
 }

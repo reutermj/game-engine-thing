@@ -839,7 +839,7 @@ mod scheduling {
         assert_eq!(trace(&e), ["a::input", "b::update", "a::update", "b::simulate", "a::late"]);
         assert_eq!(
             e.schedule().unwrap(),
-            "input: a::input\nupdate: b::update, a::update\nsimulate: b::simulate\nlate: a::late"
+            "input: a::input\nupdate: b::update, a::update\nsimulate (60 Hz): b::simulate\nlate: a::late"
         );
     }
 
@@ -934,6 +934,80 @@ mod scheduling {
         e.send("pinger", "ping 99").unwrap();
         step(&e, 1);
         assert_eq!(trace(&e), ["v1 saw [99]", "v1 saw [99, 1]", "v1 saw [99, 1]"]);
+    }
+}
+
+/// Fixed-rate phases: docs/architecture/scheduling.md, "Fixed rates".
+mod rates {
+    use test_probe::Trace;
+
+    use super::{engine, lib, load};
+
+    fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
+        e.world().values::<Trace>().unwrap().into_iter().flat_map(|(_, t)| t.lines).collect()
+    }
+
+    fn count(lines: &[String], what: &str) -> usize {
+        lines.iter().filter(|l| l.contains(what)).count()
+    }
+
+    /// Runs one frame covering `seconds`, as a bootstrap would.
+    fn frame(e: &engine_loader::engine::Engine, seconds: f32) {
+        e.set_frame_time(seconds);
+        e.step_all();
+    }
+
+    #[test]
+    fn each_phase_runs_at_its_rate_with_its_step() {
+        let e = engine("rates_each");
+        load(&e, "rates", "RATES_V1");
+        for _ in 0..6 {
+            frame(&e, 1.0 / 60.0);
+        }
+        let t = trace(&e);
+        assert_eq!((count(&t, " frame "), count(&t, " 60 "), count(&t, " 10 ")), (6, 6, 1), "{t:?}");
+        assert!(t.contains(&"v1 60 0.0167".to_string()) && t.contains(&"v1 10 0.1000".to_string()), "{t:?}");
+        // The ten-hertz step comes on the sixth frame, after its sixty.
+        assert_eq!(t[t.len() - 1], "v1 10 0.1000");
+    }
+
+    #[test]
+    fn a_long_frame_takes_several_steps_and_a_short_one_may_take_none() {
+        let e = engine("rates_long_short");
+        load(&e, "rates", "RATES_V1");
+        frame(&e, 3.0 / 60.0);
+        assert_eq!(count(&trace(&e), " 60 "), 3, "three steps' worth");
+        frame(&e, 0.5 / 60.0);
+        assert_eq!(count(&trace(&e), " 60 "), 3, "half a step: none yet");
+        frame(&e, 0.5 / 60.0);
+        assert_eq!(count(&trace(&e), " 60 "), 4, "the other half");
+        assert_eq!(count(&trace(&e), " frame "), 3, "once a frame, whatever its length");
+    }
+
+    #[test]
+    fn a_stall_takes_at_most_eight_steps_and_drops_the_rest() {
+        let e = engine("rates_stall");
+        load(&e, "rates", "RATES_V1");
+        frame(&e, 1.0);
+        assert_eq!(count(&trace(&e), " 60 "), 8);
+        frame(&e, 1.0 / 60.0);
+        assert_eq!(count(&trace(&e), " 60 "), 9, "the backlog is gone, not paid over the next frames");
+    }
+
+    #[test]
+    fn time_toward_a_step_survives_a_reload() {
+        let e = engine("rates_reload");
+        load(&e, "rates", "RATES_V1");
+        for _ in 0..3 {
+            frame(&e, 1.0 / 60.0);
+        }
+        e.load("rates", &lib("RATES_V2")).unwrap();
+        for _ in 0..3 {
+            frame(&e, 1.0 / 60.0);
+        }
+        let t = trace(&e);
+        assert_eq!(count(&t, "v1 10"), 0);
+        assert_eq!(count(&t, "v2 10"), 1, "three frames before the reload and three after make a step: {t:?}");
     }
 }
 
