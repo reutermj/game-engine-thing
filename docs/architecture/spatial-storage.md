@@ -114,9 +114,10 @@ spatial table, writing a key or extent (a query writing one logs a
 or handing one out mutably marks the table, and it's re-sorted when the
 `Structural` drops. A re-sort bounds the rows written since the last
 through the glue, a page at a time, moves the rows whose keys left their
-page's range (splitting full pages, big rows to big pages), then merges
-neighboring pages that fit in three quarters of one
-([Upkeep, reworked](#upkeep-reworked)).
+page's range (splitting full pages at a boundary of a block of the
+order, big rows to big pages), then merges neighboring pages that fit in
+three quarters of one ([Upkeep, reworked](#upkeep-reworked),
+[Pages as blocks](#pages-as-blocks-of-the-order)).
 `Query::in_region` walks runs, pages, then rows; `Query::near_pairs` sweeps
 pages along x, then tests rows a page at a time, across the query's
 spatial tables ([Against sweep and prune](#against-sweep-and-prune)).
@@ -312,3 +313,90 @@ with the scene's extent across the sweep, so it isn't a primitive for
 storage to keep. Temporal coherence by ticks can't help a settled pile:
 every body moves every step, while the pair set stays the same from step to
 step, so only slack (fat) boxes and a cache of pairs could reuse them.
+
+## Pages as blocks of the order
+
+2026-09-24 (get-emj.26). Falling was where the ECS was furthest behind the
+arrays in `:tax` (1.6×): bodies really move, so rows change pages every
+step. Profiled at 10 000 falling, the re-sort was about 150 µs a step:
+re-bounding every row (10 µs a thousand), 660 to 870 rows moved (about 65
+ns each: four columns, about 60 bytes and four ticks, the lanes, and two
+entity locations), splits and merges, and re-boxing. What changed, each
+measured:
+
+- **A full page splits at a block boundary**, the key between its rows'
+  quartiles with the most trailing zeros, not at the median: in Z-order
+  that's the edge of the largest square (or half of one) there, so pages
+  tend to be whole blocks. A range split at the median straddles blocks,
+  and its box covers both pieces and the gap between. Blocks have less
+  edge per row, so rows cross fewer page boundaries too: half the moves
+  (457 and 354 a step, in the two halves of `:tax`'s 60, against 866 and
+  662), and a broadphase twice as fast. Found by making cells bigger (2 to
+  8 units): at 4, a cell held about a page of the pile, pages were cells,
+  and the broadphase and moves came out the same as they do now. Splitting
+  at blocks makes the cell size matter little (0.5 to 4 measured the
+  same), so `CELL` stays about the size of the smallest things.
+  `pages_are_blocks_of_the_order` sees the difference (mean page width
+  plus height 6.2 against 9.5 at the median).
+- **Rows to move are bits by page**, set as rows are re-bounded and
+  carried through moves, so a page with one row to move doesn't have
+  every row asked where it belongs.
+- **Each row's key and cells are in its page's lanes**, beside its box,
+  rather than in vectors by page; a page's box is the lanes halved round
+  by round rather than a fold, whose chain of dependent compares doesn't
+  vectorize (18 µs to 8 for 1000 pages); a moved value is copied as a
+  fixed size (a copy of a size known only at runtime is a call to
+  `memcpy`, two per column per move); the rows to re-bound are a mask.
+- **`Position::bounds` is inlined** into the glue: it's in physics's
+  interface crate, and the glue called it per row
+  ([lore](../lore/a-trait-impl-the-glue-calls-is-not-inlined-across-crates.md)).
+
+Twelve mutations of these are caught: nine by `spatial_test` (a moved
+row's bit left behind, no row marked, either half of the range check, a
+lane skipped in the box, a key left behind by `swap_remove`, extents' or
+new rows' writes unseen, the median split), three fixed-size copies of the
+wrong size by `values_of_every_size_move_whole`.
+
+`:tax`, µs per step, ECS / arrays, medians of five runs, before and after:
+
+| | 1000 falling | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
+|---|---|---|---|---|---|---|
+| frame, before | 87 / 53 | 137 / 122 | 130 / 121 | 909 / 561 | 1452 / 1276 | 1371 / 1275 |
+| frame, after | 74 / 54 | 133 / 125 | 126 / 123 | 730 / 572 | 1350 / 1298 | 1288 / 1289 |
+| broadphase, before | 19 | 19 | 20 | 220 | 226 | 216 |
+| broadphase, after | 12 | 14 | 14 | 116 | 150 | 150 |
+| outside the systems, before | 24 | 13 | 6 | 196 | 100 | 25 |
+| outside the systems, after | 18 | 11 | 6 | 127 | 78 | 24 |
+
+The arrays' broadphase is 204, 281 and 282 at 10 000. `spatial_bench`
+(which gained a falling scene): the falling re-sort 224 µs to 150, the
+creeping one 78 to 67, and on the dense layout `near_pairs` 631 µs to 343
+at 10 000 and 32 to 26 at 1000, 64 regions 52 µs to 36.
+
+**What didn't pay:**
+
+- **Pages of 32 rows.** Before blocks, 30 µs better falling (a third fewer
+  moves, half the pages to walk) and 16 worse at rest (the broadphase);
+  with blocks, worse or even everywhere. 24 rows was erratic.
+- **Testing only the lanes a page uses** in `Lanes::meeting`, in chunks up
+  to its rows: the broadphase went from 219 µs to 310, the loop no longer
+  a fixed one the compiler unrolls.
+- **Prefetching the next pages' columns** in the re-bounding loop: 7% of
+  it before `bounds` was inlined, within the noise after.
+- **Re-keying every re-bounded row**, to drop the branch on whether its
+  cell changed: creeping 22 µs slower, falling the same.
+- **A wider interval to split in** (eighths): the same.
+- **Slack, not built:** a row allowed to stay while its key is in a
+  neighbouring page's range. 57% of the rows that left their range, before
+  blocks, were in a neighbour's; after blocks halved the moves, that's
+  worth perhaps 10 µs, and a split narrows its neighbours' ranges, so it
+  would need a pass to move rows the split left outside.
+
+**What's left**, at 10 000 falling (730 / 572): re-bounding, about 72 µs,
+since every body is written every step (7 ns a row); moving about 400 rows,
+20; applying 331 new contacts and 331 `Contact` events a step, about 35
+(each a boxed closure in the log: batching a writer's consecutive changes
+is the next step there); and gathering, the solver's gathering and writing
+back, 117 over the arrays, unchanged ([physics.md](physics.md#what-the-ecs-costs)).
+The broadphase (89 under the arrays') and narrowphase (23 under) pay for
+most of it.

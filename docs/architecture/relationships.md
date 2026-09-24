@@ -52,10 +52,13 @@ kept like [spatial order](spatial-storage.md):
 - it's re-sorted when the `Structural` drops;
 - a system never sees its own rows move, and the systems after it do.
 
-A re-sort keys every row, and stops there if the rows are in order.
-Otherwise it sorts them (stable and adaptive: a few appended rows and a
-few swapped by removals are close to a merge) and moves every column into
-pages in that order (`ErasedColumn::gather`).
+A re-sort keys the rows new to the table or whose key was written since
+the last (by the values' ticks, as a spatial re-sort re-bounds only what
+was written), or every row when a newer build's glue installed the key,
+since it may key the same values otherwise; then it stops if the rows are
+in order.[^keyed] Otherwise it sorts them (stable and adaptive: a few
+appended rows and a few swapped by removals are close to a merge) and moves
+every column into pages in that order (`ErasedColumn::gather`).
 
 - `Query::for_each_ordered` walks in key order across all the query's
   ordered tables: one table walks as it is, several are merged.
@@ -225,3 +228,9 @@ restitution 1 comes back at 3.
     contact from its side. It measured best (upkeep 4 µs, even under full
     churn). It was set aside as outside the ECS, and the table model stays
     in `spike/relations/table.rs` as the benchmark to beat.
+
+[^keyed]: *(History, 2026-09-24, get-emj.26.)* A re-sort keyed every row
+    afresh, a glue call each, since keys are cheap: a dirty re-sort of 4800
+    contacts took 17 µs, 6 keying only what changed. It's little in the
+    physics pile (the contacts are re-sorted about a third of the steps it
+    falls), and more in any ordered table that's large and mostly still.

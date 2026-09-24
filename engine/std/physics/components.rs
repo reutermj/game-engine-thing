@@ -37,6 +37,9 @@ component! {
 /// A position's box is its collider's, or a point without one.
 impl SpatialKey for Position {
     type Extent = Collider;
+    // Inline, as `SpatialKey` says: the glue calls it for every row it
+    // re-bounds.
+    #[inline]
     fn bounds(&self, collider: Option<&Collider>) -> Bounds {
         let half = collider.map_or([0.0, 0.0], |c| if c.shape == BOX { [c.hx, c.hy] } else { [c.hx, c.hx] });
         Bounds::around([self.x, self.y], half)
@@ -148,6 +151,8 @@ component! {
 }
 
 impl OrderKey for ContactPair {
+    // Inline, as `OrderKey` says.
+    #[inline]
     fn key(&self) -> u128 {
         pair_key(self.a, self.b)
     }
@@ -218,6 +223,7 @@ component! {
 }
 
 impl OrderKey for Overlap {
+    #[inline]
     fn key(&self) -> u128 {
         pair_key(self.a, self.b)
     }

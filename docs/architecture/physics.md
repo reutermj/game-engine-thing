@@ -355,33 +355,39 @@ narrowphase and solver, contacts in the same order, bodies as indices. It
 asserts they end bit for bit the same (they do), so what differs is the
 cost of the world, not different work.
 
-µs per step, `-c opt`, one thread, ECS / arrays, the median of three runs.
+µs per step, `-c opt`, one thread, ECS / arrays, the median of five runs.
 Settled is 400 steps after the drop, when every body still creeps 1e-4 to
 1e-2 a step; at rest is 4000, when the pile has stopped bit for bit (1000
 bodies by about step 2800, 10 000 by 3000):
 
 | | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
 |---|---|---|---|---|---|
-| frame | 139 / 123 | 131 / 122 | 910 / 563 | 1454 / 1279 | 1384 / 1288 |
-| gathering colliders | 4 / – | 4 / – | 54 / – | 51 / – | 51 / – |
-| broadphase | 20 / 24 | 20 / 24 | 221 / 201 | 227 / 282 | 220 / 283 |
-| narrowphase | 9 / 18 | 9 / 18 | 36 / 59 | 99 / 183 | 100 / 186 |
-| merging contacts | 4 / 1 | 4 / 1 | 15 / 4 | 36 / 12 | 36 / 11 |
-| solve: gathering | 7 / 3 | 7 / 3 | 55 / 22 | 75 / 30 | 75 / 31 |
-| solver | 74 / 74 | 73 / 72 | 261 / 252 | 777 / 740 | 782 / 743 |
-| writing back | 6 / 2 | 6 / 2 | 51 / 15 | 68 / 19 | 66 / 19 |
-| outside the systems (the spatial re-sort) | 13 / – | 6 / – | 196 / – | 101 / – | 25 / – |
+| frame | 133 / 125 | 126 / 123 | 730 / 572 | 1350 / 1298 | 1288 / 1289 |
+| gathering colliders | 4 / – | 4 / – | 51 / – | 49 / – | 50 / – |
+| broadphase | 14 / 25 | 14 / 25 | 116 / 205 | 150 / 285 | 150 / 285 |
+| narrowphase | 9 / 18 | 9 / 18 | 37 / 60 | 96 / 185 | 99 / 186 |
+| merging contacts | 4 / 1 | 4 / 1 | 15 / 4 | 36 / 12 | 36 / 12 |
+| solve: gathering | 7 / 3 | 7 / 3 | 54 / 22 | 73 / 31 | 73 / 31 |
+| solver | 75 / 75 | 74 / 74 | 262 / 257 | 780 / 756 | 766 / 746 |
+| writing back | 6 / 2 | 6 / 2 | 49 / 16 | 67 / 20 | 64 / 20 |
+| outside the systems (the spatial re-sort) | 11 / – | 6 / – | 127 / – | 78 / – | 24 / – |
 
 The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
-1454, 14% over them, where it was 129%.[^tax] What took it there:
+1350, 4% over them, where it was 129%, and at rest the two are the same.
+Falling, where bodies change pages every step, it's 28% over (730 against
+572), where it was 62% before pages were made blocks of the order.[^tax]
+What took it there:
 
 - **The spatial storage, reworked** (upkeep and broadphase:
   [spatial-storage.md](spatial-storage.md#upkeep-reworked)). The re-sort
-  is proportional to what changed, about 10 ns a row written (101 µs while
-  the 10 000 creep, 25 at rest), and `solve` writes a position only when
-  it changes bit for bit. `near_pairs` walks page lanes and is 0.8 to 1.1×
-  the arrays' sweep and prune, which keeps its x order between steps
-  ([Against sweep and prune](spatial-storage.md#against-sweep-and-prune)).
+  is proportional to what changed, about 7 ns a row written (78 µs while
+  the 10 000 creep, 24 at rest), and `solve` writes a position only when
+  it changes bit for bit. `near_pairs` walks page lanes
+  ([Against sweep and prune](spatial-storage.md#against-sweep-and-prune)),
+  and pages split at blocks of the order, which halved the rows falling
+  bodies move and made `near_pairs` about half the arrays' sweep and
+  prune, which keeps its x order between steps
+  ([Pages as blocks](spatial-storage.md#pages-as-blocks-of-the-order)).
 - **Walking queries.** A query with only table terms and no sparse filter
   matches every row of every page, so `for_each` takes each term's slice
   once a page and indexes it, with no per-row dispatch on the kind of term,
@@ -433,9 +439,10 @@ The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
   marking static bodies' rows written, and it would defeat writing only
   the positions that change.
 
-**What's left**, about 175 µs of the 10 000 settled frame's:
+**What's left**, of the 10 000 falling frame's 158 µs over the arrays
+(52 settled), before what the broadphase and narrowphase save:
 
-1. **Copying in and out, 150 µs.** Colliders out for detection (which
+1. **Copying in and out, 150 µs** (117 over the arrays falling). Colliders out for detection (which
    makes the narrowphase faster than the arrays', whose bodies are spread
    over four arrays: gathering and narrowphase together are 150 µs against
    183), bodies and contacts into the solver's arrays and back, and the
@@ -443,11 +450,14 @@ The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
    index is where it's stored; rows in the world can't be that, since
    spatial order moves them. A walk over bodies still costs about twice a
    `Vec`'s: about 15 ns a page, on spatial pages of 12 rows on average.
-2. **The re-sort**, 101 µs while bodies creep, 25 at rest.
+2. **The re-sort**, 127 µs falling (re-bounding every body about 72,
+   moving rows 20), 78 while bodies creep, 24 at rest.
 3. **The merge**, contacts updated in the world rather than a list
-   replaced, 24 µs over the arrays.
+   replaced, 24 µs over the arrays; and, falling, spawning 331 contacts
+   and sending 331 `Contact` events a step, about 35 µs applying them,
+   each a boxed closure in the system's log.
 
-The broadphase is now slightly faster than the arrays' when settled. The
+The broadphase is now about half the arrays'. The
 solver and the narrowphase cost the same either way, since they're the
 same code over the same arrays. The scheduler and frame cost about 7 µs.
 Neither side is parallel yet, and scenes that churn contacts, or bodies
@@ -682,3 +692,7 @@ frame 508.
     contact, though most bodies don't have one. The copies and the upkeep
     were then cut apart, and merged the same day: copying in and out alone
     took the frame to 2521, the upkeep and page lanes alone to about 2650.
+    Then, with pages split at the median of their keys, the table's 10 000
+    columns read, frame first: falling 910 / 563, broadphase 221 / 201,
+    outside the systems 196; settled 1454 / 1279, 227 / 282, 101; at rest
+    1384 / 1288, 220 / 283, 25 (medians of three runs).

@@ -180,7 +180,7 @@ impl ErasedColumn {
         // (allocated, uninitialized) slot, which takes ownership, and the
         // hole left here is refilled as in `swap_remove_drop`.
         unsafe {
-            std::ptr::copy_nonoverlapping(self.slot(row), to.slot(to.len), self.ty.layout.size());
+            copy_value(self.slot(row), to.slot(to.len), self.ty.layout.size());
             to.len += 1;
             self.fill_from_last(row);
         }
@@ -296,7 +296,7 @@ impl ErasedColumn {
     unsafe fn fill_from_last(&mut self, row: usize) {
         let last = self.len - 1;
         if row != last {
-            unsafe { std::ptr::copy_nonoverlapping(self.slot(last), self.slot(row), self.ty.layout.size()) };
+            unsafe { copy_value(self.slot(last), self.slot(row), self.ty.layout.size()) };
         }
         self.len = last;
     }
@@ -344,6 +344,34 @@ impl Drop for ErasedColumn {
     }
 }
 
+/// Copies one value of `size` bytes: small sizes as fixed-size copies, since
+/// a copy of a size known only at runtime is a call to `memcpy`, and moving
+/// a row of a spatial table makes two per column (2026-09-24).
+///
+/// # Safety
+/// As `copy_nonoverlapping`: `size` bytes readable at `src`, writable at
+/// `dst`, not overlapping.
+#[inline(always)]
+unsafe fn copy_value(src: *const u8, dst: *mut u8, size: usize) {
+    #[inline(always)]
+    unsafe fn fixed<const N: usize>(src: *const u8, dst: *mut u8) {
+        unsafe { (dst as *mut [u8; N]).write_unaligned((src as *const [u8; N]).read_unaligned()) }
+    }
+    unsafe {
+        match size {
+            0 => {}
+            4 => fixed::<4>(src, dst),
+            8 => fixed::<8>(src, dst),
+            12 => fixed::<12>(src, dst),
+            16 => fixed::<16>(src, dst),
+            20 => fixed::<20>(src, dst),
+            24 => fixed::<24>(src, dst),
+            32 => fixed::<32>(src, dst),
+            _ => std::ptr::copy_nonoverlapping(src, dst, size),
+        }
+    }
+}
+
 fn dangling(layout: Layout) -> NonNull<u8> {
     NonNull::new(std::ptr::without_provenance_mut(layout.align())).expect("alignment is non-zero")
 }
@@ -386,6 +414,61 @@ mod tests {
 
     fn word(s: &str) -> Word {
         Word { text: s.into() }
+    }
+
+    /// Values of `N` bytes, each byte its own, for `copy_value`'s sizes.
+    macro_rules! sized {
+        ($($name:ident: $id:literal, $ty:ty;)+) => {$(
+            component! {
+                #[derive(Debug, Default, PartialEq, Copy)]
+                struct $name: $id { b: $ty }
+            }
+        )+};
+    }
+    sized! {
+        B1: "test::B1", [u8; 1];
+        B3: "test::B3", [u8; 3];
+        B4: "test::B4", [u8; 4];
+        B8: "test::B8", [u8; 8];
+        B12: "test::B12", [u8; 12];
+        B16: "test::B16", [u8; 16];
+        B20: "test::B20", [u8; 20];
+        B24: "test::B24", [u8; 24];
+        B28: "test::B28", [u8; 28];
+        B32: "test::B32", [u8; 32];
+        B40: "test::B40", [u32; 10];
+    }
+
+    /// Moves between columns and fills holes with every byte intact, at
+    /// the sizes copied as fixed sizes and the ones between and past them.
+    #[test]
+    fn values_of_every_size_move_whole() {
+        fn moves<T: Component + Copy + PartialEq + std::fmt::Debug>(make: impl Fn(u8) -> T) {
+            let (mut from, mut to) = (ErasedColumn::new(ValueType::of::<T>()), ErasedColumn::new(ValueType::of::<T>()));
+            for i in 0..6 {
+                from.push(make(i));
+            }
+            // Row 1 out, the last into its place; then the last out.
+            from.swap_remove_into(1, &mut to);
+            from.swap_remove_into(4, &mut to);
+            from.swap_remove_drop(0);
+            assert_eq!(from.as_slice::<T>(), [make(3), make(5), make(2)], "{}", T::NAME);
+            assert_eq!(to.as_slice::<T>(), [make(1), make(4)], "{}", T::NAME);
+        }
+        fn bytes<const N: usize>(i: u8) -> [u8; N] {
+            std::array::from_fn(|k| i.wrapping_mul(31).wrapping_add(k as u8 * 7 + 1))
+        }
+        moves(|i| B1 { b: bytes(i) });
+        moves(|i| B3 { b: bytes(i) });
+        moves(|i| B4 { b: bytes(i) });
+        moves(|i| B8 { b: bytes(i) });
+        moves(|i| B12 { b: bytes(i) });
+        moves(|i| B16 { b: bytes(i) });
+        moves(|i| B20 { b: bytes(i) });
+        moves(|i| B24 { b: bytes(i) });
+        moves(|i| B28 { b: bytes(i) });
+        moves(|i| B32 { b: bytes(i) });
+        moves(|i| B40 { b: std::array::from_fn(|k| u32::from_ne_bytes(bytes(i + k as u8))) });
     }
 
     #[test]

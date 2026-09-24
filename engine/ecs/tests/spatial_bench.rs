@@ -123,7 +123,51 @@ fn creeping_frame(n: usize) {
     println!("{n:>6} rows creeping: {frame:>7.1} us/frame, writing {writing:.1}, the rest (the re-sort) {:.1}", frame - writing);
 }
 
+/// Moves every body down about as far as a falling pile's do a step (a
+/// third of a body at the most), each at its own speed, so rows change
+/// cells and pages every frame, as they do falling; a body past the floor
+/// goes back to the top.
+fn faller(_: &mut Cx, mut q: Query<(&Size, &mut Vel, &mut At)>) {
+    let t = Instant::now();
+    q.for_each(|row, (_, mut v, mut at)| {
+        let i = row.entity().index;
+        v.y = 0.05 + (i * 7919 % 100) as f32 * 0.0025;
+        at.y += v.y;
+        if at.y > 30.0 {
+            at.y -= 60.0;
+        }
+    });
+    *WRITING.lock().unwrap() += t.elapsed().as_nanos();
+}
+
+fn falling_frame(n: usize) {
+    let w = World::new();
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let per_row = (n as f32).sqrt() as usize * 4;
+        for k in 0..n {
+            let (col, row) = (k % per_row, k / per_row);
+            m.spawn((At { x: 0.5 + col as f32 * 1.2, y: 30.0 - row as f32 * 1.2 }, Size { hx: 0.45, hy: 0.45 }, Vel::default()));
+        }
+    }
+    let s = Schedule { systems: vec![faller.system(&w, "faller")] };
+    for _ in 0..10 {
+        s.run_sequential(&w);
+    }
+    *WRITING.lock().unwrap() = 0;
+    let frames = 200;
+    let t = Instant::now();
+    for _ in 0..frames {
+        s.run_sequential(&w);
+    }
+    let frame = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
+    let writing = *WRITING.lock().unwrap() as f64 / frames as f64 / 1e3;
+    println!("{n:>6} rows falling: {frame:>7.1} us/frame, writing {writing:.1}, the rest (the re-sort) {:.1}", frame - writing);
+}
+
 fn main() {
+    falling_frame(1000);
+    falling_frame(10_000);
     creeping_frame(1000);
     creeping_frame(10_000);
     blanket_writer_frame(10_000);
