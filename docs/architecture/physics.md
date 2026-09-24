@@ -428,6 +428,35 @@ What took it there:
   one out, and positions have to be written after anyway. Pages are
   separate allocations, so there's no flat index into the world's memory
   to solve over.
+  Taken apart one cause at a time, the same solve bit for bit at 10 000
+  settled (`./bazel run -c opt //engine/std/physics:solver_layout`), from
+  791 µs on the copy:
+  - *Layout* isn't it. SoA over the same flat index is 780, and the holes
+    of spatial pages (9.5 rows in 16) cost nothing: flat arrays indexed
+    `page * 16 + row` are 788.
+  - *Pages* are. Every field in 16-row pages is 909 µs and in 256-row
+    pages 887, and 836 to 884 even with each body looked up once per
+    contact rather than once per touch.
+  - *Derived data* is. An inverse mass worked out from `Body` on every
+    touch is 930. In the world's own `Velocity` and `Body` pages it's
+    1209, and 870 at best, with inverse masses carried in the constraints
+    as Box2D does.
+  - *The copy itself* is 14 µs gathering and 4.5 writing velocities back,
+    in a walk that writes positions anyway.
+
+  The loop is about 85 instructions per contact per iteration (9 loads and
+  4 stores of body fields, 2 dependent divides), so whatever a lookup adds
+  shows up in the time nearly in full. So the copy is a transpose into the
+  solver's layout, not a patch over a storage flaw. It would take storage
+  that is one allocation per column, plus an inverse-mass column, to solve
+  in place as fast as on the copy, and that would still save only the
+  18 µs of copying.
+- **Renumbering bodies in contact order.** On the copy, bodies in entity
+  order (the order that contacts, sorted by pair, reach them) are 750 µs
+  against 791 in the walk's spatial order. That is the ECS's gap over the
+  arrays in the solver row above, since the arrays index bodies by entity.
+  Renumbering them in the gather cost as much as it saved: 25 to 29 µs
+  more gathering, tried both by sorting the slots and by first touch.
 - **Mapping entities to rows by their locations**, instead of a vector by
   entity index built from the walk (`Slots`): 7.1 ns a pair against 1.2,
   the map's building included. A location is two dependent loads into

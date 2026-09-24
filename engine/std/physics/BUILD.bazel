@@ -156,3 +156,24 @@ rust_binary(
         "//engine/loader",
     ],
 )
+
+# Why `solve` copies bodies out of the world: the same solve over the same
+# pile's contacts with bodies kept each way (layout, pages, derived inverse
+# mass, order, in the world's own pages), each checked bit for bit:
+#   ./bazel run -c opt //engine/std/physics:solver_layout
+rust_binary(
+    name = "solver_layout",
+    srcs = [
+        "solver.rs",
+        "tests/solver_layout.rs",
+    ],
+    crate_root = "tests/solver_layout.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
