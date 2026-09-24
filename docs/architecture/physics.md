@@ -181,7 +181,9 @@ contacts in `late`:
    step. Contacts whose `Response` is disabled aren't solved. Writing
    positions makes its apply node re-sort
    them ([Broadphase](#broadphase)), so every system after the step
-   finds bodies where they are.
+   finds bodies where they are. It writes only the positions that
+   changed, bit for bit, so a pile at rest costs the re-sort nothing
+   ([What the ECS costs](#what-the-ecs-costs)).
 
 Each system is a plain system over queries, so the pipeline is the ECS
 doing what it's for, and step 3 gathers bodies into local arrays, solves
@@ -353,47 +355,60 @@ narrowphase and solver, contacts in the same order, bodies as indices. It
 asserts they end bit for bit the same (they do), so what differs is the
 cost of the world, not different work.
 
-µs per step, settled pile, `-c opt`, one thread, ECS / arrays (the median
-of three runs):
+µs per step, `-c opt`, one thread, ECS / arrays, the median of three runs.
+Settled is 400 steps after the drop, when every body still creeps 1e-4 to
+1e-2 a step; at rest is 4000, when the pile has stopped bit for bit (1000
+bodies by about step 2800, 10 000 by 3000):
 
-| | 1000 bodies | 10 000 bodies |
-|---|---|---|
-| frame | 196 / 125 | 2521 / 1295 |
-| gathering colliders | 4 / – | 53 / – |
-| broadphase | 60 / 26 | 1013 / 288 |
-| narrowphase | 9 / 18 | 108 / 186 |
-| merging contacts | 3 / 1 | 34 / 12 |
-| solve: gathering | 6 / 3 | 65 / 30 |
-| solver | 75 / 75 | 797 / 755 |
-| writing back | 6 / 2 | 60 / 20 |
-| outside the systems (the spatial re-sort) | 32 / – | 363 / – |
+| | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
+|---|---|---|---|---|---|
+| frame | 139 / 123 | 131 / 122 | 910 / 563 | 1454 / 1279 | 1384 / 1288 |
+| gathering colliders | 4 / – | 4 / – | 54 / – | 51 / – | 51 / – |
+| broadphase | 20 / 24 | 20 / 24 | 221 / 201 | 227 / 282 | 220 / 283 |
+| narrowphase | 9 / 18 | 9 / 18 | 36 / 59 | 99 / 183 | 100 / 186 |
+| merging contacts | 4 / 1 | 4 / 1 | 15 / 4 | 36 / 12 | 36 / 11 |
+| solve: gathering | 7 / 3 | 7 / 3 | 55 / 22 | 75 / 30 | 75 / 31 |
+| solver | 74 / 74 | 73 / 72 | 261 / 252 | 777 / 740 | 782 / 743 |
+| writing back | 6 / 2 | 6 / 2 | 51 / 15 | 68 / 19 | 66 / 19 |
+| outside the systems (the spatial re-sort) | 13 / – | 6 / – | 196 / – | 101 / – | 25 / – |
 
-Copying in and out (gathering, merging, the solver's gathering and writing
-back) was 633 µs of the 10 000 frame and is 212, against 62 on arrays; the
-frame went from 2955 to 2521.[^copies] Most of it was the query's own cost
-per row, not the copies:
+The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
+1454, 14% over them, where it was 129%.[^tax] What took it there:
 
-- **`for_each` over table terms walks slices.** A query with only table
-  terms and no sparse filter matches every row of every page, so it takes
-  each term's slice once a page and indexes it, with no per-row dispatch on
-  the kind of term. With the per-row calls inlined, a row went from 5.4 ns
-  to 2.1 on a spatial table and 1.0 on 256-row pages, where a `Vec` of the
-  same values copies at 0.4 to 1.4 (`./bazel run -c opt
-  //engine/ecs:query_bench`). This alone, with the mod unchanged, took the
-  frame to about 2760 µs.
+- **The spatial storage, reworked** (upkeep and broadphase:
+  [spatial-storage.md](spatial-storage.md#upkeep-reworked)). The re-sort
+  is proportional to what changed, about 10 ns a row written (101 µs while
+  the 10 000 creep, 25 at rest), and `solve` writes a position only when
+  it changes bit for bit. `near_pairs` walks page lanes and is 0.8 to 1.1×
+  the arrays' sweep and prune, which keeps its x order between steps
+  ([Against sweep and prune](spatial-storage.md#against-sweep-and-prune)).
+- **Walking queries.** A query with only table terms and no sparse filter
+  matches every row of every page, so `for_each` takes each term's slice
+  once a page and indexes it, with no per-row dispatch on the kind of term,
+  and the per-row steps are forced inline (lore: [a query's row cost its
+  dispatch](../lore/a-query-row-cost-its-dispatch-not-its-data.md)). A
+  walk with no sparse filters also skips the filter check (`Query::passes`).
+  A row of three terms went from 5.4 ns to 2.1 on a spatial table and 1.0
+  on 256-row pages, where a `Vec` of the values copies at 0.4 to 1.4
+  (`./bazel run -c opt //engine/ecs:query_bench`).
 - **Page walks** (`for_each_page`, `for_each_ordered_page`) hand a system
   each page's columns whole: `&[T]`, or a `ColumnMut<T>` that stamps a
   row's tick on `set` or the whole page's on `write_all`. Merging and
-  writing back contacts write every row, so they stamp by page: 54 µs to 34
-  for the merge at 10 000, against `for_each_ordered` and `Mut`. Where rows
-  are only read, a page walk is no faster than `for_each` now, and physics
-  uses `for_each`.
+  writing back contacts write every contact (a resting one while something
+  sleeps is stamped with its page), so they stamp by page: the merge went
+  from 54 µs to 34 at 10 000 against `for_each_ordered` and `Mut`. Where
+  rows are only read, a page walk is no faster than `for_each`, which
+  physics uses there.
 - **Colliders are gathered by four queries**, one for each of with or
   without a `Body` and a `Velocity`, instead of one and then a second walk
-  filling in velocities by entity: queries have no optional terms. And the
+  filling in velocities by entity: queries have no optional terms. The
   gathered item holds only what a pair is tested with, not whole
-  `Collider`s and `Body`s: writing items out was most of gathering (44 µs
-  against 64).
+  `Collider`s and `Body`s (44 µs against 64 writing them out).
+- **The solve looks for resting contacts only while something sleeps.**
+  The test is always false when nothing does, yet made per contact in the
+  gathering walk it cost 30 µs of 75 at 10 000 settled; the walk is split
+  on it instead. Why the dead test cost so much isn't known (measured, not
+  read in the assembly).
 
 **Tried, and slower:**
 
@@ -404,9 +419,9 @@ per row, not the copies:
   building the references cost more than copying the values (42 µs
   against 27). The solver touches each body a dozen times per contact per
   iteration, so an indirection per touch costs more than one copy in and
-  one out; and positions have to be written after anyway, so the walk over
-  bodies stays. Pages are separate allocations, so there's no flat index
-  into the world's memory to solve over.
+  one out, and positions have to be written after anyway. Pages are
+  separate allocations, so there's no flat index into the world's memory
+  to solve over.
 - **Mapping entities to rows by their locations**, instead of a vector by
   entity index built from the walk (`Slots`): 7.1 ns a pair against 1.2,
   the map's building included. A location is two dependent loads into
@@ -415,30 +430,83 @@ per row, not the copies:
   contact takes its geometry straight from the narrowphase with no list in
   between: narrowphase and merge together went from 133 to 149 µs.
 - **Stamping bodies by page** in writing back: 34 to 32 µs, not worth
-  marking static bodies' rows written.
+  marking static bodies' rows written, and it would defeat writing only
+  the positions that change.
 
-**What's left:**
+**What's left**, about 175 µs of the 10 000 settled frame's:
 
-1. **Spatial storage, most of the gap.** `near_pairs` (pairs of Z-order
-   pages, swept) is 3.5× a sweep and prune on arrays that keeps its x
-   order between steps. Keeping the order costs 363 µs a step: `solve`
-   writes every body, at rest or not, and each write re-bounds its row.
-   Its pages are also why a walk over bodies still costs twice a `Vec`'s:
-   about 15 ns a page, on pages of 12 rows on average.
-2. **Copying in and out, 150 µs.** Colliders out for detection (which
+1. **Copying in and out, 150 µs.** Colliders out for detection (which
    makes the narrowphase faster than the arrays', whose bodies are spread
-   over four arrays: gathering and narrowphase together are 161 µs against
-   186), bodies and contacts into the solver's arrays and back, and the
+   over four arrays: gathering and narrowphase together are 150 µs against
+   183), bodies and contacts into the solver's arrays and back, and the
    entity-to-body map, built twice a step. Arrays skip it because a body's
    index is where it's stored; rows in the world can't be that, since
-   spatial order moves them every step.
+   spatial order moves them. A walk over bodies still costs about twice a
+   `Vec`'s: about 15 ns a page, on spatial pages of 12 rows on average.
+2. **The re-sort**, 101 µs while bodies creep, 25 at rest.
 3. **The merge**, contacts updated in the world rather than a list
-   replaced, 22 µs over the arrays.
+   replaced, 24 µs over the arrays.
 
-The solver and the narrowphase cost the same either way, since they're
-the same code over the same arrays. The scheduler and frame cost about 7
-µs. Neither side is parallel yet, and scenes that churn contacts, or
-bodies carrying many game components, aren't measured.
+The broadphase is now slightly faster than the arrays' when settled. The
+solver and the narrowphase cost the same either way, since they're the
+same code over the same arrays. The scheduler and frame cost about 7 µs.
+Neither side is parallel yet, and scenes that churn contacts, or bodies
+carrying many game components, aren't measured.
+
+## Sleeping
+
+**Status: a prototype, off unless a game spawns `Sleep`** (2026-09-24,
+`sleep.rs`). An island, dynamic bodies joined by pressed contacts, whose
+bodies have all been slower than `Sleep::speed` for `Sleep::time` falls
+asleep: its velocities are zeroed, and until it wakes, gravity skips it,
+the solver treats it as immovable, its contacts with other sleeping or
+static bodies are kept as they are (impulses too) without being looked
+for, and nothing is written, so change detection leaves its rows alone.
+A moving body pressing on a sleeping one wakes its island (a still one
+waits to fall asleep in its own), as does a kinematic body moving into
+it, or `physics` sent `wake`; removing `Sleep` wakes everything.
+
+It changes the simulation (a body stops when a threshold says so, not
+when the solver does), which is why it's opt in, and why `:tax` measures
+it apart, the ECS alone, with no arrays to agree with. From when the whole
+pile is asleep, against the same pile awake at the same step (speed 0.05,
+0.5 s), µs per step:
+
+| | 1000 bodies | 10 000 bodies |
+|---|---|---|
+| asleep by step | 630 | 550 |
+| frame | 57 / 141 | 584 / 1461 |
+| broadphase | 20 / 20 | 211 / 212 |
+| narrowphase | 4 / 9 | 51 / 103 |
+| merging contacts | 5 / 4 | 54 / 36 |
+| solve: gathering | 10 / 7 | 101 / 76 |
+| solver | 0 / 75 | 0 / 792 |
+| writing back | 6 / 6 | 62 / 70 |
+| outside the systems | 6 / 13 | 25 / 98 |
+| deepest overlap | 0.007 / 0.007 | 0.006 / 0.006 |
+
+(Medians of three runs, with the query and page-walk work merged in.
+Merging and the solver's gathering cost more asleep than awake: while
+anything sleeps each contact's ends are looked up to find the resting
+ones.)
+
+The solver and the re-sort go; everything that walks every body or
+contact stays, since a sleeping body is still a row every query visits:
+the broadphase, gathering, merging (which checks each contact's ends) and
+writing back. Sleeping as storage, a tag that moves sleeping bodies to a
+table of their own, would let those walks skip them by what they match,
+and `near_pairs` keep the pairs between pages that haven't changed; the
+prototype does neither.
+
+What it doesn't do: carry sleep across a reload (it's the mod's transient
+state, so a reload wakes everything, which is safe, not free); wake bodies
+when what they rest on is despawned or moved by a game, or when a game
+sets a sleeping body's velocity; keep `Touching` on sleeping bodies. Its
+test (`physics_test`) covers falling asleep, staying put with contacts
+kept, waking where a body lands, and settling again; two of seven
+mutations survive it, both close to equivalent: sleeping bodies not
+immovable (a moving body touching one wakes it that step anyway), and
+sleeping bodies written back (with zero velocities, which writes nothing).
 
 ## What changes elsewhere
 
@@ -602,11 +670,15 @@ frame 508.
     real-time game's simulation depended on its frame rate, which only
     lockstep hid. Fixed-rate phases replaced it.
 
-[^copies]: *(History, 2026-09-24.)* Before, at 10 000 bodies settled:
-    gathering colliders 144 µs, merging 113, the solver's gathering 179
-    and writing back 184, against the arrays' 11, 29 and 19. And before
-    that the 10 000 frame was 4738 µs, until two fixes: the mod mapped
-    entities to array indices by sorting and binary search, three times a
-    step, where entity ids are small dense integers and a vector by index
-    does it in O(1) (`Slots`); and writing back looked up `Touching` on
-    both ends of every contact, though most bodies don't have one.
+[^tax]: *(History, 2026-09-24.)* When `:tax` was written, at 10 000
+    bodies settled: frame 2909 µs against the arrays' 1269, gathering
+    colliders 144, broadphase 996 / 277, merging 113 / 11, the solver's
+    gathering 179 / 29, writing back 184 / 19, and the re-sort 352 (32 of
+    them at 1000 bodies), as much at rest as settled. Before that the 10 000
+    frame was 4738 µs, until two fixes: the mod mapped entities to array
+    indices by sorting and binary search, three times a step, where entity
+    ids are small dense integers and a vector by index does it in O(1)
+    (`Slots`); and writing back looked up `Touching` on both ends of every
+    contact, though most bodies don't have one. The copies and the upkeep
+    were then cut apart, and merged the same day: copying in and out alone
+    took the frame to 2521, the upkeep and page lanes alone to about 2650.

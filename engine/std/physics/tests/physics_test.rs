@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use engine_loader::engine::Engine;
-use physics::Position;
+use physics::{Position, Velocity};
 use runfiles::Runfiles;
 
 fn path(var: &str) -> PathBuf {
@@ -72,6 +72,101 @@ mod pile {
         // gather) would leave them where they started.
         let resting = positions(&e).into_iter().filter(|&(x, y)| (0.0..40.0).contains(&x) && (y - 9.55).abs() < 0.02);
         assert_eq!(resting.count(), 38, "every body dropped on a shelf rests on it");
+    }
+
+    /// Rows the last spatial re-sort of the bodies' tables re-bounded: the
+    /// statics' are re-sorted only when they change.
+    fn rebounded(e: &Engine) -> usize {
+        let w = e.world();
+        w.tables()
+            .filter(|t| t.components.iter().any(|&c| w.name(c) == "physics::Body"))
+            .filter_map(|t| t.spatial.as_ref())
+            .map(|s| s.pages.read().unwrap().rebounded)
+            .sum()
+    }
+
+    /// A pile at rest comes to rest bit for bit, and then the solver
+    /// writes no position, so the re-sort after it re-bounds nothing.
+    #[test]
+    fn a_pile_at_rest_is_not_re_sorted() {
+        let e = game("PILE", "at_rest");
+        send(&e, "pile", "drop 200");
+        let bits = |e: &Engine| {
+            let mut all: Vec<_> = e.world().values::<Position>().unwrap().into_iter().map(|(e, p)| (e, p.x.to_bits(), p.y.to_bits())).collect();
+            all.sort();
+            all
+        };
+        let mut steps = 0;
+        let mut before = bits(&e);
+        loop {
+            step(&e, 50);
+            steps += 50;
+            let now = bits(&e);
+            if now == before {
+                break;
+            }
+            assert!(steps < 5000, "still moving after {steps} steps");
+            before = now;
+        }
+        step(&e, 1);
+        assert_eq!(bits(&e), before);
+        assert_eq!(rebounded(&e), 0, "at rest after {steps} steps");
+    }
+
+    fn asleep(e: &Engine) -> f32 {
+        field(&send(e, "physics", "sleeping"), "asleep")
+    }
+
+    /// Steps until `n` bodies are asleep, or panics after `limit` steps.
+    fn until_asleep(e: &Engine, n: f32, limit: u32) -> u32 {
+        let mut steps = 0;
+        while asleep(e) < n {
+            assert!(steps < limit, "{} of {n} asleep after {steps} steps", asleep(e));
+            step(e, 10);
+            steps += 10;
+        }
+        steps
+    }
+
+    #[test]
+    fn nothing_sleeps_unless_asked() {
+        let e = game("PILE", "no_sleep");
+        send(&e, "pile", "drop 200");
+        step(&e, 600);
+        assert_eq!(asleep(&e), 0.0);
+    }
+
+    /// With sleeping on, a settled pile falls asleep and stays put, and a
+    /// body dropped on it wakes what it lands on, which settles and sleeps
+    /// again without sinking in.
+    #[test]
+    fn a_sleeping_pile_wakes_where_something_lands_on_it() {
+        let e = game("PILE", "sleep");
+        send(&e, "pile", "drop 200");
+        send(&e, "pile", "sleep 0.05 0.5");
+        until_asleep(&e, 200.0, 2000);
+        let (at, before) = (positions(&e), send(&e, "physics", "stats"));
+        step(&e, 100);
+        assert_eq!(positions(&e), at, "asleep, nothing moved");
+        assert_eq!(rebounded(&e), 0);
+        // Kept as they were, impulses and all, though not looked for.
+        assert!(field(&before, "contacts") >= 200.0, "{before}");
+        assert_eq!(field(&send(&e, "physics", "stats"), "contacts"), field(&before, "contacts"), "contacts kept");
+        let still = e.world().values::<Velocity>().unwrap().into_iter().all(|(_, v)| v == Velocity::default());
+        assert!(still, "asleep, every body stopped");
+
+        // Onto the top of the pile, from a row above it.
+        send(&e, "pile", "drop 20");
+        let mut least = asleep(&e);
+        for _ in 0..30 {
+            step(&e, 5);
+            least = least.min(asleep(&e));
+        }
+        assert!(least < 150.0, "landing woke the bodies under it: at least {least} of 200 stayed asleep");
+        until_asleep(&e, 220.0, 3000);
+        settled(&e);
+        send(&e, "physics", "wake");
+        assert_eq!(asleep(&e), 0.0);
     }
 
     #[test]

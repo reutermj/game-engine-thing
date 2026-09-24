@@ -15,6 +15,7 @@ exports_files([
 PHYSICS_SRCS = [
     "lib.rs",
     "narrow.rs",
+    "sleep.rs",
     "solver.rs",
 ]
 

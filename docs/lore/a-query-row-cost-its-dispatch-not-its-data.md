@@ -27,3 +27,6 @@ So before blaming a query's cost on copying or on storage, check whether the
 per-row path is straight-line code: the physics mod's gathers and scatters
 had been attributed to copying, and most of their cost went with this
 (physics.md, "What the ECS costs").
+
+See also [an assert in a hot accessor](an-assert-in-a-hot-accessor-can-cost-a-quarter-of-the-loop.md),
+the same kind of cost found in `near_pairs`.

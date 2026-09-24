@@ -2,6 +2,7 @@
 //!
 //!   widen <w>  rebuild the box's walls w wide, for piles bigger than ~1100
 //!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
+//!   sleep <speed> <time>  turn on sleeping (see `physics::Sleep`)
 //!   stats      how many bodies, how many at rest, the deepest overlap
 //!              between two of them, and how many got out of the box
 //!   shelves    two shelves across the box at `SHELF`, one a body with no
@@ -9,7 +10,7 @@
 //!              bodies dropped on each: colliders physics gathers apart
 
 use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
-use physics::{Body, Collider, Gravity, Placed, Position, Shape, Vec2, Velocity};
+use physics::{Body, Collider, Gravity, Placed, Position, Shape, Sleep, Vec2, Velocity};
 
 pub const WIDTH: f32 = 40.0;
 pub const HEIGHT: f32 = 30.0;
@@ -131,6 +132,12 @@ impl Mod for Pile {
                 self.drop_bodies(&mut world, n);
                 Ok(format!("dropped {n}"))
             }
+            Some(("sleep", args)) => {
+                let mut args = args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}")));
+                let (Some(speed), Some(time)) = (args.next(), args.next()) else { return Err("sleep <speed> <time>".into()) };
+                world.spawn((Sleep { speed: speed?, time: time? },));
+                Ok("sleeping on".into())
+            }
             None if message.trim() == "stats" => Ok(stats(&mut world, self.width())),
             None if message.trim() == "shelves" => {
                 let w = self.width();
@@ -145,7 +152,7 @@ impl Mod for Pile {
                 }
                 Ok("shelved".into())
             }
-            _ => Err("commands: widen <w> | drop <n> | stats | shelves".into()),
+            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | stats | shelves".into()),
         }
     }
 }
