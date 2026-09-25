@@ -1,5 +1,6 @@
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "POISON_ENV", "engine_game")
+load("//engine:sanitize.bzl", "sanitized_tests")
 
 # A platformer for a player that takes turns, on the lockstep bootstrap.
 #
@@ -63,3 +64,6 @@ rust_test(
         "//platformer/walkers:walkers_interface",
     ],
 )
+
+# platformer_test_asan; see docs/runbooks/004-run-the-loader-under-sanitizers.md.
+sanitized_tests(tests = [":platformer_test"])

@@ -1,6 +1,7 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
+load("//engine:sanitize.bzl", "SANITIZED_TESTS", "SANITIZERS", "sanitized_tests")
 
 # Test mods live here, apart from the demo mods in //mods, so editing a demo
 # never changes what a test proves.
@@ -417,3 +418,24 @@ rust_test(
     env = {var: "$(rlocationpath %s)" % target for var, target in E2E_DATA.items()} | POISON_ENV,
     deps = ["@rules_rust//rust/runfiles"],
 )
+
+# Under AddressSanitizer and LeakSanitizer: `<test>_asan`.
+# See docs/runbooks/004-run-the-loader-under-sanitizers.md.
+# Not poison_test: the sanitized runs keep every build mapped instead.
+sanitized_tests(tests = [
+    ":e2e_test",
+    ":reload_test",
+])
+
+# Every sanitized test, per sanitizer: ./bazel test //engine/tests:asan
+[
+    test_suite(
+        name = sanitizer,
+        tags = ["manual"],
+        tests = [
+            test + "_" + sanitizer
+            for test in SANITIZED_TESTS
+        ],
+    )
+    for sanitizer in SANITIZERS
+]

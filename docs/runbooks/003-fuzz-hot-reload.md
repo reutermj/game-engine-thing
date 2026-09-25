@@ -12,6 +12,10 @@
   corpus and scripts replayed, and a dozen seeded sessions that must between
   them reach every kind of reply the model knows (about 20 s).
 
+- **Related:** the replay test runs in poison mode, so a stale pointer
+  into an unloaded build faults at once; the loader under AddressSanitizer
+  is [runbook 004](004-run-the-loader-under-sanitizers.md).
+
 What the driver covers, and the model's rules, are in
 [hot-reload.md, "How reload is tested"](../architecture/hot-reload.md#how-reload-is-tested).
 

@@ -1,4 +1,5 @@
 load("//engine:defs.bzl", "POISON_ENV", "engine_game")
+load("//engine:sanitize.bzl", "sanitized_tests")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 # Pong for a player that takes turns (an agent, a test): the lockstep
@@ -60,3 +61,6 @@ PONG_TWINS = {
     ("reload_test", {}, []),
     ("reload_test_full", {"REPLAY_FULL": "1"}, ["manual"]),
 ]]
+
+# pong_test_asan; see docs/runbooks/004-run-the-loader-under-sanitizers.md.
+sanitized_tests(tests = [":pong_test"])

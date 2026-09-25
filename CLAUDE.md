@@ -65,6 +65,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `schedule.rs` — turns every build's declarations into the order a
     frame runs systems in. Pure, so it's unit-tested alone, and so a load
     can be checked against it before it commits.
+  - `poison.rs` — a build's opened library, and the test-only poison
+    mode (`ENGINE_POISON_UNLOADED`, on in every loader test): an unloaded
+    build's span is mapped `PROT_NONE`, so a stale pointer into it faults
+    at once and says which build it was. Its own file because it is the
+    loader's only code that is there for testing, and unsafe (mmap, a
+    SIGSEGV handler).
   - `control_server.rs` — the control socket's thread, which reads requests
     and queues them for the engine. Separate because it's the one other
     thread in the loader, and must never run mod code: requests wait for the
@@ -116,6 +122,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   `resident`) and `engine_game` (with its reload target). If a mod needs a new build
   setting (a link flag, a runtime linkage), it goes here, so every mod gets
   it.
+- `engine/sanitize.bzl` — `<test>_asan` for the loader's tests (suite
+  `//engine/tests:asan`, manual): the test and everything it loads rebuilt
+  with `-Zsanitizer=address` (LeakSanitizer included) on the stable rustc.
+  See [runbooks/004](docs/runbooks/004-run-the-loader-under-sanitizers.md).
 - `engine/tools/mod_links.rs` — the build action that digests a mod's
   interface, so the engine can check at load time what each build was
   compiled against. See

@@ -16,17 +16,21 @@
 //! - `ENGINE_POISON_UNLOADED=strict`: also `mprotect` a kept build `PROT_NONE`.
 //!   glibc still runs that build's TLS destructors at thread exit, so this
 //!   faults on the (known, leaky but legal) thread-local case too.
+//! - `ENGINE_POISON_UNLOADED=keep`: the opposite, for the sanitizers: never
+//!   close a build, and keep its staged file, so a report at exit (a leak
+//!   LeakSanitizer finds) can still name the frames in unloaded builds
+//!   instead of printing `<unknown module>`.
 //!
 //! Unset, a `ModLibrary` is a `Library` and nothing more: no span is looked
 //! up and `drop` is `dlclose`.
 
+use std::cell::UnsafeCell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::Path;
-use std::cell::UnsafeCell;
-use std::sync::{Mutex, Once, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
 
 use libloading::Library;
 
@@ -35,12 +39,16 @@ pub enum Mode {
     Off,
     Unmapped,
     Strict,
+    Keep,
 }
 
+/// Read once: a mode that changed mid-process would guard some builds and
+/// not others, and `keep` must hold from the first build to the last.
 pub fn mode() -> Mode {
     static MODE: OnceLock<Mode> = OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("ENGINE_POISON_UNLOADED").as_deref() {
         Ok("strict") => Mode::Strict,
+        Ok("keep") => Mode::Keep,
         Ok("" | "0") | Err(_) => Mode::Off,
         Ok(_) => Mode::Unmapped,
     })
@@ -75,20 +83,19 @@ static MAPPING: Mutex<()> = Mutex::new(());
 impl ModLibrary {
     /// `dlopen`s `staged`, a copy of `source`.
     pub unsafe fn open(staged: &Path, source: &Path) -> Result<ModLibrary, libloading::Error> {
-        if mode() != Mode::Off {
+        let guarding = matches!(mode(), Mode::Unmapped | Mode::Strict);
+        if guarding {
             static HANDLER: Once = Once::new();
             HANDLER.call_once(|| unsafe { install_handler() });
         }
-        let _mapping = (mode() != Mode::Off).then(|| MAPPING.lock().unwrap_or_else(|e| e.into_inner()));
+        let _mapping = guarding.then(|| MAPPING.lock().unwrap_or_else(|e| e.into_inner()));
         let lib = unsafe { Library::new(staged) }?;
-        let guard = match mode() {
-            Mode::Off => None,
-            _ => {
-                let name = staged.to_string_lossy().into_owned();
-                let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.into());
-                span_of(&name).map(|span| Guard { name, source: source.to_string_lossy().into_owned(), span })
-            }
-        };
+        let guard = guarding.then(|| {
+            let name = staged.to_string_lossy().into_owned();
+            let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.into());
+            span_of(&name).map(|span| Guard { name, source: source.to_string_lossy().into_owned(), span })
+        });
+        let guard = guard.flatten();
         Ok(ModLibrary { lib: ManuallyDrop::new(lib), guard })
     }
 }
@@ -102,6 +109,11 @@ impl Deref for ModLibrary {
 
 impl Drop for ModLibrary {
     fn drop(&mut self) {
+        // The handle is leaked on purpose, so the build stays in the link
+        // map for a sanitizer's report at exit.
+        if mode() == Mode::Keep {
+            return;
+        }
         let lib = unsafe { ManuallyDrop::take(&mut self.lib) };
         let Some(Guard { name, source, span: (start, end) }) = self.guard.take() else {
             drop(lib);
@@ -202,7 +214,14 @@ static mut PREVIOUS: SigAction = SigAction { handler: 0, mask: [0; 16], flags: 0
 /// it replaced (std's, which tells a stack overflow from other faults) and
 /// returns, so the access faults again and dies the way it would have.
 unsafe fn install_handler() {
-    let action = SigAction { handler: on_fault as *const () as usize, mask: [0; 16], flags: SA_SIGINFO | SA_ONSTACK, restorer: 0 };
+    let action = SigAction {
+        handler: on_fault as *const () as usize,
+        mask: [0; 16],
+        // On std's alternate stack, as its own handler runs, so a stack
+        // overflow still reaches it.
+        flags: SA_SIGINFO | SA_ONSTACK,
+        restorer: 0,
+    };
     unsafe { sigaction(SIGSEGV, &action, &raw mut PREVIOUS) };
 }
 

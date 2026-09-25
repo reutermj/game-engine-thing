@@ -1,6 +1,7 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
+load("//engine:sanitize.bzl", "sanitized_tests")
 
 # 2D rigid bodies, with every piece of state in the world or this mod's
 # state, so the solver hot-reloads under a running simulation. A game uses
@@ -227,4 +228,10 @@ rust_binary(
         "//engine/ecs",
         "//engine/loader",
     ],
+)
+
+# physics_test_asan; see docs/runbooks/004-run-the-loader-under-sanitizers.md.
+sanitized_tests(
+    skip = ["threads::threads_that_ran_a_builds_tasks_do_not_keep_it_mapped"],
+    tests = [":physics_test"],
 )

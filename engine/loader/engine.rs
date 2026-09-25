@@ -1017,7 +1017,9 @@ impl Engine {
         // Read while the file still has its name: the maps name it by path.
         let image = std::fs::canonicalize(&staged).map(|path| mapped_ranges(&path)).unwrap_or_default();
         // The mapping outlives the file, so nothing is left behind to clean up.
-        let _ = std::fs::remove_file(&staged);
+        if crate::poison::mode() != crate::poison::Mode::Keep {
+            let _ = std::fs::remove_file(&staged);
+        }
         Ok((lib?, image))
     }
 }
