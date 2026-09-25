@@ -165,9 +165,7 @@ impl Schedule {
             (Node::System(x), Node::Apply(y)) | (Node::Apply(y), Node::System(x)) => {
                 system_apply_overlap(world, self.systems[x].view(), &self.apply_footprint(world, fs, y))
             }
-            (Node::Apply(x), Node::Apply(y)) => {
-                applies_overlap(&self.apply_footprint(world, fs, x), &self.apply_footprint(world, fs, y))
-            }
+            (Node::Apply(x), Node::Apply(y)) => applies_overlap(&self.apply_footprint(world, fs, x), &self.apply_footprint(world, fs, y)),
         }
     }
 
@@ -177,7 +175,10 @@ impl Schedule {
         if fs.state[i] != State::Pending {
             return false;
         }
-        if let Node::Apply(s) = fs.nodes[i] && fs.logs[s].is_none() && fs.running[s].is_none() {
+        if let Node::Apply(s) = fs.nodes[i]
+            && fs.logs[s].is_none()
+            && fs.running[s].is_none()
+        {
             return false;
         }
         self.blockers(world, fs, i).is_empty()
@@ -285,55 +286,55 @@ impl Schedule {
         std::thread::scope(|scope| {
             for thread in 0..threads {
                 let (shared, wake) = (&shared, &wake);
-                scope.spawn(move || loop {
-                    let mut guard = shared.lock().unwrap();
-                    let (i, node, apply) = loop {
-                        if guard.2.is_some() {
-                            return;
-                        }
-                        let fs = &mut guard.0;
-                        if fs.state.iter().all(|s| *s == State::Done) {
-                            wake.notify_all();
-                            return;
-                        }
-                        if let Some(i) = (0..fs.nodes.len()).find(|&i| self.ready(world, fs, i)) {
-                            let node = fs.nodes[i];
-                            let apply = match node {
-                                Node::Apply(s) => {
-                                    let fp = self.apply_footprint(world, fs, s);
-                                    Some((fp, fs.logs[s].take().unwrap()))
-                                }
-                                Node::System(_) => None,
-                            };
-                            fs.state[i] = State::Running;
-                            if let (Node::Apply(s), Some((fp, _))) = (node, &apply) {
-                                fs.running[s] = Some(fp.clone());
+                scope.spawn(move || {
+                    loop {
+                        let mut guard = shared.lock().unwrap();
+                        let (i, node, apply) = loop {
+                            if guard.2.is_some() {
+                                return;
                             }
-                            break (i, node, apply);
+                            let fs = &mut guard.0;
+                            if fs.state.iter().all(|s| *s == State::Done) {
+                                wake.notify_all();
+                                return;
+                            }
+                            if let Some(i) = (0..fs.nodes.len()).find(|&i| self.ready(world, fs, i)) {
+                                let node = fs.nodes[i];
+                                let apply = match node {
+                                    Node::Apply(s) => {
+                                        let fp = self.apply_footprint(world, fs, s);
+                                        Some((fp, fs.logs[s].take().unwrap()))
+                                    }
+                                    Node::System(_) => None,
+                                };
+                                fs.state[i] = State::Running;
+                                if let (Node::Apply(s), Some((fp, _))) = (node, &apply) {
+                                    fs.running[s] = Some(fp.clone());
+                                }
+                                break (i, node, apply);
+                            }
+                            guard = wake.wait(guard).unwrap();
+                        };
+                        drop(guard);
+                        let start = base.elapsed();
+                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_node(world, node, apply)));
+                        let end = base.elapsed();
+                        let mut guard = shared.lock().unwrap();
+                        let out = match run {
+                            Ok(out) => out,
+                            Err(panic) => {
+                                guard.2.get_or_insert(panic);
+                                wake.notify_all();
+                                return;
+                            }
+                        };
+                        if let (Node::System(s), Some(log)) = (node, out) {
+                            guard.0.logs[s] = Some(log);
                         }
-                        guard = wake.wait(guard).unwrap();
-                    };
-                    drop(guard);
-                    let start = base.elapsed();
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.run_node(world, node, apply)
-                    }));
-                    let end = base.elapsed();
-                    let mut guard = shared.lock().unwrap();
-                    let out = match run {
-                        Ok(out) => out,
-                        Err(panic) => {
-                            guard.2.get_or_insert(panic);
-                            wake.notify_all();
-                            return;
-                        }
-                    };
-                    if let (Node::System(s), Some(log)) = (node, out) {
-                        guard.0.logs[s] = Some(log);
+                        guard.0.state[i] = State::Done;
+                        guard.1.push(Span { node: self.node_name(node), thread, start, end });
+                        wake.notify_all();
                     }
-                    guard.0.state[i] = State::Done;
-                    guard.1.push(Span { node: self.node_name(node), thread, start, end });
-                    wake.notify_all();
                 });
             }
         });

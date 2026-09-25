@@ -47,10 +47,7 @@ impl Bounds {
     }
 
     pub fn union(&self, o: &Bounds) -> Bounds {
-        Bounds {
-            min: [self.min[0].min(o.min[0]), self.min[1].min(o.min[1])],
-            max: [self.max[0].max(o.max[0]), self.max[1].max(o.max[1])],
-        }
+        Bounds { min: [self.min[0].min(o.min[0]), self.min[1].min(o.min[1])], max: [self.max[0].max(o.max[0]), self.max[1].max(o.max[1])] }
     }
 
     pub fn grown(&self, by: f32) -> Bounds {
@@ -890,9 +887,8 @@ impl Resort<'_> {
         let row = self.pages.lanes[p].swap_remove(r);
         self.pages.lanes[q].push(row);
         (self.pages.stale[p], self.pages.stale[q]) = (true, true);
-        let place = |e: Entity, page: usize, row: usize| {
-            self.entities.place(e, Location { table: self.table, page: page as u32, row: row as u32 })
-        };
+        let place =
+            |e: Entity, page: usize, row: usize| self.entities.place(e, Location { table: self.table, page: page as u32, row: row as u32 });
         place(e, q, self.rows[q].len() - 1);
         if let Some(&swapped) = self.rows[p].get(r) {
             place(swapped, p, r);

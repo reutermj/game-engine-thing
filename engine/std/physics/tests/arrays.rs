@@ -8,8 +8,7 @@ use std::time::Instant;
 
 use engine_ecs::{Entity, World};
 use physics::{
-    Body, Collider, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Placed, Position, Response, STATIC,
-    Shape, Vec2, Velocity,
+    Body, Collider, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Placed, Position, Response, STATIC, Shape, Vec2, Velocity,
 };
 
 use crate::narrow;
@@ -311,4 +310,3 @@ impl Arrays {
         assert_eq!(fresh.len(), pair_count);
     }
 }
-

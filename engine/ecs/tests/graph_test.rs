@@ -7,9 +7,9 @@
 //! `equivalence` runs whole frames on threads and compares the world with
 //! the sequential run's.
 
+use ecs_game::{Burning, Options, SparseBurning, TableBurning};
 use engine_ecs::World;
 use engine_ecs::harness::{FrameState, Schedule, State};
-use ecs_game::{Burning, Options, SparseBurning, TableBurning};
 
 fn setup<B: Burning>(anywhere: bool) -> (World, Schedule) {
     let w = ecs_game::world::<B>();
@@ -122,9 +122,9 @@ mod readiness {
     /// though both remember the last list they resolved.
     #[test]
     fn spawns_from_two_spawners_in_one_log_land_in_their_own_tables() {
+        use ecs_game::{Label, Position};
         use engine_ecs::harness::{Cx, IntoSystem};
         use engine_ecs::{Query, Spawner};
-        use ecs_game::{Label, Position};
         let w = ecs_game::world::<SparseBurning>();
         fn spawn(_: &mut Cx, points: Spawner<(Position,)>, labels: Spawner<(Label,)>) {
             for i in 0..3 {
@@ -258,11 +258,8 @@ mod rows {
         run(&w, vec![mark.system(&w, "mark")]);
         assert_eq!(SEEN.load(Ordering::SeqCst), 0, "the marks land after the system");
         let mark = w.id("Mark").unwrap();
-        let marked: usize = w
-            .tables()
-            .filter(|t| t.components.contains(&mark))
-            .map(|t| t.rows.read().unwrap().iter().map(Vec::len).sum::<usize>())
-            .sum();
+        let marked: usize =
+            w.tables().filter(|t| t.components.contains(&mark)).map(|t| t.rows.read().unwrap().iter().map(Vec::len).sum::<usize>()).sum();
         assert_eq!(marked, 4);
     }
 
@@ -355,10 +352,7 @@ mod groups {
 
     fn marked(w: &World) -> usize {
         let mark = w.id("Mark").unwrap();
-        w.tables()
-            .filter(|t| t.components.contains(&mark))
-            .map(|t| t.rows.read().unwrap().iter().map(Vec::len).sum::<usize>())
-            .sum()
+        w.tables().filter(|t| t.components.contains(&mark)).map(|t| t.rows.read().unwrap().iter().map(Vec::len).sum::<usize>()).sum()
     }
 
     #[test]

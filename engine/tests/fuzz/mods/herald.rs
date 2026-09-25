@@ -70,10 +70,7 @@ impl Mod for HeraldMod {
                 self.pending.push(n()?);
                 Ok(format!("herald:{BUILD} queued {}", self.pending.len()))
             }
-            "get" => Ok(format!(
-                "herald:{BUILD} calls={} loads={} pending={:?}",
-                self.calls, self.loads, self.pending
-            )),
+            "get" => Ok(format!("herald:{BUILD} calls={} loads={} pending={:?}", self.calls, self.loads, self.pending)),
             "boom" => fz_planted::panic(format!("herald:{BUILD} panics on boom")),
             _ => Err(format!("herald doesn't understand {message:?}")),
         }

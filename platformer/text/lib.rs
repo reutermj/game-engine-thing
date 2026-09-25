@@ -12,9 +12,7 @@
 use clock::Clock;
 use engine_api::{Cx, Mod, WorldMut, export_mod};
 use physics::{Position, Touching, Velocity};
-use platformer::{
-    Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile,
-};
+use platformer::{Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile};
 use walkers::Walker;
 
 const HELP: &str = "commands: left | right | stop | jump | show | state";
@@ -81,13 +79,7 @@ fn seen(at: &Position, v: &Velocity, w: f32, h: f32) -> Seen {
 
 fn header(s: &Snapshot) -> String {
     let won = if s.player.won { "   YOU WIN" } else { "" };
-    format!(
-        "frame {}   coins {} ({} left)   deaths {}{won}",
-        s.frame,
-        s.player.coins,
-        s.coins.len(),
-        s.player.deaths
-    )
+    format!("frame {}   coins {} ({} left)   deaths {}{won}", s.frame, s.player.coins, s.coins.len(), s.player.deaths)
 }
 
 fn draw(s: &Snapshot) -> String {

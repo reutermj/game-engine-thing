@@ -13,9 +13,7 @@
 
 use engine_api::{ChildOf, Cx, Entity, Mod, WorldMut, export_mod};
 use physics::{Body, Collider, Position, Touching, Velocity};
-use platformer::{
-    Coin, GOAL, LevelInfo, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SENSORS, SOLID, SPIKE, TILES, Tile, WALKERS,
-};
+use platformer::{Coin, GOAL, LevelInfo, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player, SENSORS, SOLID, SPIKE, TILES, Tile, WALKERS};
 use walkers::Walker;
 
 /// The map: `#` solid, `^` spikes, `G` goal, `C` coin, `E` walker, `P` player

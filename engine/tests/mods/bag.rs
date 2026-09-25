@@ -62,7 +62,6 @@ impl Mod for BagMod {
             world.spawn((Bag::default(),));
         }
     }
-
 }
 
 export_mod!(BagMod);

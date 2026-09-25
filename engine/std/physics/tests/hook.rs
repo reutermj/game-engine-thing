@@ -20,7 +20,13 @@ engine_api::mod_state! {
 }
 
 impl Hook {
-    fn between(&mut self, _: &mut (), _: &mut Cx, mut ids: Query<&Body, With<Velocity>>, mut bodies: Query<&mut Velocity, With<Body>, Despawns>) {
+    fn between(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        mut ids: Query<&Body, With<Velocity>>,
+        mut bodies: Query<&mut Velocity, With<Body>, Despawns>,
+    ) {
         if self.kick.is_empty() && self.despawn == 0 {
             return;
         }
@@ -47,7 +53,8 @@ impl Mod for Hook {
     fn message(&mut self, _: &mut (), _: &mut Cx, message: &str) -> Result<String, String> {
         match message.split_once(' ') {
             Some(("kick", args)) => {
-                let args: Result<Vec<f32>, String> = args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}"))).collect();
+                let args: Result<Vec<f32>, String> =
+                    args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}"))).collect();
                 let &[x, y] = args?.as_slice() else { return Err("kick <vx> <vy>".into()) };
                 self.kick = vec![x, y];
                 Ok("kicking".into())

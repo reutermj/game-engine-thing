@@ -58,7 +58,6 @@ impl Mod for Vault {
     fn load(&mut self, ticker: &mut Ticker, cx: &mut Cx) {
         ticker.start(cx.name());
     }
-
 }
 
 impl vault::Vault for Vault {

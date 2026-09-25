@@ -16,10 +16,7 @@ use test_probe::Probe;
 /// The library built by the `engine_mod` target whose rlocation is in `$var`.
 fn lib(var: &str) -> PathBuf {
     let rlocation = std::env::var(var).unwrap_or_else(|_| panic!("${var} is not set"));
-    Runfiles::create()
-        .expect("runfiles")
-        .rlocation(&rlocation)
-        .unwrap_or_else(|| panic!("{rlocation} is not in runfiles"))
+    Runfiles::create().expect("runfiles").rlocation(&rlocation).unwrap_or_else(|| panic!("{rlocation} is not in runfiles"))
 }
 
 /// An engine with no bootstrap: tests step it frame by frame themselves.
@@ -35,9 +32,7 @@ fn engine_with(test: &str, bootstrap: Option<&str>) -> Box<Engine> {
 }
 
 fn load(engine: &Engine, name: &str, var: &str) -> String {
-    engine
-        .load(name, &lib(var))
-        .unwrap_or_else(|e| panic!("loading {var} as {name}: {e}"))
+    engine.load(name, &lib(var)).unwrap_or_else(|e| panic!("loading {var} as {name}: {e}"))
 }
 
 fn step(engine: &Engine, frames: usize) {
@@ -127,11 +122,7 @@ fn a_bad_build_leaves_the_old_build_running() {
 
     let garbage = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join("garbage.so");
     std::fs::write(&garbage, "not an ELF file").unwrap();
-    let cases = [
-        (garbage, "dlopen failed"),
-        (lib("NO_ENTRY"), "engine_mod_info"),
-        (lib("WRONG_API"), "mod API"),
-    ];
+    let cases = [(garbage, "dlopen failed"), (lib("NO_ENTRY"), "engine_mod_info"), (lib("WRONG_API"), "mod API")];
     for (path, expected) in cases {
         let err = e.load("counter", &path).expect_err("a bad build must be rejected");
         assert!(err.contains(expected), "{} gave {err:?}, expected it to mention {expected:?}", path.display());
@@ -224,10 +215,7 @@ mod deps {
         load(&e, "base", "BASE_V1");
         load(&e, "user", "USER_V1");
         let err = e.load("base", &lib("BASE_V2")).unwrap_err();
-        assert!(
-            err.contains("base's interface changed, and user was built against the old one"),
-            "{err}"
-        );
+        assert!(err.contains("base's interface changed, and user was built against the old one"), "{err}");
         assert!(e.list().contains("base gen 0"), "nothing may change:\n{}", e.list());
     }
 
@@ -266,13 +254,8 @@ mod deps {
         load(&e, "user", "USER_V1");
         let garbage = std::path::PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join("bad.so");
         std::fs::write(&garbage, "not an ELF file").unwrap();
-        let err = e
-            .load_batch(&[
-                ("base".into(), lib("BASE_V2")),
-                ("user".into(), lib("USER_V2")),
-                ("broken".into(), garbage),
-            ])
-            .unwrap_err();
+        let err =
+            e.load_batch(&[("base".into(), lib("BASE_V2")), ("user".into(), lib("USER_V2")), ("broken".into(), garbage)]).unwrap_err();
         assert!(err.contains("broken: dlopen failed"), "{err}");
         let list = e.list();
         assert!(list.contains("base gen 0") && list.contains("user gen 0") && !list.contains("broken"), "{list}");
@@ -483,10 +466,7 @@ mod state_pointing_into_its_build {
         load(&e, "counter", "COUNTER_V1");
         step(&e, 3);
         let reply = load(&e, "counter", "COUNTER_V4");
-        assert_eq!(
-            reply,
-            "reloaded counter (generation 1, state migrated: kept total, kept probe, added grown (default))"
-        );
+        assert_eq!(reply, "reloaded counter (generation 1, state migrated: kept total, kept probe, added grown (default))");
         step(&e, 1);
         // v1's total and probe, then one of v4's steps of 10.
         assert_eq!((probe(&e).value, probe(&e).build), (13, 5));
@@ -614,10 +594,7 @@ mod resident {
     fn a_game_reload_keeps_the_resident_build_and_reloads_the_rest() {
         let e = with_vault("resident_batch");
         let reply = e.load_batch(&[("vault".into(), lib("VAULT_V2")), ("counter".into(), lib("COUNTER_V1"))]);
-        assert_eq!(
-            reply.as_deref(),
-            Ok("loaded counter; vault is resident: restart the engine to load its new build")
-        );
+        assert_eq!(reply.as_deref(), Ok("loaded counter; vault is resident: restart the engine to load its new build"));
         assert_eq!(ask(&e, "build"), "v1");
     }
 
@@ -736,9 +713,7 @@ mod pumping {
         // check can't leave the session running forever.
         let client = std::thread::spawn(move || {
             let checks = std::panic::catch_unwind(|| {
-                let load = |name: &str, path: &std::path::Path| {
-                    request(&requests, Request::Load { name: name.into(), path: path.into() })
-                };
+                let load = |name: &str, path: &std::path::Path| request(&requests, Request::Load { name: name.into(), path: path.into() });
                 assert_eq!(send(&requests, "fake_os", "size"), "ok 640x480");
                 assert_eq!(load("counter", &v1), "ok loaded counter");
                 let total = until(&requests, "counter", "get", |r| r != "ok 0");
@@ -803,10 +778,7 @@ mod pumping {
     fn the_bootstrap_must_be_one() {
         let e = engine_with("bootstrap_not_one", Some("counter"));
         let err = e.load("counter", &lib("COUNTER_V1")).unwrap_err();
-        assert_eq!(
-            err,
-            "counter is the game's bootstrap, but isn't one: implement Bootstrap and export_mod!(.., bootstrap)"
-        );
+        assert_eq!(err, "counter is the game's bootstrap, but isn't one: implement Bootstrap and export_mod!(.., bootstrap)");
     }
 
     #[test]
@@ -849,10 +821,7 @@ mod scheduling {
         step(&e, 1);
         // Load order alone would run a's systems first.
         assert_eq!(trace(&e), ["a::input", "b::update", "a::update", "b::simulate", "a::late"]);
-        assert_eq!(
-            e.schedule().unwrap(),
-            "input: a::input\nupdate: b::update, a::update\nsimulate (60 Hz): b::simulate\nlate: a::late"
-        );
+        assert_eq!(e.schedule().unwrap(), "input: a::input\nupdate: b::update, a::update\nsimulate (60 Hz): b::simulate\nlate: a::late");
     }
 
     #[test]

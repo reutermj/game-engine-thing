@@ -83,10 +83,7 @@ fn draw(s: &Snapshot) -> String {
 }
 
 fn describe(s: &Snapshot) -> String {
-    let mut out = format!(
-        "frame {}\nball x {:.2} y {:.2} vx {:.2} vy {:.2}\n",
-        s.frame, s.ball.x, s.ball.y, s.ball.vx, s.ball.vy
-    );
+    let mut out = format!("frame {}\nball x {:.2} y {:.2} vx {:.2} vy {:.2}\n", s.frame, s.ball.x, s.ball.y, s.ball.vx, s.ball.vy);
     for p in &s.paddles {
         let side = if p.face < WIDTH / 2.0 { "you" } else { "ai" };
         out += &format!("{side} paddle face {:.0} y {:.2} intent {:.1}\n", p.face, p.y, p.intent);

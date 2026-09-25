@@ -812,11 +812,7 @@ fn median(mut xs: Vec<f64>) -> f64 {
 /// asked, which must be the reference's.
 type Variant<'a> = Box<dyn FnMut(bool) -> (f64, Option<Outcome>) + 'a>;
 
-fn time<'a, I: 'a>(
-    setup: impl Fn() -> I + 'a,
-    mut run: impl FnMut(&mut I) + 'a,
-    check: impl Fn(&I) -> Outcome + 'a,
-) -> Variant<'a> {
+fn time<'a, I: 'a>(setup: impl Fn() -> I + 'a, mut run: impl FnMut(&mut I) + 'a, check: impl Fn(&I) -> Outcome + 'a) -> Variant<'a> {
     Box::new(move |checked| {
         let mut input = setup();
         let start = Instant::now();
@@ -895,13 +891,19 @@ fn main() {
     // In place in the world's pages, under its column guards.
     let w = e.world();
     let (cb, cv) = (w.id("physics::Body").unwrap(), w.id("physics::Velocity").unwrap());
-    let tables: Vec<_> = w.tables().filter(|t| t.column_index(cb).is_some() && t.column_index(cv).is_some() && t.column_index(w.id("physics::Position").unwrap()).is_some()).collect();
+    let tables: Vec<_> = w
+        .tables()
+        .filter(|t| {
+            t.column_index(cb).is_some() && t.column_index(cv).is_some() && t.column_index(w.id("physics::Position").unwrap()).is_some()
+        })
+        .collect();
     let mut vguards: Vec<_> = tables.iter().map(|t| t.columns[t.column_index(cv).unwrap()].write().unwrap()).collect();
     let bguards: Vec<_> = tables.iter().map(|t| t.columns[t.column_index(cb).unwrap()].read().unwrap()).collect();
     // The stand-in for statics needs a velocity somewhere: a page of its own.
     let mut still = Box::new([Velocity { x: 0.0, y: 0.0 }; SPATIAL_ROWS]);
     let still_body = Box::new([Body::fixed(); SPATIAL_ROWS]);
-    let mut vptrs: Vec<*mut Velocity> = vguards.iter_mut().flat_map(|g| g.iter_mut().map(|c| c.as_mut_slice::<Velocity>().as_mut_ptr())).collect();
+    let mut vptrs: Vec<*mut Velocity> =
+        vguards.iter_mut().flat_map(|g| g.iter_mut().map(|c| c.as_mut_slice::<Velocity>().as_mut_ptr())).collect();
     vptrs.push(still.as_mut_ptr());
     let mut bptrs: Vec<*const Body> = bguards.iter().flat_map(|g| g.iter().map(|c| c.as_slice::<Body>().as_ptr())).collect();
     bptrs.push(still_body.as_ptr());
@@ -932,15 +934,15 @@ fn main() {
             |b| outcome(n, |i| (b.0.0[i].v, b.0.0[i].pseudo), b.1.iter().map(|c| (c.jn, c.jt, c.speed))),
         ),
     );
-    let soa = || Soa {
-        v: s.bodies.iter().map(|b| b.v).collect(),
-        inv: s.bodies.iter().map(|b| b.inv_mass).collect(),
-        p: vec![Vec2::ZERO; n],
-    };
+    let soa =
+        || Soa { v: s.bodies.iter().map(|b| b.v).collect(), inv: s.bodies.iter().map(|b| b.inv_mass).collect(), p: vec![Vec2::ZERO; n] };
     let soa_out = |b: &(Soa, Vec<Constraint>), map: &[u32]| {
         outcome(n, |i| (b.0.v[map[i] as usize], b.0.p[map[i] as usize]), b.1.iter().map(|c| (c.jn, c.jt, c.speed)))
     };
-    r.row("(a) SoA: v, inv_mass, pseudo in three flat arrays", time(|| (soa(), s.contacts.clone()), |b| solve(&mut b.0, &mut b.1, DT), |b| soa_out(b, &identity)));
+    r.row(
+        "(a) SoA: v, inv_mass, pseudo in three flat arrays",
+        time(|| (soa(), s.contacts.clone()), |b| solve(&mut b.0, &mut b.1, DT), |b| soa_out(b, &identity)),
+    );
 
     // (c) derived inverse mass.
     r.row(
@@ -1033,7 +1035,12 @@ fn main() {
                 let (v, inv) = paged16();
                 let mut pages: Pages<Vec2, 16> = pages_of(&v);
                 let ptrs = s.packed.iter().map(|&k| &mut pages[k as usize / 16][k as usize % 16] as *mut Vec2).collect();
-                (pages, PerBody { v: ptrs, inv: s.bodies.iter().map(|b| b.inv_mass).collect(), p: vec![Vec2::ZERO; n] }, s.contacts.clone(), inv)
+                (
+                    pages,
+                    PerBody { v: ptrs, inv: s.bodies.iter().map(|b| b.inv_mass).collect(), p: vec![Vec2::ZERO; n] },
+                    s.contacts.clone(),
+                    inv,
+                )
             },
             |b| solve(&mut b.1, &mut b.2, DT),
             |b| {
@@ -1046,11 +1053,7 @@ fn main() {
     // Each body found once per contact, not on every touch.
     r.row(
         "once per contact: AoS",
-        time(
-            || (s.bodies.clone(), s.contacts.clone()),
-            |b| solve_at(&AosAt(b.0.as_mut_ptr()), &mut b.1, DT),
-            |b| aos_out(b, &identity),
-        ),
+        time(|| (s.bodies.clone(), s.contacts.clone()), |b| solve_at(&AosAt(b.0.as_mut_ptr()), &mut b.1, DT), |b| aos_out(b, &identity)),
     );
     r.row(
         "once per contact: 16-row pages as the world fills them, all fields paged",
@@ -1245,7 +1248,11 @@ fn main() {
         }
         scatters.push(start.elapsed().as_secs_f64() * 1e6);
     }
-    println!("\n(e) the copy, against the world's pages: gathering bodies {:.1} µs, writing velocities back {:.1} µs", median(gathers), median(scatters));
+    println!(
+        "\n(e) the copy, against the world's pages: gathering bodies {:.1} µs, writing velocities back {:.1} µs",
+        median(gathers),
+        median(scatters)
+    );
 
     drop((vguards, bguards));
     drop(e);

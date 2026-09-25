@@ -21,10 +21,20 @@ use runfiles::Runfiles;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
-    Load { name: String, path: PathBuf },
-    Batch { mods: Vec<(String, PathBuf)> },
-    Unload { name: String },
-    Send { name: String, message: String },
+    Load {
+        name: String,
+        path: PathBuf,
+    },
+    Batch {
+        mods: Vec<(String, PathBuf)>,
+    },
+    Unload {
+        name: String,
+    },
+    Send {
+        name: String,
+        message: String,
+    },
     List,
     /// The order the systems run in.
     Schedule,
@@ -54,9 +64,7 @@ impl Request {
         match cmd {
             "load" => {
                 // The path is the rest of the line so it may contain spaces.
-                let (name, path) = rest
-                    .split_once(' ')
-                    .ok_or("usage: load <name> <path>")?;
+                let (name, path) = rest.split_once(' ').ok_or("usage: load <name> <path>")?;
                 validate_name(name)?;
                 Ok(Request::Load { name: name.into(), path: path.into() })
             }
@@ -80,8 +88,7 @@ impl Request {
         match self {
             Request::Load { name, path } => format!("load {name} {}\n", path.display()),
             Request::Batch { mods } => {
-                let lines: String =
-                    mods.iter().map(|(name, path)| format!("{name} {}\n", path.display())).collect();
+                let lines: String = mods.iter().map(|(name, path)| format!("{name} {}\n", path.display())).collect();
                 format!("batch\n{lines}")
             }
             Request::Unload { name } => format!("unload {name}\n"),
@@ -153,16 +160,13 @@ pub struct Manifest {
 pub fn read_manifest(rlocation: &str) -> Result<Manifest, String> {
     let runfiles = Runfiles::create().map_err(|e| format!("finding runfiles: {e}"))?;
     let resolve = |rlocation: &str| -> Result<PathBuf, String> {
-        let path = runfiles
-            .rlocation(rlocation)
-            .ok_or_else(|| format!("{rlocation} is not in runfiles"))?;
+        let path = runfiles.rlocation(rlocation).ok_or_else(|| format!("{rlocation} is not in runfiles"))?;
         // Absolute, since the engine may be sent it by a process with another cwd.
         path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))
     };
 
     let manifest_path = resolve(rlocation)?;
-    let text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+    let text = std::fs::read_to_string(&manifest_path).map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
     let mut manifest = Manifest { reload: None, bootstrap: None, mods: Vec::new() };
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let mut parts = line.splitn(3, ' ');
@@ -188,9 +192,7 @@ mod tests {
     fn every_request_survives_a_round_trip() {
         let requests = [
             Request::Load { name: "counter".into(), path: "/tmp/a b/libcounter.so".into() },
-            Request::Batch {
-                mods: vec![("a".into(), "/x/liba.so".into()), ("b".into(), "/y z/libb.so".into())],
-            },
+            Request::Batch { mods: vec![("a".into(), "/x/liba.so".into()), ("b".into(), "/y z/libb.so".into())] },
             Request::Batch { mods: vec![] },
             Request::Unload { name: "counter".into() },
             Request::Send { name: "pong_text".into(), message: "up".into() },

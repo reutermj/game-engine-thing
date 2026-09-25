@@ -126,11 +126,7 @@ fn pools(lava: &mut Query<&Lava>) -> Vec<Lava> {
     pools
 }
 
-fn ignite<B: Burning>(
-    _: &mut Cx,
-    mut lava: Query<&Lava>,
-    mut walkers: Query<(&Position, &Health), Without<B>, Adds<B>>,
-) {
+fn ignite<B: Burning>(_: &mut Cx, mut lava: Query<&Lava>, mut walkers: Query<(&Position, &Health), Without<B>, Adds<B>>) {
     let pools = pools(&mut lava);
     walkers.for_each(|row, (p, _)| {
         work();
@@ -213,11 +209,7 @@ pub struct Options {
 }
 
 pub fn schedule<B: Burning>(w: &World, o: Options) -> Schedule {
-    let ignite: SystemDecl = if o.anywhere {
-        ignite_anywhere::<B>.system(w, "ignite")
-    } else {
-        ignite::<B>.system(w, "ignite")
-    };
+    let ignite: SystemDecl = if o.anywhere { ignite_anywhere::<B>.system(w, "ignite") } else { ignite::<B>.system(w, "ignite") };
     Schedule {
         systems: vec![
             ignite,

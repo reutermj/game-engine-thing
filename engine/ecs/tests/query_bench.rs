@@ -175,21 +175,27 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
 
     let workers = Workers::new(Some(Arc::new(Inline)));
     let s = Instant::now();
-    let parts = q.par_for_each_page(&workers, |r| Vec::with_capacity(r.len()), |out, page, (m, v, _)| {
-        out.extend(page.rows().map(|r| solver(&m[r], &v[r])))
-    });
+    let parts = q.par_for_each_page(
+        &workers,
+        |r| Vec::with_capacity(r.len()),
+        |out, page, (m, v, _)| out.extend(page.rows().map(|r| solver(&m[r], &v[r]))),
+    );
     let mut out: Vec<Solver> = Vec::with_capacity(n);
     parts.into_iter().for_each(|p| out.extend(p));
     record(9, s, n);
 
     let s = Instant::now();
     let out = &out;
-    q.par_for_each_page(&workers, |r| r.start, |i, page, (_, mut v, _)| {
-        for r in page.rows() {
-            v.set(r, Vel { x: out[*i].v[0], y: out[*i].v[1] });
-            *i += 1;
-        }
-    });
+    q.par_for_each_page(
+        &workers,
+        |r| r.start,
+        |i, page, (_, mut v, _)| {
+            for r in page.rows() {
+                v.set(r, Vel { x: out[*i].v[0], y: out[*i].v[1] });
+                *i += 1;
+            }
+        },
+    );
     record(10, s, n);
 
     let s = Instant::now();
@@ -210,31 +216,43 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     record(13, s, n);
 
     let s = Instant::now();
-    q.par_for_each_page(&workers, |_| (), |_, page, (m, mut v, _)| {
-        for i in page.rows().filter(|&i| m[i].kind == 0) {
-            let mut v = v.get_mut(i);
-            v.x += m[i].a * 0.016;
-            v.y += m[i].b * 0.016;
-        }
-    });
+    q.par_for_each_page(
+        &workers,
+        |_| (),
+        |_, page, (m, mut v, _)| {
+            for i in page.rows().filter(|&i| m[i].kind == 0) {
+                let mut v = v.get_mut(i);
+                v.x += m[i].a * 0.016;
+                v.y += m[i].b * 0.016;
+            }
+        },
+    );
     record(14, s, n);
 
     let s = Instant::now();
-    q.par_for_each(&workers, |_| (), |_, _, (m, mut v, _)| {
-        if m.kind == 0 {
-            v.x += m.a * 0.016;
-            v.y += m.b * 0.016;
-        }
-    });
+    q.par_for_each(
+        &workers,
+        |_| (),
+        |_, _, (m, mut v, _)| {
+            if m.kind == 0 {
+                v.x += m.a * 0.016;
+                v.y += m.b * 0.016;
+            }
+        },
+    );
     record(15, s, n);
 
     let s = Instant::now();
-    q.par_for_each(&Workers::default(), |_| (), |_, _, (m, mut v, _)| {
-        if m.kind == 0 {
-            v.x += m.a * 0.016;
-            v.y += m.b * 0.016;
-        }
-    });
+    q.par_for_each(
+        &Workers::default(),
+        |_| (),
+        |_, _, (m, mut v, _)| {
+            if m.kind == 0 {
+                v.x += m.a * 0.016;
+                v.y += m.b * 0.016;
+            }
+        },
+    );
     record(16, s, n);
 
     let s = Instant::now();

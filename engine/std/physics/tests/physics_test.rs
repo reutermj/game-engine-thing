@@ -99,7 +99,8 @@ mod pile {
         let e = game("PILE", "at_rest");
         send(&e, "pile", "drop 200");
         let bits = |e: &Engine| {
-            let mut all: Vec<_> = e.world().values::<Position>().unwrap().into_iter().map(|(e, p)| (e, p.x.to_bits(), p.y.to_bits())).collect();
+            let mut all: Vec<_> =
+                e.world().values::<Position>().unwrap().into_iter().map(|(e, p)| (e, p.x.to_bits(), p.y.to_bits())).collect();
             all.sort();
             all
         };
@@ -393,7 +394,8 @@ mod pile {
             // gravity), the bottom row falls in that step as the same pile
             // awake does: gravity, and the contacts above it solved.
             let bottom = |e: &Engine, at: f32| {
-                let heights: std::collections::HashMap<_, _> = e.world().values::<Position>().unwrap().into_iter().map(|(b, p)| (b, p.y)).collect();
+                let heights: std::collections::HashMap<_, _> =
+                    e.world().values::<Position>().unwrap().into_iter().map(|(b, p)| (b, p.y)).collect();
                 let mut falling: Vec<f32> =
                     e.world().values::<Velocity>().unwrap().into_iter().filter(|(b, _)| heights[b] > at - 0.3).map(|(_, v)| v.y).collect();
                 falling.sort_by(f32::total_cmp);
@@ -411,7 +413,8 @@ mod pile {
             assert!(near && asleep[0] > 0.1, "{width} wide: the bottom row as it falls, asleep before {asleep:?}, awake {awake:?}");
             let w = e.world();
             let there: std::collections::HashSet<_> = w.values::<Position>().unwrap().into_iter().map(|(e, _)| e).collect();
-            let dangling = w.values::<ContactPair>().unwrap().into_iter().filter(|(_, p)| !there.contains(&p.a) || !there.contains(&p.b)).count();
+            let dangling =
+                w.values::<ContactPair>().unwrap().into_iter().filter(|(_, p)| !there.contains(&p.a) || !there.contains(&p.b)).count();
             assert_eq!(dangling, 0, "{width} wide: no contact with the floor left for the solve to push on");
             step(&e, 29);
             assert!(lowest(&e) > at + 1.0, "{width} wide: fell through where the floor was: {} from {at}", lowest(&e));
@@ -505,7 +508,11 @@ mod pile {
             let e = asleep_pile_with("PILE_HOOK", "despawn_between", (width, n), &[]);
             send(&e, "pile_hook", "despawn");
             step(&e, 2);
-            assert!(asleep(&e) < all - 1.0, "{width} wide: despawned between finding contacts and solving, its island woke: {} asleep", asleep(&e));
+            assert!(
+                asleep(&e) < all - 1.0,
+                "{width} wide: despawned between finding contacts and solving, its island woke: {} asleep",
+                asleep(&e)
+            );
         }
     }
 
@@ -547,8 +554,12 @@ mod pile {
             step(&e, 1);
             let at: std::collections::HashMap<_, _> = e.world().values::<Position>().unwrap().into_iter().collect();
             let near_nap = |b: &engine_ecs::Entity| at.get(b).is_some_and(|p: &Position| (p.y - NAP).abs() < 0.1);
-            let fell: Vec<_> = e.world().values::<Velocity>().unwrap().into_iter().filter(|(b, _)| near_nap(b)).map(|(b, v)| (v.y, at[&b].y)).collect();
-            assert!(fell.len() == 2 && fell.iter().all(|(vy, y)| *vy > 0.3 && *y > NAP), "{width} wide: woken, they fell in the step they woke: {fell:?}");
+            let fell: Vec<_> =
+                e.world().values::<Velocity>().unwrap().into_iter().filter(|(b, _)| near_nap(b)).map(|(b, v)| (v.y, at[&b].y)).collect();
+            assert!(
+                fell.len() == 2 && fell.iter().all(|(vy, y)| *vy > 0.3 && *y > NAP),
+                "{width} wide: woken, they fell in the step they woke: {fell:?}"
+            );
         }
     }
 
@@ -564,9 +575,16 @@ mod pile {
         send(&e, "pile", "sleep 0.05 0.5");
         until_asleep(&e, 38.0, 2000);
         let on_shelf = |e: &Engine| {
-            let bodies: std::collections::HashSet<_> = e.world().values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).map(|(e, _)| e).collect();
-            let mut all: Vec<f32> =
-                e.world().values::<Position>().unwrap().into_iter().filter(|(en, p)| bodies.contains(en) && p.x < 20.0).map(|(_, p)| p.y).collect();
+            let bodies: std::collections::HashSet<_> =
+                e.world().values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).map(|(e, _)| e).collect();
+            let mut all: Vec<f32> = e
+                .world()
+                .values::<Position>()
+                .unwrap()
+                .into_iter()
+                .filter(|(en, p)| bodies.contains(en) && p.x < 20.0)
+                .map(|(_, p)| p.y)
+                .collect();
             all.sort_by(f32::total_cmp);
             all
         };
@@ -694,7 +712,8 @@ mod pile {
             send(&e, "pile", "sleep 0.05 0.5");
             let mut seen = Vec::new();
             let mut look = |e: &Engine| {
-                let mut bits: Vec<_> = e.world().values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
+                let mut bits: Vec<_> =
+                    e.world().values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
                 bits.sort_unstable();
                 seen.push((bits, asleep(e).to_bits(), in_sleeping_tables(e)));
             };
@@ -711,7 +730,10 @@ mod pile {
         let once = run("replay_a", 60);
         // Asleep, woken, and asleep again: sleeping had a part in it.
         let counts: Vec<f32> = once.iter().map(|s| f32::from_bits(s.1)).collect();
-        assert!(counts.iter().filter(|&&c| c >= 1000.0).count() >= 2 && counts.iter().any(|&c| c < 1000.0), "asleep at each look: {counts:?}");
+        assert!(
+            counts.iter().filter(|&&c| c >= 1000.0).count() >= 2 && counts.iter().any(|&c| c < 1000.0),
+            "asleep at each look: {counts:?}"
+        );
         assert!(once == run("replay_b", 60), "replayed, the same");
         assert!(once == run("replay_30", 30), "at 30 frames a second, the same");
     }
@@ -830,8 +852,7 @@ mod runner {
         let e = game("RUNNER", "contacts");
         step(&e, 20);
         let contacts = send(&e, "runner", "contacts");
-        let lines: Vec<Vec<f32>> =
-            contacts.lines().map(|l| l.split_whitespace().map(|v| v.parse().unwrap()).collect()).collect();
+        let lines: Vec<Vec<f32>> = contacts.lines().map(|l| l.split_whitespace().map(|v| v.parse().unwrap()).collect()).collect();
         // At x 2.5, only the tile across 2..3 is under it.
         assert_eq!(lines.len(), 1, "{contacts}");
         assert_eq!((lines[0][1], lines[0][2]), (0.0, 1.0), "{contacts}");
@@ -961,7 +982,8 @@ mod threads {
             contacts.sort_unstable();
             let mut overlaps: Vec<_> = w.values::<Overlap>().unwrap().into_iter().map(|(en, o)| (en, o.a, o.b)).collect();
             overlaps.sort_unstable();
-            let mut touching: Vec<_> = w.values::<Touching>().unwrap().into_iter().map(|(en, t)| (en, [t.below, t.above, t.left, t.right])).collect();
+            let mut touching: Vec<_> =
+                w.values::<Touching>().unwrap().into_iter().map(|(en, t)| (en, [t.below, t.above, t.left, t.right])).collect();
             touching.sort_unstable();
             (all, contacts, overlaps, touching)
         };

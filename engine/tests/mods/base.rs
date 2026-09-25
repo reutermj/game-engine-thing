@@ -31,7 +31,6 @@ impl Mod for Base {
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!("base {BUILD}"));
     }
-
 }
 
 export_mod!(Base);

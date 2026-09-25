@@ -29,9 +29,7 @@ pub fn collide(a: &Placed, b: &Placed, rel: Vec2) -> Option<Manifold> {
         (Shape::Box(ha), Shape::Box(hb)) => box_box(a.at, ha, b.at, hb, rel),
         (Shape::Circle(ra), Shape::Circle(rb)) => circle_circle(a.at, ra, b.at, rb),
         (Shape::Box(h), Shape::Circle(r)) => box_circle(a.at, h, b.at, r),
-        (Shape::Circle(r), Shape::Box(h)) => {
-            box_circle(b.at, h, a.at, r).map(|m| Manifold { normal: -m.normal, ..m })
-        }
+        (Shape::Circle(r), Shape::Box(h)) => box_circle(b.at, h, a.at, r).map(|m| Manifold { normal: -m.normal, ..m }),
     }
 }
 
@@ -107,7 +105,8 @@ mod tests {
     #[test]
     fn boxes_push_apart_along_the_shallower_axis() {
         // b sits on a, sunk 0.1 into it.
-        let m = collide(&rect(Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.5)), &rect(Vec2::new(0.2, -0.9), Vec2::new(0.5, 0.5)), Vec2::ZERO).unwrap();
+        let m =
+            collide(&rect(Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.5)), &rect(Vec2::new(0.2, -0.9), Vec2::new(0.5, 0.5)), Vec2::ZERO).unwrap();
         assert_eq!(m.normal, Vec2::new(0.0, -1.0));
         assert!((m.depth - 0.1).abs() < 1e-5, "{m:?}");
     }

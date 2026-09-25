@@ -200,4 +200,3 @@ fn input_comes_first_then_the_rules_the_walkers_physics_and_what_they_did() {
          late: platformer::take_hits"
     );
 }
-

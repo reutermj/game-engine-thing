@@ -12,8 +12,8 @@
 use engine_api::{Cx, Despawns, EventReader, Mod, Query, Spawner, Systems, With, export_mod, phase};
 use physics::{Body, Collider, Gravity, Position, Touching, Trigger, Velocity};
 use platformer::{
-    Bounce, Coin, GOAL, GRAVITY, Hurt, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER, PLAYER_HEIGHT,
-    PLAYER_WIDTH, Player, RUN_SPEED, Run, SENSORS, SPIKE, TILES, Tile,
+    Bounce, Coin, GOAL, GRAVITY, Hurt, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
+    RUN_SPEED, Run, SENSORS, SPIKE, TILES, Tile,
 };
 
 engine_api::mod_state! {
@@ -72,15 +72,7 @@ impl Core {
             // Seen by the systems after this one: physics moves it this frame.
             let body = Body { friction: 0.0, ..Body::default() };
             let collider = Collider::rect(PLAYER_WIDTH / 2.0, PLAYER_HEIGHT / 2.0).on(PLAYER, TILES | SENSORS);
-            spawner.spawn((
-                Player::default(),
-                Input::default(),
-                start(&info),
-                Velocity::default(),
-                body,
-                collider,
-                Touching::default(),
-            ));
+            spawner.spawn((Player::default(), Input::default(), start(&info), Velocity::default(), body, collider, Touching::default()));
         }
     }
 

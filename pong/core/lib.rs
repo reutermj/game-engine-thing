@@ -12,8 +12,8 @@
 use engine_api::{Cx, Dt, Entity, EventReader, Mod, Query, Systems, With, Without, WorldMut, export_mod, phase};
 use physics::{Body, Collider, Contact, Position, Trigger, Velocity};
 use pong::{
-    BALL_RADIUS, Ball, Goal, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE,
-    SERVE_SPEED, Score, Steer, WIDTH,
+    BALL_RADIUS, Ball, Goal, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE, SERVE_SPEED, Score,
+    Steer, WIDTH,
 };
 
 /// Vertical speed of each serve, as a fraction of `SERVE_SPEED`, in turn.
@@ -78,13 +78,7 @@ fn serve(score: &Score, direction: f32) -> (Position, Velocity) {
 }
 
 impl Core {
-    fn steer(
-        &mut self,
-        _: &mut (),
-        _: &mut Cx,
-        mut steers: EventReader<Steer>,
-        mut players: Query<&mut Paddle, With<Player>>,
-    ) {
+    fn steer(&mut self, _: &mut (), _: &mut Cx, mut steers: EventReader<Steer>, mut players: Query<&mut Paddle, With<Player>>) {
         let Some(intent) = steers.read().last().map(|s| s.intent) else { return };
         players.for_each(|_, mut paddle| paddle.intent = intent);
     }

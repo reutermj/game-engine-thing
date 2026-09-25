@@ -94,7 +94,8 @@ fn sort_pairs(w: &Workers, parts: Vec<Vec<Vec<(u32, u32)>>>) -> Vec<(u32, u32)> 
 fn fill<T: Send + Clone>(w: &Workers, n: usize, min: usize, f: impl Fn(std::ops::Range<usize>, &mut Vec<T>) + Sync) -> Vec<T> {
     static TASK_ALLOC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let in_task = *TASK_ALLOC.get_or_init(|| std::env::var_os("TASK_ALLOC").is_some());
-    let parts: Vec<_> = even(n, w.chunks(n, min)).into_iter().map(|r| (if in_task { Vec::new() } else { Vec::with_capacity(r.len()) }, r)).collect();
+    let parts: Vec<_> =
+        even(n, w.chunks(n, min)).into_iter().map(|r| (if in_task { Vec::new() } else { Vec::with_capacity(r.len()) }, r)).collect();
     w.map_each(parts, |_, (mut out, r)| {
         f(r, &mut out);
         out
@@ -163,28 +164,28 @@ impl Arrays {
 
         let pairs = &pairs;
         let mut found: Vec<Cached> = fill(w, pairs.len(), 256, |r, found| {
-                for &(i, j) in &pairs[r] {
-                    let (a, b) = (i as usize, j as usize);
-                    let (ca, cb, ba, bb) = (&this.collider[a], &this.collider[b], &this.body[a], &this.body[b]);
-                    let meets = ca.mask & cb.layer != 0 && cb.mask & ca.layer != 0;
-                    if !meets || ca.sensor || cb.sensor || (ba.kind != DYNAMIC && bb.kind != DYNAMIC) {
-                        continue;
-                    }
-                    let Some(m) = narrow::collide(&this.placed(a), &this.placed(b), this.vel[b] - this.vel[a]) else { continue };
-                    found.push(Cached {
-                        a: i,
-                        b: j,
-                        normal: m.normal,
-                        depth: m.depth,
-                        friction: ba.friction.min(bb.friction),
-                        restitution: ba.restitution.max(bb.restitution),
-                        jn: 0.0,
-                        jt: 0.0,
-                        pressed: false,
-                        was_pressed: false,
-                    });
+            for &(i, j) in &pairs[r] {
+                let (a, b) = (i as usize, j as usize);
+                let (ca, cb, ba, bb) = (&this.collider[a], &this.collider[b], &this.body[a], &this.body[b]);
+                let meets = ca.mask & cb.layer != 0 && cb.mask & ca.layer != 0;
+                if !meets || ca.sensor || cb.sensor || (ba.kind != DYNAMIC && bb.kind != DYNAMIC) {
+                    continue;
                 }
-            });
+                let Some(m) = narrow::collide(&this.placed(a), &this.placed(b), this.vel[b] - this.vel[a]) else { continue };
+                found.push(Cached {
+                    a: i,
+                    b: j,
+                    normal: m.normal,
+                    depth: m.depth,
+                    friction: ba.friction.min(bb.friction),
+                    restitution: ba.restitution.max(bb.restitution),
+                    jn: 0.0,
+                    jt: 0.0,
+                    pressed: false,
+                    was_pressed: false,
+                });
+            }
+        });
         let narrowphase = Instant::now();
 
         {
@@ -231,15 +232,15 @@ impl Arrays {
         let at = |i: u32| if slot[i as usize] == u32::MAX { still } else { slot[i as usize] };
         let mut constraints: Vec<Constraint> = fill(w, this.contacts.len(), 512, |r, out| {
             out.extend(this.contacts[r].iter().map(|c| Constraint {
-                        a: at(c.a),
-                        b: at(c.b),
-                        normal: c.normal,
-                        depth: c.depth,
-                        friction: c.friction,
-                        restitution: c.restitution,
-                        jn: c.jn,
-                        jt: c.jt,
-                        speed: 0.0,
+                a: at(c.a),
+                b: at(c.b),
+                normal: c.normal,
+                depth: c.depth,
+                friction: c.friction,
+                restitution: c.restitution,
+                jn: c.jn,
+                jt: c.jt,
+                speed: 0.0,
             }))
         });
         let solve_gather = Instant::now();
@@ -312,7 +313,16 @@ fn world_digest(w: &World) -> Vec<u32> {
     contacts.sort_by_key(|(_, p)| (p.a, p.b));
     for (e, p) in contacts {
         let (j, m) = (impulses[&e], manifolds[&e]);
-        d.extend([e.index, e.generation, p.a.index, p.b.index, j.normal.to_bits(), j.tangent.to_bits(), m.pressed as u32, m.depth.to_bits()]);
+        d.extend([
+            e.index,
+            e.generation,
+            p.a.index,
+            p.b.index,
+            j.normal.to_bits(),
+            j.tangent.to_bits(),
+            m.pressed as u32,
+            m.depth.to_bits(),
+        ]);
     }
     d
 }
@@ -426,12 +436,29 @@ fn measure(manifest: &engine_control::Manifest, (n, width, warmup): (u32, f32, u
     }
     ecs[9] = ecs_frame - systems;
     ecs[10] = field(&stages, "near");
-    let arr = [array_frame, t.gravity / f, 0.0, t.broadphase / f, t.narrowphase / f, t.merge / f, t.solve_gather / f, t.solver / f, t.write_back / f, 0.0, 0.0];
+    let arr = [
+        array_frame,
+        t.gravity / f,
+        0.0,
+        t.broadphase / f,
+        t.narrowphase / f,
+        t.merge / f,
+        t.solve_gather / f,
+        t.solver / f,
+        t.write_back / f,
+        0.0,
+        0.0,
+    ];
     let run = Run { ecs, arrays: arr, ecs_digest: world_digest(e.world()), arrays_digest: arrays.digest() };
     if workers.threads() == 1 {
         // The comparison `main` makes: the same computation both ways.
         let ecs: HashMap<Entity, Position> = e.world().values::<Position>().unwrap().into_iter().collect();
-        let differ = arrays.entity.iter().zip(&arrays.pos).filter(|(e, p)| ecs[e].x.to_bits() != p.x.to_bits() || ecs[e].y.to_bits() != p.y.to_bits()).count();
+        let differ = arrays
+            .entity
+            .iter()
+            .zip(&arrays.pos)
+            .filter(|(e, p)| ecs[e].x.to_bits() != p.x.to_bits() || ecs[e].y.to_bits() != p.y.to_bits())
+            .count();
         assert_eq!(differ, 0, "{n}: {differ} bodies ended elsewhere than the arrays put them");
     }
     e.world().set_executor(None);
@@ -517,7 +544,9 @@ pub fn run(manifest: &engine_control::Manifest) {
                 runs[ti].push(run);
             }
         }
-        println!("\n{n} in a box {width} wide, {scene}: µs per step (speedup over one thread), ECS / arrays, medians of {reps} runs of {FRAMES} steps; pool");
+        println!(
+            "\n{n} in a box {width} wide, {scene}: µs per step (speedup over one thread), ECS / arrays, medians of {reps} runs of {FRAMES} steps; pool"
+        );
         println!("(every run at N threads ended bit for bit where one thread did, both sides)\n");
         println!("| stage | {} |", configs.iter().map(|c| c.0.clone()).collect::<Vec<_>>().join(" | "));
         println!("|---|{}", "---|".repeat(configs.len()));
@@ -553,7 +582,9 @@ pub fn run(manifest: &engine_control::Manifest) {
     }
     // The same step with threads spawned for every run instead of kept.
     let (n, width, warmup) = (10000u32, 401.0f32, 400u32);
-    println!("\n{n} settled in a box {width} wide, pool against threads spawned per run (`Scoped`): µs per step, ECS / arrays, medians of {reps}\n");
+    println!(
+        "\n{n} settled in a box {width} wide, pool against threads spawned per run (`Scoped`): µs per step, ECS / arrays, medians of {reps}\n"
+    );
     println!("| threads | pool: frame | scoped: frame | pool: stages but the solver | scoped: stages but the solver |");
     println!("|---|---|---|---|---|");
     for &t in threads.iter().filter(|&&t| t > 1) {

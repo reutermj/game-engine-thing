@@ -442,8 +442,7 @@ fn dangling(layout: Layout) -> NonNull<u8> {
 }
 
 fn array(layout: Layout, n: usize) -> Layout {
-    Layout::from_size_align(layout.size().checked_mul(n).expect("column too large"), layout.align())
-        .expect("column layout")
+    Layout::from_size_align(layout.size().checked_mul(n).expect("column too large"), layout.align()).expect("column layout")
 }
 
 #[cfg(test)]
@@ -728,9 +727,7 @@ mod tests {
         c.set_tick(3, 7);
         // SAFETY: reads each u32 and writes a whole u64; nothing to drop.
         unsafe {
-            c.migrate(ValueType::of::<Large>(), |old, new| {
-                (new as *mut Large).write(Large { n: (*(old as *const Small)).n as u64 * 2 })
-            })
+            c.migrate(ValueType::of::<Large>(), |old, new| (new as *mut Large).write(Large { n: (*(old as *const Small)).n as u64 * 2 }))
         };
         assert_eq!(c.as_slice::<Large>().iter().map(|l| l.n).sum::<u64>(), 90);
         // The same rows, written when they were.

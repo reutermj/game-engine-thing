@@ -33,14 +33,8 @@ fn timeline(spans: &[Span]) -> String {
     for s in spans {
         let (a, b) = (s.start.as_secs_f64() / end * width, s.end.as_secs_f64() / end * width);
         let (a, b) = (a as usize, (b.ceil() as usize).max(a as usize + 1));
-        out += &format!(
-            "  {:<16} t{} |{}{}{}|\n",
-            s.node,
-            s.thread,
-            " ".repeat(a),
-            "#".repeat(b - a),
-            " ".repeat(64usize.saturating_sub(b))
-        );
+        out +=
+            &format!("  {:<16} t{} |{}{}{}|\n", s.node, s.thread, " ".repeat(a), "#".repeat(b - a), " ".repeat(64usize.saturating_sub(b)));
     }
     out
 }

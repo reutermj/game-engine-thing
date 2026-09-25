@@ -22,8 +22,8 @@ use std::collections::BTreeMap;
 use engine_ecs::erased::{ErasedColumn, ValueType};
 use engine_ecs::world::PAGE_ROWS;
 use engine_ecs::{
-    Bounds, Build, Component, ComponentDesc, ComponentId, Crossing, Entity, FieldKind, FieldType, OrderKey, SpatialKey,
-    Structural, World, component, schema,
+    Bounds, Build, Component, ComponentDesc, ComponentId, Crossing, Entity, FieldKind, FieldType, OrderKey, SpatialKey, Structural, World,
+    component, schema,
 };
 
 /// Where a driver's choices come from.
@@ -443,7 +443,11 @@ fn run_world(w: &World, ch: &mut impl Choices, steps: usize, spawns: u64) -> usi
                         0 => {
                             let (ca, cb) = (id(), id());
                             if v2 {
-                                s.spawn(e, (a::V2 { n, tag: Canary::new(n), c: Canary::new(ca) }, B { c: Canary::new(cb) }), &[ids.a, ids.b]);
+                                s.spawn(
+                                    e,
+                                    (a::V2 { n, tag: Canary::new(n), c: Canary::new(ca) }, B { c: Canary::new(cb) }),
+                                    &[ids.a, ids.b],
+                                );
                                 m.a = Some((ca, n, Some(n)));
                             } else {
                                 s.spawn(e, (a::V1 { c: Canary::new(ca), n: n as u32 }, B { c: Canary::new(cb) }), &[ids.a, ids.b]);

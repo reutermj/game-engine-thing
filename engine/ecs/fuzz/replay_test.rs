@@ -26,10 +26,8 @@ fn shard() -> (usize, usize) {
 
 fn replay(target: &str, run: impl Fn(&[u8])) {
     let dir = Path::new(CORPUS).join(target);
-    let mut inputs: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .map(|entry| entry.unwrap().path())
-        .collect();
+    let mut inputs: Vec<_> =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())).map(|entry| entry.unwrap().path()).collect();
     inputs.sort();
     assert!(!inputs.is_empty(), "a corpus for {target}");
     let (index, total) = shard();

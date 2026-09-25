@@ -918,7 +918,11 @@ impl Islands {
         let mut inert = Vec::new();
         let mut island_of = Vec::with_capacity(contacts.len());
         for (k, c) in contacts.iter().enumerate() {
-            let end = if moves(c.a) { c.a } else if moves(c.b) { c.b } else {
+            let end = if moves(c.a) {
+                c.a
+            } else if moves(c.b) {
+                c.b
+            } else {
                 inert.push(k as u32);
                 island_of.push(u32::MAX);
                 continue;
@@ -1038,7 +1042,13 @@ impl Batches {
         let island: Vec<u32> = contacts
             .iter()
             .map(|c| {
-                let end = if moves(c.a) { c.a } else if moves(c.b) { c.b } else { return u32::MAX };
+                let end = if moves(c.a) {
+                    c.a
+                } else if moves(c.b) {
+                    c.b
+                } else {
+                    return u32::MAX;
+                };
                 let r = find(&mut parent, end) as usize;
                 if id[r] == u32::MAX {
                     id[r] = size.len() as u32;
@@ -1315,114 +1325,165 @@ fn scene(name: &str, input: &Input, pool: &Pool, threads: &[usize]) {
             assert!(outcome(&i.bodies, &i.contacts) == reference, "{name}: island batches on {t} threads differ from serial");
         }
     }
-    println!("  bit for bit: colored and wide the same on every thread count; islands and island batches the same as serial on every count (3 runs each)");
+    println!(
+        "  bit for bit: colored and wide the same on every thread count; islands and island batches the same as serial on every count (3 runs each)"
+    );
 
     // What building them costs a step.
     let mut build: Vec<Variant> = vec![
-        (1, Box::new(|| {
-            let start = Instant::now();
-            black_box(color(&input.bodies, &input.contacts, Rule::Box2d));
-            us(start)
-        })),
-        (1, Box::new(|| {
-            let c = color(&input.bodies, &input.contacts, Rule::Box2d);
-            let start = Instant::now();
-            let colors = Colors::of(&c, &input.contacts);
-            black_box(colors.permute(&input.contacts));
-            us(start)
-        })),
-        (1, Box::new(|| {
-            let mut contacts = input.contacts.clone();
-            let colored = colors.permute(&contacts);
-            let start = Instant::now();
-            colors.unpermute(&colored, &mut contacts);
-            black_box(&contacts);
-            us(start)
-        })),
-        (1, Box::new(|| {
-            let start = Instant::now();
-            black_box(Islands::of(&input.bodies, &input.contacts));
-            us(start)
-        })),
-        (1, Box::new(|| {
-            let start = Instant::now();
-            black_box(Batches::of(&input.bodies, &input.contacts, 16));
-            us(start)
-        })),
-        (1, Box::new(|| {
-            let mut colored = colors.permute(&input.contacts);
-            let start = Instant::now();
-            let wide = Wide::of(&input.bodies, &mut colored, &colors, DT);
-            wide.finish(&mut colored);
-            black_box(&colored);
-            us(start)
-        })),
+        (
+            1,
+            Box::new(|| {
+                let start = Instant::now();
+                black_box(color(&input.bodies, &input.contacts, Rule::Box2d));
+                us(start)
+            }),
+        ),
+        (
+            1,
+            Box::new(|| {
+                let c = color(&input.bodies, &input.contacts, Rule::Box2d);
+                let start = Instant::now();
+                let colors = Colors::of(&c, &input.contacts);
+                black_box(colors.permute(&input.contacts));
+                us(start)
+            }),
+        ),
+        (
+            1,
+            Box::new(|| {
+                let mut contacts = input.contacts.clone();
+                let colored = colors.permute(&contacts);
+                let start = Instant::now();
+                colors.unpermute(&colored, &mut contacts);
+                black_box(&contacts);
+                us(start)
+            }),
+        ),
+        (
+            1,
+            Box::new(|| {
+                let start = Instant::now();
+                black_box(Islands::of(&input.bodies, &input.contacts));
+                us(start)
+            }),
+        ),
+        (
+            1,
+            Box::new(|| {
+                let start = Instant::now();
+                black_box(Batches::of(&input.bodies, &input.contacts, 16));
+                us(start)
+            }),
+        ),
+        (
+            1,
+            Box::new(|| {
+                let mut colored = colors.permute(&input.contacts);
+                let start = Instant::now();
+                let wide = Wide::of(&input.bodies, &mut colored, &colors, DT);
+                wide.finish(&mut colored);
+                black_box(&colored);
+                us(start)
+            }),
+        ),
     ];
     let b = timings(pool, &mut build);
     println!(
         "  building, µs (median, 10th-90th): coloring {:.1} ({:.1}-{:.1}), ordering and copying into color order {:.1} ({:.1}-{:.1}), copying back {:.1} ({:.1}-{:.1}), islands {:.1} ({:.1}-{:.1}), island batches for 16 threads {:.1} ({:.1}-{:.1}), \
          wide batches from color order and back, with the targets {:.1} ({:.1}-{:.1})\n",
-        b[0].0, b[0].1, b[0].2, b[1].0, b[1].1, b[1].2, b[2].0, b[2].1, b[2].2, b[3].0, b[3].1, b[3].2, b[4].0, b[4].1, b[4].2,
-        b[5].0, b[5].1, b[5].2
+        b[0].0,
+        b[0].1,
+        b[0].2,
+        b[1].0,
+        b[1].1,
+        b[1].2,
+        b[2].0,
+        b[2].1,
+        b[2].2,
+        b[3].0,
+        b[3].1,
+        b[3].2,
+        b[4].0,
+        b[4].1,
+        b[4].2,
+        b[5].0,
+        b[5].1,
+        b[5].2
     );
 
     // The solves. The pool is woken just before each timed run, as a step
     // would keep it awake through the physics.
     let mut variants: Vec<Variant> = Vec::new();
     let mut names = Vec::new();
-    variants.push((1, Box::new(|| {
-        let mut i = input.clone();
-        warm_up(pool, 1, 2);
-        let start = Instant::now();
-        solver::solve(&mut i.bodies, &mut i.contacts, DT);
-        us(start)
-    })));
+    variants.push((
+        1,
+        Box::new(|| {
+            let mut i = input.clone();
+            warm_up(pool, 1, 2);
+            let start = Instant::now();
+            solver::solve(&mut i.bodies, &mut i.contacts, DT);
+            us(start)
+        }),
+    ));
     names.push(("serial".to_string(), 1));
     for &t in threads {
         let colors = &colors;
-        variants.push((t, Box::new(move || {
-            let mut i = input.clone();
-            let mut colored = colors.permute(&i.contacts);
-            warm_up(pool, t, 2);
-            let start = Instant::now();
-            solve_colored(pool, t, &mut i.bodies, &mut colored, colors, DT);
-            us(start)
-        })));
+        variants.push((
+            t,
+            Box::new(move || {
+                let mut i = input.clone();
+                let mut colored = colors.permute(&i.contacts);
+                warm_up(pool, t, 2);
+                let start = Instant::now();
+                solve_colored(pool, t, &mut i.bodies, &mut colored, colors, DT);
+                us(start)
+            }),
+        ));
         names.push(("colored".to_string(), t));
     }
     for &t in threads {
         let colors = &colors;
-        variants.push((t, Box::new(move || {
-            let mut i = input.clone();
-            let mut colored = colors.permute(&i.contacts);
-            let mut wide = Wide::of(&i.bodies, &mut colored, colors, DT);
-            warm_up(pool, t, 2);
-            let start = Instant::now();
-            solve_wide(pool, t, &mut i.bodies, &mut wide);
-            us(start)
-        })));
+        variants.push((
+            t,
+            Box::new(move || {
+                let mut i = input.clone();
+                let mut colored = colors.permute(&i.contacts);
+                let mut wide = Wide::of(&i.bodies, &mut colored, colors, DT);
+                warm_up(pool, t, 2);
+                let start = Instant::now();
+                solve_wide(pool, t, &mut i.bodies, &mut wide);
+                us(start)
+            }),
+        ));
         names.push(("colored, wide".to_string(), t));
     }
     for &t in threads {
         let islands = &islands;
-        variants.push((t, Box::new(move || {
-            let mut i = input.clone();
-            warm_up(pool, t, 2);
-            let start = Instant::now();
-            solve_islands(pool, t, &mut i.bodies, &mut i.contacts, islands, DT);
-            us(start)
-        })));
+        variants.push((
+            t,
+            Box::new(move || {
+                let mut i = input.clone();
+                warm_up(pool, t, 2);
+                let start = Instant::now();
+                solve_islands(pool, t, &mut i.bodies, &mut i.contacts, islands, DT);
+                us(start)
+            }),
+        ));
         names.push(("islands".to_string(), t));
     }
     for &t in threads {
         let batches = Batches::of(&input.bodies, &input.contacts, t);
-        variants.push((t, Box::new(move || {
-            let mut i = input.clone();
-            warm_up(pool, t, 2);
-            let start = Instant::now();
-            solve_batches(pool, t, &mut i.bodies, &mut i.contacts, &batches, DT);
-            us(start)
-        })));
+        variants.push((
+            t,
+            Box::new(move || {
+                let mut i = input.clone();
+                warm_up(pool, t, 2);
+                let start = Instant::now();
+                solve_batches(pool, t, &mut i.bodies, &mut i.contacts, &batches, DT);
+                us(start)
+            }),
+        ));
         names.push(("island batches".to_string(), t));
     }
     let r = timings(pool, &mut variants);
@@ -1460,7 +1521,10 @@ fn diagnose(input: &Input, pool: &Pool, colors: &Colors, threads: &[usize]) {
         let per: Vec<f64> = waited.into_iter().map(|w| spread(w).0).collect();
         let (lo, hi) = (per.iter().copied().fold(f64::MAX, f64::min), per.iter().copied().fold(0.0, f64::max));
         let working: Vec<String> = per.iter().map(|w| format!("{:.0}", solve - w)).collect();
-        println!("  diag {t} threads: solve {solve:.0} µs; at barriers, per thread {lo:.0}-{hi:.0} µs; working, by thread: {}", working.join(" "));
+        println!(
+            "  diag {t} threads: solve {solve:.0} µs; at barriers, per thread {lo:.0}-{hi:.0} µs; working, by thread: {}",
+            working.join(" ")
+        );
     }
 }
 
@@ -1472,32 +1536,41 @@ fn overheads(pool: &Pool, threads: &[usize]) {
     for &t in threads.iter().filter(|&&t| t > 1) {
         const BARRIERS: usize = 1000;
         let mut v: Vec<Variant> = vec![
-            (t, Box::new(|| {
-                pool.run(t, &|_| {});
-                let start = Instant::now();
-                pool.run(t, &|_| {});
-                us(start)
-            })),
-            (t, Box::new(|| {
-                let barrier = Barrier::new(t);
-                pool.run(t, &|_| {});
-                let start = Instant::now();
-                pool.run(t, &|_| {
-                    for _ in 0..BARRIERS {
-                        barrier.wait();
-                    }
-                });
-                us(start) / BARRIERS as f64
-            })),
-            (1, Box::new(|| {
-                let start = Instant::now();
-                std::thread::scope(|s| {
-                    for _ in 1..t {
-                        s.spawn(|| black_box(0));
-                    }
-                });
-                us(start)
-            })),
+            (
+                t,
+                Box::new(|| {
+                    pool.run(t, &|_| {});
+                    let start = Instant::now();
+                    pool.run(t, &|_| {});
+                    us(start)
+                }),
+            ),
+            (
+                t,
+                Box::new(|| {
+                    let barrier = Barrier::new(t);
+                    pool.run(t, &|_| {});
+                    let start = Instant::now();
+                    pool.run(t, &|_| {
+                        for _ in 0..BARRIERS {
+                            barrier.wait();
+                        }
+                    });
+                    us(start) / BARRIERS as f64
+                }),
+            ),
+            (
+                1,
+                Box::new(|| {
+                    let start = Instant::now();
+                    std::thread::scope(|s| {
+                        for _ in 1..t {
+                            s.spawn(|| black_box(0));
+                        }
+                    });
+                    us(start)
+                }),
+            ),
         ];
         let r = timings(pool, &mut v);
         println!(
@@ -1526,7 +1599,10 @@ fn settled(a: &Arrays, before: &[Vec2]) -> Settled {
         deepest: a.contacts.iter().map(|c| c.depth).fold(0.0, f32::max),
         mean: speeds.iter().sum::<f32>() / speeds.len() as f32,
         fastest: speeds.iter().copied().fold(0.0, f32::max),
-        moved: moving.iter().filter(|&&i| a.pos[i].x.to_bits() != before[i].x.to_bits() || a.pos[i].y.to_bits() != before[i].y.to_bits()).count(),
+        moved: moving
+            .iter()
+            .filter(|&&i| a.pos[i].x.to_bits() != before[i].x.to_bits() || a.pos[i].y.to_bits() != before[i].y.to_bits())
+            .count(),
     }
 }
 

@@ -115,9 +115,7 @@ impl Cx<'_> {
             // A failed scheduler was reported when it failed, and `list`
             // shows it; the game keeps running on the loader's frame until
             // it's reloaded.
-            Err(e) if matches!(e.kind, CallErrorKind::NotProvided | CallErrorKind::ProviderFailed) => {
-                self.step_mods()
-            }
+            Err(e) if matches!(e.kind, CallErrorKind::NotProvided | CallErrorKind::ProviderFailed) => self.step_mods(),
             Err(e) => {
                 self.log(format!("no frame: {e}"));
                 Status::ERROR

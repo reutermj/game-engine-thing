@@ -77,10 +77,7 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
     for m in mods {
         for (index, desc) in m.systems.iter().enumerate() {
             let Some(&rank) = phase_rank.get(desc.phase.as_str()) else {
-                return Err(format!(
-                    "{}::{} runs in phase {}, which no loaded mod declares",
-                    m.name, desc.name, desc.phase
-                ));
+                return Err(format!("{}::{} runs in phase {}, which no loaded mod declares", m.name, desc.name, desc.phase));
             };
             let name = format!("{}::{}", m.name, desc.name);
             if nodes.iter().any(|n: &Node| n.planned.name == name) {
@@ -123,9 +120,11 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
     // `simulate` is fixed-rate, and any phase a mod declares so (the first
     // declaration with a rate wins).
     let rate = |name: &str| {
-        mods.iter().flat_map(|m| m.phases).filter(|p| p.name == name).find_map(|p| p.fixed_hz).or_else(|| {
-            (name == phase::SIMULATE).then_some(phase::SIMULATE_HZ)
-        })
+        mods.iter()
+            .flat_map(|m| m.phases)
+            .filter(|p| p.name == name)
+            .find_map(|p| p.fixed_hz)
+            .or_else(|| (name == phase::SIMULATE).then_some(phase::SIMULATE_HZ))
     };
     let mut planned: Vec<PlannedPhase> =
         phases.iter().map(|name| PlannedPhase { name: name.clone(), systems: Vec::new(), fixed_hz: rate(name) }).collect();
@@ -222,8 +221,7 @@ mod tests {
     }
 
     fn order(mods: &[(&str, Vec<SystemDesc>, Vec<PhaseDesc>)]) -> Result<Vec<String>, String> {
-        let decls: Vec<ModDecls> =
-            mods.iter().map(|(name, systems, phases)| ModDecls { name, systems, phases }).collect();
+        let decls: Vec<ModDecls> = mods.iter().map(|(name, systems, phases)| ModDecls { name, systems, phases }).collect();
         Ok(plan(&decls)?.phases.into_iter().flat_map(|p| p.systems).map(|s| s.name).collect())
     }
 

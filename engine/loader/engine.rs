@@ -9,25 +9,24 @@
 use std::alloc::Layout;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use engine_api::{
-    API_VERSION, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL,
-    BUILD_SYMBOL, BuildFn, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc,
-};
 use engine_api::scheduler::{FramePlan, PlannedNode, Ran};
+use engine_api::{
+    API_VERSION, BUILD_SYMBOL, BuildFn, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL, InfoFn,
+    MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc,
+};
+use engine_control::Request;
 use engine_ecs::schema::{self, Field};
 use engine_ecs::{Build, Change, FrameCx, Keepalive, Log, Structural, World};
-use engine_control::Request;
 
 use crate::poison::ModLibrary;
 use crate::schedule::{self, ModDecls, Plan};
-
 
 pub struct Engine {
     host: Host,
@@ -66,7 +65,6 @@ pub struct Engine {
     /// by the group's first phase: bookkeeping like the plan's, kept across
     /// reloads. Time policy (real or lockstep) is the bootstrap's.
     accumulated: RefCell<HashMap<String, f64>>,
-
 }
 
 /// A frame in progress: its plan, its nodes in order (each system, then its
@@ -222,7 +220,9 @@ impl Engine {
     /// A batch of one: see [`Engine::load_batch`].
     pub fn load(&self, name: &str, path: &Path) -> Result<String, String> {
         // Asked for by name, so refuse rather than skip as a batch does.
-        if let Some(m) = self.mods.borrow().iter().find(|m| &*m.name == name && m.resident) && m.content != content_hash(path)? {
+        if let Some(m) = self.mods.borrow().iter().find(|m| &*m.name == name && m.resident)
+            && m.content != content_hash(path)?
+        {
             return Err(resident_note(name));
         }
         self.load_batch(&[(name.to_string(), path.to_path_buf())])
@@ -404,20 +404,15 @@ impl Engine {
         // Checked before reading any other field: a build from another API
         // version may lay `ModInfo` out differently.
         if info.api_version != API_VERSION {
-            return Err(format!(
-                "{name} was built against mod API v{}, engine is v{API_VERSION}",
-                info.api_version
-            ));
+            return Err(format!("{name} was built against mod API v{}, engine is v{API_VERSION}", info.api_version));
         }
         let main = unsafe { *lib.get::<MainFn>(MAIN_SYMBOL).map_err(|e| format!("{name}: {}", describe(e)))? };
         // A zero-sized mod still gets a real allocation: `alloc_zeroed` with a
         // zero-size layout is undefined behavior.
-        let layout = Layout::from_size_align(info.state_size.max(1), info.state_align)
-            .map_err(|e| format!("{name}: bad state layout: {e}"))?;
-        let (fields, drops) = unsafe {
-            schema::read_fields(info.state_fields, info.state_field_count, info.state_size, info.state_align)
-        }
-        .ok_or_else(|| format!("{name}: its state's schema doesn't describe its layout"))?;
+        let layout =
+            Layout::from_size_align(info.state_size.max(1), info.state_align).map_err(|e| format!("{name}: bad state layout: {e}"))?;
+        let (fields, drops) = unsafe { schema::read_fields(info.state_fields, info.state_field_count, info.state_size, info.state_align) }
+            .ok_or_else(|| format!("{name}: its state's schema doesn't describe its layout"))?;
         let state = StateSchema { layout, version: info.state_version, fields, drops, default: info.state_default };
         let interface = unsafe { copy_str(info.interface, info.interface_len) };
         let deps = unsafe { copy_str(info.deps, info.deps_len) };
@@ -499,11 +494,8 @@ impl Engine {
                         } else {
                             // A resident dependency's running build is the one
                             // that stays, so only a restart can bring these together.
-                            let restart = if !dep_in_batch && is_resident(dep) {
-                                format!("; {}", resident_note(dep))
-                            } else {
-                                String::new()
-                            };
+                            let restart =
+                                if !dep_in_batch && is_resident(dep) { format!("; {}", resident_note(dep)) } else { String::new() };
                             problems.push(format!(
                                 "{name} was built against a different interface of {dep} than the {} one{restart}",
                                 if dep_in_batch { "new" } else { "running" }
@@ -537,9 +529,7 @@ impl Engine {
         for (name, services) in providers {
             for service in services {
                 match seen.iter().find(|(s, _)| *s == service.name) {
-                    Some((_, other)) => {
-                        problems.push(format!("{name} and {other} both provide {}", service.name))
-                    }
+                    Some((_, other)) => problems.push(format!("{name} and {other} both provide {}", service.name)),
                     None => seen.push((&service.name, name)),
                 }
             }
@@ -594,9 +584,9 @@ impl Engine {
         let ours = self.rustc.get_or_init(|| rustc_version(Path::new("/proc/self/exe")));
         let theirs = rustc_version(path);
         match (ours, theirs) {
-            (Some(ours), Some(theirs)) if *ours != theirs => Err(format!(
-                "{name} was built by {theirs}, the engine by {ours}; restart the engine to switch compilers"
-            )),
+            (Some(ours), Some(theirs)) if *ours != theirs => {
+                Err(format!("{name} was built by {theirs}, the engine by {ours}; restart the engine to switch compilers"))
+            }
             _ => Ok(()),
         }
     }
@@ -608,15 +598,11 @@ impl Engine {
 
     pub fn unload(&self, name: &str) -> Result<String, String> {
         let mut mods = self.mods.borrow_mut();
-        let index = mods
-            .iter()
-            .position(|m| &*m.name == name)
-            .ok_or_else(|| format!("{name} is not loaded"))?;
+        let index = mods.iter().position(|m| &*m.name == name).ok_or_else(|| format!("{name} is not loaded"))?;
         if mods[index].resident {
             return Err(format!("{name} is resident: it unloads when the engine exits"));
         }
-        let dependents: Vec<&str> =
-            mods.iter().filter(|m| m.deps.iter().any(|(d, _)| d == name)).map(|m| &*m.name).collect();
+        let dependents: Vec<&str> = mods.iter().filter(|m| m.deps.iter().any(|(d, _)| d == name)).map(|m| &*m.name).collect();
         if !dependents.is_empty() {
             return Err(format!("{name} is needed by {}; unload them first", dependents.join(", ")));
         }
@@ -656,11 +642,7 @@ impl Engine {
             let generation = unsafe { (*m.ctx).generation };
             let needs: Vec<&str> = m.deps.iter().map(|(d, _)| d.as_str()).collect();
             let needs = if needs.is_empty() { String::new() } else { format!(" needs {}", needs.join(",")) };
-            out += &format!(
-                "\n  {} gen {generation}{bootstrap}{failed}{needs}  {}",
-                m.name,
-                m.source.display()
-            );
+            out += &format!("\n  {} gen {generation}{bootstrap}{failed}{needs}  {}", m.name, m.source.display());
         }
         out += &format!("\n{}", self.world.summary());
         out
@@ -701,9 +683,7 @@ impl Engine {
                 return Err(bootstrap_note(name));
             }
             if !m.resident {
-                return Err(format!(
-                    "{name} runs the frame loop, so it must be resident: engine_mod(resident = True)"
-                ));
+                return Err(format!("{name} runs the frame loop, so it must be resident: engine_mod(resident = True)"));
             }
             if m.failed.get() {
                 return Err(format!("{name} has failed"));
@@ -738,8 +718,7 @@ impl Engine {
         if let Some(plan) = &*self.plan.borrow() {
             return Ok(plan.clone());
         }
-        let decls: Vec<ModDecls> =
-            mods.iter().map(|m| ModDecls { name: &m.name, systems: &m.systems, phases: &m.phases }).collect();
+        let decls: Vec<ModDecls> = mods.iter().map(|m| ModDecls { name: &m.name, systems: &m.systems, phases: &m.phases }).collect();
         let plan = Rc::new(schedule::plan(&decls)?);
         *self.plan.borrow_mut() = Some(plan.clone());
         Ok(plan)
@@ -908,7 +887,9 @@ impl Engine {
         }));
         if applied.is_err() {
             eprintln!("[engine] applying {module}'s changes panicked; it won't run again until it is reloaded");
-            if let Ok(mods) = self.mods.try_borrow() && let Some(m) = mods.iter().find(|m| *m.name == *module) {
+            if let Ok(mods) = self.mods.try_borrow()
+                && let Some(m) = mods.iter().find(|m| *m.name == *module)
+            {
                 m.failed.set(true);
             }
         }
@@ -927,18 +908,12 @@ impl Engine {
             return false;
         }
         let Ok(mods) = self.mods.try_borrow_mut() else { return false };
-        mods.iter().any(|m| std::ptr::eq(m.ctx, caller) && m.resident)
-            && mods.iter().all(|m| m.resident || !m.running.get())
+        mods.iter().any(|m| std::ptr::eq(m.ctx, caller) && m.resident) && mods.iter().all(|m| m.resident || !m.running.get())
     }
 
     /// Serves every queued request, waiting up to `timeout` for the first.
     /// Messages for `caller`, which is running, go to `handler`.
-    fn serve(
-        &self,
-        caller: Option<&str>,
-        timeout: Duration,
-        handler: &mut dyn FnMut(&str) -> Result<String, String>,
-    ) -> Pumped {
+    fn serve(&self, caller: Option<&str>, timeout: Duration, handler: &mut dyn FnMut(&str) -> Result<String, String>) -> Pumped {
         let first = if timeout.is_zero() { self.inbox.try_recv().ok() } else { self.inbox.recv_timeout(timeout).ok() };
         for pending in first.into_iter().chain(std::iter::from_fn(|| self.inbox.try_recv().ok())) {
             let reply = self.handle(caller, &pending.text, handler);
@@ -948,12 +923,7 @@ impl Engine {
     }
 
     /// Handles one control request, returning the reply to send.
-    fn handle(
-        &self,
-        caller: Option<&str>,
-        text: &str,
-        handler: &mut dyn FnMut(&str) -> Result<String, String>,
-    ) -> String {
+    fn handle(&self, caller: Option<&str>, text: &str, handler: &mut dyn FnMut(&str) -> Result<String, String>) -> String {
         let request = Request::parse(text);
         // Messages aren't logged, request or reply: a game played over
         // messages would flood the log.
@@ -999,13 +969,10 @@ impl Engine {
     /// the Bazel output again (or a link to it) would reload nothing. See
     /// docs/lore/dlopen-returns-the-loaded-image-for-a-file-it-has-seen.md.
     fn open_staged(&self, name: &str, path: &Path) -> Result<(ModLibrary, Vec<(usize, usize)>), String> {
-        std::fs::create_dir_all(&self.staging_dir)
-            .map_err(|e| format!("creating {}: {e}", self.staging_dir.display()))?;
+        std::fs::create_dir_all(&self.staging_dir).map_err(|e| format!("creating {}: {e}", self.staging_dir.display()))?;
         let n = self.staged_count.get();
         self.staged_count.set(n + 1);
-        let staged = self
-            .staging_dir
-            .join(format!("{name}-{}-{n}.so", std::process::id()));
+        let staged = self.staging_dir.join(format!("{name}-{}-{n}.so", std::process::id()));
         std::fs::copy(path, &staged).map_err(|e| format!("copying {}: {e}", path.display()))?;
         // `engine_mod` links with `-z now`, so a missing symbol fails here, while
         // the old build is still running.
@@ -1036,10 +1003,7 @@ impl Loaded {
         self.running.set(was_running);
         if status == Status::ERROR {
             self.failed.set(true);
-            eprintln!(
-                "[engine] {} failed during {op:?}; it won't run again until it is reloaded",
-                self.name
-            );
+            eprintln!("[engine] {} failed during {op:?}; it won't run again until it is reloaded", self.name);
         }
         status
     }
@@ -1064,10 +1028,7 @@ impl Loaded {
         let old = &self.state;
         unsafe {
             let to = alloc_state(new.layout);
-            schema::migrate(
-                ((*self.ctx).state as *mut u8, &old.fields, &old.drops),
-                (to as *mut u8, &new.fields, &new.drops, new.default),
-            );
+            schema::migrate(((*self.ctx).state as *mut u8, &old.fields, &old.drops), (to as *mut u8, &new.fields, &new.drops, new.default));
             std::alloc::dealloc((*self.ctx).state as *mut u8, old.layout);
             (*self.ctx).state = to;
         }
@@ -1133,9 +1094,7 @@ fn check_plan(mods: &[Loaded], opened: &[Opened], removed: Option<&str>) -> Resu
 fn in_dependency_order(mut pending: Vec<Opened>) -> Result<Vec<Opened>, String> {
     let mut ordered: Vec<Opened> = Vec::new();
     while !pending.is_empty() {
-        let ready = pending.iter().position(|o| {
-            o.deps.iter().all(|(dep, _)| !pending.iter().any(|p| p.name == *dep))
-        });
+        let ready = pending.iter().position(|o| o.deps.iter().all(|(dep, _)| !pending.iter().any(|p| p.name == *dep)));
         let Some(ready) = ready else {
             let names: Vec<&str> = pending.iter().map(|o| o.name.as_str()).collect();
             return Err(format!("dependency cycle among {}", names.join(", ")));
@@ -1307,8 +1266,7 @@ unsafe extern "C" fn host_begin_call(
         let bytes = |p, n| std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n));
         (bytes(service, service_len), bytes(method, method_len))
     };
-    let Some((provider, s)) = mods.iter().find_map(|m| Some((m, m.services.iter().find(|s| s.name == service)?)))
-    else {
+    let Some((provider, s)) = mods.iter().find_map(|m| Some((m, m.services.iter().find(|s| s.name == service)?))) else {
         return CallStatus::NOT_PROVIDED;
     };
     let Some(&(_, call)) = s.methods.iter().find(|(name, _)| name == method) else {
@@ -1332,20 +1290,12 @@ unsafe extern "C" fn host_end_call(ctx: *const ModContext, target: *const CallTa
         m.running.set(false);
         if panicked {
             m.failed.set(true);
-            eprintln!(
-                "[engine] {} panicked in a call from {}; it won't run again until it is reloaded",
-                m.name,
-                unsafe { name_of(ctx) }
-            );
+            eprintln!("[engine] {} panicked in a call from {}; it won't run again until it is reloaded", m.name, unsafe { name_of(ctx) });
         }
     }
 }
 
-unsafe fn host_pump(
-    ctx: *const ModContext,
-    timeout: Duration,
-    handler: &mut dyn FnMut(&str) -> Result<String, String>,
-) -> Pumped {
+unsafe fn host_pump(ctx: *const ModContext, timeout: Duration, handler: &mut dyn FnMut(&str) -> Result<String, String>) -> Pumped {
     let engine = unsafe { engine_of(ctx) };
     if !engine.safe_point(ctx) {
         return Pumped::Refused;
@@ -1358,10 +1308,7 @@ unsafe extern "C" fn host_step_mods(ctx: *const ModContext) -> Status {
     // No panicking in here: unwinding out of an extern "C" fn aborts.
     let status = engine.run_frame();
     if status != Status::OK {
-        eprintln!(
-            "[engine] {} asked for a frame inside a frame, or while the mods are being changed",
-            unsafe { name_of(ctx) }
-        );
+        eprintln!("[engine] {} asked for a frame inside a frame, or while the mods are being changed", unsafe { name_of(ctx) });
     }
     status
 }

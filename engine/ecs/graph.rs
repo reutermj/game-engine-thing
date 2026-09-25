@@ -319,10 +319,7 @@ pub fn systems_overlap(world: &World, x: SystemView<'_>, y: SystemView<'_>) -> b
 
 pub fn system_apply_overlap(world: &World, x: SystemView<'_>, fp: &Footprint) -> bool {
     let observes_deaths = x.queries().any(|q| q.sparse_driven(world));
-    if sparse_conflict(&sparse_of(world, x), &fp.sparse)
-        || sparse_conflict(&x.events(), &fp.events)
-        || (fp.kills && observes_deaths)
-    {
+    if sparse_conflict(&sparse_of(world, x), &fp.sparse) || sparse_conflict(&x.events(), &fp.events) || (fp.kills && observes_deaths) {
         return true;
     }
     // Moving rows rewrites every column of both tables, and the rows: any
@@ -335,4 +332,3 @@ pub fn applies_overlap(a: &Footprint, b: &Footprint) -> bool {
         || sparse_conflict(&a.events, &b.events)
         || a.tables.iter().any(|s| b.tables.iter().any(|t| s.meets_shape(t)))
 }
-

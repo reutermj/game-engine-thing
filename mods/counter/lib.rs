@@ -31,7 +31,6 @@ impl Mod for Counter {
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
         cx.log(format!("loaded (generation {}), count is {}", cx.generation(), self.count));
     }
-
 }
 
 export_mod!(Counter);

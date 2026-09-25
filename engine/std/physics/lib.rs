@@ -21,12 +21,11 @@ use engine_api::{
     export_mod, field_struct, phase,
 };
 use physics::{
-    Asleep, Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, Resting, STATIC, Shape, Sleep, Touching, Trigger, Vec2, Velocity,
+    Asleep, Body, Collider, Contact, ContactPair, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position, Response,
+    Resting, STATIC, Shape, Sleep, Touching, Trigger, Vec2, Velocity,
 };
 use sleep::Sleepers;
 use solver::{Constraint, SolverBody};
-
 
 #[cfg(not(feature = "v2"))]
 const BUILD: &str = "v1";
@@ -172,7 +171,12 @@ impl Physics {
         (dt, workers): (Dt, Workers),
         mut gravity: Query<&Gravity>,
         mut bodies: Query<(&Body, &mut Velocity), Without<Asleep>>,
-        (mut config, mut sleeping, mut marks, mut resting): (Query<&Sleep>, SleepingBodies<'_, '_>, SleepMarks<'_, '_>, RestingContacts<'_, '_>),
+        (mut config, mut sleeping, mut marks, mut resting): (
+            Query<&Sleep>,
+            SleepingBodies<'_, '_>,
+            SleepMarks<'_, '_>,
+            RestingContacts<'_, '_>,
+        ),
     ) {
         let start = Instant::now();
         let dt = *dt;
@@ -338,13 +342,19 @@ impl Physics {
             // the gathers several times slower than one thread's.
             let room = |r: std::ops::Range<usize>| Vec::with_capacity(r.len());
             let join = |items: &mut Vec<Item>, parts: Vec<Vec<Item>>| parts.into_iter().for_each(|p| items.extend(p));
-            let parts = moving.par_for_each(&workers, room, |out, row, (p, c, b, u)| out.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
+            let parts = moving.par_for_each(&workers, room, |out, row, (p, c, b, u)| {
+                out.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false))
+            });
             join(&mut items, parts);
-            let parts = held.par_for_each(&workers, room, |out, row, (p, c, b)| out.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
+            let parts =
+                held.par_for_each(&workers, room, |out, row, (p, c, b)| out.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
             join(&mut items, parts);
-            let parts = drifting.par_for_each(&workers, room, |out, row, (p, c, u)| out.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
+            let parts = drifting
+                .par_for_each(&workers, room, |out, row, (p, c, u)| out.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
             join(&mut items, parts);
-            let parts = statics.par_for_each(&workers, room, |out, row, (p, c)| out.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
+            let parts = statics.par_for_each(&workers, room, |out, row, (p, c)| {
+                out.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true))
+            });
             join(&mut items, parts);
         } else {
             moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
@@ -696,9 +706,13 @@ impl Physics {
         // constraint, for writing back over the same chunks.
         let mut firsts: Vec<(usize, usize)> = Vec::new();
         if par {
-            let parts = contacts.par_for_each_ordered_page(&workers, |rows| (rows.start, Vec::with_capacity(rows.len())), |(_, out), _, (pair, m, r, j)| {
-                out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i])));
-            });
+            let parts = contacts.par_for_each_ordered_page(
+                &workers,
+                |rows| (rows.start, Vec::with_capacity(rows.len())),
+                |(_, out), _, (pair, m, r, j)| {
+                    out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i])));
+                },
+            );
             for (row, part) in parts {
                 firsts.push((row, constraints.len()));
                 constraints.extend(part);
@@ -732,12 +746,16 @@ impl Physics {
         };
         if par {
             let (bodies, kinds) = (&bodies, &kinds);
-            moving.par_for_each(&workers, |rows| rows.start, |k, _, (body, v, p)| {
-                if kinds[*k].0 {
-                    write(body, &bodies[*k], v, p);
-                }
-                *k += 1;
-            });
+            moving.par_for_each(
+                &workers,
+                |rows| rows.start,
+                |k, _, (body, v, p)| {
+                    if kinds[*k].0 {
+                        write(body, &bodies[*k], v, p);
+                    }
+                    *k += 1;
+                },
+            );
         } else {
             let mut i = 0;
             moving.for_each(|_, (body, v, p)| {
@@ -783,27 +801,28 @@ impl Physics {
         // stamped whole, as in the merge.
         let results = if par {
             let (constraints, firsts) = (&constraints, &firsts);
-            contacts.par_for_each_ordered_page(
-                &workers,
-                |rows| {
-                    let at = firsts.iter().find(|f| f.0 == rows.start).expect("the chunks the gathering walked").1;
-                    (at, WroteBack { began: Vec::with_capacity(rows.len() / 4 + 8), ..WroteBack::default() })
-                },
-                |(k, out), page, (pair, mut m, r, mut j)| {
-                    let (m, j) = (m.write_all(), j.write_all());
-                    for i in page.rows() {
-                        if r[i].disabled {
-                            (m[i].pressed, j[i]) = (false, Impulse::default());
-                        } else {
-                            wrote(&constraints[*k], &pair[i], &mut m[i], &mut j[i], out);
-                            *k += 1;
+            contacts
+                .par_for_each_ordered_page(
+                    &workers,
+                    |rows| {
+                        let at = firsts.iter().find(|f| f.0 == rows.start).expect("the chunks the gathering walked").1;
+                        (at, WroteBack { began: Vec::with_capacity(rows.len() / 4 + 8), ..WroteBack::default() })
+                    },
+                    |(k, out), page, (pair, mut m, r, mut j)| {
+                        let (m, j) = (m.write_all(), j.write_all());
+                        for i in page.rows() {
+                            if r[i].disabled {
+                                (m[i].pressed, j[i]) = (false, Impulse::default());
+                            } else {
+                                wrote(&constraints[*k], &pair[i], &mut m[i], &mut j[i], out);
+                                *k += 1;
+                            }
                         }
-                    }
-                },
-            )
-            .into_iter()
-            .map(|(_, out)| out)
-            .collect()
+                    },
+                )
+                .into_iter()
+                .map(|(_, out)| out)
+                .collect()
         } else {
             let mut solved = constraints.iter();
             let mut out = WroteBack::default();
@@ -844,7 +863,6 @@ impl Physics {
     }
 }
 
-
 impl Physics {
     /// Sleeping's bookkeeping after a step: see `Sleepers::update`. Links
     /// between dynamic bodies make islands; a kinematic body moving into a
@@ -865,7 +883,8 @@ impl Physics {
     ) {
         let slots = Slots::of(entities.iter().copied());
         // Sleeping bodies aren't among the step's, but are all dynamic.
-        let kind = |e: Entity| slots.get(e).map_or(if sleep.is_asleep(e) { (false, DYNAMIC) } else { (false, STATIC) }, |k| kinds[k as usize]);
+        let kind =
+            |e: Entity| slots.get(e).map_or(if sleep.is_asleep(e) { (false, DYNAMIC) } else { (false, STATIC) }, |k| kinds[k as usize]);
         let awake: Vec<(Entity, f32)> = (0..entities.len())
             .filter(|&k| kinds[k] == (true, DYNAMIC))
             .map(|k| (entities[k], bodies[k].v.x.hypot(bodies[k].v.y)))
@@ -979,7 +998,11 @@ fn contact(a: &Item, b: &Item, m: &narrow::Manifold) -> Found {
     (
         ContactPair { a: a.entity, b: b.entity },
         Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, pressed: false, was_pressed: false },
-        Response { friction: a.body.friction.min(b.body.friction), restitution: a.body.restitution.max(b.body.restitution), disabled: false },
+        Response {
+            friction: a.body.friction.min(b.body.friction),
+            restitution: a.body.restitution.max(b.body.restitution),
+            disabled: false,
+        },
     )
 }
 

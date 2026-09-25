@@ -2,7 +2,7 @@
 //! back up, so something is always moving. The bodies live in the world, so
 //! reloading this mod (or physics, or any other) leaves them where they are.
 
-use engine_api::{ChildOf, Cx, Entity, Mod, Query, Systems, With, component, children_of, export_mod};
+use engine_api::{ChildOf, Cx, Entity, Mod, Query, Systems, With, children_of, component, export_mod};
 use physics::{Body, Collider, Gravity, Position, Velocity};
 
 const WIDTH: f32 = 20.0;

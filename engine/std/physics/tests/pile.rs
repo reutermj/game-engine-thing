@@ -128,10 +128,7 @@ fn stats(world: &mut WorldMut, width: f32) -> String {
         bodies.push((Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }, Vec2::new(v.x, v.y).len()));
     });
     let resting = bodies.iter().filter(|(_, speed)| *speed < REST).count();
-    let escaped = bodies
-        .iter()
-        .filter(|(b, _)| b.at.x < 0.0 || b.at.x > width || b.at.y < -HEIGHT / 2.0 || b.at.y > HEIGHT)
-        .count();
+    let escaped = bodies.iter().filter(|(b, _)| b.at.x < 0.0 || b.at.x > width || b.at.y < -HEIGHT / 2.0 || b.at.y > HEIGHT).count();
     // Quadratic, and fine for a message.
     let mut deepest = 0.0f32;
     for (i, (a, _)) in bodies.iter().enumerate() {
@@ -141,10 +138,7 @@ fn stats(world: &mut WorldMut, width: f32) -> String {
     }
     let fastest = bodies.iter().map(|(_, speed)| *speed).fold(0.0, f32::max);
     let mean = bodies.iter().map(|(_, speed)| *speed).sum::<f32>() / bodies.len().max(1) as f32;
-    format!(
-        "bodies {} resting {resting} deepest {deepest:.3} escaped {escaped} fastest {fastest:.3} mean {mean:.3}",
-        bodies.len()
-    )
+    format!("bodies {} resting {resting} deepest {deepest:.3} escaped {escaped} fastest {fastest:.3} mean {mean:.3}", bodies.len())
 }
 
 /// How far two of the pile's shapes overlap, or 0.

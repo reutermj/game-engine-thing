@@ -27,24 +27,16 @@ pub struct ControlServer {
 impl ControlServer {
     pub fn bind(path: &Path, requests: Sender<Pending>) -> Result<ControlServer, String> {
         if let Some(dir) = path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
         if path.exists() {
             if UnixStream::connect(path).is_ok() {
-                return Err(format!(
-                    "another engine is already listening on {}",
-                    path.display()
-                ));
+                return Err(format!("another engine is already listening on {}", path.display()));
             }
             // Left behind by an engine that didn't exit cleanly.
             let _ = std::fs::remove_file(path);
         }
-        let listener =
-            UnixListener::bind(path).map_err(|e| format!("binding {}: {e}", path.display()))?;
+        let listener = UnixListener::bind(path).map_err(|e| format!("binding {}: {e}", path.display()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
             .name("control".into())

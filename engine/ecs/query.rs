@@ -456,9 +456,7 @@ impl<T: Component> Term for &mut T {
                 let (values, ticks) = guards[table].pages_mut()[page].as_mut_slice_ticked::<T>(*now);
                 Some(Mut { value: &mut values[row], tick: &mut ticks[row], now: *now })
             }
-            TermState::Sparse(set, now) => {
-                set.set_mut().get_mut_ticked::<T>(e, *now).map(|(value, tick)| Mut { value, tick, now: *now })
-            }
+            TermState::Sparse(set, now) => set.set_mut().get_mut_ticked::<T>(e, *now).map(|(value, tick)| Mut { value, tick, now: *now }),
         }
     }
     #[inline(always)]
@@ -769,9 +767,14 @@ impl QueryDecl {
 #[derive(Clone, Debug)]
 pub enum ParamDecl {
     Query(QueryDecl),
-    Spawner { components: Vec<ComponentId> },
+    Spawner {
+        components: Vec<ComponentId>,
+    },
     /// An event queue, read or written.
-    Events { queue: usize, write: bool },
+    Events {
+        queue: usize,
+        write: bool,
+    },
     /// A parameter made of others (a tuple of parameters, or a crate's own
     /// parameter built from them): its footprint is its members'.
     Group(Vec<ParamDecl>),
@@ -820,11 +823,25 @@ type Publish = Box<dyn FnOnce(&mut EventQueue, u64) + Send>;
 /// One change a system made. A system's changes are applied in the order it
 /// made them, by its apply node.
 pub enum Change {
-    Insert { e: Entity, c: ComponentId, apply: Apply },
-    Remove { e: Entity, c: ComponentId },
+    Insert {
+        e: Entity,
+        c: ComponentId,
+        apply: Apply,
+    },
+    Remove {
+        e: Entity,
+        c: ComponentId,
+    },
     Despawn(Entity),
-    Spawn { e: Entity, components: Arc<[ComponentId]>, apply: Apply },
-    Event { queue: usize, publish: Publish },
+    Spawn {
+        e: Entity,
+        components: Arc<[ComponentId]>,
+        apply: Apply,
+    },
+    Event {
+        queue: usize,
+        publish: Publish,
+    },
     /// A spatial table whose keys or extents the system could write, to
     /// re-sort after it.
     Reorder(TableId),
@@ -868,15 +885,13 @@ impl Row<'_> {
     }
 
     pub fn insert<T: Component>(&self, value: T) {
-        let c = declared::<T>(self.world, &self.changes.adds)
-            .unwrap_or_else(|| panic!("{} isn't in this query's Adds", T::NAME));
+        let c = declared::<T>(self.world, &self.changes.adds).unwrap_or_else(|| panic!("{} isn't in this query's Adds", T::NAME));
         let e = self.entity;
         self.log.borrow_mut().push(Change::Insert { e, c, apply: Box::new(move |s| s.insert_id(e, c, value)) });
     }
 
     pub fn remove<T: Component>(&self) {
-        let c = declared::<T>(self.world, &self.changes.removes)
-            .unwrap_or_else(|| panic!("{} isn't in this query's Removes", T::NAME));
+        let c = declared::<T>(self.world, &self.changes.removes).unwrap_or_else(|| panic!("{} isn't in this query's Removes", T::NAME));
         self.log.borrow_mut().push(Change::Remove { e: self.entity, c });
     }
 
@@ -1040,8 +1055,7 @@ pub struct Query<'w, D: Data, F = (), C = ()> {
 
 impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     pub(crate) fn take(world: &'w World, decl: &'w QueryDecl, log: &'w Log) -> Self {
-        let table_ids: Vec<TableId> =
-            world.tables().filter(|t| decl.matches(world, &t.components)).map(|t| t.id).collect();
+        let table_ids: Vec<TableId> = world.tables().filter(|t| decl.matches(world, &t.components)).map(|t| t.id).collect();
         let rows = table_ids.iter().map(|&t| TableRead::new(world.table(t))).collect();
         let states = D::take(world, &table_ids, &decl.terms);
         let is_sparse = |c: &&ComponentId| world.storage(**c) == Storage::Sparse;
@@ -1379,8 +1393,10 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         let Query { world, decl, rows, states, log, .. } = self;
         let rows = &*rows;
         // The walk's pages with rows, which chunks are cut between.
-        let walk: Vec<(usize, usize)> =
-            tables.iter().flat_map(|&t| (0..rows[t].rows.len()).filter(move |&p| !rows[t].rows[p].is_empty()).map(move |p| (t, p))).collect();
+        let walk: Vec<(usize, usize)> = tables
+            .iter()
+            .flat_map(|&t| (0..rows[t].rows.len()).filter(move |&p| !rows[t].rows[p].is_empty()).map(move |p| (t, p)))
+            .collect();
         let weights: Vec<usize> = walk.iter().map(|&(t, p)| rows[t].rows[p].len()).collect();
         let chunks = crate::par::balanced(&weights, workers.chunks(weights.iter().sum(), PAR_ROWS));
         // Each table's pages cut where a chunk starts in it, so the runs
@@ -1922,7 +1938,8 @@ pub fn near_pairs_with(workers: &Workers, active: &impl NearSide, passive: &impl
         }
         keys.lists
     });
-    let meets: Vec<_> = even(units.len(), workers.chunks(units.len(), 4)).into_iter().map(|r| (buckets(r.len() * 4), Vec::with_capacity(64), r)).collect();
+    let meets: Vec<_> =
+        even(units.len(), workers.chunks(units.len(), 4)).into_iter().map(|r| (buckets(r.len() * 4), Vec::with_capacity(64), r)).collect();
     let met = workers.map_each(meets, |_, (mut keys, mut noted, r)| {
         for &(t, unit) in &units[r] {
             meet_unit(&mut keys, &mut |e| noted.push(e), (&pages, widest, grow), &pas[t], unit);
@@ -2225,8 +2242,7 @@ impl<'w> Structural<'w> {
     /// their declared ids.
     pub fn spawn<B: Bundle>(&mut self, e: Entity, bundle: B, ids: &[ComponentId]) {
         let world = self.world;
-        let table_components: Vec<ComponentId> =
-            ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
+        let table_components: Vec<ComponentId> = ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
         let to = world.table_for(&table_components);
         self.spawn_into(to, e, bundle, ids);
     }
@@ -2238,8 +2254,7 @@ impl<'w> Structural<'w> {
             Some((last, t)) if Arc::ptr_eq(last, ids) => *t,
             _ => {
                 let world = self.world;
-                let table_components: Vec<ComponentId> =
-                    ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
+                let table_components: Vec<ComponentId> = ids.iter().copied().filter(|c| world.storage(*c) == Storage::Table).collect();
                 let t = world.table_for(&table_components);
                 self.spawned_into = Some((ids.clone(), t));
                 t

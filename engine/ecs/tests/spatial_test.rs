@@ -4,8 +4,8 @@
 //! the systems after it do; a re-sort is an apply node the scheduler orders
 //! readers of the table after; parallel frames equal sequential ones.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
 use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Executor, Query, Scoped, SpatialKey, With, Without, Workers, World, component};
@@ -360,8 +360,7 @@ fn a_parallel_frame_equals_a_sequential_one() {
         let w = World::new();
         let mut seed = 6;
         populate(&w, sized(500, 60), &mut seed);
-        let systems: Vec<SystemDecl> =
-            vec![mover.system(&w, "mover"), probe.system(&w, "probe"), tagger.system(&w, "tagger")];
+        let systems: Vec<SystemDecl> = vec![mover.system(&w, "mover"), probe.system(&w, "probe"), tagger.system(&w, "tagger")];
         let s = Schedule { systems };
         *REGIONS.lock().unwrap() = (0..20).map(|_| region(&mut seed)).collect();
         let mut seen = Vec::new();
@@ -626,7 +625,8 @@ fn pairs_between_sides_agree_with_brute_force() {
     let marked: std::collections::HashSet<Entity> = w.values::<Mark>().unwrap().into_iter().map(|(e, _)| e).collect();
     for _ in 0..sized(10, 2) {
         s.run_sequential(&w);
-        let not_both = |set: &std::collections::HashSet<Entity>| brute_pairs_of_any(&w, 0.05, |a, b| !(set.contains(&a) && set.contains(&b)));
+        let not_both =
+            |set: &std::collections::HashSet<Entity>| brute_pairs_of_any(&w, 0.05, |a, b| !(set.contains(&a) && set.contains(&b)));
         let got = PAIRS.lock().unwrap().clone();
         assert!(got.iter().any(|(a, b)| tagged.contains(a) || tagged.contains(b)), "some pairs cross the sides");
         assert_eq!(got, not_both(&tagged));

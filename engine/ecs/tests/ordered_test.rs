@@ -135,11 +135,7 @@ fn random_changes_keep_every_table_in_order() {
     let spawn = |w: &World, seed: &mut u64, names: &mut HashMap<Entity, String>, live: &mut Vec<Entity>| {
         let mut m = w.between_frames(Build::default()).unwrap();
         let rank = Rank { n: lcg(seed) % 50 };
-        let e = if lcg(seed).is_multiple_of(3) {
-            m.spawn((rank, Tag {}, Name::default()))
-        } else {
-            m.spawn((rank, Name::default()))
-        };
+        let e = if lcg(seed).is_multiple_of(3) { m.spawn((rank, Tag {}, Name::default())) } else { m.spawn((rank, Name::default())) };
         let s = format!("{e:?}");
         m.insert(e, Name { s: s.clone() });
         names.insert(e, s);
@@ -261,8 +257,7 @@ fn a_key_range_over_a_table_in_another_order_is_scanned() {
     Schedule { systems: vec![find.system(&w, "find")] }.run_sequential(&w);
     let mut found = FOUND.lock().unwrap().clone();
     found.sort();
-    let mut want: Vec<Entity> =
-        w.values::<Rank>().unwrap().into_iter().filter(|(_, r)| (10..20).contains(&r.n)).map(|(e, _)| e).collect();
+    let mut want: Vec<Entity> = w.values::<Rank>().unwrap().into_iter().filter(|(_, r)| (10..20).contains(&r.n)).map(|(e, _)| e).collect();
     want.sort();
     assert_eq!(found, want);
 }

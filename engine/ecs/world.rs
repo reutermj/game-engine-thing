@@ -28,9 +28,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLo
 use crate::component::{ComponentDesc, DefaultFn, DropFn, Entity, Storage};
 use crate::erased::{ErasedColumn, ValueType, drop_value};
 use crate::events::EventQueue;
+use crate::ordered::{self, KeyOrder, OrderDesc};
 use crate::par::Executor;
 use crate::schema::{self, Field};
-use crate::ordered::{self, KeyOrder, OrderDesc};
 use crate::spatial::{Resort, SPATIAL_PAGE_ROWS, SpatialDesc, SpatialPages};
 
 /// Rows per page: the unit of borrowing for data parallelism, and where a
@@ -167,9 +167,7 @@ impl Entities {
     }
 
     pub fn is_alive(&self, e: Entity) -> bool {
-        self.slot(e.index).is_some_and(|(g, l)| {
-            g.load(Ordering::Acquire) == e.generation && l.load(Ordering::Acquire) != DEAD
-        })
+        self.slot(e.index).is_some_and(|(g, l)| g.load(Ordering::Acquire) == e.generation && l.load(Ordering::Acquire) != DEAD)
     }
 
     pub fn location(&self, e: Entity) -> Option<Location> {
@@ -533,10 +531,7 @@ impl World {
             return if current.ty.same_values(&ty) {
                 Ok(None)
             } else {
-                Err(format!(
-                    "{} was built with an older layout of {}; reload it with the rest of the game",
-                    build.name, desc.name
-                ))
+                Err(format!("{} was built with an older layout of {}; reload it with the rest of the game", build.name, desc.name))
             };
         }
         let report = if current.ty.same_values(&ty) {
@@ -555,10 +550,7 @@ impl World {
                 unsafe {
                     if migrate {
                         c.migrate(ty, |old, to| {
-                            schema::migrate(
-                                (old, &current.fields, &current.field_drops),
-                                (to, &new.fields, &new.field_drops, new.default),
-                            )
+                            schema::migrate((old, &current.fields, &current.field_drops), (to, &new.fields, &new.field_drops, new.default))
                         })
                     } else {
                         let drop = current.ty;
@@ -680,16 +672,28 @@ impl World {
         let columns = set.iter().map(|&c| RwLock::new(vec![ErasedColumn::new(self.value_type(c))])).collect();
         // A table with a spatial key is kept in its order (the first key's,
         // should a table have two).
-        let spatial = set.iter().copied().find(|&c| self.component(c).spatial).map(|key| SpatialTable {
-            key,
-            pages: RwLock::new(SpatialPages::default()),
-        });
+        let spatial = set
+            .iter()
+            .copied()
+            .find(|&c| self.component(c).spatial)
+            .map(|key| SpatialTable { key, pages: RwLock::new(SpatialPages::default()) });
         let page_rows = if spatial.is_some() { SPATIAL_PAGE_ROWS } else { PAGE_ROWS };
-        let ordered = spatial.is_none().then(|| set.iter().copied().find(|&c| self.component(c).ordered)).flatten().map(|key| {
-            OrderedTable { key, order: RwLock::new(KeyOrder::default()) }
-        });
-        let table =
-            Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial, ordered, arrived: AtomicU32::new(0), left: AtomicU32::new(0) };
+        let ordered = spatial
+            .is_none()
+            .then(|| set.iter().copied().find(|&c| self.component(c).ordered))
+            .flatten()
+            .map(|key| OrderedTable { key, order: RwLock::new(KeyOrder::default()) });
+        let table = Table {
+            id,
+            components: set.clone(),
+            rows: RwLock::new(vec![Vec::new()]),
+            columns,
+            page_rows,
+            spatial,
+            ordered,
+            arrived: AtomicU32::new(0),
+            left: AtomicU32::new(0),
+        };
         assert_eq!(self.tables.push(table), id.0 as usize);
         by_set.insert(set, id);
         id
@@ -881,7 +885,15 @@ impl LockedTable<'_> {
 
 impl<'w> Structural<'w> {
     pub fn new(world: &'w World) -> Structural<'w> {
-        Structural { world, tables: Vec::new(), sparse: HashMap::new(), events: HashMap::new(), spawned_into: None, freed: Vec::new(), tick: None }
+        Structural {
+            world,
+            tables: Vec::new(),
+            sparse: HashMap::new(),
+            events: HashMap::new(),
+            spawned_into: None,
+            freed: Vec::new(),
+            tick: None,
+        }
     }
 
     /// Every table and sparse set, for use between frames.
@@ -891,11 +903,8 @@ impl<'w> Structural<'w> {
         for t in tables {
             s.lock_table(t);
         }
-        let sparse: Vec<ComponentId> = world
-            .components()
-            .filter(|(_, info)| info.storage == Storage::Sparse && info.sparse.get().is_some())
-            .map(|(c, _)| c)
-            .collect();
+        let sparse: Vec<ComponentId> =
+            world.components().filter(|(_, info)| info.storage == Storage::Sparse && info.sparse.get().is_some()).map(|(c, _)| c).collect();
         for c in sparse {
             s.lock_sparse(c);
         }
@@ -1194,10 +1203,8 @@ impl Drop for Structural<'_> {
             let desc = world.spatial_desc(spatial.key).expect("an installed spatial key");
             let key = t.table.column_index(spatial.key).expect("the key's own table");
             // The extent is read only as the layout the glue was built for.
-            let extent = world
-                .id(desc.extent)
-                .filter(|&x| world.installed_as(x, desc.extent_fingerprint))
-                .and_then(|x| t.table.column_index(x));
+            let extent =
+                world.id(desc.extent).filter(|&x| world.installed_as(x, desc.extent_fingerprint)).and_then(|x| t.table.column_index(x));
             Resort {
                 table: t.table.id,
                 rows: &mut t.rows,
@@ -1239,11 +1246,7 @@ pub enum ColumnGuard<'w> {
 
 impl<'w> ColumnGuard<'w> {
     pub fn take(column: &'w RwLock<Vec<ErasedColumn>>, write: bool) -> ColumnGuard<'w> {
-        if write {
-            ColumnGuard::Write(column.take_write())
-        } else {
-            ColumnGuard::Read(column.take_read())
-        }
+        if write { ColumnGuard::Write(column.take_write()) } else { ColumnGuard::Read(column.take_read()) }
     }
 
     pub fn pages(&self) -> &[ErasedColumn] {
@@ -1268,11 +1271,7 @@ pub enum SparseGuard<'w> {
 
 impl<'w> SparseGuard<'w> {
     pub fn take(set: &'w RwLock<SparseSet>, write: bool) -> SparseGuard<'w> {
-        if write {
-            SparseGuard::Write(set.take_write())
-        } else {
-            SparseGuard::Read(set.take_read())
-        }
+        if write { SparseGuard::Write(set.take_write()) } else { SparseGuard::Read(set.take_read()) }
     }
 
     pub fn set(&self) -> &SparseSet {

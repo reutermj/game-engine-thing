@@ -13,12 +13,9 @@
 //!   ghost              from now on, the player's contacts are disabled
 //!                      between finding and solving them: it falls through
 
-use engine_api::{
-    Cx, Entity, EventReader, Mod, Query, Systems, With, Without, component, export_mod, field_struct, phase,
-};
+use engine_api::{Cx, Entity, EventReader, Mod, Query, Systems, With, Without, component, export_mod, field_struct, phase};
 use physics::{
-    Body, Collider, Contact, ContactPair, Gravity, Manifold, Overlap, Position, Response, Spatial, Touching, Trigger, Vec2,
-    Velocity,
+    Body, Collider, Contact, ContactPair, Gravity, Manifold, Overlap, Position, Response, Spatial, Touching, Trigger, Vec2, Velocity,
 };
 
 pub const FLOOR_Y: f32 = 10.0;
@@ -144,10 +141,7 @@ impl Mod for Scene {
         s.add("walk", Self::walk);
         s.add("record", Self::record).phase(phase::LATE);
         s.add("meet", Self::meet).phase(phase::LATE);
-        s.add("pass_through", Self::pass_through)
-            .phase("physics::step")
-            .after("physics::find_contacts")
-            .before("physics::solve");
+        s.add("pass_through", Self::pass_through).phase("physics::step").after("physics::find_contacts").before("physics::solve");
     }
 
     fn load(&mut self, _: &mut (), cx: &mut Cx) {
@@ -209,11 +203,8 @@ impl Mod for Scene {
                 return Ok(out.join("\n"));
             }
             "trace" => {
-                let lines: Vec<String> = self
-                    .trace
-                    .iter()
-                    .map(|s| format!("{:.4} {:.4} {:.4} {:.4} {}", s.x, s.y, s.vx, s.vy, s.below))
-                    .collect();
+                let lines: Vec<String> =
+                    self.trace.iter().map(|s| format!("{:.4} {:.4} {:.4} {:.4} {}", s.x, s.y, s.vx, s.vy, s.below)).collect();
                 return Ok(lines.join("\n"));
             }
             "walker" => {

@@ -128,8 +128,7 @@ static SPECS: &[Spec] = &[
 
 /// Every mod name the driver uses: each mod's, and a second name a herald
 /// build can be loaded as, which two providers of one service can't share.
-const NAMES: [&str; 10] =
-    ["keeper", "herald", "hearer", "ranker", "anchor", "tether", "clock", "lockstep", "sequential", "herald2"];
+const NAMES: [&str; 10] = ["keeper", "herald", "hearer", "ranker", "anchor", "tether", "clock", "lockstep", "sequential", "herald2"];
 
 /// Each build's library, from the paths in the environment.
 fn libs() -> &'static [PathBuf] {
@@ -139,9 +138,8 @@ fn libs() -> &'static [PathBuf] {
         let libs: Vec<PathBuf> = SPECS
             .iter()
             .map(|s| {
-                let at = std::env::var(s.var).unwrap_or_else(|_| {
-                    panic!("${} is not set: run through //engine/tests/fuzz:reload or :replay_test", s.var)
-                });
+                let at = std::env::var(s.var)
+                    .unwrap_or_else(|_| panic!("${} is not set: run through //engine/tests/fuzz:reload or :replay_test", s.var));
                 runfiles.rlocation(&at).unwrap_or_else(|| panic!("{at} is not in the runfiles"))
             })
             .collect();
@@ -391,20 +389,13 @@ fn state_layout(s: &Spec) -> (u32, u32) {
 /// `s`'s `Default` state.
 fn fresh(s: &Spec) -> State {
     match s.kind {
-        Kind::Keeper => State::Keeper {
-            loads: 0,
-            spawned: 0,
-            journal: Vec::new(),
-            extra: (ItemLayout::of(s.v) != ItemLayout::A).then_some(7),
-        },
+        Kind::Keeper => {
+            State::Keeper { loads: 0, spawned: 0, journal: Vec::new(), extra: (ItemLayout::of(s.v) != ItemLayout::A).then_some(7) }
+        }
         Kind::Herald => State::Herald { calls: 0, pending: Vec::new(), loads: 0 },
-        Kind::Hearer => State::Hearer {
-            early: Vec::new(),
-            late: Vec::new(),
-            at_load: String::new(),
-            loads: 0,
-            heard: (s.v == "c").then_some(0),
-        },
+        Kind::Hearer => {
+            State::Hearer { early: Vec::new(), late: Vec::new(), at_load: String::new(), loads: 0, heard: (s.v == "c").then_some(0) }
+        }
         Kind::Ranker => State::Ranker { seen: Vec::new(), loads: 0 },
         Kind::Anchor => State::Anchor { pings: 0, loads: 0 },
         Kind::Tether => State::Tether { pings: 0 },
@@ -600,12 +591,8 @@ impl Model {
     /// downward; one provider per service.
     fn check_links(&self, opened: &[(String, usize)]) -> Vec<String> {
         let in_batch = |name: &str| opened.iter().find(|(n, _)| n == name).map(|(_, s)| &SPECS[*s]);
-        let mut after: Vec<(&str, &Spec, bool)> = self
-            .mods
-            .iter()
-            .filter(|m| in_batch(&m.name).is_none())
-            .map(|m| (m.name.as_str(), m.spec(), false))
-            .collect();
+        let mut after: Vec<(&str, &Spec, bool)> =
+            self.mods.iter().filter(|m| in_batch(&m.name).is_none()).map(|m| (m.name.as_str(), m.spec(), false)).collect();
         after.extend(opened.iter().map(|(n, s)| (n.as_str(), &SPECS[*s], true)));
         let resident_after = |name: &str| match in_batch(name) {
             Some(s) => s.resident,
@@ -630,15 +617,10 @@ impl Model {
                                 None => stranded.push((dep, vec![name])),
                             }
                         } else {
-                            let restart = if !dep_batched && resident_now(dep) {
-                                format!("; {}", resident_note(dep))
-                            } else {
-                                String::new()
-                            };
+                            let restart =
+                                if !dep_batched && resident_now(dep) { format!("; {}", resident_note(dep)) } else { String::new() };
                             let which = if dep_batched { "new" } else { "running" };
-                            problems.push(format!(
-                                "{name} was built against a different interface of {dep} than the {which} one{restart}"
-                            ));
+                            problems.push(format!("{name} was built against a different interface of {dep} than the {which} one{restart}"));
                         }
                     }
                     Some(_) => {}
@@ -783,10 +765,9 @@ impl Model {
         let v = m.spec().v;
         match &mut m.state {
             State::Keeper { .. } if v == "e" => m.failed = true,
-            State::Keeper { loads, .. }
-            | State::Herald { loads, .. }
-            | State::Ranker { loads, .. }
-            | State::Anchor { loads, .. } => *loads += 1,
+            State::Keeper { loads, .. } | State::Herald { loads, .. } | State::Ranker { loads, .. } | State::Anchor { loads, .. } => {
+                *loads += 1
+            }
             State::Hearer { loads, at_load: at, .. } => {
                 *loads += 1;
                 *at = at_load;
@@ -820,12 +801,8 @@ impl Model {
         if self.mods[i].spec().resident {
             return Expect::Exactly(Err(format!("{name} is resident: it unloads when the engine exits")));
         }
-        let dependents: Vec<&str> = self
-            .mods
-            .iter()
-            .filter(|m| m.spec().deps.iter().any(|(d, _)| *d == name))
-            .map(|m| m.name.as_str())
-            .collect();
+        let dependents: Vec<&str> =
+            self.mods.iter().filter(|m| m.spec().deps.iter().any(|(d, _)| *d == name)).map(|m| m.name.as_str()).collect();
         if !dependents.is_empty() {
             return Expect::Exactly(Err(format!("{name} is needed by {}; unload them first", dependents.join(", "))));
         }
@@ -975,9 +952,7 @@ impl Model {
                     Ok(format!("hearer:{v} cleared"))
                 }
                 _ => {
-                    let State::Hearer { early, late, at_load, loads, heard } = &self.mods[i].state else {
-                        unreachable!()
-                    };
+                    let State::Hearer { early, late, at_load, loads, heard } = &self.mods[i].state else { unreachable!() };
                     let heard = heard.map_or("-".to_string(), |h| h.to_string());
                     Ok(format!(
                         "hearer:{v} loads={loads} at_load={at_load} heard={heard} early=[{}] late=[{}]",
@@ -1156,15 +1131,39 @@ fn world_items(world: &engine_api::World, items: ItemLayout, flags: FlagLayout) 
     let missing = |what: &str| format!("{what} isn't installed with the model's layout");
     let flag = |level: i64, note: String, seen: bool| Flag { level, note, seen };
     let flag_of: HashMap<engine_api::Entity, Flag> = match flags {
-        FlagLayout::A => world.values::<FlagA>().ok_or(missing("fz::Flag"))?.into_iter().map(|(e, f)| (e, flag(f.level as i64, f.note, false))).collect(),
-        FlagLayout::C => world.values::<FlagC>().ok_or(missing("fz::Flag"))?.into_iter().map(|(e, f)| (e, flag(f.level as i64, f.note, f.seen))).collect(),
-        FlagLayout::S => world.values::<FlagS>().ok_or(missing("fz::Flag"))?.into_iter().map(|(e, f)| (e, flag(f.level as i64, f.note, false))).collect(),
+        FlagLayout::A => {
+            world.values::<FlagA>().ok_or(missing("fz::Flag"))?.into_iter().map(|(e, f)| (e, flag(f.level as i64, f.note, false))).collect()
+        }
+        FlagLayout::C => world
+            .values::<FlagC>()
+            .ok_or(missing("fz::Flag"))?
+            .into_iter()
+            .map(|(e, f)| (e, flag(f.level as i64, f.note, f.seen)))
+            .collect(),
+        FlagLayout::S => {
+            world.values::<FlagS>().ok_or(missing("fz::Flag"))?.into_iter().map(|(e, f)| (e, flag(f.level as i64, f.note, false))).collect()
+        }
     };
     let item = |id: u32, count: u64, name: String, tags: Vec<String>, weight: f64| Item { id, count, name, tags, weight, flag: None };
     let found: Vec<(engine_api::Entity, Item)> = match items {
-        ItemLayout::A => world.values::<ItemA>().ok_or(missing("fz::Item"))?.into_iter().map(|(e, i)| (e, item(i.id, i.count as u64, i.name, i.tags, 0.0))).collect(),
-        ItemLayout::C => world.values::<ItemC>().ok_or(missing("fz::Item"))?.into_iter().map(|(e, i)| (e, item(i.id, i.count, i.name, Vec::new(), i.weight))).collect(),
-        ItemLayout::D => world.values::<ItemD>().ok_or(missing("fz::Item"))?.into_iter().map(|(e, i)| (e, item(i.id, i.count, i.name, Vec::new(), i.weight))).collect(),
+        ItemLayout::A => world
+            .values::<ItemA>()
+            .ok_or(missing("fz::Item"))?
+            .into_iter()
+            .map(|(e, i)| (e, item(i.id, i.count as u64, i.name, i.tags, 0.0)))
+            .collect(),
+        ItemLayout::C => world
+            .values::<ItemC>()
+            .ok_or(missing("fz::Item"))?
+            .into_iter()
+            .map(|(e, i)| (e, item(i.id, i.count, i.name, Vec::new(), i.weight)))
+            .collect(),
+        ItemLayout::D => world
+            .values::<ItemD>()
+            .ok_or(missing("fz::Item"))?
+            .into_iter()
+            .map(|(e, i)| (e, item(i.id, i.count, i.name, Vec::new(), i.weight)))
+            .collect(),
     };
     let flagged = found.iter().filter(|(e, _)| flag_of.contains_key(e)).count();
     if flagged != flag_of.len() {
@@ -1194,11 +1193,8 @@ fn world_ranks(world: &engine_api::World, layout: RankLayout) -> Option<Vec<u64>
 fn mapped_builds(dir: &Path) -> usize {
     let maps = std::fs::read_to_string("/proc/self/maps").expect("/proc/self/maps");
     let dir = format!("{}/", dir.display());
-    let mut paths: Vec<&str> = maps
-        .lines()
-        .filter_map(|line| Some(line.splitn(6, ' ').nth(5)?.trim_start()))
-        .filter(|path| path.starts_with(&dir))
-        .collect();
+    let mut paths: Vec<&str> =
+        maps.lines().filter_map(|line| Some(line.splitn(6, ' ').nth(5)?.trim_start())).filter(|path| path.starts_with(&dir)).collect();
     paths.sort();
     paths.dedup();
     paths.len()
@@ -1401,13 +1397,7 @@ pub fn run(ch: &mut impl Choices, steps: usize) -> Stats {
 
 fn run_ops(next: &mut dyn FnMut() -> Option<Op>) -> Stats {
     let dir = staging_dir();
-    let mut s = Session {
-        engine: Engine::new(None, dir.clone()),
-        dir,
-        model: Model::default(),
-        log: Vec::new(),
-        stats: Stats::default(),
-    };
+    let mut s = Session { engine: Engine::new(None, dir.clone()), dir, model: Model::default(), log: Vec::new(), stats: Stats::default() };
     while let Some(op) = next() {
         s.apply(op);
         s.check();
@@ -1465,9 +1455,7 @@ impl Session {
         }
         let matches = match &expected {
             Expect::Exactly(expected) => actual == *expected,
-            Expect::Refused(start, mentions) => {
-                actual.as_ref().is_err_and(|e| e.starts_with(start.as_str()) && e.contains(mentions))
-            }
+            Expect::Refused(start, mentions) => actual.as_ref().is_err_and(|e| e.starts_with(start.as_str()) && e.contains(mentions)),
         };
         if !matches {
             self.fail(&format!("{what}\n  replied {actual:?}\n  expected {expected:?}"));
@@ -1506,10 +1494,7 @@ impl Session {
         if let (Some((items, _)), Some((flags, _))) = (model.item, model.flag) {
             match world_items(world, items, flags) {
                 Ok(found) if found == model.describe_items() => {}
-                found => self.fail(&format!(
-                    "the items are\n  {found:?}\nand the model has\n  {:?}",
-                    model.describe_items()
-                )),
+                found => self.fail(&format!("the items are\n  {found:?}\nand the model has\n  {:?}", model.describe_items())),
             }
         } else if !model.items.is_empty() {
             self.fail("the model has items with no layout installed");
@@ -1522,10 +1507,7 @@ impl Session {
         }
         let (mapped, builds) = (mapped_builds(&self.dir), model.mapped());
         if mapped != builds.len() {
-            self.fail(&format!(
-                "{mapped} build(s) mapped, and the model expects {}: the builds loaded at {builds:?}",
-                builds.len()
-            ));
+            self.fail(&format!("{mapped} build(s) mapped, and the model expects {}: the builds loaded at {builds:?}", builds.len()));
         }
 
         // Each running mod's own report of itself: none of these change

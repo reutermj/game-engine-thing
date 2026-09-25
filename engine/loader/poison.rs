@@ -151,22 +151,11 @@ impl Drop for ModLibrary {
         // Reserved, not just protected: nothing else may be mapped here for
         // the rest of the process, so a stale pointer can't land in a newer
         // build's code and run it.
-        let at = unsafe {
-            mmap(
-                start as *mut c_void,
-                len,
-                PROT_NONE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
-                -1,
-                0,
-            )
-        };
+        let at =
+            unsafe { mmap(start as *mut c_void, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0) };
         if at as usize != start {
             // Another thread mapped into the span between the unmap and here.
-            eprintln!(
-                "[poison] {name}: couldn't guard {start:#x}..{end:#x}: {}",
-                std::io::Error::last_os_error()
-            );
+            eprintln!("[poison] {name}: couldn't guard {start:#x}..{end:#x}: {}", std::io::Error::last_os_error());
             return;
         }
         GUARDED.fetch_add(1, Ordering::Relaxed);
@@ -292,10 +281,7 @@ unsafe fn frame_at(ip: usize) {
     // what turns `ip` into the object's own address, as llvm-symbolizer
     // takes it: `fbase` isn't, for an executable not linked at zero.
     let mut map: *const usize = std::ptr::null();
-    if unsafe { dladdr1(ip as *const c_void, &mut info, &mut map, RTLD_DL_LINKMAP) } != 0
-        && !info.fname.is_null()
-        && !map.is_null()
-    {
+    if unsafe { dladdr1(ip as *const c_void, &mut info, &mut map, RTLD_DL_LINKMAP) } != 0 && !info.fname.is_null() && !map.is_null() {
         w.put(unsafe { CStr::from_ptr(info.fname) }.to_bytes());
         w.put(b" ");
         w.hex(ip - unsafe { *map });
@@ -429,10 +415,7 @@ struct SigInfo {
 }
 
 unsafe extern "C" {
-    fn dl_iterate_phdr(
-        callback: unsafe extern "C" fn(*mut DlPhdrInfo, usize, *mut c_void) -> c_int,
-        data: *mut c_void,
-    ) -> c_int;
+    fn dl_iterate_phdr(callback: unsafe extern "C" fn(*mut DlPhdrInfo, usize, *mut c_void) -> c_int, data: *mut c_void) -> c_int;
     fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void;
     fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int;
     fn sysconf(name: c_int) -> i64;

@@ -14,7 +14,6 @@ engine_api::mod_state! {
     struct Tracer {}
 }
 
-
 // Each build registers only some of these.
 #[allow(dead_code)]
 impl Tracer {

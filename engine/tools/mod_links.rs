@@ -98,10 +98,7 @@ mod tests {
         // can appear in this interface's.
         let dep = |digest: &str| [("physics".to_string(), digest.to_string())];
         assert_ne!(base, interface_digest(&[src("a.rs", "struct A;")], &dep("01")));
-        assert_ne!(
-            interface_digest(&[src("a.rs", "struct A;")], &dep("01")),
-            interface_digest(&[src("a.rs", "struct A;")], &dep("02"))
-        );
+        assert_ne!(interface_digest(&[src("a.rs", "struct A;")], &dep("01")), interface_digest(&[src("a.rs", "struct A;")], &dep("02")));
     }
 
     #[test]

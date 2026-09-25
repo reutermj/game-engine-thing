@@ -14,10 +14,8 @@ const CORPUS: &str = "engine/tests/fuzz/corpus";
 
 #[test]
 fn corpus_replays() {
-    let mut inputs: Vec<_> = std::fs::read_dir(Path::new(CORPUS))
-        .unwrap_or_else(|e| panic!("{CORPUS}: {e}"))
-        .map(|entry| entry.unwrap().path())
-        .collect();
+    let mut inputs: Vec<_> =
+        std::fs::read_dir(Path::new(CORPUS)).unwrap_or_else(|e| panic!("{CORPUS}: {e}")).map(|entry| entry.unwrap().path()).collect();
     inputs.sort();
     assert!(!inputs.is_empty(), "a corpus in {CORPUS}");
     for input in inputs {

@@ -2,7 +2,6 @@
 //! and the field-by-field description that lets values migrate between
 //! builds whose layouts differ. See docs/architecture/ecs.md.
 
-
 /// Generational handle: a despawned entity's index is reused with a new
 /// generation, so a stale handle never reaches a newer entity.
 #[repr(C)]
@@ -95,9 +94,7 @@ pub const fn __drop_fn<T>() -> Option<DropFn> {
 #[doc(hidden)]
 pub unsafe extern "C" fn __drop<T>(value: *mut u8) {
     // A panicking drop leaks rather than unwinding into the loader.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        std::ptr::drop_in_place(value as *mut T)
-    }));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { std::ptr::drop_in_place(value as *mut T) }));
 }
 
 #[doc(hidden)]
@@ -319,7 +316,6 @@ unsafe impl<T: FieldType, const N: usize> FieldType for [T; N] {
     const FINGERPRINT: u64 = __fingerprint("Array", &[T::FINGERPRINT, N as u64]);
 }
 
-
 unsafe impl<K: FieldType + Ord, V: FieldType> Crossing for std::collections::BTreeMap<K, V> {}
 unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BTreeMap<K, V> {
     const KIND: FieldKind = FieldKind::OPAQUE;
@@ -434,7 +430,6 @@ macro_rules! field_struct {
     };
 }
 
-
 /// A component type. Normally implemented by [`component!`].
 ///
 /// # Safety
@@ -461,10 +456,8 @@ pub unsafe trait Component: Default + Send + Sync + 'static {
     const ORDER: Option<crate::ordered::OrderDesc> = None;
     /// Checked on every typed access to stored values, so a build can't
     /// read a layout it wasn't compiled for.
-    const FINGERPRINT: u64 =
-        __component_fingerprint(Self::NAME, Self::VERSION, size_of::<Self>(), align_of::<Self>(), Self::FIELDS);
+    const FINGERPRINT: u64 = __component_fingerprint(Self::NAME, Self::VERSION, size_of::<Self>(), align_of::<Self>(), Self::FIELDS);
 }
-
 
 #[doc(hidden)]
 #[macro_export]

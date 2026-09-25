@@ -20,7 +20,6 @@ impl Mod for User {
     fn systems(s: &mut Systems<Self>) {
         s.add("touch", Self::touch);
     }
-
 }
 
 export_mod!(User);

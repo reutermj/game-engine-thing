@@ -26,27 +26,23 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub mod scheduler;
 mod service;
 mod system;
-pub use system::{
-    Declarations, IntoSystem, PhaseBuilder, PhaseDesc, SystemBuilder, SystemDesc, SystemFn, Systems, phase,
-};
 #[doc(hidden)]
 pub use system::__declare;
+pub use system::{Declarations, IntoSystem, PhaseBuilder, PhaseDesc, SystemBuilder, SystemDesc, SystemFn, Systems, phase};
 
 /// The ECS, shared with the loader as Rust types: see `engine_ecs`.
 pub use engine_ecs;
-pub use engine_ecs::{
-    Adds, Bounds, Bundle, ColumnMut, Component, ComponentDesc, Dt, Crossing, DefaultFn, Despawns, DropFn, Entity, Event, EventReader,
-    EventWriter, FieldDesc, FieldKind, FieldType, Mut, NearSide, OrderKey, Page, Query, Removes, Row, SpatialKey, Spawner, Storage, With,
-    Without, World, ChildOf, children_of, entity_key, near_pairs, near_pairs_with, pair_key, pairs_from, Executor, Scoped, Workers,
-    WorldMut, component, event, field_struct,
-};
 #[doc(hidden)]
 pub use engine_ecs::{__component_fingerprint, __drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __storage, __write_default};
-pub use service::{
-    CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc,
+pub use engine_ecs::{
+    Adds, Bounds, Bundle, ChildOf, ColumnMut, Component, ComponentDesc, Crossing, DefaultFn, Despawns, DropFn, Dt, Entity, Event,
+    EventReader, EventWriter, Executor, FieldDesc, FieldKind, FieldType, Mut, NearSide, OrderKey, Page, Query, Removes, Row, Scoped,
+    SpatialKey, Spawner, Storage, With, Without, Workers, World, WorldMut, children_of, component, entity_key, event, field_struct,
+    near_pairs, near_pairs_with, pair_key, pairs_from,
 };
 #[doc(hidden)]
 pub use service::{__begin_call, __end_call, __serve};
+pub use service::{CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
 pub const API_VERSION: u32 = 24;
@@ -183,11 +179,8 @@ pub struct Host {
     /// and swap builds. Waits up to `timeout` for the first request. Messages
     /// addressed to the caller go to `handler`, since the caller is running.
     /// See [`Cx::pump_loader`].
-    pub pump: unsafe fn(
-        ctx: *const ModContext,
-        timeout: std::time::Duration,
-        handler: &mut dyn FnMut(&str) -> Result<String, String>,
-    ) -> Pumped,
+    pub pump:
+        unsafe fn(ctx: *const ModContext, timeout: std::time::Duration, handler: &mut dyn FnMut(&str) -> Result<String, String>) -> Pumped,
     /// A scheduler's frame primitives; see [`scheduler`]. `begin_frame`
     /// returns the plan, or `None` if a frame is already open.
     pub begin_frame: unsafe fn(ctx: *const ModContext) -> Option<scheduler::FramePlan>,
@@ -247,12 +240,7 @@ pub struct Cx<'a> {
 impl Cx<'_> {
     pub fn name(&self) -> &str {
         // SAFETY: the loader keeps the name alive and valid UTF-8 for the context's lifetime.
-        unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                self.raw.name,
-                self.raw.name_len,
-            ))
-        }
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.raw.name, self.raw.name_len)) }
     }
 
     pub fn generation(&self) -> u32 {

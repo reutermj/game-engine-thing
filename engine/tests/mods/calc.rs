@@ -18,7 +18,6 @@ engine_api::mod_state! {
 
 impl Mod for CalcMod {
     type Transient = ();
-
 }
 
 impl calc::Calc for CalcMod {

@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, WorldMut, component};
+use engine_ecs::{
+    Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, WorldMut, component,
+};
 
 component! {
     /// A spatial key, so some rows are in pages of a dozen or so.
@@ -315,7 +317,6 @@ fn a_page_walk_refuses_a_sparse_term() {
     run(&w, walk, "walk");
 }
 
-
 component! {
     /// Moves an entity to a table nothing has walked.
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -451,7 +452,11 @@ fn rows_arriving_are_written_and_rows_leaving_are_seen_to_have_left() {
         m.remove::<At>(with_at[1]);
         Vec::new()
     });
-    assert_eq!(changed_now(), (want, [false, true, true, false]), "an `At` removed: left one query's tables, and arrived unwritten in the other's");
+    assert_eq!(
+        changed_now(),
+        (want, [false, true, true, false]),
+        "an `At` removed: left one query's tables, and arrived unwritten in the other's"
+    );
     let want = between(&mut |_| Vec::new());
     assert_eq!(changed_now(), (want, [false; 4]), "all of it older than the `now`");
 }
@@ -489,15 +494,23 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
         populate(&w, &mut seed);
     }
     fn split(_: &mut Cx, mut q: Query<&Val>) {
-        let chunks = q.par_for_each_page(&workers(), |r| (r, Vec::new()), |(_, seen), page, v| {
-            seen.extend(page.rows().map(|r| (page.entity(r), v[r].n)));
-        });
+        let chunks = q.par_for_each_page(
+            &workers(),
+            |r| (r, Vec::new()),
+            |(_, seen), page, v| {
+                seen.extend(page.rows().map(|r| (page.entity(r), v[r].n)));
+            },
+        );
         *CHUNKS.lock().unwrap() = chunks;
     }
     fn split_ordered(_: &mut Cx, mut q: Query<(&Val, &Rank), Without<Tag>>) {
-        let chunks = q.par_for_each_ordered_page(&workers(), |r| (r, Vec::new()), |(_, seen), page, (_, rank)| {
-            seen.extend(page.rows().map(|r| (page.entity(r), rank[r].n as u64)));
-        });
+        let chunks = q.par_for_each_ordered_page(
+            &workers(),
+            |r| (r, Vec::new()),
+            |(_, seen), page, (_, rank)| {
+                seen.extend(page.rows().map(|r| (page.entity(r), rank[r].n as u64)));
+            },
+        );
         *CHUNKS.lock().unwrap() = chunks;
     }
     fn paged(_: &mut Cx, mut q: Query<&Val>) {
@@ -548,20 +561,24 @@ fn a_parallel_walk_writes_and_changes_what_one_thread_does() {
         *SINCE.lock().unwrap() = q.now();
     }
     fn change(_: &mut Cx, mut q: Query<&mut Val, (), Despawns>) {
-        q.par_for_each_page(&workers(), |_| (), |_, page, mut v| {
-            for r in page.rows() {
-                let n = v[r].n;
-                if n % 5 == 0 {
-                    v.set(r, Val { n: n + 1 });
-                } else if n % 11 == 0 {
-                    // Read through `Mut`, not written.
-                    assert!(v.get_mut(r).n > 0);
+        q.par_for_each_page(
+            &workers(),
+            |_| (),
+            |_, page, mut v| {
+                for r in page.rows() {
+                    let n = v[r].n;
+                    if n % 5 == 0 {
+                        v.set(r, Val { n: n + 1 });
+                    } else if n % 11 == 0 {
+                        // Read through `Mut`, not written.
+                        assert!(v.get_mut(r).n > 0);
+                    }
+                    if n % 3 == 0 {
+                        page.row(r).despawn();
+                    }
                 }
-                if n % 3 == 0 {
-                    page.row(r).despawn();
-                }
-            }
-        });
+            },
+        );
     }
     fn written(_: &mut Cx, mut q: Query<&Val>) {
         let since = *SINCE.lock().unwrap();

@@ -16,12 +16,12 @@
 mod arrays;
 #[path = "../narrow.rs"]
 mod narrow;
-#[path = "../solver.rs"]
-mod solver;
 #[path = "tax_par.rs"]
 mod par;
 #[path = "pool.rs"]
 mod pool;
+#[path = "../solver.rs"]
+mod solver;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,7 +61,9 @@ fn main() {
         return;
     }
     println!("µs per step, {FRAMES} steps, -c opt, one thread; ECS / arrays\n");
-    println!("| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |");
+    println!(
+        "| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (n, width) in PILES {
         // Settled is still creeping (every body 1e-4 to 1e-2 a step); at rest
@@ -133,7 +135,9 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
     const TIME: f32 = 0.5;
     const SETTLE: u32 = 10;
     println!("\nSleeping (speed {SPEED}, {TIME} s), ECS only: µs per step, asleep / awake at the same step\n");
-    println!("| bodies | box | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |");
+    println!(
+        "| bodies | box | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (n, width) in PILES {
         let run = |sleep: bool, until: Option<u32>| {

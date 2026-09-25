@@ -136,9 +136,8 @@ impl std::error::Error for CallError {}
 #[doc(hidden)]
 pub fn __begin_call(cx: &mut Cx, service: &'static str, method: &'static str) -> Result<CallTarget, CallError> {
     let mut target = CallTarget { call: None, provider: std::ptr::null_mut() };
-    let status = unsafe {
-        ((*cx.raw.host).begin_call)(cx.raw, service.as_ptr(), service.len(), method.as_ptr(), method.len(), &mut target)
-    };
+    let status =
+        unsafe { ((*cx.raw.host).begin_call)(cx.raw, service.as_ptr(), service.len(), method.as_ptr(), method.len(), &mut target) };
     let kind = match status {
         CallStatus::OK if target.call.is_some() => return Ok(target),
         CallStatus::NOT_PROVIDED => CallErrorKind::NotProvided,
@@ -165,10 +164,7 @@ pub fn __end_call(cx: &mut Cx, target: &CallTarget, panicked: bool) {
 // Err carries nothing: the Result crosses into the caller's build, and a
 // panic payload, a Box<dyn Any> with this build's vtable, could not outlive it.
 #[allow(clippy::result_unit_err)]
-pub unsafe fn __serve<T: Mod, R>(
-    ctx: *mut ModContext,
-    method: impl FnOnce(&mut T, &mut T::Transient, &mut Cx) -> R,
-) -> Result<R, ()> {
+pub unsafe fn __serve<T: Mod, R>(ctx: *mut ModContext, method: impl FnOnce(&mut T, &mut T::Transient, &mut Cx) -> R) -> Result<R, ()> {
     let run = std::panic::AssertUnwindSafe(|| unsafe {
         let state = &mut *((*ctx).state as *mut T);
         let transient = &mut *crate::transient::<T>(&raw mut (*ctx).transient);
@@ -182,8 +178,12 @@ pub unsafe fn __serve<T: Mod, R>(
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __service_ret {
-    () => { () };
-    ($ret:ty) => { $ret };
+    () => {
+        ()
+    };
+    ($ret:ty) => {
+        $ret
+    };
 }
 
 /// Declares a service: functions a mod provides for other mods to call. See

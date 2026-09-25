@@ -16,19 +16,13 @@ use engine_control::Request;
 use runfiles::Runfiles;
 
 fn request_from_env() -> Result<Request, String> {
-    let name = std::env::var("ENGINE_MOD_NAME")
-        .map_err(|_| "usage: modctl list | schedule | load <name> <path> | unload <name> | quit")?;
-    let rlocation = std::env::var("ENGINE_MOD_RLOCATION")
-        .map_err(|_| "ENGINE_MOD_RLOCATION is not set")?;
+    let name = std::env::var("ENGINE_MOD_NAME").map_err(|_| "usage: modctl list | schedule | load <name> <path> | unload <name> | quit")?;
+    let rlocation = std::env::var("ENGINE_MOD_RLOCATION").map_err(|_| "ENGINE_MOD_RLOCATION is not set")?;
     let runfiles = Runfiles::create().map_err(|e| format!("finding runfiles: {e}"))?;
-    let path = runfiles
-        .rlocation(&rlocation)
-        .ok_or_else(|| format!("{rlocation} is not in runfiles"))?;
+    let path = runfiles.rlocation(&rlocation).ok_or_else(|| format!("{rlocation} is not in runfiles"))?;
     // Resolve through the runfiles symlink so the engine gets an absolute path to
     // the real build output.
-    let path = path
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let path = path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(Request::Load { name, path })
 }
 
@@ -37,10 +31,7 @@ fn request_from_args(args: &[String]) -> Result<Request, String> {
     // Relative paths are relative to where the user ran `bazel run`, not the runfiles cwd.
     if let Request::Load { name, path } = request {
         let base = std::env::var_os("BUILD_WORKING_DIRECTORY").unwrap_or_else(|| ".".into());
-        let path = Path::new(&base)
-            .join(path)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let path = Path::new(&base).join(path).canonicalize().map_err(|e| e.to_string())?;
         return Ok(Request::Load { name, path });
     }
     Ok(request)

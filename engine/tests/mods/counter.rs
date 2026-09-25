@@ -100,9 +100,7 @@ impl Mod for Counter {
         match message.split_once(' ') {
             None if message == "get" => Ok(self.total.to_string()),
             // Not resident, so the loader refuses.
-            None if message == "pump" => {
-                Ok(format!("{:?}", cx.pump_loader(std::time::Duration::ZERO, |_, _| Err(String::new()))))
-            }
+            None if message == "pump" => Ok(format!("{:?}", cx.pump_loader(std::time::Duration::ZERO, |_, _| Err(String::new())))),
             Some(("add", n)) => {
                 self.total += n.parse::<u64>().map_err(|e| format!("{n:?}: {e}"))?;
                 self.write_probe(cx);

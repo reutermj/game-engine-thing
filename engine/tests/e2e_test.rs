@@ -18,10 +18,7 @@ fn rlocation(var: &str) -> String {
 
 fn runfile(var: &str) -> PathBuf {
     let rlocation = rlocation(var);
-    Runfiles::create()
-        .expect("runfiles")
-        .rlocation(&rlocation)
-        .unwrap_or_else(|| panic!("{rlocation} is not in runfiles"))
+    Runfiles::create().expect("runfiles").rlocation(&rlocation).unwrap_or_else(|| panic!("{rlocation} is not in runfiles"))
 }
 
 /// A fresh runtime directory (socket and staged libraries) for one test.
@@ -96,12 +93,7 @@ fn stdout(output: &Output) -> String {
 }
 
 fn describe(output: &Output) -> String {
-    format!(
-        "status {}\n--- stdout\n{}--- stderr\n{}",
-        output.status,
-        stdout(output),
-        String::from_utf8_lossy(&output.stderr)
-    )
+    format!("status {}\n--- stdout\n{}--- stderr\n{}", output.status, stdout(output), String::from_utf8_lossy(&output.stderr))
 }
 
 /// `modctl list` once the engine is up and has loaded its manifest.
@@ -136,11 +128,7 @@ fn a_game_starts_hot_reloads_a_mod_and_quits() {
 
     // Exactly what `./bazel run //mods/counter` runs: modctl with no
     // arguments, told which mod and library through its environment.
-    let reload = modctl(
-        &runtime,
-        &[],
-        &[("ENGINE_MOD_NAME", "counter"), ("ENGINE_MOD_RLOCATION", &rlocation("COUNTER_V2"))],
-    );
+    let reload = modctl(&runtime, &[], &[("ENGINE_MOD_NAME", "counter"), ("ENGINE_MOD_RLOCATION", &rlocation("COUNTER_V2"))]);
     assert!(reload.status.success(), "{}", describe(&reload));
     assert_eq!(stdout(&reload).trim(), "reloaded counter (generation 1)");
     let list = stdout(&modctl(&runtime, &["list"], &[]));
@@ -238,11 +226,7 @@ fn a_game_reload_reloads_only_the_mods_that_changed() {
 
     // A per-mod reload that would strand a dependent is refused, naming the
     // game's reload target, which only the manifest could have told it.
-    let strand = modctl(
-        &runtime,
-        &[],
-        &[("ENGINE_MOD_NAME", "base"), ("ENGINE_MOD_RLOCATION", &rlocation("BASE_V2"))],
-    );
+    let strand = modctl(&runtime, &[], &[("ENGINE_MOD_NAME", "base"), ("ENGINE_MOD_RLOCATION", &rlocation("BASE_V2"))]);
     assert!(!strand.status.success(), "{}", describe(&strand));
     assert!(stdout(&strand).contains("`./bazel run //engine/tests:test_game_reload`"), "{}", describe(&strand));
 

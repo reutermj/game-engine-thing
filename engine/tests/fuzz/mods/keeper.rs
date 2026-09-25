@@ -221,8 +221,7 @@ impl Keeper {
         cx.world().for_each::<&Item>(|e, item| items.push((e, item.clone())));
         // Flags after the walk: `get` locks the table the walk holds.
         let world = cx.world();
-        let mut items: Vec<String> =
-            items.into_iter().map(|(e, item)| Self::describe(&item, world.get::<Flag>(e))).collect();
+        let mut items: Vec<String> = items.into_iter().map(|(e, item)| Self::describe(&item, world.get::<Flag>(e))).collect();
         items.sort();
         #[cfg(not(any(feature = "c", feature = "d")))]
         let extra = "-".to_string();

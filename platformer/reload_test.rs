@@ -27,11 +27,8 @@ fn route(script: &[&'static str]) -> Vec<Input<'static>> {
 /// corner, standing still long enough to fall asleep; and a jump onto the
 /// walker there, stomping it.
 const STOMP: &[&str] = &[
-    "step 5", "right", "step 29", "jump", "step 41", "stop", "step 2",
-    "right", "step 23", "jump", "step 41", "stop", "step 2",
-    "right", "step 45", "jump", "step 66", "stop", "step 1",
-    "right", "step 60", "stop", "step 1",
-    "step 31", "jump", "step 60",
+    "step 5", "right", "step 29", "jump", "step 41", "stop", "step 2", "right", "step 23", "jump", "step 41", "stop", "step 2", "right",
+    "step 45", "jump", "step 66", "stop", "step 1", "right", "step 60", "stop", "step 1", "step 31", "jump", "step 60",
 ];
 
 /// Standing at the start until asleep (about frame 40), then a jump from asleep.
@@ -92,11 +89,7 @@ fn reloading_one_mod_a_frame_is_invisible() {
 #[test]
 fn reloading_a_few_mods_together_now_and_then_is_invisible() {
     let stomp = route(STOMP);
-    assert_invisible(
-        &game(&stomp, "step 1"),
-        "mixed",
-        &[every(3, Batch::Mixed(5)), every(13, Batch::Whole), every(29, Batch::EachInTurn)],
-    );
+    assert_invisible(&game(&stomp, "step 1"), "mixed", &[every(3, Batch::Mixed(5)), every(13, Batch::Whole), every(29, Batch::EachInTurn)]);
 }
 
 /// At 45 frames a second the 60 Hz phases take one step some frames and

@@ -74,10 +74,7 @@ fn stale_call() {
 
 #[test]
 fn a_stale_call_faults_and_names_the_build() {
-    let out = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "stale_call", "--nocapture"])
-        .output()
-        .unwrap();
+    let out = Command::new(std::env::current_exe().unwrap()).args(["--ignored", "--exact", "stale_call", "--nocapture"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.signal(), Some(11), "expected SIGSEGV; stderr:\n{stderr}");
     let named = format!("inside an unloaded build of {}", std::fs::canonicalize(lib("COUNTER_V1")).unwrap().display());

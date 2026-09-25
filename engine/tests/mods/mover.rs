@@ -53,7 +53,6 @@ impl Mod for Mover {
         // what installs this build's layout.
         world.id::<Pos>();
     }
-
 }
 
 export_mod!(Mover);

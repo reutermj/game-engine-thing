@@ -19,11 +19,7 @@ pub struct Field {
 
 impl Field {
     fn describe(&self) -> String {
-        if self.kind == FieldKind::OPAQUE {
-            format!("type {:016x}", self.fingerprint)
-        } else {
-            kind_name(self.kind).into()
-        }
+        if self.kind == FieldKind::OPAQUE { format!("type {:016x}", self.fingerprint) } else { kind_name(self.kind).into() }
     }
 }
 
@@ -42,12 +38,7 @@ pub fn carries(o: &Field, f: &Field) -> bool {
 ///
 /// # Safety
 /// `fields` must point to `count` descs (or be anything, with `count` 0).
-pub unsafe fn read_fields(
-    fields: *const FieldDesc,
-    count: usize,
-    size: usize,
-    align: usize,
-) -> Option<(Vec<Field>, Vec<Option<DropFn>>)> {
+pub unsafe fn read_fields(fields: *const FieldDesc, count: usize, size: usize, align: usize) -> Option<(Vec<Field>, Vec<Option<DropFn>>)> {
     if !align.is_power_of_two() || !size.is_multiple_of(align) {
         return None;
     }
@@ -170,7 +161,6 @@ pub unsafe fn convert(from: FieldKind, src: *const u8, size: usize, to: FieldKin
     }
 }
 
-
 /// Rewrites one value from an old layout into a new one, matching fields by
 /// name: the new value starts as the new build's `Default`, takes every old
 /// field that `carries` over (the default's field dropped first), and every
@@ -181,10 +171,7 @@ pub unsafe fn convert(from: FieldKind, src: *const u8, size: usize, to: FieldKin
 /// `old` must be a live value laid out per its fields, whose drops belong to
 /// code that is still mapped; `new` must be uninitialized memory for the new
 /// layout.
-pub unsafe fn migrate(
-    old: (*mut u8, &[Field], &[Option<DropFn>]),
-    new: (*mut u8, &[Field], &[Option<DropFn>], DefaultFn),
-) {
+pub unsafe fn migrate(old: (*mut u8, &[Field], &[Option<DropFn>]), new: (*mut u8, &[Field], &[Option<DropFn>], DefaultFn)) {
     let (old, old_fields, old_drops) = old;
     let (new, new_fields, new_drops, default) = new;
     let mut carried = vec![false; old_fields.len()];

@@ -21,9 +21,8 @@ mod stack {
     /// `steps`, and the deepest overlap.
     pub fn simulate(shapes: &[Placed], g: f32, steps: usize) -> (Vec<f32>, f32) {
         let mut placed = shapes.to_vec();
-        let mut bodies: Vec<SolverBody> = (0..placed.len())
-            .map(|i| SolverBody { inv_mass: if i == 0 { 0.0 } else { 1.0 }, ..Default::default() })
-            .collect();
+        let mut bodies: Vec<SolverBody> =
+            (0..placed.len()).map(|i| SolverBody { inv_mass: if i == 0 { 0.0 } else { 1.0 }, ..Default::default() }).collect();
         let mut cache: Vec<Constraint> = Vec::new();
         let mut deepest = 0.0f32;
         for _ in 0..steps {
