@@ -79,6 +79,21 @@ fn the_same_inputs_replay_the_same_game() {
     assert!(first.0.starts_with("frame 508"), "{}", first.0);
 }
 
+/// Physics sleeps by default, and nothing in pong ever should: the ball
+/// never goes slower than a serve, and the paddles are kinematic, which
+/// don't sleep however still they stand.
+#[test]
+fn nothing_in_pong_falls_asleep() {
+    let e = game("awake");
+    for (command, frames) in [("down", 24), ("stay", 46), ("up", 25), ("stay", 400), ("down", 13)] {
+        send(&e, "pong_text", command);
+        for _ in 0..frames {
+            send(&e, "lockstep", "step 1");
+            assert_eq!(send(&e, "physics", "sleeping"), "asleep 0", "{}", state(&e));
+        }
+    }
+}
+
 #[test]
 fn the_court_is_drawn_to_size() {
     let e = game("drawn");

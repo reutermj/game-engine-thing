@@ -124,6 +124,38 @@ fn falling_onto_the_spikes_respawns_the_player() {
     assert!(player(&e, "x") < 7.0, "back at the start:\n{}", state(&e));
 }
 
+/// Physics sleeps by default, and the player standing still falls asleep
+/// (for a step: `play` writes its velocity every frame, which wakes it).
+/// Told to jump in the step it's asleep, it jumps as it does awake.
+#[test]
+fn a_player_asleep_jumps_in_the_frame_it_is_told_to_as_it_does_awake() {
+    let asleep = |e: &Engine| e.send("physics", "sleeping").unwrap() == "asleep 1";
+    let e = game("asleep");
+    play(&e, &["step 20"]);
+    let mut frames = 20;
+    while !asleep(&e) {
+        assert!(frames < 200, "never asleep standing still:\n{}", state(&e));
+        play(&e, &["step 1"]);
+        frames += 1;
+    }
+    let jump = |e: &Engine| {
+        play(e, &["jump"]);
+        (0..10)
+            .map(|_| {
+                play(e, &["step 1"]);
+                (player(e, "y"), player(e, "vy"))
+            })
+            .collect::<Vec<_>>()
+    };
+    let from_asleep = jump(&e);
+    // The same stand, a frame shorter: awake, at the same place.
+    let e = game("awake");
+    play(&e, &[&format!("step {}", frames - 1)]);
+    assert!(!asleep(&e));
+    assert_eq!(from_asleep, jump(&e), "jumping from asleep, and from awake");
+    assert!(from_asleep[0].1 < -10.0, "{from_asleep:?}");
+}
+
 /// The level mod's own builds, loaded over the running one like
 /// `./bazel run //platformer/level` after an edit.
 fn level_build(var: &str) -> PathBuf {

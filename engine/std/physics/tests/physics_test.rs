@@ -160,12 +160,16 @@ mod pile {
     /// in columns, 500 have 1.1 contacts a body, 1000 have 1.5 (2026-09-25; docs/lore).
     const SCENES: [(f32, u32); 2] = [(40.0, 200), (41.0, 1000)];
 
+    /// Physics sleeps by default; the pile, the benchmarks' scene, turns
+    /// it off (`Sleep::OFF`) unless asked.
     #[test]
-    fn nothing_sleeps_unless_asked() {
+    fn sleeping_is_on_by_default_and_the_pile_turns_it_off() {
         let e = game("PILE", "no_sleep");
         send(&e, "pile", "drop 200");
         step(&e, 600);
         assert_eq!(asleep(&e), 0.0);
+        send(&e, "pile", "sleep default");
+        until_asleep(&e, 200.0, 2000);
     }
 
     /// With sleeping on, a settled pile falls asleep and stays put, and a

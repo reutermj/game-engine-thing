@@ -2,8 +2,10 @@
 //!
 //!   widen <w>  rebuild the box's walls w wide, for piles bigger than ~1100
 //!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
-//!   sleep <speed> <time>  turn on sleeping (see `physics::Sleep`)
+//!   sleep <speed> <time>  turn on sleeping (see `physics::Sleep`), which
+//!              the pile has off, for the benchmarks
 //!   sleep off  turn it off again
+//!   sleep default  leave it to physics's default, which is on
 //!   kick <vx> <vy> [newest | naps]  set the velocity of the first body
 //!              dropped (or one of the island last to fall asleep, or the
 //!              bodies `nap` spawned), as a game would a sleeping body's
@@ -63,6 +65,16 @@ engine_api::mod_state! {
         later: Vec<Entity>,
         /// What `post` spawned.
         posts: Vec<Entity>,
+    }
+}
+
+/// Replaces the `Sleep` entity with `to`, or with none: physics's default.
+fn set_sleep(world: &mut WorldMut, to: Option<Sleep>) {
+    let mut was = Vec::new();
+    world.for_each::<&Sleep>(|e, _| was.push(e));
+    was.into_iter().for_each(|e| world.despawn(e));
+    if let Some(to) = to {
+        world.spawn((to,));
     }
 }
 
@@ -162,6 +174,9 @@ impl Mod for Pile {
         }
         let mut world = cx.world();
         world.spawn((Gravity { x: 0.0, y: 20.0 },));
+        // The benchmarks' scene, which `:tax` checks bit for bit against a
+        // step that doesn't sleep: off unless asked.
+        world.spawn((Sleep::OFF,));
         self.build_walls(&mut world);
     }
 
@@ -182,10 +197,12 @@ impl Mod for Pile {
                 Ok(format!("dropped {n}"))
             }
             Some(("sleep", "off")) => {
-                let mut on = Vec::new();
-                world.for_each::<&Sleep>(|e, _| on.push(e));
-                on.into_iter().for_each(|e| world.despawn(e));
+                set_sleep(&mut world, Some(Sleep::OFF));
                 Ok("sleeping off".into())
+            }
+            Some(("sleep", "default")) => {
+                set_sleep(&mut world, None);
+                Ok("sleeping by default".into())
             }
             Some(("grow", h)) => {
                 let h: f32 = h.trim().parse().map_err(|e| format!("{h:?}: {e}"))?;
@@ -326,7 +343,7 @@ impl Mod for Pile {
             Some(("sleep", args)) => {
                 let mut args = args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}")));
                 let (Some(speed), Some(time)) = (args.next(), args.next()) else { return Err("sleep <speed> <time>".into()) };
-                world.spawn((Sleep { speed: speed?, time: time? },));
+                set_sleep(&mut world, Some(Sleep { speed: speed?, time: time? }));
                 Ok("sleeping on".into())
             }
             None if message.trim() == "stats" => Ok(stats(&mut world, self.width())),
@@ -345,7 +362,7 @@ impl Mod for Pile {
                 }
                 Ok("shelved".into())
             }
-            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | kick <vx> <vy> [newest | naps] | grow <h> | despawn [nap] | nap later | nap body | unsleep | resleep [post] | post | floor off | floor falls | floor swap | floor <dy> | lift <vy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
+            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | sleep default | kick <vx> <vy> [newest | naps] | grow <h> | despawn [nap] | nap later | nap body | unsleep | resleep [post] | post | floor off | floor falls | floor swap | floor <dy> | lift <vy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
         }
     }
 }

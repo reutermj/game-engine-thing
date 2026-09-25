@@ -252,18 +252,25 @@ component! {
 }
 
 component! {
-    /// Sleeping, on one entity; no entity, no sleeping. An island (dynamic
-    /// bodies joined by contacts) all of whose bodies have been slower than
-    /// `speed` for `time` seconds falls asleep: its bodies stop, and aren't
-    /// simulated until something moves against one, what one rests on goes,
-    /// a game writes to one, or `physics` is sent `wake`. It changes the
-    /// simulation, so it's off unless a game asks. See
-    /// docs/architecture/physics.md, "Sleeping".
+    /// Sleeping's thresholds, on one entity; no entity, `Sleep::DEFAULT`.
+    /// An island (dynamic bodies joined by contacts) all of whose bodies
+    /// have been slower than `speed` for `time` seconds falls asleep: its
+    /// bodies stop, and aren't simulated until something moves against one,
+    /// what one rests on goes, a game writes to one, or `physics` is sent
+    /// `wake`. A `speed` of 0 turns it off (`Sleep::OFF`): nothing is slower
+    /// than that. See docs/architecture/physics.md, "Sleeping".
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Sleep: "physics::Sleep" {
         pub speed: f32,
         pub time: f32,
     }
+}
+
+impl Sleep {
+    /// What physics sleeps by with no `Sleep` entity: slower than 0.05 a
+    /// second (a cell, in both games' units) for half a second.
+    pub const DEFAULT: Sleep = Sleep { speed: 0.05, time: 0.5 };
+    pub const OFF: Sleep = Sleep { speed: 0.0, time: 0.0 };
 }
 
 component! {

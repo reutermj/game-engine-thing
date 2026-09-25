@@ -177,7 +177,7 @@ impl Physics {
         self.steps += 1;
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
         if sleep.asleep > 0 || !marks.is_empty() {
-            Self::wake_by_games(sleep, config.single(|_, _| ()).is_some(), (self.since, self.slept), &mut sleeping, &mut marks);
+            Self::wake_by_games(sleep, sleeping_by(&mut config).is_some(), (self.since, self.slept), &mut sleeping, &mut marks);
             // As `fall_woken`, through the query that has their velocities.
             for &e in &sleep.woken {
                 sleeping.with(e, |_, (v, _, _, body)| fall(g, dt, body, v));
@@ -709,7 +709,7 @@ impl Physics {
             });
         }
         let gathered = Instant::now();
-        let config = config.single(|_, c| *c);
+        let config = sleeping_by(&mut config);
         solver::solve(&mut bodies, &mut constraints, dt);
         let after_solver = Instant::now();
 
@@ -929,6 +929,13 @@ struct Merged {
 enum Made {
     Spawn(usize),
     Despawn(Entity),
+}
+
+/// The thresholds sleeping goes by, if it's on: the `Sleep` entity's, or
+/// `Sleep::DEFAULT` with none.
+fn sleeping_by(config: &mut Query<&Sleep>) -> Option<Sleep> {
+    let c = config.single(|_, c| *c).unwrap_or(Sleep::DEFAULT);
+    (c.speed > 0.0).then_some(c)
 }
 
 /// Gravity's step on a body's velocity.

@@ -735,9 +735,11 @@ stealing, which this pool doesn't do.
 
 ## Sleeping
 
-**Status: off unless a game spawns `Sleep`; sleeping is storage, and a
-wake is seen by the world's change detection** (2026-09-24, `sleep.rs`,
-get-emj.27; its gaps closed 2026-09-25). An island, dynamic bodies joined
+**Status: on by default, at `Sleep::DEFAULT` (slower than 0.05 a second
+for 0.5 s), which a `Sleep` entity changes and `Sleep::OFF` (no speed)
+turns off; sleeping is storage, and a wake is seen by the world's change
+detection** (2026-09-24, `sleep.rs`, get-emj.27; its gaps closed, and on
+by default, 2026-09-25).[^sleep-default] An island, dynamic bodies joined
 by pressed contacts, whose bodies have all been slower than `Sleep::speed`
 for `Sleep::time` falls asleep: its velocities are zeroed and each body
 gets `Asleep { island }`, which moves it to a table of its own, and each
@@ -751,9 +753,10 @@ ends wake. Falling asleep and waking are structural changes, at the apply
 node of the system that decided them, and happen only as islands do.
 
 It changes the simulation (a body stops when a threshold says so, not
-when the solver does), which is why it's opt in, and why `:tax` measures
-it apart, the ECS alone, with no arrays to agree with (`:tax -- sleeping`
-runs only that table). From ten steps after the whole pile is asleep,
+when the solver does), which is why the pile, the benchmarks' scene,
+turns it off unless asked, and why `:tax` measures it apart, the ECS
+alone, with no arrays to agree with (`:tax -- sleeping` runs only that
+table). From ten steps after the whole pile is asleep,
 against the same pile awake at the same step (speed 0.05, 0.5 s), µs per
 step, medians of three runs, on the columns (40 and 400 wide) and on real
 piles (41 and 401; see [the scenes](#the-scenes)):
@@ -877,6 +880,12 @@ What it doesn't do:
   when a contact begins touching, in its collide phase; the same in
   `find_contacts` (a found contact that touches, with an awake end moving
   faster than `Sleep::speed`) is the likely next step.
+- **No body can opt out, and a free body slower than `Sleep::speed`
+  stops**: a body drifting at 0.04 a second with nothing touching it
+  falls asleep in half a second, and stays where it stopped. Box2D has
+  the same threshold (a hundredth of a metre a second) and a per-body
+  `allowSleep`; neither game has such a body, and the whole world's is
+  `Sleep::OFF`.
 - **A game that writes a body's velocity every frame wakes it every time
   it falls asleep**: the platformer's `play` sets the player's `v.x` each
   frame, so the player standing still sleeps one step in 32. Harmless (a
@@ -1275,6 +1284,19 @@ frame 508.
     and 1 / 65. Measured before pages were made blocks of the order: at
     1000, 56 / 140 and 10 / 142; at 10 000, 580 / 1472 and 26 / 1503, the
     broadphase 208 / 222 and 2 / 243.
+
+[^sleep-default]: *(2026-09-25.)* Turned on by default after both games
+    were checked with it: pong's ball never sleeps (it never goes slower
+    than 16 a second) and its paddles are kinematic, which never do, so in
+    2500 frames nothing slept and the game's state was the same at every
+    look, on or off. The platformer's player standing still sleeps one step
+    in 32 (see below) and runs and jumps in the frame it's told to, on the
+    same trajectory as awake; every recorded route passes unchanged.
+    `pong_test`'s `nothing_in_pong_falls_asleep` and `platformer_test`'s
+    `a_player_asleep_jumps_in_the_frame_it_is_told_to_as_it_does_awake`
+    pin both (each catches a mutation: kinematic bodies let sleep; the
+    jump without the step's gravity, or not waking the player). Off
+    by default, from 2026-09-24, while its gaps were open.
 
 [^touching]: *(History, 2026-09-25.)* Waking at once every island a
     resting contact joins to a woken one, transitively (as Box2D's islands

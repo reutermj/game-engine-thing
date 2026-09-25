@@ -1,5 +1,5 @@
-//! Sleeping (opt in, with a `Sleep` entity): the islands that fall asleep
-//! and wake together. See docs/architecture/physics.md, "Sleeping".
+//! Sleeping (on unless a `Sleep` entity turns it off): the islands that
+//! fall asleep and wake together. See docs/architecture/physics.md, "Sleeping".
 //!
 //! The world says who's asleep: a sleeping body has `Asleep`, which puts
 //! it in tables of its own. This is the mod's copy of that by entity index,
