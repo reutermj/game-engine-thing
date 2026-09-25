@@ -80,6 +80,13 @@ changing the ABI, the reload sequence or the Bazel rules.
     Tables, queries, guards and the executors are safe Rust, and no unsafe
     code depends on concurrency (storage.md, "Where the unsafe is"), so
     keep new unsafe beside the existing unsafe code.
+    **Growing the unsafe core is a design decision, not an optimization.**
+    Every addition needs Miri and fuzz coverage before it can be trusted,
+    and that testing blocked progress for as long as whole features took to
+    build. So new unsafe is weighed as a design choice: try it in a spike
+    to get the data (the measured gain, and the testing it will need), and
+    bring that to the user before it lands. It's never slipped in as part
+    of a performance pass.
   - `world.rs` — storage, entity locations, installing a build's layouts
     (and migrating values), and the guards each node takes.
   - `query.rs`, `events.rs` — system parameters: `Query`, `Spawner`, rows
