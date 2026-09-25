@@ -225,6 +225,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
             crate_root = interface[0],
             srcs = interface,
             deps = interface_deps + ["//engine/api"],
+            lint_config = "//engine:mod_lints",
             testonly = testonly,
             visibility = visibility,
         )
@@ -257,6 +258,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         # already links with -z now; pin it so the loader can rely on it. See
         # docs/lore/mods-are-linked-bind-now.md.
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
+        lint_config = "//engine:mod_lints",
         testonly = testonly,
         visibility = ["//visibility:private"],
         **kwargs

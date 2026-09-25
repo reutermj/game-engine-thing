@@ -1,1 +1,20 @@
+load("@rules_rust//rust:defs.bzl", "rust_lint_config")
+
 exports_files(["defs.bzl"])
+
+# Lints for code that runs inside a mod: every crate engine_mod makes, and
+# the crates linked into every mod (//engine/ecs, //engine/api,
+# //engine/tests:probe). Only clippy reads these; rustc ignores clippy:: levels.
+#
+# No printing: println! in a mod writes through the statically linked std of
+# that mod, whose stdout buffer leaks when the mod unloads (see
+# docs/lore/a-mods-own-std-leaks-its-stdout-buffer-when-unloaded.md). The
+# loader, tests, benches and modctl do not take this config, so they may print.
+rust_lint_config(
+    name = "mod_lints",
+    clippy = dict(
+        print_stderr = "deny",
+        print_stdout = "deny",
+    ),
+    visibility = ["//visibility:public"],
+)

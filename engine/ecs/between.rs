@@ -33,6 +33,9 @@ impl<'w> WorldMut<'w> {
     }
 
     /// `T`'s id, installing this build's layout of it if need be.
+    // The one print in mod code, and so the one leak of a mod std's stdout
+    // buffer (see //engine:mod_lints); it wants a host log to go through.
+    #[allow(clippy::print_stdout)]
     fn install(&self, desc: &ComponentDesc) -> ComponentId {
         match self.world.install(desc, &self.build) {
             Ok(Some(report)) => println!("[engine] {report}"),

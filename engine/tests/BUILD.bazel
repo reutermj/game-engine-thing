@@ -10,6 +10,7 @@ rust_library(
     name = "probe",
     srcs = ["probe.rs"],
     crate_name = "test_probe",
+    lint_config = "//engine:mod_lints",
     deps = ["//engine/api"],
 )
 

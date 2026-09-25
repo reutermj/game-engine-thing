@@ -10,6 +10,7 @@ rust_library(
         "system.rs",
     ],
     crate_name = "engine_api",
+    lint_config = "//engine:mod_lints",
     crate_root = "lib.rs",
     visibility = ["//visibility:public"],
     deps = ["//engine/ecs"],

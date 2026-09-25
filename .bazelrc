@@ -8,3 +8,21 @@ try-import %workspace%/user.bazelrc
 common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker_messages
 common --@rules_rust//rust/settings:extra_exec_rustc_flag=-Alinker_messages
 
+
+# Clippy runs as an aspect over every Rust target that bazel test builds, so a
+# lint fails the test run like a compile error does. Not on build or run: a
+# lint should not block a hot reload mid-edit. ./bazel build --config=lint
+# lints without testing. Levels are clippy-only flags, so they sit on common:
+# a Starlark flag that differs between build and test would discard the
+# analysis cache on every switch.
+common --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+# The access declaration is the system signature: its Query types and its
+# parameter count are the API, and an alias or a struct would hide them.
+common --@rules_rust//rust/settings:clippy_flag=-Aclippy::type_complexity
+common --@rules_rust//rust/settings:clippy_flag=-Aclippy::too_many_arguments
+# Storage and solver loops index several parallel arrays by one index.
+common --@rules_rust//rust/settings:clippy_flag=-Aclippy::needless_range_loop
+test --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+test --output_groups=+clippy_checks
+build:lint --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:lint --output_groups=+clippy_checks
