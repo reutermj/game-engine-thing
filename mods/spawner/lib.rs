@@ -37,7 +37,7 @@ impl Spawner {
         mut bodies: Query<(&ChildOf, &mut Velocity), With<Body>>,
     ) {
         self.frames += 1;
-        if self.frames % 60 != 0 {
+        if !self.frames.is_multiple_of(60) {
             return;
         }
         let Some(scene) = scenes.single(|row, ()| row.entity()) else { return };

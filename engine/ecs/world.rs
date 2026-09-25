@@ -110,7 +110,7 @@ impl Location {
         (self.table.0 as u64) << 40 | (self.page as u64) << 16 | self.row as u64
     }
     fn unpack(bits: u64) -> Option<Location> {
-        (bits < RESERVED).then(|| Location {
+        (bits < RESERVED).then_some(Location {
             table: TableId((bits >> 40) as u32),
             page: ((bits >> 16) & 0xff_ffff) as u32,
             row: (bits & 0xffff) as u32,
@@ -622,7 +622,7 @@ impl World {
     /// which re-sorts what it wrote.
     pub fn moves_rows(&self, c: ComponentId) -> bool {
         let info = self.component(c);
-        info.spatial || info.ordered || self.extents.lock().unwrap().iter().any(|n| *n == info.name)
+        info.spatial || info.ordered || self.extents.lock().unwrap().contains(&info.name)
     }
 
     /// The glue of ordered key `c`, and when the build that installed it

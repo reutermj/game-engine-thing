@@ -135,7 +135,7 @@ fn random_changes_keep_every_table_in_order() {
     let spawn = |w: &World, seed: &mut u64, names: &mut HashMap<Entity, String>, live: &mut Vec<Entity>| {
         let mut m = w.between_frames(Build::default()).unwrap();
         let rank = Rank { n: lcg(seed) % 50 };
-        let e = if lcg(seed) % 3 == 0 {
+        let e = if lcg(seed).is_multiple_of(3) {
             m.spawn((rank, Tag {}, Name::default()))
         } else {
             m.spawn((rank, Name::default()))

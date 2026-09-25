@@ -6,6 +6,10 @@
 //! order never falls to the entity tie-break. Mirrored by the reload
 //! fuzzer's model (engine/tests/fuzz/reload_ops.rs).
 
+// One source, builds with different `Rank` layouts: a cast or a
+// `..Default::default()` redundant in one build is what another needs.
+#![allow(clippy::unnecessary_cast, clippy::needless_update)]
+
 use engine_api::{Cx, Entity, Mod, OrderKey, Query, Systems, export_mod, phase};
 
 #[cfg(feature = "a")]

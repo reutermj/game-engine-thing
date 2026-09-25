@@ -178,7 +178,7 @@ fn wait_for(s: &Shared, w: usize, seen: u64) -> u64 {
         }
         std::hint::spin_loop();
         spins += 1;
-        if spins % 256 == 0 && start.elapsed() > SPIN {
+        if spins.is_multiple_of(256) && start.elapsed() > SPIN {
             // Park, unless the epoch moved while saying so: `run` stores
             // the epoch before looking at `parked`, both SeqCst, so one of
             // the two sees the other.
@@ -1555,7 +1555,7 @@ fn islands_solver(pool: &Pool, threads: usize) -> Solve<'_> {
 fn settling(name: &str, from: &Arrays, pool: &Pool, steps: u32) {
     let marks = [100u32, 400, 1000, 2000, 3000, steps];
     let runs: Vec<(&str, Solve, Solve)> = vec![
-        ("serial (islands on 16 threads alongside)", Box::new(|b, c, dt| solver::solve(b, c, dt)), islands_solver(pool, 16)),
+        ("serial (islands on 16 threads alongside)", Box::new(solver::solve), islands_solver(pool, 16)),
         ("colored (1 thread, 16 alongside)", colored_solver(pool, 1), colored_solver(pool, 16)),
     ];
     println!("\n### Settling: {name} from step 1, on arrays\n");

@@ -113,7 +113,7 @@ fn worker(s: &Shared, me: usize) {
                 break;
             }
             spins += 1;
-            if spins % 64 == 0 && idle.elapsed() > spin() {
+            if spins.is_multiple_of(64) && idle.elapsed() > spin() {
                 let mut parked = s.parked.lock().unwrap();
                 *parked += 1;
                 // Checked under the lock `run` takes to wake: no lost wakeup.

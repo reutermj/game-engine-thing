@@ -168,7 +168,7 @@ fn play(game: &Game, test: &str, reloads: Option<Reloads>, mut check: impl FnMut
         _ => 0,
     };
     let mut boundary = |e: &Engine, frame: u32, twins: &mut [Twin]| {
-        if let Some(r) = reloads.filter(|r| frame % r.every == 0) {
+        if let Some(r) = reloads.filter(|r| frame.is_multiple_of(r.every)) {
             let which: Vec<usize> = match r.batch {
                 Batch::Whole => (0..twins.len()).collect(),
                 Batch::EachInTurn => {

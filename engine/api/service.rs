@@ -162,6 +162,9 @@ pub fn __end_call(cx: &mut Cx, target: &CallTarget, panicked: bool) {
 /// # Safety
 /// `ctx` must be the provider's context, from `begin_call`, whose state is a `T`.
 #[doc(hidden)]
+// Err carries nothing: the Result crosses into the caller's build, and a
+// panic payload, a Box<dyn Any> with this build's vtable, could not outlive it.
+#[allow(clippy::result_unit_err)]
 pub unsafe fn __serve<T: Mod, R>(
     ctx: *mut ModContext,
     method: impl FnOnce(&mut T, &mut T::Transient, &mut Cx) -> R,

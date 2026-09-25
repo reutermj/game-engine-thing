@@ -151,7 +151,7 @@ pub fn balanced(weights: &[usize], chunks: usize) -> Vec<Range<usize>> {
 
 /// `slice` cut into consecutive pieces of `lens`: outputs carved per chunk,
 /// so each task writes its own and nothing is copied together after.
-pub fn carve<'a, T>(mut slice: &'a mut [T], lens: impl IntoIterator<Item = usize>) -> Vec<&'a mut [T]> {
+pub fn carve<T>(mut slice: &mut [T], lens: impl IntoIterator<Item = usize>) -> Vec<&mut [T]> {
     let mut out = Vec::new();
     for n in lens {
         let (head, tail) = std::mem::take(&mut slice).split_at_mut(n);

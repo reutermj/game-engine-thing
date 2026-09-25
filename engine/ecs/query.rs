@@ -548,6 +548,9 @@ pub trait Data {
     fn run_page<'b>(runs: &'b mut Self::Runs<'_>, page: usize) -> Self::Slices<'b>;
 }
 
+// Lifetimes spelled as the trait declares them, so this impl reads like the
+// others.
+#[allow(clippy::needless_lifetimes)]
 impl Data for () {
     type Items<'a> = ();
     type States<'w> = ();
@@ -926,7 +929,7 @@ fn merged(rows: &[TableRead<'_>], ordered: &[usize]) -> Vec<(u128, Entity, u32, 
         }
     }
     // One sorted run per table: a stable sort merges them.
-    all.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+    all.sort_by_key(|x| (x.0, x.1));
     all
 }
 

@@ -177,10 +177,8 @@ impl Schedule {
         if fs.state[i] != State::Pending {
             return false;
         }
-        if let Node::Apply(s) = fs.nodes[i] {
-            if fs.logs[s].is_none() && fs.running[s].is_none() {
-                return false;
-            }
+        if let Node::Apply(s) = fs.nodes[i] && fs.logs[s].is_none() && fs.running[s].is_none() {
+            return false;
         }
         self.blockers(world, fs, i).is_empty()
     }

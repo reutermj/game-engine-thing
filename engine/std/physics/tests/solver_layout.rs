@@ -798,7 +798,7 @@ impl Scene {
 type Outcome = (Vec<[u32; 4]>, Vec<[u32; 3]>);
 
 fn outcome(n: usize, body: impl Fn(usize) -> (Vec2, Vec2), contacts: impl Iterator<Item = (f32, f32, f32)>) -> Outcome {
-    let b = (0..n).map(|i| body(i)).map(|(v, p)| [v.x.to_bits(), v.y.to_bits(), p.x.to_bits(), p.y.to_bits()]).collect();
+    let b = (0..n).map(&body).map(|(v, p)| [v.x.to_bits(), v.y.to_bits(), p.x.to_bits(), p.y.to_bits()]).collect();
     let c = contacts.map(|(jn, jt, s)| [jn.to_bits(), jt.to_bits(), s.to_bits()]).collect();
     (b, c)
 }

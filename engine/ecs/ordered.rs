@@ -194,7 +194,7 @@ impl Resort<'_> {
         // Stable and adaptive: the rows are mostly in order already (new
         // ones appended, a few swapped by removals), so this is close to a
         // merge of a few runs.
-        all.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+        all.sort_by_key(|x| (x.0, x.1));
         let at: Vec<(u32, u32)> = all.iter().map(|&(_, _, p, r)| (p, r)).collect();
         for c in self.columns {
             *c = ErasedColumn::gather(c, &at, self.page_rows);

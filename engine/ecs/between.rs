@@ -15,6 +15,14 @@ pub struct WorldMut<'w> {
     /// The build whose code this is: components it names are installed with
     /// it on first use.
     build: Build,
+    /// Where reports go (a migration's): the host's log, since this code runs
+    /// inside a mod, and a mod printing through its own std leaks that std's
+    /// stdout buffer when it unloads
+    /// (docs/lore/a-mods-own-std-leaks-its-stdout-buffer-when-unloaded.md).
+    /// None for the loader's and tests' own use, which drops them. `'static`
+    /// so dropping a `WorldMut` doesn't keep the world borrowed (a closure
+    /// bounded by `'w` would, by drop check).
+    log: Option<Box<dyn Fn(&str)>>,
 }
 
 impl World {
@@ -23,7 +31,7 @@ impl World {
         if self.frame_open() {
             return Err("the world is reached through a system's parameters during a frame".into());
         }
-        Ok(WorldMut { world: self, build })
+        Ok(WorldMut { world: self, build, log: None })
     }
 }
 
@@ -32,13 +40,20 @@ impl<'w> WorldMut<'w> {
         self.world
     }
 
+    /// Sends this world's reports to `log`.
+    pub fn with_log(mut self, log: impl Fn(&str) + 'static) -> WorldMut<'w> {
+        self.log = Some(Box::new(log));
+        self
+    }
+
     /// `T`'s id, installing this build's layout of it if need be.
-    // The one print in mod code, and so the one leak of a mod std's stdout
-    // buffer (see //engine:mod_lints); it wants a host log to go through.
-    #[allow(clippy::print_stdout)]
     fn install(&self, desc: &ComponentDesc) -> ComponentId {
         match self.world.install(desc, &self.build) {
-            Ok(Some(report)) => println!("[engine] {report}"),
+            Ok(Some(report)) => {
+                if let Some(log) = &self.log {
+                    log(&report);
+                }
+            }
             Ok(None) => {}
             Err(e) => panic!("{e}"),
         }

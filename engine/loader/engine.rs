@@ -222,10 +222,8 @@ impl Engine {
     /// A batch of one: see [`Engine::load_batch`].
     pub fn load(&self, name: &str, path: &Path) -> Result<String, String> {
         // Asked for by name, so refuse rather than skip as a batch does.
-        if let Some(m) = self.mods.borrow().iter().find(|m| &*m.name == name && m.resident) {
-            if m.content != content_hash(path)? {
-                return Err(resident_note(name));
-            }
+        if let Some(m) = self.mods.borrow().iter().find(|m| &*m.name == name && m.resident) && m.content != content_hash(path)? {
+            return Err(resident_note(name));
         }
         self.load_batch(&[(name.to_string(), path.to_path_buf())])
     }
@@ -910,10 +908,8 @@ impl Engine {
         }));
         if applied.is_err() {
             eprintln!("[engine] applying {module}'s changes panicked; it won't run again until it is reloaded");
-            if let Ok(mods) = self.mods.try_borrow() {
-                if let Some(m) = mods.iter().find(|m| *m.name == *module) {
-                    m.failed.set(true);
-                }
+            if let Ok(mods) = self.mods.try_borrow() && let Some(m) = mods.iter().find(|m| *m.name == *module) {
+                m.failed.set(true);
             }
         }
     }

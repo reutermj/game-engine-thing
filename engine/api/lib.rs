@@ -312,7 +312,11 @@ impl Cx<'_> {
             keepalive: unsafe { (host.keepalive)(self.raw) },
         };
         let name = self.name().to_string();
-        world.between_frames(build).unwrap_or_else(|e| panic!("{name}: {e}"))
+        let (log, ctx): (_, *const ModContext) = (host.log, &*self.raw);
+        let world = world.between_frames(build).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // SAFETY: as `Cx::log`; the context outlives the `WorldMut`, which
+        // borrows this `Cx`.
+        world.with_log(move |msg: &str| unsafe { log(ctx, msg.as_ptr(), msg.len()) })
     }
 
     /// Sends an event, readable from the next frame: for code outside a

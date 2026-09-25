@@ -13,7 +13,7 @@ engine_api::mod_state! {
 impl Hello {
     fn tick(&mut self, _: &mut (), cx: &mut Cx) {
         self.frames += 1;
-        if self.frames % 120 == 0 {
+        if self.frames.is_multiple_of(120) {
             cx.log(format!("still here after {} frames", self.frames));
         }
     }

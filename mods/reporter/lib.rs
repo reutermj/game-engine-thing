@@ -17,7 +17,7 @@ engine_api::mod_state! {
 impl Reporter {
     fn report(&mut self, _: &mut (), cx: &mut Cx, mut bodies: Query<(&Position, &Velocity)>) {
         self.frames += 1;
-        if self.frames % 60 != 0 {
+        if !self.frames.is_multiple_of(60) {
             return;
         }
         let (mut n, mut moving, mut first) = (0, 0, None);

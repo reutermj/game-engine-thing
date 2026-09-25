@@ -152,7 +152,7 @@ fn mover(_: &mut Cx, mut q: Query<&mut At>) {
     let frame = FRAME.fetch_add(1, Ordering::SeqCst) as u64;
     let mut s = frame + 99;
     q.for_each(|row, mut at| {
-        let jump = (row.entity().index as u64 + frame) % 7 == 0;
+        let jump = (row.entity().index as u64 + frame).is_multiple_of(7);
         let step = if jump { 20.0 } else { 0.6 };
         at.x = (at.x + (lcg(&mut s) - 0.5) * step).rem_euclid(50.0);
         at.y = (at.y + (lcg(&mut s) - 0.5) * step).rem_euclid(50.0);

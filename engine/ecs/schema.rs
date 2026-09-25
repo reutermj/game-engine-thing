@@ -48,7 +48,7 @@ pub unsafe fn read_fields(
     size: usize,
     align: usize,
 ) -> Option<(Vec<Field>, Vec<Option<DropFn>>)> {
-    if !align.is_power_of_two() || size % align != 0 {
+    if !align.is_power_of_two() || !size.is_multiple_of(align) {
         return None;
     }
     let descs = match count {

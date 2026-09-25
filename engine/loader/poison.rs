@@ -82,6 +82,13 @@ static MAPPING: Mutex<()> = Mutex::new(());
 
 impl ModLibrary {
     /// `dlopen`s `staged`, a copy of `source`.
+    ///
+    /// # Safety
+    ///
+    /// As `libloading::Library::new`: loading runs the library's
+    /// initializers, so `staged` must be a mod build (one `engine_mod` made).
+    /// Nothing may call into it once the `ModLibrary` is dropped; in poison
+    /// mode its span then faults.
     pub unsafe fn open(staged: &Path, source: &Path) -> Result<ModLibrary, libloading::Error> {
         let guarding = matches!(mode(), Mode::Unmapped | Mode::Strict);
         if guarding {

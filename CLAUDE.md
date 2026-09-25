@@ -176,7 +176,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   `$(./bazel info output_base)/external/<repo>/`, read its `.bzl` source for
   attributes and behavior. READMEs lag and show the happy path;
   `cc_runtime_linkage`, which the mods depend on, appears only in the
-  patched `rules_rust` source (see
+  copy of `rules_rust` that `rules_rs` ships, patched by `rules_rs` (we
+  patch nothing ourselves), not upstream (see
   [lore](docs/lore/rust-shared-libraries-link-the-cxx-runtime-dynamically.md)).
 - **Tests come in three tiers, and each proves something the others
   can't.** Run them all with `./bazel test //...`. Fix a bug at the lowest
@@ -209,6 +210,19 @@ changing the ABI, the reload sequence or the Bazel rules.
   what it claimed to (a panicking mod that panicked on every step looked the
   same disabled or not). Check a new e2e test with `--runs_per_test=50`
   before trusting it.
+- **Long checks run only when a change touches what they cover.** Checks
+  that take more than five minutes (Miri, fuzz campaigns, planted-bug
+  checks) are for changes to unsafe code (`erased.rs`, `schema.rs`,
+  component glue, the loader's `dlopen` and poison paths), the loader's
+  reload sequence, or migration; runbooks 002-004 say how to run them. The
+  default suite runs on every change. When a long check is skipped, say
+  which and why; when one is warranted, say so before starting it.
+- **`./bazel test` lints.** Clippy runs over every Rust target a test run
+  builds (`.bazelrc`), so a lint fails the run like a compile error; `build`
+  and `run` don't lint, so a lint never blocks a hot reload. Code that runs
+  inside a mod can't print (`//engine:mod_lints`): a mod's `println!` goes
+  through its own copy of std, whose stdout buffer leaks when it unloads.
+  Log through `cx.log`.
 - **Comments explain why, not what.** A "what" comment is a second copy of
   the code: it can only be redundant or wrong, and it turns wrong the
   moment the line it describes changes. Spend the comment on what the code

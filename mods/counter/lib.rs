@@ -14,7 +14,7 @@ engine_api::mod_state! {
 impl Counter {
     fn tick(&mut self, _: &mut (), cx: &mut Cx) {
         self.frames += 1;
-        if self.frames % 60 == 0 {
+        if self.frames.is_multiple_of(60) {
             self.count += 1;
             cx.log(format!("count = {}", self.count));
         }

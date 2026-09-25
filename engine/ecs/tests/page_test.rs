@@ -103,7 +103,7 @@ fn populate(w: &World, seed: &mut u64) -> Vec<Entity> {
         live.push(e);
     }
     for i in (0..live.len()).rev() {
-        if lcg(seed) % 5 == 0 {
+        if lcg(seed).is_multiple_of(5) {
             m.despawn(live.swap_remove(i));
         }
     }

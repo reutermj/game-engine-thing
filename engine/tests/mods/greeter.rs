@@ -107,7 +107,8 @@ mod greeter {
 
         fn load(&mut self, _: &mut (), _cx: &mut Cx) {
             if self.first == 0 {
-                self.first = greet as usize as u64;
+                // The point: an address kept as a number.
+                self.first = greet as fn() -> String as usize as u64;
             }
         }
 
