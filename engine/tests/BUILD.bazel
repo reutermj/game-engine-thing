@@ -273,6 +273,15 @@ engine_mod(
     "v2",
 ]]
 
+# The reload fuzzer's builds that must be refused are these too.
+exports_files(
+    [
+        "mods/no_entry.rs",
+        "mods/wrong_api.rs",
+    ],
+    visibility = ["//engine/tests/fuzz:__pkg__"],
+)
+
 engine_mod(
     name = "no_entry",
     srcs = ["mods/no_entry.rs"],

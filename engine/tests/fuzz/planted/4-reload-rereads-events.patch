@@ -1,0 +1,12 @@
+diff --git a/engine/ecs/events.rs b/engine/ecs/events.rs
+index 3369490..d5c06e1 100644
+--- a/engine/ecs/events.rs
++++ b/engine/ecs/events.rs
+@@ -136,6 +136,7 @@ impl World {
+                 if let Some(values) = &mut queue.values {
+                     values.adopt(ty);
+                 }
++                queue.cursors.lock().unwrap().clear();
+                 (queue.ty, queue.loaded_at, queue._keepalive) = (Some(ty), build.loaded_at, build.keepalive.clone());
+                 Ok(())
+             }

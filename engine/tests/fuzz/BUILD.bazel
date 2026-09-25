@@ -1,0 +1,220 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_mod")
+load("//engine/ecs/fuzz:fuzz.bzl", "fuzz_binary")
+load(":launcher.bzl", "fuzz_launcher")
+
+# Coverage-guided fuzzing of hot reload: a driver (reload_ops.rs) decodes an
+# input into loads, batches, unloads, frames and messages over the test mods
+# below, run by a real Engine, and checks each step against a model of the
+# reload rules. See docs/runbooks/002-run-miri-and-fuzz-the-core.md:
+#   ./bazel run //engine/tests/fuzz:reload -- -max_total_time=600 <corpus dir>
+#
+# The mods are purpose-made, each built several ways (different code, and
+# component and state layouts); what each build does is mirrored by the
+# model, so a change to one is a change to both.
+
+rust_library(
+    name = "planted",
+    srcs = ["mods/planted.rs"],
+    crate_name = "fz_planted",
+)
+
+[engine_mod(
+    name = "keeper_" + build,
+    srcs = ["mods/keeper.rs"],
+    crate_features = [build],
+    crate_root = "mods/keeper.rs",
+    mod_name = "keeper",
+    deps = [":planted"],
+) for build in [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "s",
+]]
+
+[engine_mod(
+    name = "herald_" + build,
+    srcs = ["mods/herald.rs"],
+    crate_features = [build],
+    crate_root = "mods/herald.rs",
+    interface = ["mods/herald_" + interface + ".rs"],
+    mod_name = "herald",
+    deps = [":planted"],
+) for build, interface in [
+    ("a", "v1"),
+    ("b", "v1"),
+    ("c", "v2"),
+    ("p", "v1"),
+]]
+
+[engine_mod(
+    name = "hearer_" + build,
+    srcs = ["mods/hearer.rs"],
+    crate_features = [build],
+    crate_root = "mods/hearer.rs",
+    mod_deps = [":herald_" + herald],
+    mod_name = "hearer",
+    deps = [":planted"],
+) for build, herald in [
+    ("a", "a"),
+    ("b", "a"),
+    ("c", "c"),
+]]
+
+[engine_mod(
+    name = "ranker_" + build,
+    srcs = ["mods/ranker.rs"],
+    crate_features = [build],
+    crate_root = "mods/ranker.rs",
+    mod_name = "ranker",
+    deps = [":planted"],
+) for build in [
+    "a",
+    "b",
+    "c",
+]]
+
+[engine_mod(
+    name = "anchor_" + build,
+    srcs = ["mods/anchor.rs"],
+    crate_features = [build],
+    crate_root = "mods/anchor.rs",
+    interface = ["mods/anchor_interface.rs"],
+    mod_name = "anchor",
+    resident = resident,
+) for build, resident in [
+    ("a", True),
+    ("b", True),
+    ("loose", False),
+]]
+
+engine_mod(
+    name = "tether",
+    srcs = ["mods/tether.rs"],
+    crate_root = "mods/tether.rs",
+    mod_deps = [":anchor_a"],
+    resident = True,
+)
+
+# Builds that must be refused: not a library at all, one without the entry
+# points, and one from another mod API.
+genrule(
+    name = "garbage",
+    outs = ["garbage.so"],
+    cmd = "echo not an ELF file > $@",
+)
+
+engine_mod(
+    name = "no_entry",
+    srcs = ["//engine/tests:mods/no_entry.rs"],
+    crate_root = "//engine/tests:mods/no_entry.rs",
+)
+
+engine_mod(
+    name = "wrong_api",
+    srcs = ["//engine/tests:mods/wrong_api.rs"],
+    crate_root = "//engine/tests:mods/wrong_api.rs",
+)
+
+# Every build the driver loads, by the variable its path is passed in.
+LIBS = {
+    "FZ_" + name.upper(): ":" + name
+    for name in [
+        "keeper_a",
+        "keeper_b",
+        "keeper_c",
+        "keeper_d",
+        "keeper_e",
+        "keeper_f",
+        "keeper_s",
+        "herald_a",
+        "herald_b",
+        "herald_c",
+        "herald_p",
+        "hearer_a",
+        "hearer_b",
+        "hearer_c",
+        "ranker_a",
+        "ranker_b",
+        "ranker_c",
+        "anchor_a",
+        "anchor_b",
+        "anchor_loose",
+        "tether",
+        "garbage",
+        "no_entry",
+        "wrong_api",
+    ]
+} | {
+    # The real ones: lockstep runs frames from a message handler, and
+    # sequential schedules them through a service call.
+    "FZ_CLOCK": "//engine/std/clock",
+    "FZ_LOCKSTEP": "//engine/std/lockstep",
+    "FZ_SEQUENTIAL": "//engine/std/sequential",
+}
+
+# The driver and its model, shared by the fuzzer, the corpus replay and the
+# seeded soak, so an input the fuzzer finds replays exactly.
+rust_library(
+    name = "reload_ops",
+    testonly = True,
+    srcs = ["reload_ops.rs"],
+    crate_name = "reload_ops",
+    deps = [
+        "//engine/api",
+        "//engine/ecs",
+        "//engine/ecs:ops",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+# The libFuzzer binary. The loader, the ECS and the driver are instrumented
+# (fuzz.bzl's transition); the mods aren't, and can't be: libFuzzer keeps
+# every instrumented module's counters for the whole run, and a mod's are
+# unmapped with it when it's unloaded.
+fuzz_binary(
+    name = "reload_fuzzer",
+    testonly = True,
+    srcs = ["reload_fuzzer.rs"],
+    edition = "2024",
+    # with_cfg.bzl 0.12.0 reads this as a dict, and fails on the `None` it
+    # defaults to.
+    exec_properties = {},
+    tags = ["manual"],
+    deps = [
+        ":reload_ops",
+        "//engine/ecs/fuzz:libfuzzer",
+    ],
+)
+
+# What `bazel run` starts: the fuzzer, with the mods built as the default
+# configuration builds them, and their paths in the environment.
+fuzz_launcher(
+    name = "reload",
+    testonly = True,
+    binary = ":reload_fuzzer",
+    libs = LIBS,
+    tags = ["manual"],
+)
+
+# The corpus replayed, and short seeded runs, in the default suite; a long
+# seeded soak by hand (the runbook has the command).
+rust_test(
+    name = "replay_test",
+    srcs = ["replay_test.rs"],
+    data = glob(["corpus/**"]) + glob(
+        ["scripts/**"],
+        allow_empty = True,
+    ) + LIBS.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in LIBS.items()},
+    deps = [
+        ":reload_ops",
+        "//engine/ecs:ops",
+    ],
+)

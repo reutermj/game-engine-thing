@@ -1,0 +1,13 @@
+diff --git a/engine/ecs/schema.rs b/engine/ecs/schema.rs
+index eeac74f..dcfd5ab 100644
+--- a/engine/ecs/schema.rs
++++ b/engine/ecs/schema.rs
+@@ -149,7 +149,7 @@ pub unsafe fn convert(from: FieldKind, src: *const u8, size: usize, to: FieldKin
+         ($ty:ty) => {
+             unsafe {
+                 (dst as *mut $ty).write_unaligned(match value {
+-                    Num::Int(v) => v as $ty,
++                    Num::Int(v) => v.clamp(<$ty>::MIN as i128, <$ty>::MAX as i128) as $ty,
+                     Num::Float(v) => v as $ty,
+                 })
+             }

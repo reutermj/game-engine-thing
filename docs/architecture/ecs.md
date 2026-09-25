@@ -94,6 +94,14 @@ are `unsafe` traits; `component!` makes a component safe by accepting only
 `FieldType` fields, and `FieldType` is implemented only for types that obey
 it.
 
+**Open question:** `HashMap` breaks the image rule while it's empty. It
+allocates nothing then, and its control bytes point at a static in the std
+of the build that made it, so walking an empty map in a component after
+that build is unmapped segfaults (measured; see
+[lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
+Dropping it from `FieldType` (`BTreeMap` has no such pointer), or giving
+it a representation that owns its empty table, is undecided.
+
 ### Heap data and whose code runs
 
 The loader moves values around as bytes, but freeing a `String` or making a

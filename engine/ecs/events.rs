@@ -49,7 +49,11 @@ pub struct EventQueue {
     seqs: Vec<u64>,
     frames: Vec<u64>,
     next_seq: u64,
-    /// The next sequence number each reader will read, by system name.
+    /// The next sequence number each reader will read, by system name. A
+    /// `BTreeMap`, not a `HashMap`: the queue is made by whichever build first
+    /// declares the event, running the ECS code linked into it, and an empty
+    /// `HashMap` points at a static in the image that made it, which is
+    /// unmapped once that build is gone (docs/lore/an-empty-hashmap-points-into-the-build-that-made-it.md).
     cursors: Mutex<BTreeMap<String, u64>>,
     /// After `values`, so they drop while it still maps their code.
     _keepalive: Option<Keepalive>,

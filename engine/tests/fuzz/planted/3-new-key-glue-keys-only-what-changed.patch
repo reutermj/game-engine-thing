@@ -1,0 +1,13 @@
+diff --git a/engine/ecs/ordered.rs b/engine/ecs/ordered.rs
+index 2643f50..c7778d4 100644
+--- a/engine/ecs/ordered.rs
++++ b/engine/ecs/ordered.rs
+@@ -161,7 +161,7 @@ impl Resort<'_> {
+     /// (History, 2026-09-24: every row was keyed afresh, a glue call each;
+     /// docs/architecture/relationships.md has what that cost.)
+     pub fn run(self) {
+-        let (since, all) = (self.order.sorted_tick, self.order.keyed_by != self.desc_loaded_at);
++        let (since, all) = (self.order.sorted_tick, self.order.keyed_by == 0);
+         let mut sorted = true;
+         let mut last: Option<(u128, Entity)> = None;
+         let mut keyed = 0;
