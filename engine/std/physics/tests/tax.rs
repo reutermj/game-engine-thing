@@ -10,6 +10,7 @@
 //! different computations. Then each stage is timed on both.
 //!
 //! With `-- parallel`, the same at 1 to 16 threads instead: see `tax_par.rs`.
+//! With `-- sleeping`, only the sleeping table at the end.
 
 #[path = "arrays.rs"]
 mod arrays;
@@ -55,6 +56,10 @@ fn main() {
         return;
     }
     const FRAMES: u32 = 60;
+    if std::env::args().any(|a| a == "sleeping") {
+        sleeping(&manifest, FRAMES);
+        return;
+    }
     println!("µs per step, {FRAMES} steps, -c opt, one thread; ECS / arrays\n");
     println!("| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
@@ -121,17 +126,18 @@ fn main() {
 }
 
 /// Sleeping, which changes the simulation, so the ECS alone: the pile with
-/// `Sleep` on, from when all of it is asleep, against the same pile awake at
-/// the same step.
+/// `Sleep` on, from `SETTLE` steps after all of it is asleep, against the
+/// same pile awake at the same step.
 fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
     const SPEED: f32 = 0.05;
     const TIME: f32 = 0.5;
+    const SETTLE: u32 = 10;
     println!("\nSleeping (speed {SPEED}, {TIME} s), ECS only: µs per step, asleep / awake at the same step\n");
-    println!("| bodies | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (n, width) in [(1000u32, 40.0f32), (10000, 400.0)] {
+    println!("| bodies | box | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (n, width) in PILES {
         let run = |sleep: bool, until: Option<u32>| {
-            let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-sleep-{sleep}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{width}-sleep-{sleep}", std::process::id()));
             let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
             e.load_batch(&manifest.mods).expect("loading the pile");
             e.send("pile", &format!("widen {width}")).unwrap();
@@ -150,6 +156,11 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
                         e.send("lockstep", "step 10").unwrap();
                         steps += 10;
                     }
+                    // Then `SETTLE` more, so what's timed is a pile asleep,
+                    // not also the step after the last of it fell asleep,
+                    // which looks at each body that did (its velocity was
+                    // written by the solve that stopped it).
+                    e.send("lockstep", &format!("step {SETTLE}")).unwrap();
                 }
             }
             e.send("physics", "reset_timings").unwrap();
@@ -160,15 +171,19 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
             let per_step = stats.split("us/step").nth(1).expect("timings in stats").to_string();
             let systems = field(&per_step, "gravity") + field(&per_step, "contacts") + field(&per_step, "solve");
             let pile = e.send("pile", "stats").unwrap();
+            let asleep = field(&e.send("physics", "sleeping").unwrap(), "asleep");
             drop(e);
             let _ = std::fs::remove_dir_all(dir);
-            (steps, frame, stages, frame - systems, field(&pile, "deepest"))
+            (steps, frame, stages, frame - systems, field(&pile, "deepest"), asleep)
         };
-        let (at, frame, stages, outside, deepest) = run(true, None);
-        let (_, frame_awake, stages_awake, outside_awake, deepest_awake) = run(false, Some(at));
+        let (at, frame, stages, outside, deepest, asleep) = run(true, None);
+        let (_, frame_awake, stages_awake, outside_awake, deepest_awake, _) = run(false, Some(at + SETTLE));
+        // Not all of it asleep by the last step waited for, or woken since:
+        // the timings are of a pile partly awake.
+        let at = if asleep < n as f64 { format!("{at} ({asleep} asleep)") } else { at.to_string() };
         let pair = |k: &str| format!("{:.0} / {:.0}", field(&stages, k), field(&stages_awake, k));
         println!(
-            "| {n} | {at} | {frame:.0} / {frame_awake:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {outside:.0} / {outside_awake:.0} | {deepest:.3} / {deepest_awake:.3} |",
+            "| {n} | {width} | {at} | {frame:.0} / {frame_awake:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {outside:.0} / {outside_awake:.0} | {deepest:.3} / {deepest_awake:.3} |",
             pair("gravity"),
             pair("gather"),
             pair("broadphase"),

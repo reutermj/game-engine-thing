@@ -26,15 +26,11 @@ pub struct Sleepers {
     /// The last island made: ids must stay unique across reloads, since a
     /// sleeping body's is in the world.
     islands: u32,
-    /// Bodies asleep, as this copy has them: a count in the world that
-    /// differs means a game despawned one or woke it.
+    /// Bodies asleep, as this copy has them.
     pub asleep: usize,
     /// Bodies woken since the step last moved them out of their sleeping
     /// tables (`Physics::move_woken`).
     pub woken: Vec<Entity>,
-    /// Statics there were last step: fewer or more, and one may have gone
-    /// from under a sleeping body.
-    pub statics: usize,
 }
 
 impl Sleepers {
@@ -42,17 +38,24 @@ impl Sleepers {
         self.asleep > 0 && self.slots.get(e.index as usize).is_some_and(|s| s.live && s.generation == e.generation && s.asleep)
     }
 
-    /// A body's slot, fresh if the index was another entity's.
+    /// A body's slot, fresh if the index was another entity's. One asleep
+    /// there was despawned, and wakes its island as `wake_missing` would
+    /// have: a spawn can reuse its index in the step it goes, before
+    /// anything looked for it missing.
     fn slot(&mut self, e: Entity) -> &mut Slot {
         let i = e.index as usize;
         if self.slots.len() <= i {
             self.slots.resize(i + 1, Slot::default());
         }
+        let was = self.slots[i];
+        if was.live && was.generation != e.generation && was.asleep {
+            self.slots[i].asleep = false;
+            self.asleep -= 1;
+            self.woken.push(Entity { index: e.index, generation: was.generation });
+            self.wake_islands(&[was.island]);
+        }
         let s = &mut self.slots[i];
         if !s.live || s.generation != e.generation {
-            if s.live && s.asleep {
-                self.asleep -= 1;
-            }
             *s = Slot { generation: e.generation, live: true, ..Slot::default() };
         }
         s
@@ -105,12 +108,13 @@ impl Sleepers {
         self.wake_islands(&islands);
     }
 
+    /// `islands` sorted.
     fn wake_islands(&mut self, islands: &[u32]) {
         if islands.is_empty() {
             return;
         }
         for (i, s) in self.slots.iter_mut().enumerate() {
-            if s.live && s.asleep && islands.contains(&s.island) {
+            if s.live && s.asleep && islands.binary_search(&s.island).is_ok() {
                 (s.asleep, s.still) = (false, 0.0);
                 self.asleep -= 1;
                 self.woken.push(Entity { index: i as u32, generation: s.generation });

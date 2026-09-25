@@ -253,6 +253,16 @@ pub struct Table {
     /// For a table holding an ordered key (and no spatial one, which wins):
     /// the key, and each row's. Locked with `rows`, like `spatial`.
     pub ordered: Option<OrderedTable>,
+    /// The ticks a row last arrived in this table (spawned, or moved from
+    /// another) and last left it (despawned, or moved to another): what
+    /// `Query::arrived_since` and `left_since` read. A row that's gone
+    /// leaves no value to look at, and a count of rows can't tell one gone
+    /// from one gone and another come; which rows arrived is in their
+    /// values' ticks, and this says in a look whether to walk for them.
+    /// Written under the rows' write guard and read under their read
+    /// guard, so the lock orders them.
+    pub arrived: AtomicU32,
+    pub left: AtomicU32,
 }
 
 pub struct OrderedTable {
@@ -679,7 +689,7 @@ impl World {
             OrderedTable { key, order: RwLock::new(KeyOrder::default()) }
         });
         let table =
-            Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial, ordered };
+            Table { id, components: set.clone(), rows: RwLock::new(vec![Vec::new()]), columns, page_rows, spatial, ordered, arrived: AtomicU32::new(0), left: AtomicU32::new(0) };
         assert_eq!(self.tables.push(table), id.0 as usize);
         by_set.insert(set, id);
         id
@@ -831,6 +841,10 @@ pub struct Structural<'w> {
     /// Entity slots freed by despawns, returned to the free list in one
     /// lock when this drops.
     freed: Vec<u32>,
+    /// The tick this stamps what it spawns, inserts and takes out: one for
+    /// all its changes, taken at the first, since no system runs while it's
+    /// held, and a tick per row was an atomic add per spawn.
+    tick: Option<u32>,
 }
 
 /// The new row a spawn or move is writing: each column's last page.
@@ -867,7 +881,7 @@ impl LockedTable<'_> {
 
 impl<'w> Structural<'w> {
     pub fn new(world: &'w World) -> Structural<'w> {
-        Structural { world, tables: Vec::new(), sparse: HashMap::new(), events: HashMap::new(), spawned_into: None, freed: Vec::new() }
+        Structural { world, tables: Vec::new(), sparse: HashMap::new(), events: HashMap::new(), spawned_into: None, freed: Vec::new(), tick: None }
     }
 
     /// Every table and sparse set, for use between frames.
@@ -953,10 +967,19 @@ impl<'w> Structural<'w> {
         }
     }
 
+    /// The tick this `Structural`'s changes are stamped with: later than
+    /// any `Query::now` taken before it.
+    fn tick(&mut self) -> u32 {
+        let world = self.world;
+        *self.tick.get_or_insert_with(|| world.next_tick())
+    }
+
     /// Places reserved entity `e` in table `id`, with `values` writing its
-    /// components' values into the new row.
+    /// components' values into the new row. A spawned value is a written
+    /// one, so change detection sees what arrives, as it does a write.
     pub(crate) fn push_row(&mut self, id: TableId, e: Entity, values: impl FnOnce(NewRow<'_, 'w>)) {
         let world = self.world;
+        let tick = self.tick();
         self.make_room(id);
         let t = self.locked(id);
         let page = t.rows.len() - 1;
@@ -964,6 +987,10 @@ impl<'w> Structural<'w> {
         let row = t.rows[page].len() - 1;
         values(NewRow { columns: &mut t.columns });
         assert!(t.columns.iter().all(|c| c[page].len() == row + 1), "every column gets a value");
+        for c in t.columns.iter_mut() {
+            c[page].set_tick(row, tick);
+        }
+        t.table.arrived.store(tick, Ordering::Relaxed);
         if let Some(pages) = &mut t.spatial {
             pages.push_row(page, e);
         }
@@ -977,6 +1004,7 @@ impl<'w> Structural<'w> {
     /// table has its column, and dropped otherwise.
     fn take_row(&mut self, at: Location, into: Option<TableId>) {
         let world = self.world;
+        let tick = self.tick();
         let (page, row) = (at.page as usize, at.row as usize);
         match into.filter(|&d| d != at.table) {
             Some(d) => {
@@ -1000,6 +1028,7 @@ impl<'w> Structural<'w> {
             }
         }
         let t = self.locked(at.table);
+        t.table.left.store(tick, Ordering::Relaxed);
         t.rows[page].swap_remove(row);
         if let Some(pages) = &mut t.spatial {
             pages.swap_remove(page, row);
@@ -1017,9 +1046,11 @@ impl<'w> Structural<'w> {
     fn move_entity(&mut self, e: Entity, at: Location, to: TableId, extra: impl FnOnce(NewRow<'_, 'w>, &Table)) {
         let world = self.world;
         let table = world.table(to);
+        let tick = self.tick();
         self.make_room(to);
         self.take_row(at, Some(to));
         let t = self.locked(to);
+        t.table.arrived.store(tick, Ordering::Relaxed);
         let page = t.rows.len() - 1;
         t.rows[page].push(e);
         let row = t.rows[page].len() - 1;
@@ -1068,8 +1099,13 @@ impl<'w> Structural<'w> {
         set.push(c);
         let to = world.table_for(&set);
         self.lock_table(to);
+        // Written as it's inserted, as a spawn's values are: the values
+        // moved with it keep their ticks.
+        let tick = self.tick();
         self.move_entity(e, at, to, |mut row, table| {
-            row.column(table.column_index(c).unwrap()).push(value);
+            let column = row.column(table.column_index(c).unwrap());
+            column.push(value);
+            column.set_tick(column.len() - 1, tick);
         });
     }
 

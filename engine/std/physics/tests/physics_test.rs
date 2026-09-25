@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use engine_loader::engine::Engine;
-use physics::{Asleep, ContactPair, Overlap, Position, Resting, Touching, Velocity};
+use physics::{Asleep, Body, ContactPair, DYNAMIC, Overlap, Position, Resting, Touching, Velocity};
 use runfiles::Runfiles;
 
 #[path = "pool.rs"]
@@ -54,12 +54,16 @@ mod pile {
         assert_eq!(field(&stats, "escaped"), 0.0, "{stats}");
     }
 
+    /// In columns (40 wide) and as a real pile (41 wide): see `SCENES`.
     #[test]
     fn a_pile_of_bodies_comes_to_rest_without_sinking_into_each_other() {
-        let e = game("PILE", "settle");
-        send(&e, "pile", "drop 300");
-        step(&e, 600);
-        settled(&e);
+        for (width, n) in SCENES {
+            let e = game("PILE", &format!("settle_{width}"));
+            send(&e, "pile", &format!("widen {width}"));
+            send(&e, "pile", &format!("drop {n}"));
+            step(&e, 1200);
+            settled(&e);
+        }
     }
 
     /// Physics gathers colliders with a body and a velocity, with one and
@@ -147,6 +151,15 @@ mod pile {
         steps
     }
 
+    /// The piles sleeping is tested on: how wide the box, and how many
+    /// bodies. At 40 wide a row holds an odd count, so the pile stands in
+    /// columns of alternating circles and boxes that don't touch: a contact
+    /// per body, and an island per column. At 41 the columns are all circles
+    /// or all boxes, which fall into a real pile, bodies resting on two
+    /// below, but only once they're tall enough to: 200 or 300 still stand
+    /// in columns, 500 have 1.1 contacts a body, 1000 have 1.5 (2026-09-25; docs/lore).
+    const SCENES: [(f32, u32); 2] = [(40.0, 200), (41.0, 1000)];
+
     #[test]
     fn nothing_sleeps_unless_asked() {
         let e = game("PILE", "no_sleep");
@@ -160,37 +173,37 @@ mod pile {
     /// again without sinking in.
     #[test]
     fn a_sleeping_pile_wakes_where_something_lands_on_it() {
-        let e = game("PILE", "sleep");
-        send(&e, "pile", "drop 200");
-        send(&e, "pile", "sleep 0.05 0.5");
-        until_asleep(&e, 200.0, 2000);
-        let (at, before) = (positions(&e), send(&e, "physics", "stats"));
-        let kept = ["physics::Position", "physics::Velocity", "physics::Manifold", "physics::Impulse"];
-        let written = kept.map(|c| ticks(&e, c));
-        step(&e, 100);
-        assert_eq!(positions(&e), at, "asleep, nothing moved");
-        // Nor was anything written: change detection, and the spatial
-        // re-sort, leave sleeping bodies and their contacts alone.
-        assert!(written == kept.map(|c| ticks(&e, c)), "asleep, nothing written");
-        // Kept as they were, impulses and all, though not looked for.
-        assert!(field(&before, "contacts") >= 200.0, "{before}");
-        assert_eq!(field(&send(&e, "physics", "stats"), "contacts"), field(&before, "contacts"), "contacts kept");
-        let still = e.world().values::<Velocity>().unwrap().into_iter().all(|(_, v)| v == Velocity::default());
-        assert!(still, "asleep, every body stopped");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("sleep", (width, n), &[]);
+            let (at, before) = (positions(&e), send(&e, "physics", "stats"));
+            let kept = ["physics::Position", "physics::Velocity", "physics::Manifold", "physics::Impulse"];
+            let written = kept.map(|c| ticks(&e, c));
+            step(&e, 100);
+            assert_eq!(positions(&e), at, "{width} wide: asleep, nothing moved");
+            // Nor was anything written: change detection, and the spatial
+            // re-sort, leave sleeping bodies and their contacts alone.
+            assert!(written == kept.map(|c| ticks(&e, c)), "{width} wide: asleep, nothing written");
+            // Kept as they were, impulses and all, though not looked for.
+            assert!(field(&before, "contacts") >= all, "{before}");
+            assert_eq!(field(&send(&e, "physics", "stats"), "contacts"), field(&before, "contacts"), "contacts kept");
+            let still = e.world().values::<Velocity>().unwrap().into_iter().all(|(_, v)| v == Velocity::default());
+            assert!(still, "{width} wide: asleep, every body stopped");
 
-        // Onto the top of the pile, from a row above it.
-        send(&e, "pile", "drop 20");
-        let mut least = asleep(&e);
-        for _ in 0..30 {
-            step(&e, 5);
-            least = least.min(asleep(&e));
+            // Onto the top of the pile, from a row above it.
+            send(&e, "pile", "drop 20");
+            let mut least = asleep(&e);
+            for _ in 0..30 {
+                step(&e, 5);
+                least = least.min(asleep(&e));
+            }
+            assert!(least < 0.75 * all, "{width} wide: landing woke the bodies under it: at least {least} of {n} stayed asleep");
+            until_asleep(&e, all + 20.0, 3000);
+            settled(&e);
+            send(&e, "physics", "wake");
+            assert_eq!(asleep(&e), 0.0);
+            assert_eq!(in_sleeping_tables(&e), (0, 0), "woken, out of the sleeping tables");
         }
-        assert!(least < 150.0, "landing woke the bodies under it: at least {least} of 200 stayed asleep");
-        until_asleep(&e, 220.0, 3000);
-        settled(&e);
-        send(&e, "physics", "wake");
-        assert_eq!(asleep(&e), 0.0);
-        assert_eq!(in_sleeping_tables(&e), (0, 0), "woken, out of the sleeping tables");
     }
 
     /// Sleeping bodies, and contacts at rest, as the world has them: how
@@ -200,17 +213,46 @@ mod pile {
         (w.values::<Asleep>().unwrap_or_default().len(), w.values::<Resting>().unwrap_or_default().len())
     }
 
-    /// A pile of 200 asleep, with sleeping on as `a_sleeping_pile_wakes_..`
-    /// has it.
-    fn asleep_pile(test: &str, then: &[&str]) -> Box<Engine> {
-        let e = game("PILE", test);
-        send(&e, "pile", "drop 200");
+    /// A pile of `n` in a box `width` wide, asleep, with sleeping on as
+    /// `a_sleeping_pile_wakes_..` has it.
+    fn asleep_pile(test: &str, scene: (f32, u32), then: &[&str]) -> Box<Engine> {
+        asleep_pile_with("PILE", test, scene, then)
+    }
+
+    /// `asleep_pile` in the game `var` names: the pile, or the pile with a
+    /// pre-solve hook (`PILE_HOOK`).
+    fn asleep_pile_with(var: &str, test: &str, (width, n): (f32, u32), then: &[&str]) -> Box<Engine> {
+        let e = game(var, &format!("{test}_{width}"));
+        send(&e, "pile", &format!("widen {width}"));
+        send(&e, "pile", &format!("drop {n}"));
         for message in then {
             send(&e, "pile", message);
         }
         send(&e, "pile", "sleep 0.05 0.5");
-        until_asleep(&e, 200.0, 2000);
+        until_asleep(&e, n as f32, 3000);
         e
+    }
+
+    /// Asleep, a pile is as deep in itself as the same pile awake at the
+    /// same step, and stays so: sleeping stops bodies where they are, and a
+    /// body's weight on its sleeping neighbors isn't solved, so it can't
+    /// push them into each other either.
+    #[test]
+    fn a_sleeping_pile_sinks_no_deeper_than_one_awake() {
+        for (width, n) in SCENES {
+            let e = asleep_pile("deep", (width, n), &[]);
+            let deepest = |e: &Engine| field(&send(e, "pile", "stats"), "deepest");
+            let at = deepest(&e);
+            let steps = field(&send(&e, "physics", "stats"), "steps") as u32;
+            step(&e, 300);
+            assert_eq!(deepest(&e), at, "{width} wide: asleep, as deep as it fell asleep");
+            let awake = game("PILE", &format!("deep_awake_{width}"));
+            send(&awake, "pile", &format!("widen {width}"));
+            send(&awake, "pile", &format!("drop {n}"));
+            step(&awake, steps + 300);
+            let (awake, asleep) = (deepest(&awake), deepest(&e));
+            assert!(asleep <= awake + 0.005 && asleep < 0.02, "{width} wide: {asleep} deep asleep, {awake} awake");
+        }
     }
 
     /// Asleep is storage: every sleeping body has left the tables the step
@@ -218,20 +260,27 @@ mod pile {
     /// a sleeping body and a wall) the ones it merges and solves.
     #[test]
     fn sleeping_bodies_and_their_contacts_have_tables_of_their_own() {
-        let e = asleep_pile("tables", &["sensing"]);
-        let contacts = e.world().values::<ContactPair>().unwrap().len();
-        assert_eq!(in_sleeping_tables(&e), (200, contacts));
-        // Overlaps between sleeping bodies aren't looked for either, and
-        // last while they sleep.
-        let overlaps = e.world().values::<Overlap>().unwrap().len();
-        assert!(overlaps > 100, "{overlaps} overlaps");
-        step(&e, 100);
-        assert_eq!(e.world().values::<Overlap>().unwrap().len(), overlaps);
-        let w = e.world();
-        for t in w.tables() {
-            let named = |name: &str| t.components.iter().any(|&c| w.name(c) == name);
-            if named("physics::Body") && !named("physics::Asleep") {
-                assert!(t.is_empty(), "an awake body's table has rows");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("tables", (width, n), &["sensing"]);
+            let contacts = e.world().values::<ContactPair>().unwrap().len();
+            assert_eq!(in_sleeping_tables(&e), (n as usize, contacts));
+            // The scenes are what `SCENES` says: columns about a contact a
+            // body, a pile half again as many.
+            let per_body = contacts as f32 / all;
+            assert!(if width == 41.0 { per_body > 1.4 } else { per_body < 1.2 }, "{width} wide: {contacts} contacts");
+            // Overlaps between sleeping bodies aren't looked for either, and
+            // last while they sleep.
+            let overlaps = e.world().values::<Overlap>().unwrap().len();
+            assert!(overlaps > 100, "{overlaps} overlaps");
+            step(&e, 100);
+            assert_eq!(e.world().values::<Overlap>().unwrap().len(), overlaps);
+            let w = e.world();
+            for t in w.tables() {
+                let named = |name: &str| t.components.iter().any(|&c| w.name(c) == name);
+                if named("physics::Body") && !named("physics::Asleep") {
+                    assert!(t.is_empty(), "an awake body's table has rows");
+                }
             }
         }
     }
@@ -240,18 +289,90 @@ mod pile {
     /// (a jump, a shove) wakes it, and it moves. So does changing its shape.
     #[test]
     fn a_game_setting_a_sleeping_bodys_velocity_wakes_it() {
-        let e = asleep_pile("kick", &[]);
-        let before = positions(&e);
-        send(&e, "pile", "kick 6 -6");
-        step(&e, 1);
-        assert!(asleep(&e) < 200.0, "kicked, its island woke");
-        step(&e, 10);
-        assert_ne!(positions(&e), before, "and it moved");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("kick", (width, n), &[]);
+            let before = positions(&e);
+            send(&e, "pile", "kick 6 -6");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: kicked, its island woke");
+            step(&e, 10);
+            assert_ne!(positions(&e), before, "and it moved");
 
-        let e = asleep_pile("grow", &[]);
-        send(&e, "pile", "grow 0.6");
-        step(&e, 1);
-        assert!(asleep(&e) < 200.0, "grown into its neighbors, its island woke");
+            // In the step after its island fell asleep, when it's among the
+            // rows new to the sleeping tables, as one a game put to sleep
+            // would be.
+            let e = game("PILE", &format!("kick_newest_{width}"));
+            send(&e, "pile", &format!("widen {width}"));
+            send(&e, "pile", &format!("drop {n}"));
+            send(&e, "pile", "sleep 0.05 0.5");
+            let mut steps = 0;
+            while asleep(&e) < all {
+                assert!(steps < 3000, "{} of {n} asleep after {steps} steps", asleep(&e));
+                step(&e, 1);
+                steps += 1;
+            }
+            send(&e, "pile", "kick 6 -6 newest");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: kicked just asleep, its island woke");
+            assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "{width} wide: the world and physics agree");
+
+            // From a system between finding contacts and solving them, as a
+            // pre-solve hook would.
+            let e = asleep_pile_with("PILE_HOOK", "kick_between", (width, n), &[]);
+            send(&e, "pile_hook", "kick 6 -6");
+            step(&e, 2);
+            assert!(asleep(&e) < all, "{width} wide: kicked between finding contacts and solving, its island woke");
+
+            let e = asleep_pile("grow", (width, n), &[]);
+            send(&e, "pile", "grow 0.6");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: grown into its neighbors, its island woke");
+        }
+    }
+
+    /// A game wakes a body by taking its `Asleep` off: the rest of its
+    /// island wakes with it, as they rest on each other. Putting it back
+    /// puts it to sleep again, as physics takes what a game says.
+    #[test]
+    fn a_game_removing_a_sleeping_bodys_asleep_wakes_its_island() {
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("unsleep", (width, n), &[]);
+            send(&e, "pile", "unsleep");
+            step(&e, 1);
+            let awake = asleep(&e);
+            assert!(awake < all - 1.0, "{width} wide: its island woke too: {awake} asleep");
+            assert_eq!(in_sleeping_tables(&e).0 as f32, awake, "the world and physics agree");
+            send(&e, "pile", "resleep");
+            step(&e, 1);
+            assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "{width} wide: the world and physics agree");
+            // Given `Asleep` and nothing else new: a body the solve doesn't
+            // write, spawned steps before.
+            send(&e, "pile", "post");
+            step(&e, 5);
+            let before = asleep(&e);
+            send(&e, "pile", "resleep post");
+            step(&e, 1);
+            assert_eq!(asleep(&e), before + 1.0, "{width} wide: put to sleep");
+            assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "{width} wide: the world and physics agree");
+        }
+    }
+
+    /// Every body's height (y grows down), not the walls'.
+    fn heights(e: &Engine) -> Vec<f32> {
+        let w = e.world();
+        let bodies: std::collections::HashSet<_> = w.values::<Velocity>().unwrap().into_iter().map(|(e, _)| e).collect();
+        w.values::<Position>().unwrap().into_iter().filter(|(e, _)| bodies.contains(e)).map(|(_, p)| p.y).collect()
+    }
+
+    /// The lowest body's center.
+    fn lowest(e: &Engine) -> f32 {
+        heights(e).into_iter().fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    fn highest(e: &Engine) -> f32 {
+        heights(e).into_iter().fold(f32::INFINITY, f32::min)
     }
 
     /// Statics are passive to the broadphase like sleeping bodies, so pairs
@@ -259,100 +380,231 @@ mod pile {
     /// wake what rests on it some other way.
     #[test]
     fn a_sleeping_pile_falls_when_its_floor_goes() {
-        // The lowest body's center (y grows down), not the floor's.
-        let lowest = |e: &Engine| {
-            let w = e.world();
-            let bodies: std::collections::HashSet<_> = w.values::<Velocity>().unwrap().into_iter().map(|(e, _)| e).collect();
-            w.values::<Position>().unwrap().into_iter().filter(|(e, _)| bodies.contains(e)).map(|(_, p)| p.y).fold(f32::NEG_INFINITY, f32::max)
-        };
-        let e = asleep_pile("floor_off", &[]);
-        let at = lowest(&e);
-        send(&e, "pile", "floor off");
-        step(&e, 30);
-        assert!(lowest(&e) > at + 1.0, "fell through where the floor was: {} from {at}", lowest(&e));
-
-        let e = asleep_pile("floor_down", &[]);
-        let at = lowest(&e);
-        send(&e, "pile", "floor 3");
-        step(&e, 120);
-        assert!((lowest(&e) - (at + 3.0)).abs() < 0.1, "fell onto the floor 3 lower: {} from {at}", lowest(&e));
-
-        // A floor made a body falls, and the pile with it: its contacts no
-        // longer rest, since one end moves.
-        let e = asleep_pile("floor_falls", &[]);
-        let at = lowest(&e);
-        send(&e, "pile", "floor falls");
-        let once = |e: &Engine| {
-            let contacts = e.world().values::<ContactPair>().unwrap();
-            let mut pairs: Vec<_> = contacts.iter().map(|(_, p)| (p.a, p.b)).collect();
-            pairs.sort();
-            pairs.dedup();
-            assert_eq!(pairs.len(), contacts.len(), "a contact per pair");
-        };
-        for _ in 0..3 {
+        for (width, n) in SCENES {
+            let e = asleep_pile("floor_off", (width, n), &[]);
+            let at = lowest(&e);
+            send(&e, "pile", "floor off");
             step(&e, 1);
-            once(&e);
+            // Woken as the floor is found gone (in `find_contacts`, after
+            // gravity), the bottom row falls in that step as the same pile
+            // awake does: gravity, and the contacts above it solved.
+            let bottom = |e: &Engine, at: f32| {
+                let heights: std::collections::HashMap<_, _> = e.world().values::<Position>().unwrap().into_iter().map(|(b, p)| (b, p.y)).collect();
+                let mut falling: Vec<f32> =
+                    e.world().values::<Velocity>().unwrap().into_iter().filter(|(b, _)| heights[b] > at - 0.3).map(|(_, v)| v.y).collect();
+                falling.sort_by(f32::total_cmp);
+                falling
+            };
+            let awake = game("PILE", &format!("floor_off_awake_{width}"));
+            send(&awake, "pile", &format!("widen {width}"));
+            send(&awake, "pile", &format!("drop {n}"));
+            step(&awake, field(&send(&e, "physics", "stats"), "steps") as u32 - 1);
+            let awake_at = lowest(&awake);
+            send(&awake, "pile", "floor off");
+            step(&awake, 1);
+            let (asleep, awake) = (bottom(&e, at), bottom(&awake, awake_at));
+            let near = asleep.len() == awake.len() && asleep.iter().zip(&awake).all(|(a, b)| (a - b).abs() < 0.15);
+            assert!(near && asleep[0] > 0.1, "{width} wide: the bottom row as it falls, asleep before {asleep:?}, awake {awake:?}");
+            let w = e.world();
+            let there: std::collections::HashSet<_> = w.values::<Position>().unwrap().into_iter().map(|(e, _)| e).collect();
+            let dangling = w.values::<ContactPair>().unwrap().into_iter().filter(|(_, p)| !there.contains(&p.a) || !there.contains(&p.b)).count();
+            assert_eq!(dangling, 0, "{width} wide: no contact with the floor left for the solve to push on");
+            step(&e, 29);
+            assert!(lowest(&e) > at + 1.0, "{width} wide: fell through where the floor was: {} from {at}", lowest(&e));
+
+            // A static despawned and another spawned in the same step: as
+            // many statics as there were, and a floor gone.
+            let e = asleep_pile("floor_swap", (width, n), &[]);
+            let at = lowest(&e);
+            send(&e, "pile", "floor swap");
+            step(&e, 30);
+            assert!(lowest(&e) > at + 1.0, "{width} wide: fell through where the floor was: {} from {at}", lowest(&e));
+
+            let e = asleep_pile("floor_down", (width, n), &[]);
+            let at = lowest(&e);
+            send(&e, "pile", "floor 3");
+            step(&e, 120);
+            assert!((lowest(&e) - (at + 3.0)).abs() < 0.1, "{width} wide: fell onto the floor 3 lower: {} from {at}", lowest(&e));
+
+            // A floor made a body falls, and the pile with it: its contacts no
+            // longer rest, since one end moves.
+            let e = asleep_pile("floor_falls", (width, n), &[]);
+            let at = lowest(&e);
+            send(&e, "pile", "floor falls");
+            let once = |e: &Engine| {
+                let contacts = e.world().values::<ContactPair>().unwrap();
+                let mut pairs: Vec<_> = contacts.iter().map(|(_, p)| (p.a, p.b)).collect();
+                pairs.sort();
+                pairs.dedup();
+                assert_eq!(pairs.len(), contacts.len(), "a contact per pair");
+            };
+            for _ in 0..3 {
+                step(&e, 1);
+                once(&e);
+            }
+            step(&e, 27);
+            assert!(lowest(&e) > at + 1.0, "{width} wide: fell with the floor: {} from {at}", lowest(&e));
         }
-        step(&e, 27);
-        assert!(lowest(&e) > at + 1.0, "fell with the floor: {} from {at}", lowest(&e));
     }
 
     /// A static a game moves into sleeping bodies wakes them: no contact
-    /// joined them before it moved.
+    /// joined them before it moved. So does one it spawns there, whose
+    /// values are written as it's spawned. Found as contacts are, and out
+    /// of the sleeping tables the same step.
     #[test]
-    fn a_static_moved_into_a_sleeping_pile_wakes_what_it_meets() {
-        let e = asleep_pile("block", &["block 20 2"]);
-        send(&e, "pile", "block 20 28");
-        step(&e, 1);
-        assert!(asleep(&e) < 200.0, "what the block landed in woke");
+    fn a_static_moved_or_spawned_into_a_sleeping_pile_wakes_what_it_meets() {
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("block", (width, n), &["block 20 -10"]);
+            send(&e, "pile", "block 20 28");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: what the block moved into woke");
+            assert!(in_sleeping_tables(&e).0 < n as usize, "{width} wide: and left the sleeping tables in the same step");
+
+            let e = asleep_pile("block_spawned", (width, n), &[]);
+            send(&e, "pile", "block 20 28");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: what the block was spawned into woke");
+            assert!(in_sleeping_tables(&e).0 < n as usize, "{width} wide: and left the sleeping tables in the same step");
+        }
     }
 
     /// A kinematic body pushes and is never pushed: moving into sleeping
     /// bodies, it wakes them rather than passing through.
     #[test]
     fn a_kinematic_body_moving_into_a_sleeping_pile_wakes_it() {
-        let e = asleep_pile("pusher", &[]);
-        // From above the pile's top (about 24.5 under it), down at 3 a second.
-        send(&e, "pile", "pusher 20 22 0 3");
-        step(&e, 120);
-        assert!(asleep(&e) < 200.0, "what it pressed on woke");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("pusher", (width, n), &[]);
+            // From above the pile's top, down at 3 a second.
+            send(&e, "pile", &format!("pusher 20 {} 0 3", highest(&e) - 2.0));
+            step(&e, 120);
+            assert!(asleep(&e) < all, "{width} wide: what it pressed on woke");
+        }
     }
 
     /// A contact pressed on by a sleeping body that ends (what it rested on
     /// was despawned, or moved away) wakes it.
     #[test]
     fn a_body_despawned_from_under_sleeping_ones_wakes_them() {
-        let e = asleep_pile("despawn", &[]);
-        send(&e, "pile", "despawn");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("despawn", (width, n), &[]);
+            send(&e, "pile", "despawn");
+            step(&e, 1);
+            assert!(asleep(&e) < all - 1.0, "{width} wide: its island woke: {} asleep", asleep(&e));
+            step(&e, 120);
+            until_asleep(&e, all - 1.0, 2000);
+            assert_eq!(in_sleeping_tables(&e).0, n as usize - 1);
+
+            // From a system between finding contacts and solving them.
+            let e = asleep_pile_with("PILE_HOOK", "despawn_between", (width, n), &[]);
+            send(&e, "pile_hook", "despawn");
+            step(&e, 2);
+            assert!(asleep(&e) < all - 1.0, "{width} wide: despawned between finding contacts and solving, its island woke: {} asleep", asleep(&e));
+        }
+    }
+
+    /// pile.rs's `NAP`: where `despawn nap` spawns its sleeping body.
+    const NAP: f32 = -5.0;
+
+    /// A game may put a body to sleep itself (here spawning it with
+    /// `Asleep`, above the box), which physics takes as it is: in the same
+    /// step as a sleeping body is despawned, whose island wakes all the
+    /// same, though there are as many bodies asleep as before.
+    #[test]
+    fn a_body_put_to_sleep_by_a_game_as_another_is_despawned() {
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("nap", (width, n), &[]);
+            send(&e, "pile", "despawn nap");
+            step(&e, 1);
+            assert!(asleep(&e) < all - 1.0, "{width} wide: the despawned body's island woke: {} asleep", asleep(&e));
+            assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "the world and physics agree");
+            let napping = |e: &Engine| {
+                let w = e.world();
+                let asleep: std::collections::HashSet<_> = w.values::<Asleep>().unwrap().into_iter().map(|(e, _)| e).collect();
+                w.values::<Position>().unwrap().into_iter().filter(|(e, p)| asleep.contains(e) && p.y == NAP).count()
+            };
+            assert_eq!(napping(&e), 1, "{width} wide: spawned asleep, and kept so");
+            // Asleep before it's a body, then made one: asleep too.
+            send(&e, "pile", "nap later");
+            step(&e, 1);
+            send(&e, "pile", "nap body");
+            step(&e, 1);
+            assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "the world and physics agree");
+            step(&e, 60);
+            assert_eq!(napping(&e), 2, "{width} wide: asleep in the air, where they were spawned");
+
+            // Woken by a game (its velocity written, to nothing), one falls
+            // in that step, as a body awake at rest there would: gravity,
+            // which the step gave awake bodies before it woke.
+            send(&e, "pile", "kick 0 0 naps");
+            step(&e, 1);
+            let at: std::collections::HashMap<_, _> = e.world().values::<Position>().unwrap().into_iter().collect();
+            let near_nap = |b: &engine_ecs::Entity| at.get(b).is_some_and(|p: &Position| (p.y - NAP).abs() < 0.1);
+            let fell: Vec<_> = e.world().values::<Velocity>().unwrap().into_iter().filter(|(b, _)| near_nap(b)).map(|(b, v)| (v.y, at[&b].y)).collect();
+            assert!(fell.len() == 2 && fell.iter().all(|(vy, y)| *vy > 0.3 && *y > NAP), "{width} wide: woken, they fell in the step they woke: {fell:?}");
+        }
+    }
+
+    /// A shelf that starts moving under bodies asleep on it wakes them as
+    /// it's found moving (`find_contacts`), and they move with it in the
+    /// same step: out of their sleeping tables before the solve, their
+    /// resting contacts solved again. Waking only from the next step, the
+    /// shelf rose into them for a step, as they stood immovable.
+    #[test]
+    fn bodies_asleep_on_a_shelf_that_starts_moving_rise_with_it_in_the_same_step() {
+        let e = game("PILE", "lift");
+        send(&e, "pile", "shelves");
+        send(&e, "pile", "sleep 0.05 0.5");
+        until_asleep(&e, 38.0, 2000);
+        let on_shelf = |e: &Engine| {
+            let bodies: std::collections::HashSet<_> = e.world().values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).map(|(e, _)| e).collect();
+            let mut all: Vec<f32> =
+                e.world().values::<Position>().unwrap().into_iter().filter(|(en, p)| bodies.contains(en) && p.x < 20.0).map(|(_, p)| p.y).collect();
+            all.sort_by(f32::total_cmp);
+            all
+        };
+        let before = on_shelf(&e);
+        assert_eq!(before.len(), 19, "a row on the kinematic shelf");
+        // Up at 3 a second: 0.05 a step.
+        send(&e, "pile", "lift 3");
         step(&e, 1);
-        assert!(asleep(&e) < 199.0, "its island woke: {} asleep", asleep(&e));
-        step(&e, 120);
-        until_asleep(&e, 199.0, 2000);
-        assert_eq!(in_sleeping_tables(&e).0, 199);
+        let after = on_shelf(&e);
+        for (b, a) in before.iter().zip(&after) {
+            assert!(b - a > 0.04, "risen with the shelf in the step it woke: from {b} to {a}");
+        }
     }
 
     /// A sleeping body's `Touching` is as it fell asleep, not reset: its
     /// contacts aren't solved, but it still stands on what it stood on.
     #[test]
     fn touching_is_kept_while_asleep() {
-        let e = asleep_pile("touching", &["touching"]);
-        step(&e, 100);
-        let below = e.world().values::<Touching>().unwrap().into_iter().filter(|(_, t)| t.below).count();
-        // Every body but a few wedged between others by their sides.
-        assert!(below > 180, "{below} of 200 stand on something");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("touching", (width, n), &["touching"]);
+            step(&e, 100);
+            let below = e.world().values::<Touching>().unwrap().into_iter().filter(|(_, t)| t.below).count();
+            // Every body but a few wedged between others by their sides.
+            assert!(below as f32 > 0.9 * all, "{width} wide: {below} of {n} stand on something");
+        }
     }
 
     /// Who sleeps is in the world, so a new build of physics finds them
     /// asleep, and takes none of its own writes for a game's.
     #[test]
     fn a_reload_keeps_a_sleeping_pile_asleep() {
-        let e = asleep_pile("reload_asleep", &[]);
-        let written = ticks(&e, "physics::Position");
-        assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
-        assert_eq!(asleep(&e), 200.0, "asleep as the new build loads");
-        step(&e, 100);
-        assert_eq!(asleep(&e), 200.0);
-        assert!(ticks(&e, "physics::Position") == written, "nothing moved or was written");
+        for (width, n) in SCENES {
+            let all = n as f32;
+            let e = asleep_pile("reload_asleep", (width, n), &[]);
+            let written = ticks(&e, "physics::Position");
+            assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
+            assert_eq!(asleep(&e), all, "asleep as the new build loads");
+            step(&e, 100);
+            assert_eq!(asleep(&e), all);
+            assert!(ticks(&e, "physics::Position") == written, "nothing moved or was written");
+        }
     }
 
     /// The shelves (a body with no velocity, a velocity with no body) are
@@ -383,11 +635,49 @@ mod pile {
 
     #[test]
     fn turning_sleeping_off_wakes_everything() {
-        let e = asleep_pile("sleep_off", &[]);
-        send(&e, "pile", "sleep off");
-        step(&e, 1);
-        assert_eq!(asleep(&e), 0.0);
-        assert_eq!(in_sleeping_tables(&e), (0, 0));
+        for (width, n) in SCENES {
+            let e = asleep_pile("sleep_off", (width, n), &[]);
+            send(&e, "pile", "sleep off");
+            step(&e, 1);
+            assert_eq!(asleep(&e), 0.0);
+            assert_eq!(in_sleeping_tables(&e), (0, 0));
+        }
+    }
+
+    /// Lockstep with sleeping on: the same commands at the same steps end
+    /// the same, bit for bit, falling asleep, woken by each kind of thing
+    /// and asleep again, at 60 frames a second or at 30.
+    #[test]
+    fn a_sleeping_pile_replays_the_same() {
+        let run = |test: &str, fps: u32| {
+            let e = game("PILE", test);
+            // Physics steps, as frames at `fps`.
+            let steps = |e: &Engine, n: u32| send(e, "lockstep", &format!("step {} at {fps}", n * fps / 60));
+            send(&e, "pile", "widen 41");
+            send(&e, "pile", "drop 1000");
+            send(&e, "pile", "sleep 0.05 0.5");
+            let mut seen = Vec::new();
+            let mut look = |e: &Engine| {
+                let mut bits: Vec<_> = e.world().values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
+                bits.sort_unstable();
+                seen.push((bits, asleep(e).to_bits(), in_sleeping_tables(e)));
+            };
+            steps(&e, 300);
+            for then in ["drop 20", "kick 3 -3", "block 20 26", "floor 1", "despawn", "unsleep"] {
+                steps(&e, 300);
+                look(&e);
+                send(&e, "pile", then);
+            }
+            steps(&e, 300);
+            look(&e);
+            seen
+        };
+        let once = run("replay_a", 60);
+        // Asleep, woken, and asleep again: sleeping had a part in it.
+        let counts: Vec<f32> = once.iter().map(|s| f32::from_bits(s.1)).collect();
+        assert!(counts.iter().filter(|&&c| c >= 1000.0).count() >= 2 && counts.iter().any(|&c| c < 1000.0), "asleep at each look: {counts:?}");
+        assert!(once == run("replay_b", 60), "replayed, the same");
+        assert!(once == run("replay_30", 30), "at 30 frames a second, the same");
     }
 
     #[test]

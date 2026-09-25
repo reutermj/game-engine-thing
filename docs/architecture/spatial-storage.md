@@ -268,6 +268,20 @@ Table components only, as page walks are. A `Changed<T>` filter, which
 would need a tick to compare against in the query's declaration, isn't
 built.
 
+**Arriving and leaving** (2026-09-25, for sleeping's wakes: physics.md,
+"Sleeping"). A spawned value is written, and so is a value inserted (as
+Bevy's `Changed` includes `Added`), all at one tick per `Structural`: a
+walk for what's written sees rows new to a query, which a static spawned
+into sleeping bodies needs. Values a row carries to another table keep
+their ticks, so a row that arrives by a removal isn't seen written. A row
+that's gone leaves nothing to look at, so each table keeps the tick a row
+last left it (despawned, or moved to another table) and last arrived in
+it: `Query::left_since(since)` and `arrived_since(since)` are a look per
+matched table, whether any did, not which, the which being a walk (of the
+table for what left, of what's written for what arrived). They replace
+counting rows, which one gone and another come in the same step fools.
+`Query::written(e)` is one row's latest tick over the query's terms.
+
 ## Upkeep, reworked
 
 2026-09-24. With change detection, a settled pile still re-sorted every
