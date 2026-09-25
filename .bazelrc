@@ -24,5 +24,13 @@ common --@rules_rust//rust/settings:clippy_flag=-Aclippy::too_many_arguments
 common --@rules_rust//rust/settings:clippy_flag=-Aclippy::needless_range_loop
 test --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 test --output_groups=+clippy_checks
+# And formatting, the same way: an unformatted file fails the test run.
+# ./bazel run @rules_rust//:rustfmt formats everything.
+test --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+test --output_groups=+rustfmt_checks
 build:lint --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:lint --output_groups=+clippy_checks
+
+# rustfmt reads its config from a label flag, not from the workspace: without
+# this it formats to its defaults (100 columns) whatever rustfmt.toml says.
+common --@rules_rust//rust/settings:rustfmt.toml=//:rustfmt.toml

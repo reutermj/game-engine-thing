@@ -222,7 +222,9 @@ changing the ABI, the reload sequence or the Bazel rules.
   and `run` don't lint, so a lint never blocks a hot reload. Code that runs
   inside a mod can't print (`//engine:mod_lints`): a mod's `println!` goes
   through its own copy of std, whose stdout buffer leaks when it unloads.
-  Log through `cx.log`.
+  Log through `cx.log`. Formatting is checked the same way: `./bazel run
+  @rules_rust//:rustfmt` formats everything (`rustfmt.toml`, passed to
+  rules_rust by a flag in `.bazelrc`).
 - **Comments explain why, not what.** A "what" comment is a second copy of
   the code: it can only be redundant or wrong, and it turns wrong the
   moment the line it describes changes. Spend the comment on what the code
