@@ -50,7 +50,7 @@ four mutations of the layouts are caught by that agreement. The layouts:
 today's (insertion order, a grid index rebuilt every step, and the
 broadphase's own grid), pages per grid cell (2a), and Z-order pages (2b),
 each with and without big bodies apart, and Z-order at 64, 16 and 8 rows
-a page. `./bazel run -c opt //spike/spatial:bench`.
+a page.[^spike]
 
 Per frame, µs, `-c opt`, one thread (Z-order with big bodies apart, 8 rows
 a page, against today's):
@@ -459,3 +459,7 @@ is the next step there); and gathering, the solver's gathering and writing
 back, 117 over the arrays, unchanged ([physics.md](physics.md#what-the-ecs-costs)).
 The broadphase (89 under the arrays') and narrowphase (23 under) pay for
 most of it.
+
+[^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
+    its tests and `//engine/ecs:spatial_bench` had superseded it; it is in
+    git history up to c7be223.

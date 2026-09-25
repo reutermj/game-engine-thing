@@ -73,7 +73,7 @@ every column into pages in that order (`ErasedColumn::gather`).
 ## Closing the gap
 
 The spike's contact numbers at 1000 bodies, µs per frame, `-c opt`, one
-thread (`./bazel run -c opt //spike/relations:bench`):
+thread (`spike/relations`'s bench[^removed]):
 
 | contacts as | upkeep, settled | upkeep, full churn | solve, settled |
 |---|---|---|---|
@@ -226,8 +226,11 @@ restitution 1 comes back at 3.
     physics-owned table (`ContactTable`, one component holding every
     contact) with a `Contacts<Data, Filter>` parameter showing each hook the
     contact from its side. It measured best (upkeep 4 µs, even under full
-    churn). It was set aside as outside the ECS, and the table model stays
-    in `spike/relations/table.rs` as the benchmark to beat.
+    churn). It was set aside as outside the ECS.
+
+[^removed]: 2026-09-25. `spike/relations` was removed once the physics mod
+    ran on ordered tables and `//engine/std/physics:tax` measured it against
+    arrays; the table model and its bench are in git history up to 5377205.
 
 [^keyed]: *(History, 2026-09-24, get-emj.26.)* A re-sort keyed every row
     afresh, a glue call each, since keys are cheap: a dirty re-sort of 4800
