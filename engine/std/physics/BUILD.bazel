@@ -1,6 +1,6 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load("//engine:defs.bzl", "engine_game", "engine_mod")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
 
 # 2D rigid bodies, with every piece of state in the world or this mod's
 # state, so the solver hot-reloads under a running simulation. A game uses
@@ -132,7 +132,7 @@ rust_test(
     ],
     crate_root = "tests/physics_test.rs",
     data = TEST_DATA.values(),
-    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()},
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()} | POISON_ENV,
     deps = [
         ":physics_interface",
         "//engine/control",

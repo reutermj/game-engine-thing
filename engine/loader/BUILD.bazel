@@ -8,6 +8,7 @@ rust_library(
         "control_server.rs",
         "engine.rs",
         "lib.rs",
+        "poison.rs",
         "schedule.rs",
     ],
     crate_name = "engine_loader",

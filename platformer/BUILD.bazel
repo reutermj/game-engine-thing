@@ -1,5 +1,5 @@
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load("//engine:defs.bzl", "engine_game")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game")
 
 # A platformer for a player that takes turns, on the lockstep bootstrap.
 #
@@ -27,7 +27,7 @@ rust_test(
     name = "platformer_test",
     srcs = ["platformer_test.rs"],
     data = TEST_DATA.values(),
-    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()},
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()} | POISON_ENV,
     deps = [
         "//engine/control",
         "//engine/loader",

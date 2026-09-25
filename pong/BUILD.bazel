@@ -1,4 +1,4 @@
-load("//engine:defs.bzl", "engine_game")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 # Pong for a player that takes turns (an agent, a test): the lockstep
@@ -21,7 +21,7 @@ rust_test(
     srcs = ["pong_test.rs"],
     # The game target's output is its manifest; its runfiles have every mod.
     data = [":pong"],
-    env = {"PONG_MANIFEST": "$(rlocationpath :pong)"},
+    env = {"PONG_MANIFEST": "$(rlocationpath :pong)"} | POISON_ENV,
     deps = [
         "//engine/control",
         "//engine/loader",

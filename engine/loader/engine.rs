@@ -24,8 +24,8 @@ use engine_api::scheduler::{FramePlan, PlannedNode, Ran};
 use engine_ecs::schema::{self, Field};
 use engine_ecs::{Build, Change, FrameCx, Keepalive, Log, Structural, World};
 use engine_control::Request;
-use libloading::Library;
 
+use crate::poison::ModLibrary;
 use crate::schedule::{self, ModDecls, Plan};
 
 
@@ -49,7 +49,7 @@ pub struct Engine {
     /// Each loaded mod's current library, by `ModContext` address, for
     /// `library_of`. Separate from `mods` because it is read while `mods` is
     /// borrowed for a load.
-    libs: RefCell<HashMap<usize, Arc<Library>>>,
+    libs: RefCell<HashMap<usize, Arc<ModLibrary>>>,
     /// The rustc this engine was built with, which every mod must match.
     rustc: OnceCell<Option<String>>,
     /// Control requests waiting for the next pump; see [`Engine::requests`].
@@ -112,7 +112,7 @@ struct Loaded {
     main: MainFn,
     /// Shared with the world, which keeps a build's library mapped while
     /// component values still need its code.
-    lib: Arc<Library>,
+    lib: Arc<ModLibrary>,
     source: PathBuf,
     /// Hash of the library file, to recognize an unchanged build.
     content: u64,
@@ -145,7 +145,7 @@ struct Opened {
     name: String,
     path: PathBuf,
     content: u64,
-    lib: Arc<Library>,
+    lib: Arc<ModLibrary>,
     image: Vec<(usize, usize)>,
     info: ModInfo,
     main: MainFn,
@@ -1002,7 +1002,7 @@ impl Engine {
     /// the already-loaded image for a path, or an inode, it has seen, so opening
     /// the Bazel output again (or a link to it) would reload nothing. See
     /// docs/lore/dlopen-returns-the-loaded-image-for-a-file-it-has-seen.md.
-    fn open_staged(&self, name: &str, path: &Path) -> Result<(Library, Vec<(usize, usize)>), String> {
+    fn open_staged(&self, name: &str, path: &Path) -> Result<(ModLibrary, Vec<(usize, usize)>), String> {
         std::fs::create_dir_all(&self.staging_dir)
             .map_err(|e| format!("creating {}: {e}", self.staging_dir.display()))?;
         let n = self.staged_count.get();
@@ -1013,7 +1013,7 @@ impl Engine {
         std::fs::copy(path, &staged).map_err(|e| format!("copying {}: {e}", path.display()))?;
         // `engine_mod` links with `-z now`, so a missing symbol fails here, while
         // the old build is still running.
-        let lib = unsafe { Library::new(&staged) }.map_err(describe);
+        let lib = unsafe { ModLibrary::open(&staged, path) }.map_err(describe);
         // Read while the file still has its name: the maps name it by path.
         let image = std::fs::canonicalize(&staged).map(|path| mapped_ranges(&path)).unwrap_or_default();
         // The mapping outlives the file, so nothing is left behind to clean up.

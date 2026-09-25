@@ -25,6 +25,12 @@ changed, in one batch.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
 
+# The environment of every test that loads mods into a real engine: an
+# unloaded build's addresses are made to fault, so a stale pointer into it
+# crashes at its first use instead of running whatever is mapped there now.
+# See engine/loader/poison.rs.
+POISON_ENV = {"ENGINE_POISON_UNLOADED": "1"}
+
 EngineModInfo = provider(
     doc = "A mod the engine can load.",
     fields = {

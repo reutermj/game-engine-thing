@@ -1,6 +1,6 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load("//engine:defs.bzl", "engine_game", "engine_mod")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
 
 # Test mods live here, apart from the demo mods in //mods, so editing a demo
 # never changes what a test proves.
@@ -349,11 +349,30 @@ rust_test(
     name = "reload_test",
     srcs = ["reload_test.rs"],
     data = TEST_MODS.values(),
-    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_MODS.items()},
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_MODS.items()} | POISON_ENV,
     deps = [
         ":probe",
         "//engine/api",
         "//engine/control",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+# The loader's poison mode itself; see engine/loader/poison.rs.
+rust_test(
+    name = "poison_test",
+    srcs = ["poison_test.rs"],
+    data = [
+        ":counter_v1",
+        ":vault_v1",
+    ],
+    env = {
+        "COUNTER_V1": "$(rlocationpath :counter_v1)",
+        "VAULT_V1": "$(rlocationpath :vault_v1)",
+    } | POISON_ENV,
+    deps = [
+        "//engine/api",
         "//engine/loader",
         "@rules_rust//rust/runfiles",
     ],
@@ -395,6 +414,6 @@ rust_test(
     name = "e2e_test",
     srcs = ["e2e_test.rs"],
     data = E2E_DATA.values(),
-    env = {var: "$(rlocationpath %s)" % target for var, target in E2E_DATA.items()},
+    env = {var: "$(rlocationpath %s)" % target for var, target in E2E_DATA.items()} | POISON_ENV,
     deps = ["@rules_rust//rust/runfiles"],
 )
