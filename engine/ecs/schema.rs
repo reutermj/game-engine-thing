@@ -231,3 +231,62 @@ pub fn report(old: &[Field], new: &[Field]) -> String {
     }
     report.join(", ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A field's bytes read as the value they hold, as `convert` reads them.
+    fn read(kind: FieldKind, b: &[u8]) -> Num {
+        match kind {
+            FieldKind::U8 => Num::Int(b[0] as i128),
+            FieldKind::U16 => Num::Int(u16::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::U32 => Num::Int(u32::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::U64 => Num::Int(u64::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::I8 => Num::Int(b[0] as i8 as i128),
+            FieldKind::I16 => Num::Int(i16::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::I32 => Num::Int(i32::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::I64 => Num::Int(i64::from_ne_bytes(b.try_into().unwrap()) as i128),
+            FieldKind::F32 => Num::Float(f32::from_ne_bytes(b.try_into().unwrap()) as f64),
+            _ => Num::Float(f64::from_ne_bytes(b.try_into().unwrap())),
+        }
+    }
+
+    macro_rules! kinds {
+        ($($kind:ident: $ty:ty),*) => {
+            /// Each numeric kind, its size, and a value as its bytes, with
+            /// `as` semantics.
+            const KINDS: &[(FieldKind, usize, fn(&Num) -> Vec<u8>)] = &[$((
+                FieldKind::$kind,
+                size_of::<$ty>(),
+                |v| match *v {
+                    Num::Int(i) => (i as $ty).to_ne_bytes().to_vec(),
+                    Num::Float(f) => (f as $ty).to_ne_bytes().to_vec(),
+                },
+            )),*];
+        };
+    }
+    kinds!(U8: u8, U16: u16, U32: u32, U64: u64, I8: i8, I16: i16, I32: i32, I64: i64, F32: f32, F64: f64);
+
+    /// Every numeric kind into every other, from and to odd offsets, as `as`
+    /// would convert them: a packed layout's fields can be anywhere, and
+    /// Miri (with symbolic alignment checks) fails any read or write that
+    /// assumed alignment.
+    #[test]
+    fn every_numeric_kind_converts_to_every_other_unaligned() {
+        for value in [Num::Int(0), Num::Int(-3), Num::Int(70_000), Num::Float(200.5), Num::Float(-1e12)] {
+            for &(from, from_size, from_bytes) in KINDS {
+                for &(to, to_size, to_bytes) in KINDS {
+                    let mut src = [0u8; 17];
+                    src[1..1 + from_size].copy_from_slice(&from_bytes(&value));
+                    let mut dst = [0xAAu8; 17];
+                    // SAFETY: both fields are within their buffers.
+                    unsafe { convert(from, src.as_ptr().add(1), from_size, to, dst.as_mut_ptr().add(3)) };
+                    let want = to_bytes(&read(from, &src[1..1 + from_size]));
+                    assert_eq!(dst[3..3 + to_size], want[..], "{} to {}", kind_name(from), kind_name(to));
+                    assert!(dst[..3].iter().chain(&dst[3 + to_size..]).all(|&b| b == 0xAA), "nothing written past the field");
+                }
+            }
+        }
+    }
+}

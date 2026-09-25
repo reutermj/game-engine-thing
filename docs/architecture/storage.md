@@ -328,20 +328,84 @@ depends on interleavings needs model checking and luck.
 
 ### Testing the core
 
-- **Differential tests** against a trivially correct model (a map of entity
-  to component values): random sequences of spawns, despawns, inserts,
-  removes, layout migrations and queries, applied to both, compared after
-  each step.
-- **Miri** on the core's own tests, to catch undefined behavior the
-  differential tests can't see (aliasing, uninitialized reads, misalignment).
-- **Fuzzing** the same operation sequences, coverage-guided.
-- **The equivalence test** for the scheduler: pong and the platformer
-  replayed under the parallel and sequential schedulers, frame by frame.
+One set of operation sequences, three ways to choose and check them. The
+sequences are two drivers in `engine/ecs/tests/ops.rs`, each against a
+trivially correct model, compared after every step:
 
-**Open question:** toolchain. Miri, and the sanitizers, need a nightly
-compiler; the build is pinned to stable. Running them in their own hermetic
-nightly toolchain, for the core crate only, is the likely answer, still to
-be tried under Bazel (deferred until after the MVP).
+- **`world`**: spawns, inserts, removes and despawns through `Structural`
+  (dead entities included, which every operation must ignore), keys and
+  heap values written in place, the re-sorts of an ordered table, and
+  migrations between two layouts of a component, back and forth, against a
+  map from entity to values. It checks every row's location, and an
+  ordered table's key order, as it goes.
+- **`columns`**: `ErasedColumn`'s own operations, against vectors: moves
+  between pages, drops, `drop_front`, `gather` into pages of any size,
+  migrations by `schema::migrate`, ticks, and a `gather` given a wrong
+  order and a migration that panics partway, both of which must leave each
+  value dropped once. Its layouts have padding, heap fields and an
+  over-aligned one.
+
+Heap values are canaries, which count themselves and check they're alive
+when read or dropped, so a double drop, a leak or a read of a moved-out
+value fails the step it happened in, natively.
+
+The drivers are run:
+
+- **Seeded**, in the default suite (`//engine/ecs:model_test`, 5 s), and
+  for as long as wanted as a soak.
+- **Under Miri**, with the crate's unit tests and the integration tests
+  that drive the unsafe code (world, spatial, ordered, page), under both
+  Stacked and Tree Borrows, with symbolic alignment checks and strict
+  provenance: `./bazel test //engine/ecs:miri`, 22 minutes. It sees
+  what no native run can: aliasing violations, uninitialized reads,
+  provenance, misalignment. Inputs are sized down under `cfg(miri)`, and
+  the tests whose point needs thousands of rows (dense piles, splits across
+  threads) are skipped there.
+- **Coverage-guided**, by libFuzzer (`//engine/ecs/fuzz:world` and
+  `:columns`), with its input as the drivers' choices. Stable rustc's
+  SanitizerCoverage flags and the llvm module's libFuzzer, so no nightly
+  ([lore](../lore/a-stable-rustc-fuzzes-with-the-llvm-modules-libfuzzer.md));
+  no AddressSanitizer either, which is nightly-only, so the corpus is
+  replayed under Miri (`//engine/ecs/fuzz:miri`) for what only a sanitizer
+  would see, and natively in the default suite.
+
+Miri's toolchain is a nightly of its own, registered for Miri's toolchain
+types only, so everything else builds with the stable one
+([lore](../lore/rules-rs-runs-miri-hermetically-and-only-its-source-says-so.md)).
+How to run each, and what to do with what it finds:
+[runbook 002](../runbooks/002-run-miri-and-fuzz-the-core.md).
+
+**What they found** (2026-09-25), each fixed with a test that fails
+without the fix:
+
+- **Moves copied values as integers** (Miri, on its first run): the
+  fixed-size copies in `copy_value` read `[u8; N]`, which strips a
+  pointer's provenance (a moved `String`'s buffer was then dangling) and
+  reads padding as initialized. Now `MaybeUninit<[u8; N]>`, the same
+  instructions ([lore](../lore/copying-a-value-as-bytes-drops-its-pointers.md)).
+- **A `gather` refused partway dropped values twice**: its order was
+  checked as it moved, so a bad entry panicked with the values before it
+  owned by both the old pages and the new. Now it checks the whole order,
+  and allocates, before moving anything.
+- **A migration that panicked dropped values twice**: the column still
+  counted every row, rewritten ones included. Now the rows not yet handed
+  to the migration are dropped, and the rest are the new column's.
+
+Neither panic happens in the engine today (`Resort` builds a valid order;
+the migration glue doesn't unwind), but both are safe functions or
+documented contracts that a caller could meet.
+
+**Not covered:** the loader's `dlopen` paths and `engine/api` (Miri can't
+load a shared library, and the ECS is the only crate here with unsafe code
+of its own); the parallel executors beyond the scaled `spatial_test` and
+`page_test` cases (safe code, but Miri's race detector would see a wrong
+`Sync`); and the drop and default glue under unwinding, which can't
+happen: an `extern "C"` function that panics aborts, and `__drop` catches
+the panic first.
+
+Still planned: **the equivalence test** for the scheduler, pong and the
+platformer replayed under the parallel and sequential schedulers, frame by
+frame.
 
 ## Other open questions
 
@@ -488,9 +552,8 @@ optimizations for later (get-znt.11), none of which changes the design:
 - table moves (`apply(ignite)`, 4,000 rows in 0.23 ms) clone the table's
   component list and look up guards in a `HashMap` per row.
 
-**Not done yet:** Miri on `erased.rs`, which needs a nightly toolchain;
-events as publish nodes (the same mechanism as apply nodes); exclusive
-systems and mod state conflicts.
+**Not done yet:** events as publish nodes (the same mechanism as apply
+nodes); exclusive systems and mod state conflicts.
 
 [^landing]: *(History, 2026-09-23.)* Designed here as a draft, prototyped
     as `spike/ecs` (see [Spike results](#spike-results)), then landed as

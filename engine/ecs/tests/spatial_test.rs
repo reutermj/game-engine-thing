@@ -41,6 +41,13 @@ impl SpatialKey for At {
 /// `At::BIG`'s default: a row with a larger half extent goes in a big page.
 const BIG: f32 = 2.0;
 
+/// `native` rows or rounds, or `miri` under Miri, where each costs a
+/// thousand times more. Tests whose point needs the full size (dense piles,
+/// enough pages to split across threads) are skipped there instead.
+const fn sized(native: usize, miri: usize) -> usize {
+    if cfg!(miri) { miri } else { native }
+}
+
 fn lcg(s: &mut u64) -> f32 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*s >> 40) as f32 / (1u64 << 24) as f32
@@ -169,7 +176,7 @@ fn regions_and_pairs_agree_with_brute_force() {
     let _s = serial();
     let w = World::new();
     let mut seed = 1;
-    populate(&w, 600, &mut seed);
+    populate(&w, sized(600, 100), &mut seed);
     check(&w);
     agrees(&w, &mut seed);
 }
@@ -179,9 +186,9 @@ fn moving_keeps_the_order_and_the_systems_after_see_it() {
     let _s = serial();
     let w = World::new();
     let mut seed = 2;
-    populate(&w, 400, &mut seed);
+    populate(&w, sized(400, 80), &mut seed);
     let s = Schedule { systems: vec![mover.system(&w, "mover"), probe.system(&w, "probe")] };
-    for _ in 0..30 {
+    for _ in 0..sized(30, 4) {
         let regions: Vec<Bounds> = (0..20).map(|_| region(&mut seed)).collect();
         *REGIONS.lock().unwrap() = regions.clone();
         s.run_sequential(&w);
@@ -201,14 +208,14 @@ fn everything_moving_at_once_keeps_the_order() {
     let _s = serial();
     let w = World::new();
     let mut seed = 7;
-    populate(&w, 500, &mut seed);
+    populate(&w, sized(500, 80), &mut seed);
     // Every row leaves its page in one step: full pages of rows that belong
     // elsewhere, split while they're still there.
     fn shift(_: &mut Cx, mut q: Query<&mut At>) {
         q.for_each(|_, mut at| (at.x, at.y) = ((at.x + 25.0) % 50.0, (at.y * 0.5 + 13.0) % 50.0));
     }
     let s = Schedule { systems: vec![shift.system(&w, "shift")] };
-    for _ in 0..6 {
+    for _ in 0..sized(6, 2) {
         s.run_sequential(&w);
         check(&w);
         agrees(&w, &mut seed);
@@ -218,6 +225,7 @@ fn everything_moving_at_once_keeps_the_order() {
 /// Many rows to a cell, so pages fill with rows of one key: the splits
 /// around a key half a page shares, which a spread-out table never makes.
 #[test]
+#[cfg_attr(miri, ignore = "needs many rows a cell; too slow interpreted")]
 fn crowded_cells_keep_the_order() {
     let _s = serial();
     let w = World::new();
@@ -276,11 +284,11 @@ fn structural_changes_keep_the_order() {
     let _s = serial();
     let w = World::new();
     let mut seed = 3;
-    let mut alive = populate(&w, 300, &mut seed);
-    for round in 0..20 {
+    let mut alive = populate(&w, sized(300, 60), &mut seed);
+    for round in 0..sized(20, 3) as u32 {
         {
             let mut m = w.between_frames(Build::default()).unwrap();
-            for _ in 0..40 {
+            for _ in 0..sized(40, 15) {
                 let i = (lcg(&mut seed) * alive.len() as f32) as usize % alive.len();
                 let e = alive[i];
                 match (lcg(&mut seed) * 6.0) as u32 {
@@ -351,13 +359,13 @@ fn a_parallel_frame_equals_a_sequential_one() {
         FRAME.store(0, Ordering::SeqCst);
         let w = World::new();
         let mut seed = 6;
-        populate(&w, 500, &mut seed);
+        populate(&w, sized(500, 60), &mut seed);
         let systems: Vec<SystemDecl> =
             vec![mover.system(&w, "mover"), probe.system(&w, "probe"), tagger.system(&w, "tagger")];
         let s = Schedule { systems };
         *REGIONS.lock().unwrap() = (0..20).map(|_| region(&mut seed)).collect();
         let mut seen = Vec::new();
-        for _ in 0..20 {
+        for _ in 0..sized(20, 3) {
             match threads {
                 Some(n) => s.run_parallel(&w, n),
                 None => s.run_sequential(&w),
@@ -368,7 +376,7 @@ fn a_parallel_frame_equals_a_sequential_one() {
         (boxes(&w), w.values::<Tag>().unwrap().into_iter().map(|(e, t)| (e, t.n)).collect::<std::collections::BTreeMap<_, _>>(), seen)
     };
     let sequential = run(None);
-    for _ in 0..3 {
+    for _ in 0..sized(3, 1) {
         assert!(run(Some(4)) == sequential, "a parallel frame differed");
     }
 }
@@ -403,6 +411,7 @@ fn boxes_touching_edge_to_edge_pair() {
 /// block's (4 by 4 cells for 16 rows, 4 by 2 for 8). Split at the median,
 /// ranges straddle blocks, and boxes are longer and overlap more.
 #[test]
+#[cfg_attr(miri, ignore = "a statistic over 851 rows; too slow interpreted")]
 fn pages_are_blocks_of_the_order() {
     let _s = serial();
     let w = World::new();
@@ -437,7 +446,7 @@ fn a_re_sort_recomputes_only_the_rows_written_through() {
     let _s = serial();
     let w = World::new();
     let mut seed = 8;
-    let es = populate(&w, 300, &mut seed);
+    let es = populate(&w, sized(300, 40), &mut seed);
     static ONE: Mutex<Option<Entity>> = Mutex::new(None);
     *ONE.lock().unwrap() = Some(es[7]);
     // Visits every row mutably, reads them all, writes one.
@@ -486,6 +495,7 @@ fn brute_pairs_of(w: &World, grow: f32, keep: impl Fn(Entity) -> bool) -> Vec<(E
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs rows enough that marked rows pair; too slow interpreted")]
 fn pairs_through_filters_agree_with_brute_force() {
     let _s = serial();
     let w = World::new();
@@ -529,6 +539,7 @@ fn pairs_through_filters_agree_with_brute_force() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs a dense pile; too slow interpreted")]
 fn a_dense_pile_pairs_as_brute_force_says() {
     let _s = serial();
     let w = World::new();
@@ -577,13 +588,13 @@ fn pairs_between_sides_agree_with_brute_force() {
     let _s = serial();
     let w = World::new();
     let mut seed = 12;
-    let mut es = populate(&w, 700, &mut seed);
+    let mut es = populate(&w, sized(700, 120), &mut seed);
     {
         let mut m = w.between_frames(Build::default()).unwrap();
-        for e in es.drain(..60) {
+        for e in es.drain(..sized(60, 15)) {
             m.despawn(e);
         }
-        for _ in 0..60 {
+        for _ in 0..sized(60, 15) {
             let at = At { x: lcg(&mut seed) * 50.0, y: lcg(&mut seed) * 50.0 };
             es.push(m.spawn((at, Size { hx: 0.4, hy: 0.4 }, Tag { n: 0 })));
         }
@@ -613,7 +624,7 @@ fn pairs_between_sides_agree_with_brute_force() {
     let s = Schedule { systems: vec![mover.system(&w, "mover"), sides.system(&w, "sides")] };
     let tagged: std::collections::HashSet<Entity> = w.values::<Tag>().unwrap().into_iter().map(|(e, _)| e).collect();
     let marked: std::collections::HashSet<Entity> = w.values::<Mark>().unwrap().into_iter().map(|(e, _)| e).collect();
-    for _ in 0..10 {
+    for _ in 0..sized(10, 2) {
         s.run_sequential(&w);
         let not_both = |set: &std::collections::HashSet<Entity>| brute_pairs_of_any(&w, 0.05, |a, b| !(set.contains(&a) && set.contains(&b)));
         let got = PAIRS.lock().unwrap().clone();
@@ -642,6 +653,7 @@ fn scoped(n: usize) -> Workers {
 /// over enough rows that the sweep, the passive side and the sort all
 /// split; one thread's is checked against brute force.
 #[test]
+#[cfg_attr(miri, ignore = "needs rows enough to split; too slow interpreted")]
 fn pairs_split_across_threads_are_one_threads() {
     let _s = serial();
     let w = World::new();
@@ -706,6 +718,7 @@ fn layout(w: &World) -> Vec<Vec<Vec<Entity>>> {
 /// has pages enough: the order it leaves, page by page and row by row, is
 /// one thread's, and it re-bounds the same rows.
 #[test]
+#[cfg_attr(miri, ignore = "needs pages enough to split; too slow interpreted")]
 fn a_re_sort_across_threads_leaves_one_threads_order() {
     let _s = serial();
     /// Threads spawned per run, counting the runs: that the re-sort did

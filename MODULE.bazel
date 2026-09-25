@@ -4,18 +4,29 @@ bazel_dep(name = "rules_rs", version = "0.0.111")
 bazel_dep(name = "llvm", version = "0.8.23")
 bazel_dep(name = "platforms", version = "1.1.0")
 
+# For the fuzzers (//engine/ecs/fuzz): libFuzzer as a C++ library, and a
+# transition that instruments every Rust crate in a fuzz binary. Both are
+# already in the graph, at these versions, through rules_rs and llvm.
+bazel_dep(name = "rules_cc", version = "0.2.25")
+bazel_dep(name = "with_cfg.bzl", version = "0.12.0")
+
 toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 toolchains.toolchain(
     edition = "2024",
     version = "1.98.1",
 )
-use_repo(toolchains, "default_rust_toolchains")
+# Miri, for the unsafe core's tests only (//engine/ecs:miri_*): its own
+# nightly toolchain types, so the stable toolchain above stays the one
+# everything else builds with. See docs/runbooks/002-run-miri-and-fuzz-the-core.md.
+toolchains.experimental_miri(version = "nightly/2026-09-20")
+use_repo(toolchains, "default_rust_toolchains", "miri_toolchains")
 
 rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
 register_toolchains(
     "@default_rust_toolchains//...",
+    "@miri_toolchains//:all",
     "@llvm//toolchain:all",
 )
 

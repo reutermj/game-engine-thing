@@ -241,29 +241,41 @@ impl ErasedColumn {
     /// in the order `order` names them, as (page, row): how an ordered
     /// table is re-sorted. Each value keeps its tick, and `pages` are left
     /// empty. Panics unless `order` names every value exactly once, which
-    /// is what makes the moves sound.
+    /// is what makes the moves sound, and panics before moving any: a
+    /// value moved before a panic would be owned by the old page and the
+    /// new, and dropped by both as it unwound.
     pub fn gather(pages: &mut [ErasedColumn], order: &[(u32, u32)], page_rows: usize) -> Vec<ErasedColumn> {
         let ty = pages.first().expect("a table has a page").ty;
         assert!(pages.iter().all(|p| p.ty.same_values(&ty)), "gathering one column's pages");
+        assert!(page_rows > 0, "pages hold rows");
         assert_eq!(order.len(), pages.iter().map(|p| p.len).sum::<usize>(), "gathering every value");
         let mut seen: Vec<Vec<bool>> = pages.iter().map(|p| vec![false; p.len]).collect();
+        for &(p, r) in order {
+            let slot = seen.get_mut(p as usize).and_then(|page| page.get_mut(r as usize));
+            assert!(slot.is_some_and(|s| !std::mem::replace(s, true)), "row {r} of page {p} gathered once");
+        }
+        // Allocated up front too, so nothing between the first move and
+        // the last can panic.
+        let mut out: Vec<ErasedColumn> = order
+            .chunks(page_rows)
+            .map(|chunk| {
+                let mut column = ErasedColumn::new(ty);
+                column.reserve(chunk.len());
+                column.ticks.reserve_exact(chunk.len());
+                column
+            })
+            .collect();
         let size = ty.layout.size();
-        let mut out = Vec::with_capacity(order.len().div_ceil(page_rows).max(1));
-        for chunk in order.chunks(page_rows) {
-            let mut column = ErasedColumn::new(ty);
-            column.reserve(chunk.len());
-            column.ticks.reserve(chunk.len());
+        for (column, chunk) in out.iter_mut().zip(order.chunks(page_rows)) {
             for &(p, r) in chunk {
-                let (p, r) = (p as usize, r as usize);
-                assert!(r < pages[p].len && !std::mem::replace(&mut seen[p][r], true), "row {r} of page {p} gathered once");
+                let (page, r) = (&pages[p as usize], r as usize);
                 // SAFETY: `(p, r)` is an initialized value, moved once
                 // (checked above) into `column`'s next allocated slot.
-                unsafe { std::ptr::copy_nonoverlapping(pages[p].slot(r), column.slot(column.len), size) };
+                unsafe { std::ptr::copy_nonoverlapping(page.slot(r), column.slot(column.len), size) };
                 column.len += 1;
-                column.ticks.push(pages[p].ticks[r]);
-                column.written = column.written.max(pages[p].ticks[r]);
+                column.ticks.push(page.ticks[r]);
+                column.written = column.written.max(page.ticks[r]);
             }
-            out.push(column);
         }
         // Every value was moved out: the old pages own nothing.
         for p in pages.iter_mut() {
@@ -278,25 +290,54 @@ impl ErasedColumn {
 
     /// Rewrites every value into `to`'s layout with `migrate`, which must
     /// move or drop every part of the old value and initialize the new one
-    /// fully (see `schema::migrate`).
+    /// fully (see `schema::migrate`). If `migrate` panics, the column is
+    /// left empty with each value dropped once: those already rewritten,
+    /// those not yet reached, and the one it was given, which is its own.
     ///
     /// # Safety
     /// `migrate(old, new)` must leave `old` fully moved out or dropped and
-    /// `new` a valid value of `to`'s type.
+    /// `new` a valid value of `to`'s type, or panic with `old` moved out or
+    /// dropped (or leaked) and `new` untouched.
     pub unsafe fn migrate(&mut self, to: ValueType, mut migrate: impl FnMut(*mut u8, *mut u8)) {
+        /// Drops the values `migrate` hasn't been given when it panics.
+        /// Without it the column would still count every row, rewritten
+        /// ones included, and drop them again.
+        struct Unmigrated<'a> {
+            column: &'a mut ErasedColumn,
+            next: usize,
+        }
+        impl Drop for Unmigrated<'_> {
+            fn drop(&mut self) {
+                let (next, len) = (self.next, self.column.len);
+                self.column.len = 0;
+                // SAFETY: rows from `next` hold values no one else owns.
+                unsafe {
+                    for row in next..len {
+                        drop_value(self.column.ty, self.column.slot(row));
+                    }
+                }
+            }
+        }
+        let len = self.len;
         let mut out = ErasedColumn::new(to);
-        for row in 0..self.len {
-            out.reserve_one();
+        out.reserve(len);
+        // The rows are the same rows, so they keep their ticks.
+        let (ticks, written) = (std::mem::take(&mut self.ticks), self.written);
+        let mut rest = Unmigrated { column: self, next: 0 };
+        while rest.next < len {
+            let row = rest.next;
+            // Before the call: once given to `migrate`, the value is its.
+            rest.next += 1;
             // SAFETY: `row` is initialized and `out`'s next slot allocated;
             // the caller's `migrate` consumes one and fills the other.
-            unsafe { migrate(self.slot(row), out.slot(out.len)) };
+            unsafe { migrate(rest.column.slot(row), out.slot(row)) };
             out.len += 1;
         }
-        // Every value was moved out or dropped: free the buffer, nothing else.
-        // The rows are the same rows, so they keep their ticks.
-        self.len = 0;
-        out.ticks = std::mem::take(&mut self.ticks);
-        out.written = self.written;
+        // Every value was handed over, so this only empties the column,
+        // and swapping frees its buffer.
+        drop(rest);
+        out.ticks = ticks;
+        out.written = written;
         std::mem::swap(self, &mut out);
     }
 
@@ -371,9 +412,15 @@ impl Drop for ErasedColumn {
 /// `dst`, not overlapping.
 #[inline(always)]
 unsafe fn copy_value(src: *const u8, dst: *mut u8, size: usize) {
+    /// As `MaybeUninit`, not `[u8; N]`: a copy typed as integers drops the
+    /// provenance of any pointer in the value (a `String`'s buffer, which
+    /// is then dangling) and reads padding as initialized, both undefined
+    /// behavior that Miri caught (docs/lore/copying-a-value-as-bytes-drops-its-pointers.md).
+    /// The same instructions either way.
     #[inline(always)]
     unsafe fn fixed<const N: usize>(src: *const u8, dst: *mut u8) {
-        unsafe { (dst as *mut [u8; N]).write_unaligned((src as *const [u8; N]).read_unaligned()) }
+        type Bytes<const N: usize> = std::mem::MaybeUninit<[u8; N]>;
+        unsafe { (dst as *mut Bytes<N>).write_unaligned((src as *const Bytes<N>).read_unaligned()) }
     }
     unsafe {
         match size {
@@ -501,13 +548,19 @@ mod tests {
         assert_eq!(words, ["e", "B", "c", "d"]);
     }
 
-    /// Counts its drops.
-    #[derive(Default)]
-    struct Counted(#[allow(dead_code)] u32);
-    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    /// Counts its drops, per thread: tests run on threads of their own, and
+    /// each counts only the drops it makes.
+    #[derive(Debug, Default, PartialEq)]
+    struct Counted(u32);
+    thread_local! {
+        static DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn drops() -> usize {
+        DROPS.with(|d| d.get())
+    }
     impl Drop for Counted {
         fn drop(&mut self) {
-            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            DROPS.with(|d| d.set(d.get() + 1));
         }
     }
     // SAFETY: plain data; no schema.
@@ -517,19 +570,104 @@ mod tests {
 
     #[test]
     fn a_moved_value_is_owned_by_its_new_column_and_dropped_once() {
-        use std::sync::atomic::Ordering::SeqCst;
         let (mut from, mut to) = (ErasedColumn::new(ValueType::of::<Counted>()), ErasedColumn::new(ValueType::of::<Counted>()));
-        let before = DROPS.load(SeqCst);
+        let before = drops();
         for i in 0..3 {
             from.push(Counted(i));
         }
         from.swap_remove_into(0, &mut to);
         assert_eq!((from.len(), to.len()), (2, 1));
-        assert_eq!(DROPS.load(SeqCst), before, "a move drops nothing");
+        assert_eq!(drops(), before, "a move drops nothing");
         drop(from);
-        assert_eq!(DROPS.load(SeqCst), before + 2);
+        assert_eq!(drops(), before + 2);
         drop(to);
-        assert_eq!(DROPS.load(SeqCst), before + 3);
+        assert_eq!(drops(), before + 3);
+    }
+
+    /// An order that names a value twice, or one that isn't there, is
+    /// refused before anything moves: refused partway, the values already
+    /// moved would be owned by the new pages and the old, and dropped by
+    /// both as the panic unwound.
+    #[test]
+    fn a_gather_refused_partway_leaves_every_value_where_it_was() {
+        let ty = ValueType::of::<Word>();
+        let mut pages = [ErasedColumn::new(ty), ErasedColumn::new(ty)];
+        pages[0].push(word("a"));
+        pages[0].push(word("b"));
+        pages[1].push(word("c"));
+        for bad in [[(0, 0), (1, 0), (0, 0)], [(0, 1), (1, 0), (2, 0)], [(0, 0), (1, 0), (1, 1)]] {
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ErasedColumn::gather(&mut pages, &bad, 2)));
+            assert!(refused.is_err(), "{bad:?} names a value twice or one that isn't there");
+            assert_eq!(pages[0].as_slice::<Word>(), [word("a"), word("b")]);
+            assert_eq!(pages[1].as_slice::<Word>(), [word("c")]);
+        }
+        let out = ErasedColumn::gather(&mut pages, &[(1, 0), (0, 1), (0, 0)], 2);
+        let words: Vec<Vec<Word>> = out.iter().map(|c| c.as_slice::<Word>().to_vec()).collect();
+        assert_eq!(words, [vec![word("c"), word("b")], vec![word("a")]]);
+        assert!(pages.iter().all(ErasedColumn::is_empty));
+    }
+
+    /// A migration that panics partway drops each value once: those it
+    /// wrote in the new layout, those it never reached in the old, and the
+    /// one it was given, which was its own. The column is left empty and
+    /// usable.
+    #[test]
+    fn a_migration_that_panics_drops_every_value_once() {
+        let mut c = ErasedColumn::new(ValueType::of::<Counted>());
+        for i in 0..5 {
+            c.push(Counted(i));
+        }
+        let before = drops();
+        let mut row = 0;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: moves each value whole into the same layout, and drops
+            // the one it panics on.
+            unsafe {
+                c.migrate(ValueType::of::<Counted>(), |old, new| {
+                    if row == 3 {
+                        std::ptr::drop_in_place(old as *mut Counted);
+                        panic!("a migration that fails partway");
+                    }
+                    row += 1;
+                    (new as *mut Counted).write((old as *mut Counted).read());
+                })
+            }
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(drops() - before, 5, "each value dropped once");
+        assert!(c.is_empty() && c.ticks().is_empty());
+        c.push(Counted(9));
+        assert_eq!(c.as_slice::<Counted>(), [Counted(9)]);
+    }
+
+    component! {
+        /// Three bytes of padding, which are never initialized.
+        #[derive(Debug, Default, PartialEq, Copy)]
+        struct Padded: "test::Padded" {
+            a: u8,
+            b: u32,
+        }
+    }
+
+    /// A move copies padding (uninitialized) and pointers (whose provenance
+    /// must survive the copy) as they are. Only Miri sees the difference:
+    /// natively a copy as integers moves the same bytes.
+    #[test]
+    fn values_with_padding_and_pointers_move_whole() {
+        let (mut from, mut to) = (ErasedColumn::new(ValueType::of::<Padded>()), ErasedColumn::new(ValueType::of::<Padded>()));
+        for i in 0..3 {
+            from.push(Padded { a: i, b: i as u32 * 7 });
+        }
+        from.swap_remove_into(0, &mut to);
+        assert_eq!(from.as_slice::<Padded>(), [Padded { a: 2, b: 14 }, Padded { a: 1, b: 7 }]);
+        assert_eq!(to.as_slice::<Padded>(), [Padded { a: 0, b: 0 }]);
+        let (mut from, mut to) = (ErasedColumn::new(ValueType::of::<Word>()), ErasedColumn::new(ValueType::of::<Word>()));
+        for w in ["a", "b", "c"] {
+            from.push(word(w));
+        }
+        from.swap_remove_into(0, &mut to);
+        assert_eq!(from.as_slice::<Word>(), [word("c"), word("b")]);
+        assert_eq!(to.as_slice::<Word>(), [word("a")]);
     }
 
     #[test]

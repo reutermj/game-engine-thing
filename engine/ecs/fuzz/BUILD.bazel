@@ -1,0 +1,65 @@
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine/ecs:miri.bzl", "ecs_miri_test")
+load(":fuzz.bzl", "fuzz_binary")
+
+# Coverage-guided fuzzing of the unsafe core: the model test's drivers
+# (engine/ecs/tests/ops.rs), with libFuzzer choosing. See
+# docs/runbooks/002-run-miri-and-fuzz-the-core.md:
+#   ./bazel run //engine/ecs/fuzz:world -- -max_total_time=600 <corpus dir>
+
+# libFuzzer, with its `main`, built from source by the hermetic llvm
+# toolchain. Whole, since nothing in the Rust code refers to its symbols.
+cc_import(
+    name = "libfuzzer",
+    static_library = "@llvm//runtimes/compiler-rt:clang_rt.fuzzer.static",
+    alwayslink = True,
+)
+
+[
+    fuzz_binary(
+        name = name,
+        testonly = True,
+        srcs = [name + ".rs"],
+        edition = "2024",
+        # with_cfg.bzl 0.12.0 reads this as a dict, and fails on the
+        # `None` it defaults to.
+        exec_properties = {},
+        tags = ["manual"],
+        deps = [
+            ":libfuzzer",
+            "//engine/ecs:ops",
+        ],
+    )
+    for name in [
+        "world",
+        "columns",
+    ]
+]
+
+# The corpus, replayed through the drivers: an input that once found a bug
+# keeps checking it.
+rust_test(
+    name = "replay_test",
+    srcs = ["replay_test.rs"],
+    data = glob(["corpus/**"]),
+    deps = ["//engine/ecs:ops"],
+)
+
+# And under Miri, which sees what the fuzzers can't without a sanitizer.
+# Isolation off, to read the corpus and see the shard variables; sharded by
+# input, since Miri interprets them one after another.
+test_suite(
+    name = "miri",
+    tags = ["manual"],
+    tests = ecs_miri_test(
+        name = "miri_replay",
+        srcs = ["replay_test.rs"],
+        crate_name = "replay_test",
+        crate_root = "replay_test.rs",
+        data = glob(["corpus/**"]),
+        miri_flags = ["-Zmiri-disable-isolation"],
+        shard_count = 16,
+        deps = ["//engine/ecs:ops"],
+    ),
+)

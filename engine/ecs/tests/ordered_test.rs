@@ -60,6 +60,12 @@ impl SpatialKey for At {
     }
 }
 
+/// `native` rows or rounds, or `miri` under Miri, where each costs a
+/// thousand times more.
+const fn sized(native: usize, miri: usize) -> usize {
+    if cfg!(miri) { miri } else { native }
+}
+
 fn lcg(s: &mut u64) -> u32 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*s >> 33) as u32
@@ -139,14 +145,14 @@ fn random_changes_keep_every_table_in_order() {
         names.insert(e, s);
         live.push(e);
     };
-    for _ in 0..600 {
+    for _ in 0..sized(600, 80) {
         spawn(&w, &mut seed, &mut names, &mut live);
     }
     let walk = Schedule { systems: vec![walk_ordered.system(&w, "walk")] };
-    for round in 0..40 {
+    for round in 0..sized(40, 4) {
         {
             let mut m = w.between_frames(Build::default()).unwrap();
-            for _ in 0..30 {
+            for _ in 0..sized(30, 10) {
                 let i = lcg(&mut seed) as usize % live.len();
                 let e = live[i];
                 match lcg(&mut seed) % 4 {
@@ -163,7 +169,7 @@ fn random_changes_keep_every_table_in_order() {
         }
         // Before any spawn, which would mark the tables for sorting anyway.
         check(&w, &names);
-        for _ in 0..20 {
+        for _ in 0..sized(20, 5) {
             spawn(&w, &mut seed, &mut names, &mut live);
         }
         check(&w, &names);
@@ -198,7 +204,7 @@ fn a_key_range_is_the_rows_with_those_keys() {
     let ends: Vec<Entity> = (0..20).map(|_| m.spawn((Tag {},))).collect();
     let mut seed = 2;
     let mut links = Vec::new();
-    for _ in 0..400 {
+    for _ in 0..sized(400, 60) {
         let (a, b) = (ends[lcg(&mut seed) as usize % 20], ends[lcg(&mut seed) as usize % 20]);
         links.push((m.spawn((Link { a, b },)), a, b));
     }
@@ -230,10 +236,10 @@ fn a_key_range_over_a_table_in_another_order_is_scanned() {
     // First, so `Link` is the older component and orders the table the two
     // share: `Rank` is in it, but not in `Rank`'s order.
     let end = m.spawn((Tag {},));
-    for i in 0..100 {
+    for i in 0..sized(100, 20) as u32 {
         m.spawn((Link { a: end, b: Entity { index: 1000 - i, generation: 0 } }, Rank { n: lcg(&mut seed) % 40 }));
     }
-    for i in 0..300 {
+    for i in 0..sized(300, 40) {
         let rank = Rank { n: lcg(&mut seed) % 40 };
         if i % 2 == 0 {
             m.spawn((rank, At { x: lcg(&mut seed) as f32 % 100.0 }));
@@ -288,7 +294,7 @@ fn a_system_does_not_see_its_own_rows_move_and_the_next_does() {
     let _s = serial();
     let w = World::new();
     let mut m = w.between_frames(Build::default()).unwrap();
-    for n in 0..300 {
+    for n in 0..sized(300, 60) as u32 {
         m.spawn((Rank { n: n % 97 },));
     }
     drop(m);
@@ -344,7 +350,7 @@ fn a_re_sort_keys_only_the_rows_new_or_written_since() {
     let mut seed = 4;
     {
         let mut m = w.between_frames(Build::default()).unwrap();
-        for _ in 0..200 {
+        for _ in 0..sized(200, 40) {
             m.spawn((Rank { n: lcg(&mut seed) % 50 },));
         }
     }

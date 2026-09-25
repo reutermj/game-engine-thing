@@ -55,6 +55,13 @@ component! {
     pub struct Mark: "test::Mark", storage = sparse {}
 }
 
+/// `native` rows or rounds, or `miri` under Miri, where each costs a
+/// thousand times more. The test that needs rows enough to split an
+/// ordered walk across threads is skipped there instead.
+const fn sized(native: usize, miri: usize) -> usize {
+    if cfg!(miri) { miri } else { native }
+}
+
 fn lcg(s: &mut u64) -> u32 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*s >> 33) as u32
@@ -82,7 +89,7 @@ fn take_seen() -> Vec<(Entity, u64)> {
 fn populate(w: &World, seed: &mut u64) -> Vec<Entity> {
     let mut m = w.between_frames(Build::default()).unwrap();
     let mut live = Vec::new();
-    for k in 0..700u64 {
+    for k in 0..sized(700, 120) as u64 {
         let v = Val { n: k * 7 + 1 };
         let (x, y) = ((lcg(seed) % 400) as f32 / 10.0, (lcg(seed) % 300) as f32 / 10.0);
         let rank = Rank { n: lcg(seed) % 20 };
@@ -361,7 +368,7 @@ fn a_walk_for_what_changed_sees_exactly_the_rows_written_since() {
     assert_eq!(changed_now(), [], "nothing written since");
     run(&w, write_some, "write_some");
     let mut want = std::mem::take(&mut *WROTE.lock().unwrap());
-    assert!(want.len() > 20);
+    assert!(want.len() > sized(20, 2));
     {
         let mut m = w.between_frames(Build::default()).unwrap();
         // Written rows moved to a table no one walked keep their ticks.
@@ -405,6 +412,7 @@ fn workers() -> Workers {
 /// with threads there's more than one. The ordered walk is
 /// `for_each_ordered_page`'s, over an ordered table and one that isn't.
 #[test]
+#[cfg_attr(miri, ignore = "needs rows enough to split the ordered walk; too slow interpreted")]
 fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
     let _s = serial();
     let w = World::new();
@@ -507,7 +515,7 @@ fn a_parallel_walk_writes_and_changes_what_one_thread_does() {
         assert!(!wrote.is_empty());
         let spawned: Vec<Entity> = {
             let mut m = w.between_frames(Build::default()).unwrap();
-            (0..100).map(|k| m.spawn((Val { n: k },))).collect()
+            (0..sized(100, 10) as u64).map(|k| m.spawn((Val { n: k },))).collect()
         };
         outcomes.push((brute(&w), wrote, spawned));
     }

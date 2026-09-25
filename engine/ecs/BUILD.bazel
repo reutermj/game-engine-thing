@@ -1,6 +1,7 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load(":miri.bzl", "ecs_miri_test")
 
 # The ECS the loader and every mod share, as Rust types. See lib.rs.
 rust_library(
@@ -41,11 +42,23 @@ rust_library(
     deps = [":ecs"],
 )
 
+# Operation sequences against trivially correct models: the driver the
+# model test, the fuzzers (//engine/ecs/fuzz) and the replays share.
+rust_library(
+    name = "ops",
+    testonly = True,
+    srcs = ["tests/ops.rs"],
+    crate_name = "ecs_ops",
+    crate_root = "tests/ops.rs",
+    visibility = ["//engine/ecs/fuzz:__pkg__"],
+    deps = [":ecs"],
+)
+
 # The storage against a trivially correct model, under random changes.
 rust_test(
     name = "model_test",
     srcs = ["tests/model_test.rs"],
-    deps = [":ecs"],
+    deps = [":ops"],
 )
 
 # The graph and the query API, on the scenario and small cases.
@@ -113,4 +126,44 @@ rust_binary(
     name = "query_bench",
     srcs = ["tests/query_bench.rs"],
     deps = [":ecs"],
+)
+
+# Miri: the crate's own tests, and the integration tests that drive the
+# unsafe core, under each aliasing model. Manual, since they take minutes:
+#   ./bazel test //engine/ecs:miri
+# The tests shrink their inputs under `cfg(miri)`, and skip what's too slow
+# interpreted (docs/runbooks/002-run-miri-and-fuzz-the-core.md).
+MIRI_TESTS = ecs_miri_test(
+    name = "miri_unit",
+    srcs = glob(
+        ["*.rs"],
+        exclude = ["bench.rs"],
+    ),
+    crate_name = "engine_ecs",
+    crate_root = "lib.rs",
+) + [
+    test
+    for name in [
+        "model_test",
+        "world_test",
+        "spatial_test",
+        "ordered_test",
+        "page_test",
+    ]
+    for test in ecs_miri_test(
+        name = "miri_" + name,
+        srcs = ["tests/{}.rs".format(name)],
+        crate_name = name,
+        crate_root = "tests/{}.rs".format(name),
+        deps = [
+            ":ecs",
+            ":ops",
+        ],
+    )
+]
+
+test_suite(
+    name = "miri",
+    tags = ["manual"],
+    tests = MIRI_TESTS,
 )
