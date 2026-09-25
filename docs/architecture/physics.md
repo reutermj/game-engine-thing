@@ -347,6 +347,17 @@ couple of dozen bodies. It's also the scene system parallelism and
 
 ## What the ECS costs
 
+**Verdict (2026-09-24): not a design blocker** for single-threaded 2D
+rigid bodies up to 10 000. Against the same step on plain arrays, checked
+to be the same computation bit for bit, the ECS is within 5% settled, even
+at rest, and 1.28× falling; what's left has known causes that need no
+change of design (below). Not covered, and the open risks: parallelism
+(both sides are single-threaded; checked when system parallelism,
+get-znt.5, is built), scenes unlike a pile (mixed sizes, heavy contact
+churn, bodies carrying many game components), and tuned engines (the
+baseline is our own array code, not Box2D). Further optimization waits for
+a game that needs it.
+
 2026-09-24. `./bazel run -c opt //engine/std/physics:tax` runs a pile in
 the engine to the frame to measure, copies its whole state (bodies, and
 contacts with their impulses) into plain arrays, and runs the same steps
