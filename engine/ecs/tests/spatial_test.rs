@@ -4,11 +4,11 @@
 //! the systems after it do; a re-sort is an apply node the scheduler orders
 //! readers of the table after; parallel frames equal sequential ones.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
-use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Query, SpatialKey, With, Without, World, component};
+use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Executor, Query, Scoped, SpatialKey, With, Without, Workers, World, component};
 
 component! {
     /// A spatial key: its tables are kept in spatial order.
@@ -630,4 +630,118 @@ fn pairs_between_sides_agree_with_brute_force() {
 
 fn brute_pairs_of_any(w: &World, grow: f32, keep: impl Fn(Entity, Entity) -> bool) -> Vec<(Entity, Entity)> {
     brute_pairs(w, grow).into_iter().filter(|&(a, b)| keep(a, b)).collect()
+}
+
+fn scoped(n: usize) -> Workers {
+    Workers::new(Some(Arc::new(Scoped(n)) as Arc<dyn Executor>))
+}
+
+/// `near_pairs_with` split across threads finds exactly what one thread
+/// does, on the sides of `pairs_between_sides_agree_with_brute_force` (a
+/// table on both sides, sparse filters, reused indices) and a dense block,
+/// over enough rows that the sweep, the passive side and the sort all
+/// split; one thread's is checked against brute force.
+#[test]
+fn pairs_split_across_threads_are_one_threads() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 13;
+    let mut es = populate(&w, 4000, &mut seed);
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for e in es.drain(..300) {
+            m.despawn(e);
+        }
+        for _ in 0..300 {
+            let at = At { x: lcg(&mut seed) * 50.0, y: lcg(&mut seed) * 50.0 };
+            es.push(m.spawn((at, Size { hx: 0.4, hy: 0.4 }, Tag { n: 0 })));
+        }
+        for &e in es.iter().filter(|e| e.index % 4 == 0) {
+            m.insert(e, Mark { n: 1 });
+        }
+        for k in 0..900 {
+            let (col, row) = ((k % 30) as f32, (k / 30) as f32);
+            m.spawn((At { x: 60.0 + col * 0.9, y: row * 0.9 }, Size { hx: 0.45, hy: 0.45 }));
+        }
+    }
+    fn sides(
+        _: &mut Cx,
+        (untagged, tagged): (Query<&At, Without<Tag>>, Query<&At, With<Tag>>),
+        (unmarked, marked): (Query<&At, Without<Mark>>, Query<&At, With<Mark>>),
+        (all, tagged_marked): (Query<&At>, Query<&At, (With<Tag>, With<Mark>)>),
+    ) {
+        let cases = |w: &Workers| {
+            [
+                engine_ecs::near_pairs_with(w, &untagged, &tagged, 0.05),
+                engine_ecs::near_pairs_with(w, &unmarked, &marked, 0.05),
+                engine_ecs::near_pairs_with(w, &untagged, &tagged_marked, 0.05),
+                engine_ecs::near_pairs_with(w, &(&untagged, &tagged), &all, 0.05),
+                engine_ecs::near_pairs_with(w, &all, &(), 0.05),
+            ]
+        };
+        let one = cases(&Workers::default());
+        for n in [2, 3, 8, 16] {
+            let split = cases(&scoped(n));
+            for (k, (got, want)) in split.iter().zip(&one).enumerate() {
+                assert!(got == want, "case {k} at {n} threads: {} pairs against {}", got.len(), want.len());
+            }
+        }
+        *PAIRS.lock().unwrap() = one[4].clone();
+    }
+    let s = Schedule { systems: vec![mover.system(&w, "mover"), sides.system(&w, "sides")] };
+    for _ in 0..4 {
+        s.run_sequential(&w);
+        let got = PAIRS.lock().unwrap().clone();
+        assert!(got.len() > 3000, "{} pairs", got.len());
+        assert_eq!(got, brute_pairs(&w, 0.05));
+    }
+}
+
+/// Every spatial table's pages, row by row: the order a re-sort left.
+fn layout(w: &World) -> Vec<Vec<Vec<Entity>>> {
+    w.tables().filter(|t| t.spatial.is_some()).map(|t| t.rows.read().unwrap().clone()).collect()
+}
+
+/// A re-sort splits re-bounding across the world's executor when a table
+/// has pages enough: the order it leaves, page by page and row by row, is
+/// one thread's, and it re-bounds the same rows.
+#[test]
+fn a_re_sort_across_threads_leaves_one_threads_order() {
+    let _s = serial();
+    /// Threads spawned per run, counting the runs: that the re-sort did
+    /// split shows only here.
+    struct Counted(Scoped, AtomicU32);
+    impl Executor for Counted {
+        fn threads(&self) -> usize {
+            self.0.threads()
+        }
+        fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.run(tasks, f)
+        }
+    }
+    let counted = Arc::new(Counted(Scoped(4), AtomicU32::new(0)));
+    let (one, split) = (World::new(), World::new());
+    split.set_executor(Some(counted.clone()));
+    for w in [&one, &split] {
+        populate(w, 6000, &mut 14);
+    }
+    let pages: usize = split.tables().filter(|t| t.spatial.is_some()).map(|t| t.rows.read().unwrap().len()).sum();
+    assert!(pages * 8 >= 2048, "{pages} pages: enough to split");
+    counted.1.store(0, Ordering::Relaxed);
+    FRAME.store(0, Ordering::SeqCst);
+    let s = Schedule { systems: vec![mover.system(&one, "mover")] };
+    let t = Schedule { systems: vec![mover.system(&split, "mover")] };
+    for _ in 0..6 {
+        let frame = FRAME.load(Ordering::SeqCst);
+        s.run_sequential(&one);
+        // The same moves in both.
+        FRAME.store(frame, Ordering::SeqCst);
+        t.run_sequential(&split);
+        check(&split);
+        assert!(layout(&one) == layout(&split), "the same rows on the same pages");
+        assert_eq!(rebounded(&one), rebounded(&split));
+        assert!(rebounded(&split) > 5000);
+    }
+    assert_eq!(counted.1.load(Ordering::Relaxed), 6, "a run a re-sort");
 }

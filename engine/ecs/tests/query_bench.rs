@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Entity, Query, SpatialKey, Without, World, component};
+use std::sync::Arc;
+
+use engine_ecs::{Bounds, Build, Entity, Executor, Query, SpatialKey, Without, Workers, World, component};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -50,7 +52,7 @@ fn solver(m: &Mass, v: &Vel) -> Solver {
     Solver { v: [v.x, v.y], inv: if m.kind == 0 { m.inv } else { 0.0 } }
 }
 
-const STAGES: [&str; 9] = [
+const STAGES: [&str; 18] = [
     "copy from a Vec (the arrays' gather)",
     "for_each, copying out",
     "for_each_page, copying out",
@@ -60,10 +62,33 @@ const STAGES: [&str; 9] = [
     "a map by entity: built, 2 lookups a pair",
     "256-row pages: for_each, copying out",
     "256-row pages: for_each_page, copying out",
+    "par_for_each_page, copying out, 16 chunks inline",
+    "par_for_each_page, writing each row, 16 inline",
+    "the same split into 16 chunks, and nothing done",
+    "for_each_page, and nothing done",
+    "gravity: for_each and Mut",
+    "gravity: par_for_each_page inline, get_mut",
+    "gravity: par_for_each inline, Mut",
+    "gravity: par_for_each on no executor, Mut",
+    "gravity: for_each and Mut, again",
 ];
 
+/// Claims four threads, and runs every task on the caller: a parallel
+/// walk's cost of its own, without another core's.
+struct Inline;
+
+impl Executor for Inline {
+    fn threads(&self) -> usize {
+        4
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..tasks).for_each(f);
+    }
+}
+
 /// Nanoseconds per stage, summed over frames, and rows or pairs each covers.
-static OUT: Mutex<([u128; 9], [usize; 9])> = Mutex::new(([0; 9], [0; 9]));
+static OUT: Mutex<([u128; 18], [usize; 18])> = Mutex::new(([0; 18], [0; 18]));
 static SINK: Mutex<f32> = Mutex::new(0.0);
 
 /// Entities to places in a list, by entity index, as physics maps them.
@@ -147,6 +172,79 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
         sum += slots.get(*a).unwrap_or(0) as u64 + slots.get(*b).unwrap_or(0) as u64;
     }
     record(6, s, pairs.len());
+
+    let workers = Workers::new(Some(Arc::new(Inline)));
+    let s = Instant::now();
+    let parts = q.par_for_each_page(&workers, |r| Vec::with_capacity(r.len()), |out, page, (m, v, _)| {
+        out.extend(page.rows().map(|r| solver(&m[r], &v[r])))
+    });
+    let mut out: Vec<Solver> = Vec::with_capacity(n);
+    parts.into_iter().for_each(|p| out.extend(p));
+    record(9, s, n);
+
+    let s = Instant::now();
+    let out = &out;
+    q.par_for_each_page(&workers, |r| r.start, |i, page, (_, mut v, _)| {
+        for r in page.rows() {
+            v.set(r, Vel { x: out[*i].v[0], y: out[*i].v[1] });
+            *i += 1;
+        }
+    });
+    record(10, s, n);
+
+    let s = Instant::now();
+    q.par_for_each_page(&workers, |_| (), |_, _, _| {});
+    record(11, s, n);
+
+    let s = Instant::now();
+    q.for_each_page(|_, _| {});
+    record(12, s, n);
+
+    let s = Instant::now();
+    q.for_each(|_, (m, mut v, _)| {
+        if m.kind == 0 {
+            v.x += m.a * 0.016;
+            v.y += m.b * 0.016;
+        }
+    });
+    record(13, s, n);
+
+    let s = Instant::now();
+    q.par_for_each_page(&workers, |_| (), |_, page, (m, mut v, _)| {
+        for i in page.rows().filter(|&i| m[i].kind == 0) {
+            let mut v = v.get_mut(i);
+            v.x += m[i].a * 0.016;
+            v.y += m[i].b * 0.016;
+        }
+    });
+    record(14, s, n);
+
+    let s = Instant::now();
+    q.par_for_each(&workers, |_| (), |_, _, (m, mut v, _)| {
+        if m.kind == 0 {
+            v.x += m.a * 0.016;
+            v.y += m.b * 0.016;
+        }
+    });
+    record(15, s, n);
+
+    let s = Instant::now();
+    q.par_for_each(&Workers::default(), |_| (), |_, _, (m, mut v, _)| {
+        if m.kind == 0 {
+            v.x += m.a * 0.016;
+            v.y += m.b * 0.016;
+        }
+    });
+    record(16, s, n);
+
+    let s = Instant::now();
+    q.for_each(|_, (m, mut v, _)| {
+        if m.kind == 0 {
+            v.x += m.a * 0.016;
+            v.y += m.b * 0.016;
+        }
+    });
+    record(17, s, n);
     *SINK.lock().unwrap() += (sum % 7) as f32 + out.iter().map(|s| s.inv).sum::<f32>();
 }
 
@@ -180,7 +278,7 @@ fn main() {
             }
         }
         let s = Schedule { systems: vec![spatial.system(&w, "spatial"), plain.system(&w, "plain")] };
-        *OUT.lock().unwrap() = ([0; 9], [0; 9]);
+        *OUT.lock().unwrap() = ([0; 18], [0; 18]);
         let frames = 200;
         for _ in 0..frames {
             s.run_sequential(&w);

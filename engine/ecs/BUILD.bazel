@@ -14,6 +14,7 @@ rust_library(
         "harness.rs",
         "lib.rs",
         "ordered.rs",
+        "par.rs",
         "query.rs",
         "schema.rs",
         "spatial.rs",

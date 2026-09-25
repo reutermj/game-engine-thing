@@ -351,10 +351,12 @@ couple of dozen bodies. It's also the scene system parallelism and
 rigid bodies up to 10 000. Against the same step on plain arrays, checked
 to be the same computation bit for bit, the ECS is within 5% settled, even
 at rest, and 1.28× falling; what's left has known causes that need no
-change of design (below). Not covered, and the open risks: parallelism
-(both sides are single-threaded; checked when system parallelism,
-get-znt.5, is built), scenes unlike a pile (mixed sizes, heavy contact
-churn, bodies carrying many game components), and tuned engines (the
+change of design (below), on a real pile too (the first was columns; see
+below). The open risks: parallelism (measured: split across threads as
+built, the ECS's step gets slower where the arrays' gets faster, for
+reasons mostly unbuilt: [Parallelism](#parallelism)), contact churn (the
+contacts' re-sort, below), scenes unlike a pile (mixed sizes, bodies
+carrying many game components), and tuned engines (the
 baseline is our own array code, not Box2D). Further optimization waits for
 a game that needs it.
 
@@ -507,8 +509,210 @@ What took it there:
 The broadphase is now 56 to 59% of the arrays'. The
 solver and the narrowphase cost the same either way, since they're the
 same code over the same arrays. The scheduler and frame cost about 7 µs.
-Neither side is parallel yet, and scenes that churn contacts, or bodies
-carrying many game components, aren't measured.
+Bodies carrying many game components aren't measured.
+
+**The pile above is columns, not a pile** (found 2026-09-24 by the
+parallel solver's work). A box 40 or 400 wide holds an odd number of
+bodies a row, so each column alternates circles and boxes, and without
+rotation a circle on a box stays put: every body rests on one contact, and
+the 10 000 are 331 islands that never touch. One body more a row (41 and
+401 wide) packs them into one pile, with half again the contacts, which
+churn as it creeps. `:tax` runs both now. µs per step, ECS / arrays,
+medians of three runs:
+
+| | 1000 settled | 10 000 falling | 10 000 settled | 10 000 at rest |
+|---|---|---|---|---|
+| contacts | 1468 | 10 262 | 14 769 | 14 842 |
+| frame | 212 / 219 | 811 / 668 | 2873 / 2882 | 2396 / 2871 |
+| broadphase | 24 / 54 | 130 / 297 | 405 / 1052 | 396 / 1064 |
+| narrowphase | 15 / 25 | 31 / 42 | 253 / 291 | 238 / 283 |
+| merging contacts | 5 / 2 | 16 / 4 | 50 / 37 | 50 / 35 |
+| solver | 128 / 130 | 283 / 278 | 1428 / 1416 | 1422 / 1401 |
+| outside the systems | 18 | 184 | 476 | 36 |
+
+The verdict holds, and more so: on the real pile the ECS's frame is the
+arrays' settled and 17% under them at rest, since the arrays' sweep and
+prune suffers most from a pile (its x order is a row of 400 bodies deep).
+What's new is outside the systems: 476 µs settled, of which about 360 is
+**re-sorting the contacts** (an ordered table,
+[relationships.md](relationships.md#ordered-tables)), which rearranges the
+whole table, every column, whenever a contact begins or ends, and a
+creeping pile begins and ends some every step. At rest nothing does, and
+it's 36. Keeping ordered tables in order by splicing in what changed,
+rather than rebuilding them, is the fix; it's also what limits the step
+across threads (next).
+
+## Parallelism
+
+**Status: measured, not on by default** (2026-09-24, get-emj.30): every
+stage but the solver can run split across threads, through the ECS, bit
+for bit the same as on one thread; on this machine, at 10 000 bodies, it
+makes the ECS's step slower, and the same split on arrays faster. What
+serializes each stage is below; most of it is unbuilt rather than the
+design, but the largest part is how the step moves its data between cores,
+which is the same on arrays. The solver's own parallelism is measured
+apart (the parallel solver's work, get-emj.30's other
+half).
+
+**What's built.** In `engine_ecs`:
+
+- **`Executor`**, a trait for running tasks on threads, and **`Workers`**, a
+  system parameter that declares nothing (as `Dt` doesn't) and hands out
+  the executor installed in the world with `World::set_executor`, between
+  frames, by whoever owns the threads. Without one, everything runs on the
+  system's thread. `Scoped` is an executor that spawns its threads per run.
+- **`Query::par_for_each`, `par_for_each_page`, `par_for_each_ordered_page`**:
+  the walk cut into chunks of about equal rows, a few per thread, each a
+  task holding runs of whole pages of every term (so the split costs the
+  calling thread a cut per run, not per page). `make` is called on the
+  calling thread for each chunk, with the rows it covers, to make what its
+  task fills (see [lore](../lore/memory-a-task-allocates-is-its-threads.md)).
+  Rows' changes go into a log per chunk, joined in chunk order: the log
+  one thread would have written, so despawns free ids in the same order
+  (tested: `page_test`). The ordered walk takes at most one ordered table:
+  two are merged by key, in runs within pages, and a page can't be two
+  tasks'.
+- **`near_pairs_with`**: the active sweep in ranges of pages, the passive
+  side in ranges of its runs, each task's pairs already split by range of
+  lesser entity index, then each range sorted by a task and turned into
+  entities into its piece of the output (tested against one thread and
+  brute force: `spatial_test`).
+- **The spatial re-sort re-bounds pages in parallel** when the world has an
+  executor and the table has about 2000 rows or more; moving rows, splits
+  and merges stay on one thread (tested: `spatial_test`).
+
+In the physics mod, each stage takes the parallel path when its `Workers`
+has more than one thread and nothing sleeps (waking looks sleeping bodies
+up as pairs are found); `physics_test` runs a 600-body pile, sensing and
+touching, on four threads against one. `:tax -- parallel` measures both
+sides at 1 to 16 threads, and checks every run against one thread's, bit
+for bit: positions, velocities, and every contact with its entity and
+impulses. The arrays run the same parallel algorithm (the same chunks,
+the same range-split sort) with the same executor.
+
+**The numbers.** Ryzen 9 7950X (16 cores on two dies of 8, 32 threads),
+a pool of threads kept between runs (`tests/pool.rs`),
+µs per step, ECS / arrays, medians of three runs, every run
+checked. A run that shared the machine with more than a core of anyone
+else's work was taken again (another agent was benchmarking on it).
+"Split, one thread" runs the parallel code with every task on the calling
+thread: what the split costs by itself. 10 000 bodies, 401 wide, settled:
+
+| stage | 1 | split, one thread | 2 | 4 | 8 | 12 | 16 |
+|---|---|---|---|---|---|---|---|
+| frame | 2918 / 2889 | 3040 / 2930 | 3554 / 2678 | 3255 / 2286 | 3143 / 2034 | 3208 / 1963 | 3271 / 1963 |
+| gravity | 23 / 10 | 28 / 9 | 69 / 9 | 45 / 8 | 37 / 8 | 37 / 8 | 40 / 10 |
+| gathering colliders | 53 / – | 86 / – | 165 / – | 134 / – | 122 / – | 130 / – | 138 / – |
+| broadphase | 407 / 1060 | 430 / 1110 | 405 / 819 | 312 / 533 | 281 / 331 | 328 / 300 | 347 / 289 |
+| narrowphase | 256 / 296 | 258 / 288 | 254 / 271 | 157 / 179 | 121 / 125 | 107 / 111 | 101 / 103 |
+| merging contacts | 50 / 37 | 53 / 36 | 75 / 34 | 53 / 25 | 48 / 21 | 52 / 19 | 52 / 21 |
+| solve: gathering | 84 / 37 | 119 / 49 | 221 / 108 | 170 / 104 | 160 / 105 | 174 / 106 | 184 / 115 |
+| solver (one thread) | 1465 / 1410 | 1472 / 1404 | 1428 / 1391 | 1421 / 1391 | 1433 / 1389 | 1437 / 1385 | 1434 / 1383 |
+| writing back | 98 / 38 | 111 / 36 | 153 / 49 | 117 / 44 | 96 / 44 | 98 / 39 | 101 / 41 |
+| outside the systems | 483 / – | 483 / – | 793 / – | 857 / – | 862 / – | 871 / – | 875 / – |
+
+Spreads were within 10% but at 2 threads and in the broadphase at 4 (up
+to 15%). Everything but the solver: the ECS 1453 µs at one thread and
+1840 at 16 (0.8×), the arrays 1479 and 570 (2.6×). The other scenes,
+frames only: 400 wide (columns) settled 1353 / 1294 at one thread, best
+1459 / 1083 at 8; 401 falling 822 / 672, best 999 / 524 at 4; 400
+falling 732 / 569, best 887 / 463 at 8. The best stage speedups the ECS
+reached anywhere: narrowphase 2.5×, broadphase 1.5× (1.9× below),
+the re-sort's re-bounding 1.4× (columns settled, where nothing else
+re-sorts); gravity, gathering, the merge and writing back never above
+1.0× (the merge 1.2× and writing back 1.4× with affinity, below).
+
+**What serializes each stage:**
+
+- **Gravity** (20 µs, a pass writing every body's velocity in place) is
+  too small to split: handing out a run costs 0.5 µs at 2 threads to 5 at
+  16 (the pool, empty tasks), the split 4 to 5 µs more, and the pages then
+  have to come back to the core that runs the next stage. The arrays gain
+  1.1 to 1.7×. Not a design limit; not worth building either, at this size.
+- **Gathering colliders, the solver's gathering, writing back** are
+  transposes between the world and arrays for one consumer. Split, each
+  chunk's results are joined on the calling thread (a copy), and the data
+  crosses cores twice. The arrays' gathering loses the same way (0.3 to
+  0.5×): it's the stage's shape, not the ECS. With the solver on one
+  thread, they belong on its thread; with a parallel solver, each of its
+  threads should gather its own bodies, so the data never crosses.
+- **The broadphase**: serial parts are listing the active pages (and each
+  row's generation), sorting pages by x, and joining the ranges' pairs;
+  the sweep itself splits well. It peaks at 1.5× at 8 threads and falls
+  after, as pages and ranges per task shrink. The arrays split a sweep 2.6
+  times slower to begin with, so gain more. Unbuilt: keeping the page list
+  and generations between steps (they change only as pages do).
+- **The narrowphase** is a function of the pair: the same code on both
+  sides, 2.5 and 2.9× at 16. What's left is the join of found contacts.
+- **The merge** updates contacts in place, page by page; the spawns and
+  despawns it would have made are recorded per chunk and made on the
+  calling thread in walk order, so contacts get the ids one thread gives
+  them (spawns reserve ids as they're made: a spawn from a task would take
+  the id its timing gave it). Split, it's never faster, and its cost
+  shows up after: see the re-sort.
+- **Outside the systems**, the re-sorts. The spatial one re-bounds pages
+  in parallel, but moves, splits and merges on one thread, since a row
+  moving touches two pages and the order. The contacts' re-sort is one
+  thread's whole-table rebuild (see above), and it got 1.8 times slower
+  (483 to 857 µs) when the merge before it wrote the contacts' pages from
+  other cores; splitting its column gathers made it slower still
+  ([lore](../lore/moving-a-stage-to-other-cores-moves-its-data.md)). This
+  is the biggest single loss, and it's unbuilt, not inherent: an ordered
+  table that splices rather than rebuilds would cost little on any thread.
+
+**Where the data lives is most of it.** At 10 000 bodies the step's data
+fits in the last core's cache; a split stage pulls its share to other
+cores, and the next stage on the calling thread pulls it back. Keeping
+chunk `k` on thread `k % n` every step (`STICKY`, with workers spinning
+through the solver: `SPIN_US=2000`), one run: the real pile's ECS
+broadphase 418 to 224 µs at 8 threads (1.9×), the narrowphase 2.3×, writing
+back 1.4×, the frame 2966 to 2995; the arrays' frame 2959 to 1886. An
+executor with affinity helps what parallelizes, not the copies.
+
+**Systems at once lose physics nothing.** Physics's three systems are a
+chain of data dependencies (gravity writes the velocities finding contacts
+reads, which writes the contacts the solver reads, whose writes the re-sort
+applies), so running one mod's systems at once would give it nothing even
+without the rule against it; its step can only overlap other mods' systems
+that touch none of its tables. Splitting its systems further would make
+more apply nodes on the same chain.
+
+**Whose threads.** The executor is the host's: a resident scheduler's
+(get-znt.5), installed in the world between frames. A task runs only inside
+the system that made it, borrowing its stack, and returns before it does,
+so at a safe point no mod code is on any thread. A reloadable mod can't
+own the threads: a thread it spawns keeps its build mapped
+([lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)), and a
+pool's idle loop would be its code. Measured in `physics_test`: host threads
+that ran physics's tasks, kept or spawned per run, leave nothing mapped
+after a reload; a thread-local with a destructor touched in a task keeps
+the build mapped, from any thread, the main one included
+([lore](../lore/a-thread-local-a-mod-touches-keeps-its-build-mapped.md)).
+
+**Kept threads, not threads per system call.** Threads spawned for each run
+(`std::thread::scope`, `Scoped`) cost 23 µs a run at 2 threads to 182 at
+16, against the pool's 0.5 to 5; at 16 the real pile's frame is 5640 /
+4011 against 3243 / 1927. A step makes about a dozen runs. The pool keeps
+threads, so handing them a closure that borrows the caller's stack needs
+unsafe code whose soundness depends on concurrency (the run doesn't return
+until no worker is in it), which `engine_ecs` doesn't allow itself
+([storage.md](storage.md#where-the-unsafe-is-and-isnt)); it's in
+`tests/pool.rs` for the benchmarks. The resident scheduler owning a crate's
+pool (rayon's, audited) or this one is get-znt.5's decision. One pool must
+serve both systems at once and tasks within a system, or they
+oversubscribe the cores: a system on a worker making tasks needs work
+stealing, which this pool doesn't do.
+
+**Not built, and what each would take:**
+
+- a spawn from a task: ids reserved when the chunks are joined, in chunk
+  order, so they don't depend on timing (storage.md's open question on
+  spawned ids);
+- events from a task: a writer per chunk, sent in chunk order;
+- an ordered table that splices what changed instead of rebuilding;
+- an executor with affinity (chunks to the threads that had them) and
+  work stealing, owned by the scheduler;
+- a parallel solver, gathering its own partitions' bodies (the other half).
 
 ## Sleeping
 

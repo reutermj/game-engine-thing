@@ -19,6 +19,7 @@ pub mod harness;
 pub mod query;
 pub mod schema;
 pub mod ordered;
+pub mod par;
 pub mod spatial;
 pub mod world;
 
@@ -31,8 +32,9 @@ pub use component::{__component_fingerprint, __drop, __drop_fn, __fingerprint, _
 pub use events::{Event, EventReader, EventWriter};
 pub use query::{
     Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Data, Declare, Despawns, Dt, Filter, FilterDecl, FrameCx, Log, Mut,
-    NearSide, Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs,
+    NearSide, Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs, near_pairs_with,
 };
+pub use par::{Executor, Scoped, Workers};
 pub use ordered::{ChildOf, OrderKey, children_of, entity_key, pair_key, pairs_from};
 pub use spatial::{Bounds, SpatialKey};
 pub use world::{Build, ComponentId, Keepalive, Structural, TableId, World};

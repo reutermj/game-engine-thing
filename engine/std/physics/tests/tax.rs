@@ -8,11 +8,17 @@
 //! and solver, contacts in the same order, and bodies as indices instead of
 //! entities. They must end bit for bit the same, or the comparison is of two
 //! different computations. Then each stage is timed on both.
+//!
+//! With `-- parallel`, the same at 1 to 16 threads instead: see `tax_par.rs`.
 
 #[path = "../narrow.rs"]
 mod narrow;
 #[path = "../solver.rs"]
 mod solver;
+#[path = "tax_par.rs"]
+mod par;
+#[path = "pool.rs"]
+mod pool;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -295,6 +301,16 @@ impl Arrays {
     }
 }
 
+/// Bodies, and how wide the box is they're dropped in. A box whose rows
+/// hold an odd number of bodies (40 and 400 wide) stacks them in columns
+/// that alternate circles and boxes and never touch their neighbors: without
+/// rotation a circle on a box stays put, so each body rests on one contact
+/// and each column is an island. One body more or less a row (41 and 401
+/// wide) packs them into one pile, with half again the contacts: the pile
+/// a solver is up against (2026-09-24, found by the parallel solver's
+/// work).
+const PILES: [(u32, f32); 4] = [(1000, 40.0), (1000, 41.0), (10000, 400.0), (10000, 401.0)];
+
 /// The number after `key` in `text`.
 fn field(text: &str, key: &str) -> f64 {
     let mut words = text.split_whitespace();
@@ -304,11 +320,15 @@ fn field(text: &str, key: &str) -> f64 {
 
 fn main() {
     let manifest = engine_control::read_manifest(&std::env::var("PILE").unwrap()).unwrap();
+    if std::env::args().any(|a| a == "parallel") {
+        par::run(&manifest);
+        return;
+    }
     const FRAMES: u32 = 60;
     println!("µs per step, {FRAMES} steps, -c opt, one thread; ECS / arrays\n");
-    println!("| bodies | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (n, width) in [(1000u32, 40.0f32), (10000, 400.0)] {
+    println!("| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (n, width) in PILES {
         // Settled is still creeping (every body 1e-4 to 1e-2 a step); at rest
         // is still bit for bit, which the 10 000 are by about step 3000.
         for (scene, warmup) in [("falling", 1u32), ("settled", 400), ("at rest", 4000)] {
@@ -350,7 +370,7 @@ fn main() {
             let pair = |ecs: f64, arr: f64| format!("{ecs:.0} / {arr:.0}");
             println!("  (the arrays' sweep, sorting afresh each step: {:.0} µs)", t.fresh_sweep / f);
             println!(
-                "| {n} | {scene} | {} | {} | {} | {} / – | {} | {} | {} | {} | {} | {} | {:.0} |",
+                "| {n} | {width} | {scene} | {} | {} | {} | {} / – | {} | {} | {} | {} | {} | {} | {:.0} |",
                 arrays.contacts.len(),
                 pair(ecs_frame, array_frame),
                 pair(field(per_step, "gravity"), t.gravity / f),

@@ -248,7 +248,13 @@ The four steps, of which this document is the first:
    owning the workers (get-znt.5). Each node takes its guards with
    `try_lock`, so a scheduler bug is a failed frame, never a data race.
 3. **Data parallelism.** `par_for_each` over a query's chunks, with a
-   restricted task context.
+   restricted task context. Prototyped (2026-09-24) and measured on the
+   physics step: `Workers`, a parameter that declares nothing and reaches
+   the executor the host installed in the world; `Query::par_for_each`
+   and its page walks, whose chunks' changes join in walk order; a task
+   context of just its chunk, so no spawns or events from tasks yet. What
+   it showed, and who owns the threads:
+   [physics.md](physics.md#parallelism).
 4. **Pipeline parallelism.** The next frame's simulation during this
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.

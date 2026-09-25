@@ -112,12 +112,17 @@ TEST_DATA = {
 # The mod in a running engine, on the test scenes.
 rust_test(
     name = "physics_test",
-    srcs = ["tests/physics_test.rs"],
+    srcs = [
+        "tests/physics_test.rs",
+        "tests/pool.rs",
+    ],
+    crate_root = "tests/physics_test.rs",
     data = TEST_DATA.values(),
     env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()},
     deps = [
         ":physics_interface",
         "//engine/control",
+        "//engine/ecs",
         "//engine/loader",
         "@rules_rust//rust/runfiles",
     ],
@@ -139,12 +144,19 @@ rust_binary(
 # The ECS's cost over the same step on plain arrays, checked to be the same
 # computation bit for bit:
 #   ./bazel run -c opt //engine/std/physics:tax
+# and split across 1 to 16 threads, each checked bit for bit against one
+# (REPS and THREADS=1,2,.. in the environment override the defaults;
+# STICKY, SPIN_US and TASK_ALLOC change the pool and the arrays' lists: see
+# tests/pool.rs and tests/tax_par.rs):
+#   ./bazel run -c opt //engine/std/physics:tax -- parallel
 rust_binary(
     name = "tax",
     srcs = [
         "narrow.rs",
         "solver.rs",
+        "tests/pool.rs",
         "tests/tax.rs",
+        "tests/tax_par.rs",
     ],
     crate_root = "tests/tax.rs",
     data = [":pile_game"],

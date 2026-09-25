@@ -8,6 +8,9 @@ use engine_loader::engine::Engine;
 use physics::{Asleep, ContactPair, Overlap, Position, Resting, Touching, Velocity};
 use runfiles::Runfiles;
 
+#[path = "pool.rs"]
+mod pool;
+
 fn path(var: &str) -> PathBuf {
     Runfiles::create().unwrap().rlocation(std::env::var(var).unwrap()).unwrap()
 }
@@ -553,3 +556,94 @@ mod runner {
     }
 }
 
+/// Host threads running physics's tasks: its parallel stages, on threads
+/// that aren't the mod's (docs/architecture/physics.md, "Parallelism").
+mod threads {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use engine_ecs::{Executor, Scoped};
+
+    use super::*;
+
+    /// How many of the staged builds under `dir` the process has mapped:
+    /// each load stages a copy of its library there.
+    fn images(dir: &Path) -> usize {
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let dir = dir.to_string_lossy();
+        let mut paths: Vec<&str> =
+            maps.lines().filter_map(|l| l.splitn(6, ' ').nth(5)).map(str::trim_start).filter(|p| p.starts_with(&*dir)).collect();
+        paths.sort_unstable();
+        paths.dedup();
+        paths.len()
+    }
+
+    /// Threads that ran a build's tasks don't keep it mapped once it's
+    /// reloaded, nor after its engine is dropped, kept between runs (a
+    /// pool) or spawned for each: the same builds are mapped at each point
+    /// as with no threads at all. Tasks run only inside the system that
+    /// made them, and physics's leave nothing on a thread (a thread-local
+    /// with a destructor would keep the build mapped until the thread
+    /// exits: docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
+    #[test]
+    fn threads_that_ran_a_builds_tasks_do_not_keep_it_mapped() {
+        let executors: [(&str, Option<Arc<dyn Executor>>); 3] =
+            [("none", None), ("spawned", Some(Arc::new(Scoped(4)))), ("kept", Some(Arc::new(super::pool::Pool::new(4))))];
+        let mut seen = Vec::new();
+        for (name, executor) in executors {
+            let test = format!("images_{name}");
+            let dir = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join(&test);
+            let e = game("PILE", &test);
+            e.world().set_executor(executor.clone());
+            send(&e, "pile", "drop 400");
+            step(&e, 30);
+            let loaded = images(&dir);
+            assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
+            step(&e, 30);
+            let reloaded = images(&dir);
+            drop(e);
+            // The threads are still there, kept or not.
+            seen.push((name, loaded, reloaded, images(&dir)));
+            drop(executor);
+        }
+        eprintln!("builds mapped (loaded, reloaded, engine dropped): {seen:?}");
+        let (_, loaded, reloaded, dropped) = seen[0];
+        assert_eq!(dropped, 0, "with no threads, nothing is left mapped");
+        for s in &seen[1..] {
+            assert_eq!((s.1, s.2, s.3), (loaded, reloaded, dropped), "{}: {seen:?}", s.0);
+        }
+    }
+
+    /// The pile at four threads is where it is at one, bit for bit, over
+    /// its fall and settling, with every body sensing the others (an
+    /// `Overlap` each) and asking what it touches: `:tax -- parallel`
+    /// checks the plain pile at 10 000 bodies, this in every test run.
+    #[test]
+    fn a_pile_on_four_threads_lands_where_it_does_on_one() {
+        let run = |executor: Option<Arc<dyn Executor>>, test: &str| {
+            let e = game("PILE", test);
+            e.world().set_executor(executor);
+            send(&e, "pile", "widen 41");
+            send(&e, "pile", "drop 600");
+            send(&e, "pile", "sensing");
+            send(&e, "pile", "touching");
+            step(&e, 200);
+            let w = e.world();
+            let mut all: Vec<_> = w.values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
+            all.sort_unstable();
+            let mut contacts: Vec<_> = w.values::<ContactPair>().unwrap().into_iter().map(|(en, p)| (en, p.a, p.b)).collect();
+            contacts.sort_unstable();
+            let mut overlaps: Vec<_> = w.values::<Overlap>().unwrap().into_iter().map(|(en, o)| (en, o.a, o.b)).collect();
+            overlaps.sort_unstable();
+            let mut touching: Vec<_> = w.values::<Touching>().unwrap().into_iter().map(|(en, t)| (en, [t.below, t.above, t.left, t.right])).collect();
+            touching.sort_unstable();
+            (all, contacts, overlaps, touching)
+        };
+        let one = run(None, "one_thread");
+        let four = run(Some(Arc::new(super::pool::Pool::new(4))), "four_threads");
+        assert!(one.1.len() > 700, "{} contacts: a pile", one.1.len());
+        assert!(one.2.len() > 500 && one.3.iter().filter(|t| t.1[0]).count() > 400, "overlaps, and bodies standing on something");
+        assert!(one.0 == four.0 && one.1 == four.1, "the same bodies where they were, and the same contacts, entities and all");
+        assert!(one.2 == four.2 && one.3 == four.3, "the same overlaps, and sides touched");
+    }
+}

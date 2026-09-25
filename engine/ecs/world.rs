@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLo
 use crate::component::{ComponentDesc, DefaultFn, DropFn, Entity, Storage};
 use crate::erased::{ErasedColumn, ValueType, drop_value};
 use crate::events::EventQueue;
+use crate::par::Executor;
 use crate::schema::{self, Field};
 use crate::ordered::{self, KeyOrder, OrderDesc};
 use crate::spatial::{Resort, SPATIAL_PAGE_ROWS, SpatialDesc, SpatialPages};
@@ -401,6 +402,9 @@ pub struct World {
     /// Stamped on values when written: each query, and each write between
     /// frames, takes the next.
     change_tick: AtomicU32,
+    /// The threads systems (`Workers`) and apply nodes split work over:
+    /// the host's, set between frames, so no mod owns a thread.
+    executor: RwLock<Option<Arc<dyn Executor>>>,
 }
 
 impl Default for World {
@@ -423,6 +427,7 @@ impl World {
             frame: AtomicU64::new(0),
             frame_open: AtomicBool::new(false),
             change_tick: AtomicU32::new(1),
+            executor: RwLock::new(None),
         };
         world.table_for(&[]);
         world
@@ -711,6 +716,17 @@ impl World {
     /// The latest tick handed out: every write so far is at or before it.
     pub fn current_tick(&self) -> u32 {
         self.change_tick.load(Ordering::Acquire)
+    }
+
+    /// Installs the threads to split work over, or none: between frames,
+    /// by whoever owns them.
+    pub fn set_executor(&self, executor: Option<Arc<dyn Executor>>) {
+        assert!(!self.frame_open(), "the executor is changed between frames");
+        *self.executor.write().unwrap_or_else(PoisonError::into_inner) = executor;
+    }
+
+    pub fn executor(&self) -> Option<Arc<dyn Executor>> {
+        self.executor.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     pub fn frame_open(&self) -> bool {
@@ -1156,6 +1172,7 @@ impl Drop for Structural<'_> {
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),
+                workers: crate::par::Workers::new(world.executor()),
             }
             .run();
         }

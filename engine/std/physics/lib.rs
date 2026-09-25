@@ -17,7 +17,7 @@ mod solver;
 use std::time::Instant;
 
 use engine_api::{
-    Adds, Cx, Despawns, Dt, Entity, EventWriter, Mod, OrderKey, Query, Removes, SpatialKey, Spawner, Systems, With, Without,
+    Adds, Cx, Despawns, Dt, Entity, EventWriter, Mod, OrderKey, Query, Removes, SpatialKey, Spawner, Systems, With, Without, Workers,
     export_mod, field_struct, phase,
 };
 use physics::{
@@ -44,6 +44,9 @@ field_struct! {
         /// broadphase, the narrowphase, and the merge with the world's.
         gather: u64,
         broadphase: u64,
+        /// Within `broadphase`: the pairs `near_pairs` found, before they're
+        /// mapped to what was gathered.
+        near: u64,
         narrowphase: u64,
         merge: u64,
         /// Within `solve`: bodies and contacts gathered, the solver, and
@@ -144,7 +147,7 @@ impl Physics {
         &mut self,
         sleep: &mut Sleepers,
         _: &mut Cx,
-        dt: Dt,
+        (dt, workers): (Dt, Workers),
         mut gravity: Query<&Gravity>,
         mut bodies: Query<(&Body, &mut Velocity), Without<Asleep>>,
         (mut config, mut sleeping, mut resting): (Query<&Sleep>, SleepingBodies<'_, '_>, RestingContacts<'_, '_>),
@@ -157,12 +160,17 @@ impl Physics {
             Self::move_woken(sleep, &mut sleeping, &mut resting);
         }
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        bodies.for_each(|_, (body, mut v)| {
+        let fall = |body: &Body, mut v: engine_api::Mut<'_, Velocity>| {
             if body.kind == DYNAMIC {
                 v.x += g.x * body.gravity_scale * dt;
                 v.y += g.y * body.gravity_scale * dt;
             }
-        });
+        };
+        if workers.threads() > 1 {
+            bodies.par_for_each(&workers, |_| (), |_, _, (body, v)| fall(body, v));
+        } else {
+            bodies.for_each(|_, (body, v)| fall(body, v));
+        }
         self.time.gravity += nanos(start);
     }
 
@@ -245,14 +253,37 @@ impl Physics {
         ),
         (mut overlaps, new_overlaps): (Query<&Overlap, (), Despawns>, Spawner<(Overlap,)>),
         triggers: EventWriter<Trigger>,
+        workers: Workers,
     ) {
         let start = Instant::now();
+        // Split across threads only while nothing sleeps: waking looks
+        // sleeping bodies up as their pairs are found, one at a time.
+        let par = workers.threads() > 1 && sleep.asleep == 0 && asleep.is_empty();
         let mut items = Vec::with_capacity(moving.len() + held.len() + drifting.len() + statics.len());
         let v = |v: &Velocity| Vec2::new(v.x, v.y);
-        moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
-        held.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
-        drifting.for_each(|row, (p, c, u)| items.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
-        statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
+        if par {
+            // Each chunk's items, then joined in walk order: the one copy
+            // the split costs over the walks below. Every list a task fills
+            // is made here, on this thread, with room for all it will hold:
+            // memory a worker allocates comes from its own arena (glibc),
+            // which at a step's rate was fresh pages every time, and made
+            // the gathers several times slower than one thread's.
+            let room = |r: std::ops::Range<usize>| Vec::with_capacity(r.len());
+            let join = |items: &mut Vec<Item>, parts: Vec<Vec<Item>>| parts.into_iter().for_each(|p| items.extend(p));
+            let parts = moving.par_for_each(&workers, room, |out, row, (p, c, b, u)| out.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
+            join(&mut items, parts);
+            let parts = held.par_for_each(&workers, room, |out, row, (p, c, b)| out.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
+            join(&mut items, parts);
+            let parts = drifting.par_for_each(&workers, room, |out, row, (p, c, u)| out.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
+            join(&mut items, parts);
+            let parts = statics.par_for_each(&workers, room, |out, row, (p, c)| out.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
+            join(&mut items, parts);
+        } else {
+            moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
+            held.for_each(|row, (p, c, b)| items.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
+            drifting.for_each(|row, (p, c, u)| items.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
+            statics.for_each(|row, (p, c)| items.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
+        }
         let mut slots = Slots::of(items.iter().map(|i| i.entity));
         if sleep.asleep > 0 {
             self.wake_on_statics(sleep, &mut statics, &mut asleep, &mut resting, &slots);
@@ -262,128 +293,176 @@ impl Physics {
         // move. In entity order, lesser first, so what's found doesn't
         // depend on the order items were gathered in.
         let gathered = Instant::now();
-        let near = engine_api::near_pairs(&(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN);
+        let near = engine_api::near_pairs_with(&workers, &(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN);
+        let found_near = Instant::now();
         let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
-        // A sleeping collider is gathered only when an awake one meets it.
-        let mut fetch = |e: Entity, items: &mut Vec<Item>, slots: &mut Slots| {
-            let k = items.len() as u32;
-            let mut it = asleep.with(e, |_, (p, c, b)| item(e, p, c, *b, Vec2::ZERO, false, true)).expect("a collider has a position");
-            it.body.asleep = true;
-            items.push(it);
-            slots.insert(e, k);
-            k
-        };
-        for (a, b) in near {
-            let (i, j) = (slots.get(a), slots.get(b));
-            let i = i.unwrap_or_else(|| fetch(a, &mut items, &mut slots));
-            let j = j.unwrap_or_else(|| fetch(b, &mut items, &mut slots));
-            pairs.push((i, j));
+        if par {
+            let slots = &slots;
+            let at = |e: Entity| slots.get(e).expect("an awake collider, gathered");
+            let parts = engine_api::engine_ecs::par::even(near.len(), workers.chunks(near.len(), 1024));
+            let parts = parts.into_iter().map(|r| (Vec::with_capacity(r.len()), r)).collect();
+            for part in workers.map_each(parts, |_, (mut out, r): (Vec<(u32, u32)>, _)| {
+                out.extend(near[r].iter().map(|&(a, b)| (at(a), at(b))));
+                out
+            }) {
+                pairs.extend(part);
+            }
+        } else {
+            // A sleeping collider is gathered only when an awake one meets it.
+            let mut fetch = |e: Entity, items: &mut Vec<Item>, slots: &mut Slots| {
+                let k = items.len() as u32;
+                let mut it = asleep.with(e, |_, (p, c, b)| item(e, p, c, *b, Vec2::ZERO, false, true)).expect("a collider has a position");
+                it.body.asleep = true;
+                items.push(it);
+                slots.insert(e, k);
+                k
+            };
+            for (a, b) in near {
+                let (i, j) = (slots.get(a), slots.get(b));
+                let i = i.unwrap_or_else(|| fetch(a, &mut items, &mut slots));
+                let j = j.unwrap_or_else(|| fetch(b, &mut items, &mut slots));
+                pairs.push((i, j));
+            }
         }
         let paired = Instant::now();
         let index = |e: Entity| slots.get(e).expect("a paired collider");
-        let arrives = |a: &Item, b: &Item| a.body.kind != STATIC || b.body.kind != STATIC;
-        let collides = |a: &Item, b: &Item| {
-            let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
-            // Contacts need something to push; a sensor needs something to
-            // arrive. Static colliders overlapping (a goal line and the wall
-            // across its end) are the level's shape, not an event.
-            let pushes = a.body.kind == DYNAMIC || b.body.kind == DYNAMIC;
-            meets && if a.collider.sensor || b.collider.sensor { arrives(a, b) } else { pushes }
-        };
-        let senses = |a: &Item, b: &Item| {
-            (a.collider.senses & b.collider.layer != 0 || b.collider.senses & a.collider.layer != 0) && arrives(a, b)
-        };
         // Neither end moves, and one sleeps: their contact is `Resting`,
         // kept as it was, and not looked for again.
         let rests = |a: &Item, b: &Item| (a.body.asleep || b.body.asleep) && !a.body.moves && !b.body.moves;
 
-        let mut found: Vec<(ContactPair, Manifold, Response)> = Vec::new();
+        let mut found: Vec<Found> = Vec::new();
         // Each overlap, and whether it's a sensor's, which triggers.
         let mut overlapping: Vec<(Overlap, bool)> = Vec::new();
         let any_asleep = sleep.asleep > 0;
-        // `sleeping`: something does, so a pair may rest.
-        let mut test = |a: &Item, b: &Item, sleeping: bool| {
-            let (collide, sense) = (collides(a, b), senses(a, b));
-            let rest = sleeping && rests(a, b);
-            if !sense && (!collide || rest) {
-                return;
-            }
-            let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { return };
-            let sensor = collide && (a.collider.sensor || b.collider.sensor);
-            if (sensor || sense) && m.depth >= 0.0 {
-                overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
-            }
-            // A pair that rested and now moves (a static a game made a body,
-            // a shelf given a velocity) still has its `Resting` contact:
-            // not a new one, but that one woken, back from the next step.
-            let mut woke = || {
-                let key = ContactPair { a: a.entity, b: b.entity }.key();
-                let mut kept = false;
-                resting.in_keys::<ContactPair>(key..=key, |_, _| kept = true);
-                kept
-            };
-            if sleeping && collide && !sensor && !rest && (a.body.asleep || b.body.asleep) && woke() {
-                sleep.wake(a.entity);
-                sleep.wake(b.entity);
-            } else if collide && !sensor && !rest {
-                found.push((
-                    ContactPair { a: a.entity, b: b.entity },
-                    Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, pressed: false, was_pressed: false },
-                    Response {
-                        friction: a.body.friction.min(b.body.friction),
-                        restitution: a.body.restitution.max(b.body.restitution),
-                        disabled: false,
-                    },
-                ));
-            }
-        };
+        let pair = |&(i, j): &(u32, u32)| (&items[i as usize], &items[j as usize]);
         // Split on whether anything sleeps, so a step with nothing asleep
         // tests nothing for it: the always-false tests cost about 7 µs of
         // 110 at 10 000 settled and at rest (2026-09-24, against the arrays'
         // narrowphase over six runs each), as a dead test once did in the
         // solve (physics.md, "What the ECS costs").
-        let pair = |&(i, j): &(u32, u32)| (&items[i as usize], &items[j as usize]);
-        if any_asleep {
-            pairs.iter().map(pair).for_each(|(a, b)| test(a, b, true));
+        if par {
+            // Room for a contact per pair, made here (see the gathering).
+            let parts = engine_api::engine_ecs::par::even(pairs.len(), workers.chunks(pairs.len(), 256));
+            let parts = parts.into_iter().map(|r| (Vec::with_capacity(r.len()), Vec::new(), r)).collect();
+            let tested = workers.map_each(parts, |_, (mut found, mut overlapping, r)| {
+                pairs[r].iter().map(pair).for_each(|(a, b)| awake(a, b, &mut found, &mut overlapping));
+                (found, overlapping)
+            });
+            found.reserve_exact(tested.iter().map(|(f, _)| f.len()).sum());
+            for (f, o) in tested {
+                found.extend(f);
+                overlapping.extend(o);
+            }
+        } else if any_asleep {
+            // What `awake` does, where a pair may rest, or wake what rests.
+            let mut test = |a: &Item, b: &Item| {
+                let (collide, sense) = (collides(a, b), senses(a, b));
+                let rest = rests(a, b);
+                if !sense && (!collide || rest) {
+                    return;
+                }
+                let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { return };
+                let sensor = collide && (a.collider.sensor || b.collider.sensor);
+                if (sensor || sense) && m.depth >= 0.0 {
+                    overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
+                }
+                // A pair that rested and now moves (a static a game made a body,
+                // a shelf given a velocity) still has its `Resting` contact:
+                // not a new one, but that one woken, back from the next step.
+                let mut woke = || {
+                    let key = ContactPair { a: a.entity, b: b.entity }.key();
+                    let mut kept = false;
+                    resting.in_keys::<ContactPair>(key..=key, |_, _| kept = true);
+                    kept
+                };
+                if collide && !sensor && !rest && (a.body.asleep || b.body.asleep) && woke() {
+                    sleep.wake(a.entity);
+                    sleep.wake(b.entity);
+                } else if collide && !sensor && !rest {
+                    found.push(contact(a, b, &m));
+                }
+            };
+            pairs.iter().map(pair).for_each(|(a, b)| test(a, b));
         } else {
-            pairs.iter().map(pair).for_each(|(a, b)| test(a, b, false));
+            pairs.iter().map(pair).for_each(|(a, b)| awake(a, b, &mut found, &mut overlapping));
         }
 
         let narrowed = Instant::now();
         let key = |p: &ContactPair| (p.a, p.b);
-        let mut next = 0;
-        let spawn = |(pair, m, r): (ContactPair, Manifold, Response)| {
+        let spawn = |(pair, m, r): Found| {
             new_contacts.spawn((pair, m, r, Impulse::default()));
         };
         // Contacts pressed last step that ended: an end asleep has lost
         // what it rested on or against, and wakes.
         let mut ended = Vec::new();
-        // Every contact is written or despawned, so each page is stamped
-        // written as a whole, not row by row: 54 µs to 34 at 10 000
-        // contacts, against `for_each_ordered` and `Mut` (2026-09-24).
-        contacts.for_each_ordered_page(|page, (pair, mut m, mut r)| {
-            let (m, r) = (m.write_all(), r.write_all());
-            for i in page.rows() {
-                while found.get(next).is_some_and(|f| key(&f.0) < key(&pair[i])) {
-                    spawn(found[next]);
-                    next += 1;
+        if par {
+            // Each chunk of contacts merges with the contacts found from its
+            // first key on, updating in place, and records the spawns and
+            // despawns it would have made. Those are made here after, in
+            // order, those between two chunks' keys first: the log, and the
+            // ids spawns reserve, a single walk's.
+            let found = &found;
+            let made = |r: std::ops::Range<usize>| Merged { made: Vec::with_capacity(r.len() / 4 + 8), ..Merged::default() };
+            let merged = contacts.par_for_each_ordered_page(&workers, made, |c, page, (pair, mut m, mut r)| {
+                let (m, r) = (m.write_all(), r.write_all());
+                let from = *c.start.get_or_insert_with(|| found.partition_point(|f| key(&f.0) < key(&pair[0])));
+                c.next = c.next.max(from);
+                for i in page.rows() {
+                    while found.get(c.next).is_some_and(|f| key(&f.0) < key(&pair[i])) {
+                        c.made.push(Made::Spawn(c.next));
+                        c.next += 1;
+                    }
+                    match found.get(c.next) {
+                        Some(f) if f.0 == pair[i] => {
+                            m[i] = Manifold { was_pressed: m[i].pressed, ..f.1 };
+                            r[i] = f.2;
+                            c.next += 1;
+                        }
+                        _ => c.made.push(Made::Despawn(page.entity(i))),
+                    }
                 }
-                match found.get(next) {
-                    Some(f) if f.0 == pair[i] => {
-                        m[i] = Manifold { was_pressed: m[i].pressed, ..f.1 };
-                        r[i] = f.2;
+            });
+            let mut done = 0;
+            for c in merged {
+                found[done..c.start.expect("a chunk has rows")].iter().copied().for_each(spawn);
+                for made in c.made {
+                    match made {
+                        Made::Spawn(n) => spawn(found[n]),
+                        Made::Despawn(e) => contacts.get(e).expect("a contact the walk had").despawn(),
+                    }
+                }
+                done = c.next;
+            }
+            found[done..].iter().copied().for_each(spawn);
+        } else {
+            let mut next = 0;
+            // Every contact is written or despawned, so each page is stamped
+            // written as a whole, not row by row: 54 µs to 34 at 10 000
+            // contacts, against `for_each_ordered` and `Mut` (2026-09-24).
+            contacts.for_each_ordered_page(|page, (pair, mut m, mut r)| {
+                let (m, r) = (m.write_all(), r.write_all());
+                for i in page.rows() {
+                    while found.get(next).is_some_and(|f| key(&f.0) < key(&pair[i])) {
+                        spawn(found[next]);
                         next += 1;
                     }
-                    _ => {
-                        if sleep.asleep > 0 && m[i].pressed {
-                            ended.push(pair[i]);
+                    match found.get(next) {
+                        Some(f) if f.0 == pair[i] => {
+                            m[i] = Manifold { was_pressed: m[i].pressed, ..f.1 };
+                            r[i] = f.2;
+                            next += 1;
                         }
-                        page.row(i).despawn();
+                        _ => {
+                            if sleep.asleep > 0 && m[i].pressed {
+                                ended.push(pair[i]);
+                            }
+                            page.row(i).despawn();
+                        }
                     }
                 }
-            }
-        });
-        found[next..].iter().copied().for_each(spawn);
+            });
+            found[next..].iter().copied().for_each(spawn);
+        }
         for pair in ended {
             sleep.wake(pair.a);
             sleep.wake(pair.b);
@@ -416,6 +495,7 @@ impl Physics {
         let t = &mut self.time;
         t.gather += (gathered - start).as_nanos() as u64;
         t.broadphase += (paired - gathered).as_nanos() as u64;
+        t.near += (found_near - gathered).as_nanos() as u64;
         t.narrowphase += (narrowed - paired).as_nanos() as u64;
         t.merge += nanos(narrowed);
         t.contacts += nanos(start);
@@ -467,7 +547,7 @@ impl Physics {
         &mut self,
         sleep: &mut Sleepers,
         _: &mut Cx,
-        dt: Dt,
+        (dt, workers): (Dt, Workers),
         mut config: Query<&Sleep>,
         // Awake bodies only: a sleeping one is immovable, and in tables of
         // its own, so walks over bodies skip it by what they match.
@@ -480,16 +560,35 @@ impl Physics {
     ) {
         let start = Instant::now();
         let dt = *dt;
+        let par = workers.threads() > 1;
         let mut bodies = Vec::with_capacity(moving.len() + 1);
         let mut entities = Vec::with_capacity(moving.len());
         // Per body: whether it moves (isn't static), and its kind.
         let mut kinds: Vec<(bool, u8)> = Vec::with_capacity(moving.len() + 1);
-        moving.for_each(|row, (body, v, _)| {
-            entities.push(row.entity());
+        let solver_body = |body: &Body, v: &Velocity| {
             let inv_mass = if body.kind == DYNAMIC { body.inv_mass } else { 0.0 };
-            bodies.push(SolverBody { v: Vec2::new(v.x, v.y), inv_mass, pseudo: Vec2::ZERO });
-            kinds.push((body.kind != STATIC, body.kind));
-        });
+            SolverBody { v: Vec2::new(v.x, v.y), inv_mass, pseudo: Vec2::ZERO }
+        };
+        if par {
+            // Lists made here, as in `find_contacts`'s gathering.
+            let room = |r: std::ops::Range<usize>| (Vec::with_capacity(r.len()), Vec::with_capacity(r.len()), Vec::with_capacity(r.len()));
+            let parts = moving.par_for_each(&workers, room, |(e, s, k), row, (body, v, _)| {
+                e.push(row.entity());
+                s.push(solver_body(body, &v));
+                k.push((body.kind != STATIC, body.kind));
+            });
+            for (e, s, k) in parts {
+                entities.extend(e);
+                bodies.extend(s);
+                kinds.extend(k);
+            }
+        } else {
+            moving.for_each(|row, (body, v, _)| {
+                entities.push(row.entity());
+                bodies.push(solver_body(body, &v));
+                kinds.push((body.kind != STATIC, body.kind));
+            });
+        }
         // Bodies with no velocity (statics) and sleeping ones all stand for
         // one immovable body at the end.
         let still = bodies.len() as u32;
@@ -497,39 +596,49 @@ impl Physics {
         kinds.push((false, STATIC));
         let slots = Slots::of(entities.iter().copied());
         let index_of = |e: Entity| slots.get(e).unwrap_or(still);
+        let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse| Constraint {
+            a: index_of(pair.a),
+            b: index_of(pair.b),
+            normal: Vec2::new(m.nx, m.ny),
+            depth: m.depth,
+            friction: r.friction,
+            restitution: r.restitution,
+            jn: j.normal,
+            jt: j.tangent,
+            speed: 0.0,
+        };
 
         // In pair order, which storage keeps: the solve doesn't depend on
         // when each contact began. (History, 2026-09-24: contacts were
         // copied out of the walk and mapped after, which measured faster
         // until `for_each` walked slices.)
         let mut constraints: Vec<Constraint> = Vec::with_capacity(contacts.len());
-        contacts.for_each_ordered(|_, (pair, m, r, j)| {
-            if !r.disabled {
-                constraints.push(Constraint {
-                    a: index_of(pair.a),
-                    b: index_of(pair.b),
-                    normal: Vec2::new(m.nx, m.ny),
-                    depth: m.depth,
-                    friction: r.friction,
-                    restitution: r.restitution,
-                    jn: j.normal,
-                    jt: j.tangent,
-                    speed: 0.0,
-                });
+        // With threads: by the first contact row of each chunk, its first
+        // constraint, for writing back over the same chunks.
+        let mut firsts: Vec<(usize, usize)> = Vec::new();
+        if par {
+            let parts = contacts.par_for_each_ordered_page(&workers, |rows| (rows.start, Vec::with_capacity(rows.len())), |(_, out), _, (pair, m, r, j)| {
+                out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i])));
+            });
+            for (row, part) in parts {
+                firsts.push((row, constraints.len()));
+                constraints.extend(part);
             }
-        });
+        } else {
+            contacts.for_each_ordered(|_, (pair, m, r, j)| {
+                if !r.disabled {
+                    constraints.push(constraint(pair, &m, r, &j));
+                }
+            });
+        }
         let gathered = Instant::now();
         let config = config.single(|_, c| *c);
         solver::solve(&mut bodies, &mut constraints, dt);
         let after_solver = Instant::now();
 
-        let mut i = 0;
-        moving.for_each(|_, (body, mut v, mut p)| {
-            let (b, moves) = (bodies[i], kinds[i].0);
-            i += 1;
-            if !moves {
-                return;
-            }
+        // A body's new velocity and position, `Mut`s stamping only what's
+        // written.
+        let write = |body: &Body, b: &SolverBody, mut v: engine_api::Mut<'_, Velocity>, mut p: engine_api::Mut<'_, Position>| {
             (v.x, v.y) = (b.v.x, b.v.y);
             // A kinematic body gets no pseudo velocity: nothing pushes it.
             let step = if body.kind == KINEMATIC { b.v } else { b.v + b.pseudo };
@@ -541,7 +650,25 @@ impl Physics {
             if (to.0.to_bits(), to.1.to_bits()) != (p.x.to_bits(), p.y.to_bits()) {
                 (p.x, p.y) = to;
             }
-        });
+        };
+        if par {
+            let (bodies, kinds) = (&bodies, &kinds);
+            moving.par_for_each(&workers, |rows| rows.start, |k, _, (body, v, p)| {
+                if kinds[*k].0 {
+                    write(body, &bodies[*k], v, p);
+                }
+                *k += 1;
+            });
+        } else {
+            let mut i = 0;
+            moving.for_each(|_, (body, v, p)| {
+                let (b, moves) = (bodies[i], kinds[i].0);
+                i += 1;
+                if moves {
+                    write(body, &b, v, p);
+                }
+            });
+        }
 
         // Most bodies don't ask (the pile's none), and a failed lookup per
         // end of every contact was half of writing back.
@@ -551,38 +678,78 @@ impl Physics {
             asking.push(row.entity());
         });
         let asking = Slots::of(asking.iter().copied());
-        let mut solved = constraints.iter();
         let mut links = Vec::new();
-        // Every contact's impulse and pressing are written, so pages are
-        // stamped whole, as in the merge.
-        contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j)| {
-            let (m, j) = (m.write_all(), j.write_all());
-            for i in page.rows() {
-                if r[i].disabled {
-                    (m[i].pressed, j[i]) = (false, Impulse::default());
-                    continue;
-                }
-                let k = solved.next().expect("a constraint per contact solved");
-                j[i] = Impulse { normal: k.jn, tangent: k.jt };
-                m[i].pressed = k.jn > 0.0 || m[i].depth >= 0.0;
-                if !m[i].pressed {
-                    continue;
-                }
-                let (pair, m) = (pair[i], m[i]);
-                if config.is_some() {
-                    links.push((pair.a, pair.b));
-                }
-                let n = Vec2::new(m.nx, m.ny);
-                for (e, n) in [(pair.a, n), (pair.b, -n)] {
-                    if asking.get(e).is_some() {
-                        touching.with(e, |_, mut t| mark(&mut t, n));
-                    }
-                }
-                if !m.was_pressed {
-                    began.send(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+        // A contact's results, from constraint `k`: the sides of bodies
+        // that asked it touches, a link for sleeping, and whether it began.
+        let wrote = |k: &Constraint, pair: &ContactPair, m: &mut Manifold, j: &mut Impulse, out: &mut WroteBack| {
+            *j = Impulse { normal: k.jn, tangent: k.jt };
+            m.pressed = k.jn > 0.0 || m.depth >= 0.0;
+            if !m.pressed {
+                return;
+            }
+            if config.is_some() {
+                out.links.push((pair.a, pair.b));
+            }
+            let n = Vec2::new(m.nx, m.ny);
+            for (e, n) in [(pair.a, n), (pair.b, -n)] {
+                if asking.get(e).is_some() {
+                    out.marks.push((e, n));
                 }
             }
-        });
+            if !m.was_pressed {
+                out.began.push(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+            }
+        };
+        // Every contact's impulse and pressing are written, so pages are
+        // stamped whole, as in the merge.
+        let results = if par {
+            let (constraints, firsts) = (&constraints, &firsts);
+            contacts.par_for_each_ordered_page(
+                &workers,
+                |rows| {
+                    let at = firsts.iter().find(|f| f.0 == rows.start).expect("the chunks the gathering walked").1;
+                    (at, WroteBack { began: Vec::with_capacity(rows.len() / 4 + 8), ..WroteBack::default() })
+                },
+                |(k, out), page, (pair, mut m, r, mut j)| {
+                    let (m, j) = (m.write_all(), j.write_all());
+                    for i in page.rows() {
+                        if r[i].disabled {
+                            (m[i].pressed, j[i]) = (false, Impulse::default());
+                        } else {
+                            wrote(&constraints[*k], &pair[i], &mut m[i], &mut j[i], out);
+                            *k += 1;
+                        }
+                    }
+                },
+            )
+            .into_iter()
+            .map(|(_, out)| out)
+            .collect()
+        } else {
+            let mut solved = constraints.iter();
+            let mut out = WroteBack::default();
+            contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j)| {
+                let (m, j) = (m.write_all(), j.write_all());
+                for i in page.rows() {
+                    if r[i].disabled {
+                        (m[i].pressed, j[i]) = (false, Impulse::default());
+                        continue;
+                    }
+                    let k = solved.next().expect("a constraint per contact solved");
+                    wrote(k, &pair[i], &mut m[i], &mut j[i], &mut out);
+                }
+            });
+            vec![out]
+        };
+        // In walk order: the order the events and links are in with one
+        // thread. Touching is marked after, which only ever sets sides.
+        for out in results {
+            links.extend(out.links);
+            for (e, n) in out.marks {
+                touching.with(e, |_, mut t| mark(&mut t, n));
+            }
+            out.began.into_iter().for_each(|c| began.send(c));
+        }
         if let Some(c) = config {
             self.fall_asleep(sleep, &c, dt, &entities, &bodies, &kinds, &links, &mut moving, &mut contacts);
             Self::move_woken(sleep, &mut sleeping, &mut resting);
@@ -660,6 +827,77 @@ impl Physics {
     }
 }
 
+/// What writing back a chunk of contacts leaves for after: links for
+/// sleeping, sides of bodies touched, and contacts begun, in walk order.
+#[derive(Default)]
+struct WroteBack {
+    links: Vec<(Entity, Entity)>,
+    marks: Vec<(Entity, Vec2)>,
+    began: Vec<Contact>,
+}
+
+/// A contact found this step: what the merge makes or updates it with.
+type Found = (ContactPair, Manifold, Response);
+
+/// One chunk of a parallel merge: where in the contacts found it started
+/// (the first not before its first key) and got to, and the spawns (of
+/// found contacts, by index) and despawns it would have made, in order.
+#[derive(Default)]
+struct Merged {
+    start: Option<usize>,
+    next: usize,
+    made: Vec<Made>,
+}
+
+enum Made {
+    Spawn(usize),
+    Despawn(Entity),
+}
+
+fn arrives(a: &Item, b: &Item) -> bool {
+    a.body.kind != STATIC || b.body.kind != STATIC
+}
+
+fn collides(a: &Item, b: &Item) -> bool {
+    let meets = a.collider.mask & b.collider.layer != 0 && b.collider.mask & a.collider.layer != 0;
+    // Contacts need something to push; a sensor needs something to
+    // arrive. Static colliders overlapping (a goal line and the wall
+    // across its end) are the level's shape, not an event.
+    let pushes = a.body.kind == DYNAMIC || b.body.kind == DYNAMIC;
+    meets && if a.collider.sensor || b.collider.sensor { arrives(a, b) } else { pushes }
+}
+
+fn senses(a: &Item, b: &Item) -> bool {
+    (a.collider.senses & b.collider.layer != 0 || b.collider.senses & a.collider.layer != 0) && arrives(a, b)
+}
+
+fn contact(a: &Item, b: &Item, m: &narrow::Manifold) -> Found {
+    (
+        ContactPair { a: a.entity, b: b.entity },
+        Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, pressed: false, was_pressed: false },
+        Response { friction: a.body.friction.min(b.body.friction), restitution: a.body.restitution.max(b.body.restitution), disabled: false },
+    )
+}
+
+/// The narrowphase for a pair in a step where nothing sleeps, so nothing
+/// rests or wakes: a function of the pair alone, which is what lets pairs
+/// be tested on any thread.
+#[inline(always)]
+fn awake(a: &Item, b: &Item, found: &mut Vec<Found>, overlapping: &mut Vec<(Overlap, bool)>) {
+    let (collide, sense) = (collides(a, b), senses(a, b));
+    if !sense && !collide {
+        return;
+    }
+    let Some(m) = narrow::collide(&a.placed, &b.placed, b.v - a.v) else { return };
+    let sensor = collide && (a.collider.sensor || b.collider.sensor);
+    if (sensor || sense) && m.depth >= 0.0 {
+        overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
+    }
+    if collide && !sensor {
+        found.push(contact(a, b, &m));
+    }
+}
+
 fn placed(p: &Position, c: &Collider) -> Placed {
     Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
 }
@@ -728,10 +966,11 @@ impl Mod for Physics {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
                 let t = self.time;
                 Ok(format!(
-                    "gravity {:.1} gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
+                    "gravity {:.1} gather {:.1} broadphase {:.1} near {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
                     per(t.gravity),
                     per(t.gather),
                     per(t.broadphase),
+                    per(t.near),
                     per(t.narrowphase),
                     per(t.merge),
                     per(t.solve_gather),

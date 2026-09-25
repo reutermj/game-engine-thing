@@ -12,6 +12,7 @@
 
 use crate::component::{Component, Entity};
 use crate::erased::ErasedColumn;
+use crate::par::Workers;
 use crate::world::{Entities, Location, TableId};
 
 /// Rows per page in a spatial table: a page is a neighborhood, so small
@@ -543,6 +544,106 @@ pub(crate) struct Resort<'a> {
     pub entities: &'a Entities,
     /// The world's tick as the re-sort starts: every write so far.
     pub now: u32,
+    /// The world's executor, for re-bounding pages in parallel.
+    pub workers: Workers,
+}
+
+/// The fewest rows a re-sort's re-bounding is split across threads for
+/// (as pages, at half full): a page takes about 100 ns, a task's hand-off
+/// about a microsecond or more.
+const PAR_REBOUND_ROWS: usize = 2048;
+
+/// What re-bounding a page reads besides the page: the glue, the tick of
+/// the last sort, and every page's range.
+struct Rebound<'a> {
+    desc: &'a SpatialDesc,
+    since: u32,
+    kind: &'a [PageKind],
+    lo: &'a [u64],
+    hi: &'a [u64],
+}
+
+impl Rebound<'_> {
+    /// Re-bounds and re-keys the rows of page `p` written since the last
+    /// sort, marks those its range no longer holds, and re-boxes it.
+    /// `scratch` is what the glue writes boxes to. Returns rows re-bounded.
+    #[inline(always)]
+    fn page(
+        &self,
+        p: usize,
+        key: &ErasedColumn,
+        extent: Option<&ErasedColumn>,
+        scratch: &mut [Bounds; SPATIAL_PAGE_ROWS],
+        (lanes, misplaced_at, bounds, stale): (&mut Lanes, &mut u32, &mut Bounds, &mut bool),
+    ) -> usize {
+        let (since, big, per_cell) = (self.since, self.desc.big, 1.0 / self.desc.cell);
+        let n = lanes.len();
+        if n == 0 {
+            return 0;
+        }
+        assert!(key.len() == n && extent.is_none_or(|c| c.len() == n), "a page's order is its rows'");
+        // Only rows new to the table (a placeholder key) or whose key or
+        // extent was written since the last sort: the rest keep their
+        // boxes and keys. As a mask with no branch per row, and the
+        // extent's ticks in a loop of their own, not an `Option` per row.
+        let mut mask = 0u32;
+        for (r, (&k, &t)) in lanes.keys().iter().zip(&key.ticks()[..n]).enumerate() {
+            mask |= (((k == u64::MAX) | (t > since)) as u32) << r;
+        }
+        if let Some(x) = extent {
+            for (r, &t) in x.ticks()[..n].iter().enumerate() {
+                mask |= ((t > since) as u32) << r;
+            }
+        }
+        if mask == 0 {
+            return 0;
+        }
+        let count = mask.count_ones() as usize;
+        let mut written = [0u32; SPATIAL_PAGE_ROWS];
+        let mut bits = mask;
+        for w in &mut written[..count] {
+            *w = bits.trailing_zeros();
+            bits &= bits - 1;
+        }
+        let written = &written[..count];
+        let row_bounds = &mut scratch[..n];
+        // SAFETY: the page's keys, of the key's installed layout, whose
+        // build the glue came from, and its extents only when installed
+        // with the layout the glue reads, as many as `row_bounds` holds
+        // (checked), which `written` indexes.
+        unsafe { (self.desc.bounds)(key.value_ptr(0), extent.map_or(std::ptr::null(), |c| c.value_ptr(0)), written, row_bounds) };
+        let (kind, lo, hi) = (self.kind[p], self.lo[p], self.hi[p]);
+        let mut misplaced = 0u32;
+        for &r in written {
+            let (b, r) = (row_bounds[r as usize], r as usize);
+            lanes.set(r, b);
+            let c = cells(&b, per_cell);
+            // A new row's placeholders are consistent too: the cells
+            // `u64::MAX` are keyed `u64::MAX`.
+            if c != lanes.cell[r] {
+                (lanes.cell[r], lanes.key[r]) = (c, morton(c));
+            }
+            let k = lanes.key[r];
+            // Rows that weren't re-bounded are where the last sort put
+            // them, and no page's range has changed since: only these
+            // can need moving.
+            // Without short circuits, which a falling row leaving its range
+            // would often mispredict (measured with the page box, not apart).
+            let placed = match kind {
+                PageKind::Ordered => (b.reach() <= big) & (k >= lo) & ((k < hi) | ((k == hi) & (hi == lo))),
+                PageKind::Big => b.reach() > big,
+                PageKind::Staging => false,
+            };
+            misplaced |= (!placed as u32) << r;
+        }
+        *misplaced_at = misplaced;
+        // Boxed here, with its rows' boxes just written, rather than in
+        // a second pass; a page no row of which was written keeps its
+        // box. A move after marks it stale again.
+        *bounds = lanes.bounds();
+        *stale = false;
+        count
+    }
 }
 
 impl Resort<'_> {
@@ -556,78 +657,39 @@ impl Resort<'_> {
         self.pages.rebuild_hi();
         self.pages.misplaced.clear();
         self.pages.misplaced.resize(self.rows.len(), 0);
-        let (big, per_cell) = (self.desc.big, 1.0 / self.desc.cell);
-        let mut written = [0u32; SPATIAL_PAGE_ROWS];
         let (key_column, extent_column) = (&*self.columns[self.key], self.extent.map(|x| &*self.columns[x]));
-        for p in 0..self.rows.len() {
-            let lanes = &mut self.pages.lanes[p];
-            let n = lanes.len();
-            if n == 0 {
-                continue;
-            }
-            let key = &key_column[p];
-            let extent = extent_column.map(|c| &c[p]);
-            assert!(key.len() == n && extent.is_none_or(|c| c.len() == n), "a page's order is its rows'");
-            // Only rows new to the table (a placeholder key) or whose key or
-            // extent was written since the last sort: the rest keep their
-            // boxes and keys. As a mask with no branch per row, and the
-            // extent's ticks in a loop of their own, not an `Option` per row.
-            let mut mask = 0u32;
-            for (r, (&k, &t)) in lanes.keys().iter().zip(&key.ticks()[..n]).enumerate() {
-                mask |= (((k == u64::MAX) | (t > since)) as u32) << r;
-            }
-            if let Some(x) = extent {
-                for (r, &t) in x.ticks()[..n].iter().enumerate() {
-                    mask |= ((t > since) as u32) << r;
+        let pages = &mut *self.pages;
+        let order = Rebound { desc: &self.desc, since, kind: &pages.kind, lo: &pages.lo, hi: &pages.hi };
+        let n = self.rows.len();
+        if self.workers.threads() > 1 && n * SPATIAL_PAGE_ROWS / 2 >= PAR_REBOUND_ROWS {
+            // Pages are re-bounded independently: in ranges, a task each,
+            // with a scratch buffer each. Moves, which cross pages, stay on
+            // this thread.
+            let ranges = crate::par::even(n, self.workers.chunks(n, PAR_REBOUND_ROWS / SPATIAL_PAGE_ROWS));
+            let lens = ranges.iter().map(|r| r.len());
+            let tasks: Vec<_> = ranges
+                .iter()
+                .cloned()
+                .zip(crate::par::carve(&mut pages.lanes[..n], lens.clone()))
+                .zip(crate::par::carve(&mut pages.misplaced[..n], lens.clone()))
+                .zip(crate::par::carve(&mut pages.bounds[..n], lens.clone()))
+                .zip(crate::par::carve(&mut pages.stale[..n], lens))
+                .collect();
+            let counts = self.workers.map_each(tasks, |_, ((((range, lanes), misplaced), bounds), stale)| {
+                let mut scratch = [Bounds::EMPTY; SPATIAL_PAGE_ROWS];
+                let mut count = 0;
+                for (i, p) in range.enumerate() {
+                    let at = (&mut lanes[i], &mut misplaced[i], &mut bounds[i], &mut stale[i]);
+                    count += order.page(p, &key_column[p], extent_column.map(|c| &c[p]), &mut scratch, at);
                 }
+                count
+            });
+            rebounded = counts.iter().sum();
+        } else {
+            for p in 0..n {
+                let at = (&mut pages.lanes[p], &mut pages.misplaced[p], &mut pages.bounds[p], &mut pages.stale[p]);
+                rebounded += order.page(p, &key_column[p], extent_column.map(|c| &c[p]), &mut pages.written_bounds, at);
             }
-            if mask == 0 {
-                continue;
-            }
-            let count = mask.count_ones() as usize;
-            rebounded += count;
-            let mut bits = mask;
-            for w in &mut written[..count] {
-                *w = bits.trailing_zeros();
-                bits &= bits - 1;
-            }
-            let written = &written[..count];
-            let row_bounds = &mut self.pages.written_bounds[..n];
-            // SAFETY: the page's keys, of the key's installed layout, whose
-            // build the glue came from, and its extents only when installed
-            // with the layout the glue reads, as many as `row_bounds` holds
-            // (checked), which `written` indexes.
-            unsafe { (self.desc.bounds)(key.value_ptr(0), extent.map_or(std::ptr::null(), |c| c.value_ptr(0)), written, row_bounds) };
-            let (kind, lo, hi) = (self.pages.kind[p], self.pages.lo[p], self.pages.hi[p]);
-            let mut misplaced = 0u32;
-            for &r in written {
-                let (b, r) = (row_bounds[r as usize], r as usize);
-                lanes.set(r, b);
-                let c = cells(&b, per_cell);
-                // A new row's placeholders are consistent too: the cells
-                // `u64::MAX` are keyed `u64::MAX`.
-                if c != lanes.cell[r] {
-                    (lanes.cell[r], lanes.key[r]) = (c, morton(c));
-                }
-                let k = lanes.key[r];
-                // Rows that weren't re-bounded are where the last sort put
-                // them, and no page's range has changed since: only these
-                // can need moving.
-                // Without short circuits, which a falling row leaving its range
-                // would often mispredict (measured with the page box, not apart).
-                let placed = match kind {
-                    PageKind::Ordered => (b.reach() <= big) & (k >= lo) & ((k < hi) | ((k == hi) & (hi == lo))),
-                    PageKind::Big => b.reach() > big,
-                    PageKind::Staging => false,
-                };
-                misplaced |= (!placed as u32) << r;
-            }
-            self.pages.misplaced[p] = misplaced;
-            // Boxed here, with its rows' boxes just written, rather than in
-            // a second pass; a page no row of which was written keeps its
-            // box. A move after marks it stale again.
-            self.pages.bounds[p] = lanes.bounds();
-            self.pages.stale[p] = false;
         }
         // Nothing to move or merge: a table at rest costs only the scan of
         // its ticks above.

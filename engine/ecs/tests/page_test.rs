@@ -7,10 +7,10 @@
 //! walk for what changed sees exactly the rows written since.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Despawns, Entity, OrderKey, Query, SpatialKey, With, Without, World, component};
+use engine_ecs::{Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, component};
 
 component! {
     /// A spatial key, so some rows are in pages of a dozen or so.
@@ -382,4 +382,151 @@ fn a_walk_for_what_changed_sees_exactly_the_rows_written_since() {
     assert_eq!(changed_now(), want);
     run(&w, mark, "mark");
     assert_eq!(changed_now(), [], "all of it older than the `now`");
+}
+
+/// Executors for the parallel walks: one thread, then threads spawned per
+/// run, so tasks really run at once and finish in any order.
+fn executors() -> Vec<Workers> {
+    let mut all = vec![Workers::default()];
+    all.extend([2, 3, 8].map(|n| Workers::new(Some(Arc::new(Scoped(n)) as Arc<dyn Executor>))));
+    all
+}
+
+static WORKERS: Mutex<Option<Workers>> = Mutex::new(None);
+type Chunks = Vec<(std::ops::Range<usize>, Vec<(Entity, u64)>)>;
+static CHUNKS: Mutex<Chunks> = Mutex::new(Vec::new());
+
+fn workers() -> Workers {
+    WORKERS.lock().unwrap().clone().expect("an executor")
+}
+
+/// `par_for_each_page` is `for_each_page` in chunks: each chunk's rows are
+/// the walk's next ones, in order, and the range `make` got says which;
+/// with threads there's more than one. The ordered walk is
+/// `for_each_ordered_page`'s, over an ordered table and one that isn't.
+#[test]
+fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
+    let _s = serial();
+    let w = World::new();
+    // The ranked table in spatial order made first, so walking in table
+    // order isn't walking the ordered table first.
+    w.between_frames(Build::default()).unwrap().spawn((Val { n: 1 }, Rank { n: 3 }, At { x: 1.0, y: 1.0 }));
+    // Enough rows that the smaller, ordered walk splits too.
+    for mut seed in [10, 20, 30] {
+        populate(&w, &mut seed);
+    }
+    fn split(_: &mut Cx, mut q: Query<&Val>) {
+        let chunks = q.par_for_each_page(&workers(), |r| (r, Vec::new()), |(_, seen), page, v| {
+            seen.extend(page.rows().map(|r| (page.entity(r), v[r].n)));
+        });
+        *CHUNKS.lock().unwrap() = chunks;
+    }
+    fn split_ordered(_: &mut Cx, mut q: Query<(&Val, &Rank), Without<Tag>>) {
+        let chunks = q.par_for_each_ordered_page(&workers(), |r| (r, Vec::new()), |(_, seen), page, (_, rank)| {
+            seen.extend(page.rows().map(|r| (page.entity(r), rank[r].n as u64)));
+        });
+        *CHUNKS.lock().unwrap() = chunks;
+    }
+    fn paged(_: &mut Cx, mut q: Query<&Val>) {
+        let mut seen = SEEN.lock().unwrap();
+        q.for_each_page(|page, v| seen.extend(page.rows().map(|r| (page.entity(r), v[r].n))));
+    }
+    fn paged_ordered(_: &mut Cx, mut q: Query<(&Val, &Rank), Without<Tag>>) {
+        let mut seen = SEEN.lock().unwrap();
+        q.for_each_ordered_page(|page, (_, rank)| seen.extend(page.rows().map(|r| (page.entity(r), rank[r].n as u64))));
+    }
+    run(&w, paged, "paged");
+    let whole = take_seen();
+    run(&w, paged_ordered, "paged_ordered");
+    let ordered = take_seen();
+    let ranked = w.tables().filter(|t| t.ordered.is_some() && !t.is_empty()).count();
+    assert!(ranked >= 2 && ordered.len() < whole.len(), "tables ordered or not, and some the ordered walk leaves out");
+    for (i, workers) in executors().into_iter().enumerate() {
+        *WORKERS.lock().unwrap() = Some(workers.clone());
+        for (ordered_walk, want) in [(false, &whole), (true, &ordered)] {
+            if ordered_walk {
+                run(&w, split_ordered, "split_ordered");
+            } else {
+                run(&w, split, "split");
+            }
+            let chunks = std::mem::take(&mut *CHUNKS.lock().unwrap());
+            assert_eq!(chunks.len() > 1, i > 0, "{} chunks at {} threads", chunks.len(), workers.threads());
+            let mut at = 0;
+            for (range, seen) in &chunks {
+                assert!(!seen.is_empty(), "no chunk is empty");
+                assert_eq!(*range, at..at + seen.len(), "a chunk's range is its rows in the walk");
+                at = range.end;
+            }
+            let joined: Vec<(Entity, u64)> = chunks.into_iter().flat_map(|(_, seen)| seen).collect();
+            assert_eq!(joined, *want, "the walk's rows, in its order, at {} threads", workers.threads());
+        }
+    }
+}
+
+/// Writes and changes made through a parallel walk are one thread's: the
+/// same rows stamped written, and the same log, in the same order, which
+/// shows in the ids entities spawned after it get (despawns free them in
+/// log order).
+#[test]
+fn a_parallel_walk_writes_and_changes_what_one_thread_does() {
+    let _s = serial();
+    static SINCE: Mutex<u32> = Mutex::new(0);
+    fn mark(_: &mut Cx, q: Query<&Val>) {
+        *SINCE.lock().unwrap() = q.now();
+    }
+    fn change(_: &mut Cx, mut q: Query<&mut Val, (), Despawns>) {
+        q.par_for_each_page(&workers(), |_| (), |_, page, mut v| {
+            for r in page.rows() {
+                let n = v[r].n;
+                if n % 5 == 0 {
+                    v.set(r, Val { n: n + 1 });
+                } else if n % 11 == 0 {
+                    // Read through `Mut`, not written.
+                    assert!(v.get_mut(r).n > 0);
+                }
+                if n % 3 == 0 {
+                    page.row(r).despawn();
+                }
+            }
+        });
+    }
+    fn written(_: &mut Cx, mut q: Query<&Val>) {
+        let since = *SINCE.lock().unwrap();
+        let mut seen = SEEN.lock().unwrap();
+        q.for_each_written(since, |row, v| seen.push((row.entity(), v.n)));
+    }
+    let mut outcomes = Vec::new();
+    for workers in executors() {
+        *WORKERS.lock().unwrap() = Some(workers);
+        let w = World::new();
+        populate(&w, &mut 11);
+        run(&w, mark, "mark");
+        run(&w, change, "change");
+        run(&w, written, "written");
+        let wrote = sorted(take_seen());
+        assert!(!wrote.is_empty());
+        let spawned: Vec<Entity> = {
+            let mut m = w.between_frames(Build::default()).unwrap();
+            (0..100).map(|k| m.spawn((Val { n: k },))).collect()
+        };
+        outcomes.push((brute(&w), wrote, spawned));
+    }
+    for o in &outcomes[1..] {
+        assert!(o.0 == outcomes[0].0, "the same values and rows");
+        assert!(o.1 == outcomes[0].1, "the same rows stamped written");
+        assert!(o.2 == outcomes[0].2, "the same ids for what's spawned after: the same log");
+    }
+}
+
+#[test]
+#[should_panic(expected = "over one ordered table")]
+fn a_parallel_walk_in_key_order_refuses_two_ordered_tables() {
+    let _s = serial();
+    let w = World::new();
+    populate(&w, &mut 12);
+    *WORKERS.lock().unwrap() = Some(Workers::new(Some(Arc::new(Scoped(2)))));
+    fn walk(_: &mut Cx, mut q: Query<(&Val, &Rank)>) {
+        q.par_for_each_ordered_page(&workers(), |_| (), |_, _, _| {});
+    }
+    run(&w, walk, "walk");
 }
