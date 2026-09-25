@@ -611,6 +611,38 @@ mod pile {
         }
     }
 
+    /// How long each awake body has been still goes to the new build too,
+    /// so a pile due to fall asleep does so the same step with a reload in
+    /// between as without. Rebuilt from the world, the time restarted, and
+    /// the pile slept `Sleep::time` late (2026-09-25).
+    #[test]
+    fn a_reload_keeps_how_long_awake_bodies_have_been_still() {
+        let pile = |test| {
+            let e = game("PILE", test);
+            send(&e, "pile", "drop 200");
+            send(&e, "pile", "sleep 0.05 0.5");
+            e
+        };
+        let e = pile("still_a");
+        let mut frames = 0;
+        while asleep(&e) == 0.0 {
+            assert!(frames < 3000, "never asleep");
+            step(&e, 1);
+            frames += 1;
+        }
+        let (slept, at) = (asleep(&e), positions(&e));
+        // A third of `Sleep::time` before: every body that falls asleep
+        // then has been still for twenty steps.
+        let e = pile("still_b");
+        step(&e, frames - 10);
+        assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
+        step(&e, 9);
+        assert_eq!(asleep(&e), 0.0);
+        step(&e, 1);
+        assert_eq!(asleep(&e), slept, "asleep at step {frames} without the reload");
+        assert_eq!(positions(&e), at);
+    }
+
     /// The shelves (a body with no velocity, a velocity with no body) are
     /// on the broadphase's awake side, as colliders that aren't statics, but
     /// don't move: their contacts with bodies asleep on them rest too, found

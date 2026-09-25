@@ -926,6 +926,21 @@ mod scheduling {
         assert_eq!(since(&e, 3), ["v2 saw [1]", "v2 saw [2]", "v2 saw [2]"]);
     }
 
+    /// The queue of `Ping`s is made by the first build to declare it,
+    /// `listener_v1`'s, which is unmapped at the reload, before anything
+    /// has read the queue. Its readers' cursors were a `HashMap`, whose empty
+    /// table points at a static in the code that made it, so this first read
+    /// read unmapped memory and crashed the engine (2026-09-25).
+    #[test]
+    fn a_queue_outlives_the_build_that_made_it_before_anything_read_it() {
+        let e = engine("sched_queue_maker");
+        load(&e, "listener", "LISTENER_V1");
+        load(&e, "listener", "LISTENER_V2");
+        load(&e, "pinger", "PINGER");
+        step(&e, 1);
+        assert_eq!(trace(&e), ["v2 saw []", "v2 saw [1]", "v2 saw [1]"]);
+    }
+
     #[test]
     fn an_event_sent_between_frames_is_seen_at_the_start_of_the_next() {
         let e = engine("sched_message_event");

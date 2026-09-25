@@ -10,5 +10,6 @@ engine_mod(
         "//platformer/walkers",
     ],
     mod_name = "platformer_text",
+    twin = True,
     visibility = ["//visibility:public"],
 )

@@ -216,6 +216,27 @@ client; `engine_mod` targets are `modctl` with `ENGINE_MOD_NAME` and
 `ENGINE_BATCH_MANIFEST`. It resolves runfiles paths to absolute ones before
 sending, since the engine's working directory is not the client's.
 
+## Testing that a reload doesn't show
+
+A reload of builds with the same code must leave a game exactly as it
+would have been: every mod's state, every value in the world, every event
+queue and every fixed-rate phase's time owed. The games hold the engine to
+that (`//pong:reload_test`, `//platformer:reload_test`, over
+`//engine/tests:replay.rs`): each replays a recorded route once without
+reloads, then again reloading its mods (every one not resident) every
+frame, a few frames or tens of frames, one mod at a time or several in a
+batch, and requires every frame of the two runs to be the same, bit for bit.
+
+The builds swapped have to be different files, or step 1 of the reload
+sequence skips them
+(and `dlopen` would hand back the image it has anyway). So a mod the
+replays reload is built twice: `engine_mod(twin = True)` adds `<name>_twin`,
+the same sources under another crate name, which changes its symbols and
+so its file but not its code or layouts. Every build embeds the Bazel label
+it was built as (`ENGINE_MOD_BUILD`), and `Engine::build_of` asks the
+running build for it, which is how the replays know each reload mapped the
+build they sent.
+
 ## How a mod is built
 
 `engine_mod` wraps `rust_shared_library` with two settings the reload

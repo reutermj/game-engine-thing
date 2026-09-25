@@ -72,8 +72,11 @@ The macro adds `Clone` (add `Copy` yourself if every field is) and implements
 `Component`, recording each field's name, kind, offset, size, layout
 fingerprint and drop function in `Component::FIELDS`. Every field must be a
 `FieldType`: the integer and float types, `bool`, `Entity`, `String`, `Vec`,
-`Option`, `Box`, arrays, `HashMap`, `BTreeMap`, and structs declared with
-`field_struct!`. It is a `macro_rules!` macro rather than a derive, so it
+`Option`, `Box`, arrays, `BTreeMap`, and structs declared with
+`field_struct!`. Not `HashMap`: an empty one points at a static in the
+code that made it, which a reload unmaps (see
+[lore](../lore/an-empty-hashmap-points-into-the-code-that-made-it.md)). It is a
+`macro_rules!` macro rather than a derive, so it
 needs no proc-macro crate; the price is its fixed `struct Name: "id" { ... }`
 syntax. `Component` can still be implemented by hand, with no schema.
 
@@ -116,7 +119,7 @@ the library holding its drop code can go (see
 
 ### One compiler per session
 
-`String`, `Vec` and `HashMap` have no guaranteed layout; Rust only keeps it
+`String`, `Vec` and `BTreeMap` have no guaranteed layout; Rust only keeps it
 the same between builds of one compiler. Since a value written by one build is
 used by others' code, every mod and the loader in one running engine must come
 from the same rustc. The loader enforces it: rustc records its version in the

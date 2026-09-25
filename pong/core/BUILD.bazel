@@ -8,5 +8,6 @@ engine_mod(
     interface = ["components.rs"],
     mod_deps = ["//engine/std/physics"],
     mod_name = "pong",
+    twin = True,
     visibility = ["//visibility:public"],
 )

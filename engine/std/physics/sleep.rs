@@ -4,33 +4,41 @@
 //! The world says who's asleep: a sleeping body has `Asleep`, which puts
 //! it in tables of its own. This is the mod's copy of that by entity index,
 //! with each awake body's time spent still, so the step can ask about any
-//! entity in O(1): rebuilt from the world at load, so a reload keeps
-//! everything asleep and forgets only how long awake bodies have been still.
+//! entity in O(1). It lives in the mod's transient part, so the step can
+//! borrow it beside the state, and is handed to the next build through the
+//! state at a reload (`Physics::unload`): so a reload forgets nothing,
+//! not even how long awake bodies have been still. A build that starts
+//! without one (the first, or one whose state was reset) rebuilds it from
+//! the world, which knows who's asleep but not for how long.
 
-use engine_api::Entity;
+use engine_api::{Entity, field_struct};
 
-#[derive(Clone, Copy, Default)]
-struct Slot {
-    generation: u32,
-    live: bool,
-    /// Seconds slower than `Sleep::speed`, while awake.
-    still: f32,
-    asleep: bool,
-    /// The island it fell asleep in, woken together.
-    island: u32,
+field_struct! {
+    #[derive(Copy, Default)]
+    struct Slot {
+        generation: u32,
+        live: bool,
+        /// Seconds slower than `Sleep::speed`, while awake.
+        still: f32,
+        asleep: bool,
+        /// The island it fell asleep in, woken together.
+        island: u32,
+    }
 }
 
-#[derive(Default)]
-pub struct Sleepers {
-    slots: Vec<Slot>,
-    /// The last island made: ids must stay unique across reloads, since a
-    /// sleeping body's is in the world.
-    islands: u32,
-    /// Bodies asleep, as this copy has them.
-    pub asleep: usize,
-    /// Bodies woken since the step last moved them out of their sleeping
-    /// tables (`Physics::move_woken`).
-    pub woken: Vec<Entity>,
+field_struct! {
+    #[derive(Default)]
+    pub struct Sleepers {
+        slots: Vec<Slot>,
+        /// The last island made: ids must stay unique across reloads, since a
+        /// sleeping body's is in the world.
+        islands: u32,
+        /// Bodies asleep, as this copy has them.
+        pub asleep: u64,
+        /// Bodies woken since the step last moved them out of their sleeping
+        /// tables (`Physics::move_woken`).
+        pub woken: Vec<Entity>,
+    }
 }
 
 impl Sleepers {
