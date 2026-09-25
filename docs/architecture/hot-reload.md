@@ -198,12 +198,23 @@ would unwind through `extern "C"`.
 
 ## How reload is tested
 
-Three ways, each finding what the others can't. `//engine/tests:reload_test`
-pins each rule with two real builds and an exact expectation. The e2e test
-covers the socket and the manifest. And a **fuzzer** composes the rules:
-coverage-guided (libFuzzer), with a model of the rules checked after every
-operation, over mods made for it (`engine/tests/fuzz/`, runbook
-[003](../runbooks/003-fuzz-hot-reload.md)).
+Five ways, each finding what the others can't:
+
+- `//engine/tests:reload_test` pins each rule with two real builds and an
+  exact expectation.
+- The e2e test covers the socket and the manifest.
+- **Replays** hold the games to reloads they can't see: pong's and the
+  platformer's recorded routes, played again while their mods are
+  reloaded under them (below).
+- A **fuzzer** composes the rules: coverage-guided (libFuzzer), with a
+  model of the rules checked after every operation, over mods made for it
+  (`engine/tests/fuzz/`, runbook [003](../runbooks/003-fuzz-hot-reload.md);
+  below).
+- **Poison mode** and **AddressSanitizer** make a use of an unloaded build,
+  or of freed memory, fail at the access instead of whenever it happens to
+  matter (below; runbook [004](../runbooks/004-run-the-loader-under-sanitizers.md)).
+
+### The fuzzer
 
 The mods are built several ways each, and each build reports which it is:
 
@@ -249,6 +260,58 @@ seeded runs: an event queue's cursors outlived the build that made them
 declares); fixed-rate phases; state that points into its build; builds
 from another rustc; threads.
 
+### Reloads the games can't see
+
+A reload of builds with the same code must leave a game exactly as it
+would have been: every mod's state, every value in the world, every event
+queue and every fixed-rate phase's time owed. The games hold the engine to
+that (`//pong:reload_test`, `//platformer:reload_test`, over
+`//engine/tests:replay.rs`): each replays a recorded route once without
+reloads, then again reloading its mods (every one not resident) every
+frame, a few frames or tens of frames, one mod at a time or several in a
+batch, and requires every frame of the two runs to be the same, bit for bit.
+
+The builds swapped have to be different files, or step 1 of the reload
+sequence skips them
+(and `dlopen` would hand back the image it has anyway). So a mod the
+replays reload is built twice: `engine_mod(twin = True)` adds `<name>_twin`,
+the same sources under another crate name, which changes its symbols and
+so its file but not its code or layouts. Every build embeds the Bazel label
+it was built as (`ENGINE_MOD_BUILD`), and `Engine::build_of` asks the
+running build for it, which is how the replays know each reload mapped the
+build they sent.
+
+They found the event queue's cursors pointing into the build that made
+them (the fuzzer found it the same day), physics restarting how long awake
+bodies had been still on every reload (its sleep bookkeeping is handed over
+in its state now; see [physics.md](physics.md)), and, once in poison mode,
+the loader's pointer scan reading a state's padding (above, in "Who owns
+state").
+
+### Poison mode and the sanitizers
+
+A stale pointer into an unloaded build (a drop function, a vtable, a
+system) doesn't reliably crash: `dlclose` may leave the image mapped, and
+once it is unmapped its addresses are reused within microseconds (see
+[lore](../lore/an-unloaded-builds-addresses-are-mapped-again-within-microseconds.md)),
+so the stale call runs someone else's bytes. **Poison mode**
+(`ENGINE_POISON_UNLOADED`, `engine/loader/poison.rs`) maps an unloaded
+build's span `PROT_NONE` once its last keepalive drops, so the first stale
+access faults, and a fault handler names the build and the caller. It is on
+in every test that loads mods into a real engine (`POISON_ENV` in
+`engine/defs.bzl`): the loader's tiers, physics's and the games' tests, the
+replays and the fuzzer's replay test. It costs nothing measurable.
+
+**AddressSanitizer and LeakSanitizer** (`<test>_asan`, suite
+`//engine/tests:asan`, manual) rebuild a test and everything it loads with
+`-Zsanitizer=address` on the stable rustc, for what poison mode can't see:
+heap use-after-free and overflows, and leaks, such as a mod's own std's
+stdout buffer, lost when the build is unmapped (see
+[lore](../lore/a-mods-own-std-leaks-its-stdout-buffer-when-unloaded.md)).
+Those runs keep every build mapped (`ENGINE_POISON_UNLOADED=keep`) so a
+report at exit can name frames in them. ThreadSanitizer needs std rebuilt
+from source, and was deferred.
+
 ## The control protocol
 
 The engine listens on a Unix domain socket (`$XDG_RUNTIME_DIR/game-engine-thing/control.sock`,
@@ -272,27 +335,6 @@ client; `engine_mod` targets are `modctl` with `ENGINE_MOD_NAME` and
 `ENGINE_MOD_RLOCATION` set, and a game's reload target is `modctl` with
 `ENGINE_BATCH_MANIFEST`. It resolves runfiles paths to absolute ones before
 sending, since the engine's working directory is not the client's.
-
-## Testing that a reload doesn't show
-
-A reload of builds with the same code must leave a game exactly as it
-would have been: every mod's state, every value in the world, every event
-queue and every fixed-rate phase's time owed. The games hold the engine to
-that (`//pong:reload_test`, `//platformer:reload_test`, over
-`//engine/tests:replay.rs`): each replays a recorded route once without
-reloads, then again reloading its mods (every one not resident) every
-frame, a few frames or tens of frames, one mod at a time or several in a
-batch, and requires every frame of the two runs to be the same, bit for bit.
-
-The builds swapped have to be different files, or step 1 of the reload
-sequence skips them
-(and `dlopen` would hand back the image it has anyway). So a mod the
-replays reload is built twice: `engine_mod(twin = True)` adds `<name>_twin`,
-the same sources under another crate name, which changes its symbols and
-so its file but not its code or layouts. Every build embeds the Bazel label
-it was built as (`ENGINE_MOD_BUILD`), and `Engine::build_of` asks the
-running build for it, which is how the replays know each reload mapped the
-build they sent.
 
 ## How a mod is built
 
