@@ -1,13 +1,13 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load("//engine:defs.bzl", "engine_mod")
+load("//engine:defs.bzl", "POISON_ENV", "engine_mod")
 load("//engine/ecs/fuzz:fuzz.bzl", "fuzz_binary")
 load(":launcher.bzl", "fuzz_launcher")
 
 # Coverage-guided fuzzing of hot reload: a driver (reload_ops.rs) decodes an
 # input into loads, batches, unloads, frames and messages over the test mods
 # below, run by a real Engine, and checks each step against a model of the
-# reload rules. See docs/runbooks/002-run-miri-and-fuzz-the-core.md:
+# reload rules. See docs/runbooks/003-fuzz-hot-reload.md:
 #   ./bazel run //engine/tests/fuzz:reload -- -max_total_time=600 <corpus dir>
 #
 # The mods are purpose-made, each built several ways (different code, and
@@ -212,7 +212,7 @@ rust_test(
         ["scripts/**"],
         allow_empty = True,
     ) + LIBS.values(),
-    env = {var: "$(rlocationpath %s)" % target for var, target in LIBS.items()},
+    env = {var: "$(rlocationpath %s)" % target for var, target in LIBS.items()} | POISON_ENV,
     deps = [
         ":reload_ops",
         "//engine/ecs:ops",

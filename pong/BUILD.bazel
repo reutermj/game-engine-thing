@@ -50,7 +50,7 @@ PONG_TWINS = {
     env = {
         "PONG_MANIFEST": "$(rlocationpath :pong)",
         "TWINS": ";".join(["%s=$(rlocationpath %s)" % (mod, twin) for mod, twin in PONG_TWINS.items()]),
-    } | env,
+    } | POISON_ENV | env,
     tags = tags,
     deps = [
         "//engine/loader",

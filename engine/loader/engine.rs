@@ -1085,7 +1085,18 @@ impl Loaded {
     /// net for state that bypassed `mod_state!` (an `unsafe impl ModState`);
     /// it can't see pointers behind other pointers, and an integer can happen
     /// to look like an address.
+    ///
+    /// Only a state without a schema is scanned. One with a schema is made of
+    /// `FieldType`s, which can't point into the build, so a hit could only be
+    /// a false one, and the words of a struct include its padding, which
+    /// holds whatever bytes were last there: physics's state, a `u32` beside
+    /// padding that held the upper half of some pointer, read as an address in
+    /// its build whenever that build straddled a 4 GiB boundary, and was reset
+    /// mid-game (found by the replays under poison mode, 2026-09-25).
     fn state_points_into_its_build(&self) -> bool {
+        if !self.state.fields.is_empty() {
+            return false;
+        }
         let word = size_of::<usize>();
         let state = unsafe { (*self.ctx).state as *const u8 };
         (0..self.state.layout.size() / word).any(|i| {

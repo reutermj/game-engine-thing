@@ -56,7 +56,7 @@ rust_test(
     env = {
         "MANIFEST": "$(rlocationpath :platformer)",
         "TWINS": ";".join(["%s=$(rlocationpath %s)" % (name, twin) for name, twin in PLATFORMER_TWINS.items()]),
-    },
+    } | POISON_ENV,
     deps = [
         "//engine/loader",
         "//engine/tests:replay",

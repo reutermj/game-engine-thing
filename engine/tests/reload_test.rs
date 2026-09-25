@@ -465,6 +465,18 @@ mod state_pointing_into_its_build {
         assert_eq!(e.send("greeter", "hi").as_deref(), Ok("bonjour! (1 greetings, word bonjour)"));
     }
 
+    /// A state with a schema isn't scanned: its fields can't point into the
+    /// build, and its padding can hold anything.
+    #[test]
+    fn an_address_kept_as_a_number_is_data() {
+        let e = engine("greeter_address");
+        load(&e, "greeter", "GREETER_ADDRESS_V1");
+        step(&e, 2);
+        assert_eq!(load(&e, "greeter", "GREETER_ADDRESS_V2"), "reloaded greeter (generation 1)");
+        step(&e, 1);
+        assert_eq!(e.send("greeter", "hi").as_deref(), Ok("bonjour! (3 greetings, word bonjour)"));
+    }
+
     #[test]
     fn a_state_that_gains_a_field_is_migrated_not_reset() {
         let e = engine("state_migrate");

@@ -5,7 +5,9 @@
 //! literal (bytes in this library) in its state, which only a hand-written
 //! `unsafe impl ModState` lets through: the wrong way, for the loader's net to
 //! catch. With `right`, the state holds just the count and the closure is in
-//! the transient part, which each build makes for itself.
+//! the transient part, which each build makes for itself. With `address`,
+//! the state (from `mod_state!`) keeps an address in the first build as a
+//! plain number, which the net must not take for a pointer.
 
 use engine_api::{Cx, Mod, Systems, export_mod};
 
@@ -14,7 +16,7 @@ const WORD: &str = "hello";
 #[cfg(feature = "v2")]
 const WORD: &str = "bonjour";
 
-#[cfg(not(feature = "right"))]
+#[cfg(not(any(feature = "right", feature = "address")))]
 mod greeter {
     use super::*;
 
@@ -76,6 +78,44 @@ mod greeter {
 
         fn message(&mut self, hooks: &mut Hooks, _cx: &mut Cx, _message: &str) -> Result<String, String> {
             let greet = hooks.greet.as_ref().ok_or("no greeting")?;
+            Ok(format!("{} ({} greetings, word {WORD})", greet(), self.greetings))
+        }
+    }
+}
+
+#[cfg(feature = "address")]
+mod greeter {
+    use super::*;
+
+    fn greet() -> String {
+        format!("{WORD}!")
+    }
+
+    engine_api::mod_state! {
+        #[derive(Default)]
+        pub struct Greeter {
+            greetings: u32,
+            /// The first build's `greet`, as a number: data to the state rule,
+            /// but what the loader's pointer scan would take for a pointer
+            /// into that build.
+            first: u64,
+        }
+    }
+
+    impl Mod for Greeter {
+        type Transient = ();
+
+        fn load(&mut self, _: &mut (), _cx: &mut Cx) {
+            if self.first == 0 {
+                self.first = greet as usize as u64;
+            }
+        }
+
+        fn systems(s: &mut Systems<Self>) {
+            s.add("count", |greeter: &mut Self, _: &mut (), _: &mut Cx| greeter.greetings += 1);
+        }
+
+        fn message(&mut self, _: &mut (), _cx: &mut Cx, _message: &str) -> Result<String, String> {
             Ok(format!("{} ({} greetings, word {WORD})", greet(), self.greetings))
         }
     }

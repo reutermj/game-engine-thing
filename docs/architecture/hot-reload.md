@@ -75,9 +75,10 @@ rules a component migrates by:
   from `Default`.
 
 **A net for state that bypassed the rule.** `mod_state!` enforces it, but a
-hand-written `unsafe impl ModState` can hold anything. Before carrying state
-over, the loader scans it for pointer-sized values inside the old build's
-mapped image; if it finds one, it has the old build drop the state and the
+hand-written `unsafe impl ModState` can hold anything. Before carrying a
+state with no schema (so not one from `mod_state!`, whose fields can't
+point into the build and whose padding can hold any bytes) over, the loader
+scans it for pointer-sized values inside the old build's mapped image; if it finds one, it has the old build drop the state and the
 new one start over, with a warning, instead of crashing. The scan is shallow
 (a pointer inside a `Vec`'s buffer is invisible to it) and could in principle
 be fooled by an integer that looks like an address, so it's a mitigation, not
