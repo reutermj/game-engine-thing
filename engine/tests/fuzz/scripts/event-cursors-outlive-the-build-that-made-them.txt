@@ -1,0 +1,11 @@
+# Found by the seeded driver, 2026-09-25. herald's first build makes the
+# fz::Note queue (a build's declarations run the ECS code linked into it),
+# and the queue's map of reader cursors with it. An empty std HashMap points
+# at a static in the image that made it, so once that build is unmapped (its
+# second build has taken the queue over), the first read segfaulted. The
+# queue keeps its cursors in a BTreeMap now, which points at nothing.
+load herald_a
+unload herald
+load herald_a
+load hearer_a
+frames 1

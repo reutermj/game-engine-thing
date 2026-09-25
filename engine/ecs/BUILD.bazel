@@ -50,7 +50,10 @@ rust_library(
     srcs = ["tests/ops.rs"],
     crate_name = "ecs_ops",
     crate_root = "tests/ops.rs",
-    visibility = ["//engine/ecs/fuzz:__pkg__"],
+    visibility = [
+        "//engine/ecs/fuzz:__pkg__",
+        "//engine/tests/fuzz:__pkg__",
+    ],
     deps = [":ecs"],
 )
 

@@ -81,7 +81,9 @@ mapped image; if it finds one, it has the old build drop the state and the
 new one start over, with a warning, instead of crashing. The scan is shallow
 (a pointer inside a `Vec`'s buffer is invisible to it) and could in principle
 be fooled by an integer that looks like an address, so it's a mitigation, not
-a guarantee.
+a guarantee. It also finds an empty `HashMap`, which points at a static in
+the image that made it, so a state holding one is reset on every reload
+(see [lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
 
 ## Resident mods
 
@@ -191,6 +193,59 @@ answers `Pumped::Refused`. See
 A mod that calls `step_mods` while the list is being modified gets
 `Status::ERROR` rather than a panic, since a panic inside a host callback
 would unwind through `extern "C"`.
+
+## How reload is tested
+
+Three ways, each finding what the others can't. `//engine/tests:reload_test`
+pins each rule with two real builds and an exact expectation. The e2e test
+covers the socket and the manifest. And a **fuzzer** composes the rules:
+coverage-guided (libFuzzer), with a model of the rules checked after every
+operation, over mods made for it (`engine/tests/fuzz/`, runbook
+[003](../runbooks/003-fuzz-hot-reload.md)).
+
+The mods are built several ways each, and each build reports which it is:
+
+- `keeper`: a table component with heap fields and a sparse one, laid out
+  three ways (fields reordered, widened, added, removed; a version bump),
+  with its state migrating or resetting alongside; builds that panic in
+  `load`, in `unload` and `close`; one that stores the sparse component in
+  tables, which must be refused.
+- `herald` and `hearer`: an event, sent between frames and from a system,
+  read before and after it is sent; a service and its caller, from a hook
+  and from messages; two interface versions, so a reload strands the other
+  unless both are batched; a provider that panics.
+- `ranker`: an ordered key whose glue changes (ascending, then descending)
+  with its layout the same, and a layout change.
+- `anchor` and `tether`: residency, built resident and not.
+- `clock`, `lockstep` (frames run from a message) and `sequential` (frames
+  scheduled through a service), as the engine ships them; libraries that
+  aren't mods, or are from another mod API.
+
+The operations are loads of any build under its name (and a second
+provider's name), batches, unloads, the loader's own frames and lockstep's,
+and messages that spawn, despawn, write and flag components, send and
+queue events, call the service, or fail the mod. The model predicts each
+from this document and [mod-deps.md](mod-deps.md): which loads are refused
+and why (dependencies, interfaces, residency, one provider, a changed
+storage, open failures), and the exact reply; how each mod's state is
+handed over; how each component's values migrate or reset when a newer
+build installs another layout; which events each reader sees, once; the
+order ordered rows are in; which mods have failed. After every operation
+the driver checks all of that against the engine, the world read through
+its own mirror of each layout, and the builds mapped (`/proc/self/maps`),
+which must be exactly the running builds and those the world keeps for its
+values. Dropping the engine must unmap them all.
+
+Six bugs planted in the loader and the ECS, from a wrong numeric
+conversion to an event read twice across a reload, were each found within
+15 minutes (runbook 003 has them). It found one real bug on its first
+seeded runs: an event queue's cursors outlived the build that made them
+(see [lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
+
+**Not covered yet:** spatial keys; bootstraps running the session
+(`run_bootstrap`, `pump_loader`); schedule refusals (cycles, a phase no mod
+declares); fixed-rate phases; state that points into its build; builds
+from another rustc; threads.
 
 ## The control protocol
 

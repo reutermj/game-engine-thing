@@ -1,0 +1,13 @@
+diff --git a/engine/loader/engine.rs b/engine/loader/engine.rs
+index b2cd18d..9557600 100644
+--- a/engine/loader/engine.rs
++++ b/engine/loader/engine.rs
+@@ -626,7 +626,7 @@ impl Engine {
+         *self.plan.borrow_mut() = None;
+         let m = mods.remove(index);
+         m.close_state();
+-        self.libs.borrow_mut().remove(&(m.ctx as usize));
++        let _ = &self.libs;
+         Ok(format!("unloaded {name}"))
+     }
+ 

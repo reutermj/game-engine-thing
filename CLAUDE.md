@@ -133,6 +133,11 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/tests/` — integration and e2e tests, and the test mods they load.
   The test mods are separate from `mods/` so editing a demo never changes
   what a test proves. See the testing conventions below.
+  - `fuzz/` — the reload fuzzer: purpose-made mods with several builds
+    each, a driver that runs them on a real `Engine` against a model of
+    the reload rules (`reload_ops.rs`), its libFuzzer target, corpus,
+    scripts and planted bugs. See
+    [runbook 003](docs/runbooks/003-fuzz-hot-reload.md).
 - `game/` — the `engine_game` target listing the mods loaded at startup,
   and its `reload` target.
 - `platformer/` — the second game, on `//engine/std/physics`: `core` (the player and the rules, mod

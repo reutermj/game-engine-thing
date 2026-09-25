@@ -1,0 +1,13 @@
+diff --git a/engine/loader/engine.rs b/engine/loader/engine.rs
+index b2cd18d..c981b52 100644
+--- a/engine/loader/engine.rs
++++ b/engine/loader/engine.rs
+@@ -273,7 +273,7 @@ impl Engine {
+             let Some(m) = mods.iter_mut().find(|m| *m.name == *o.name) else { continue };
+             let (old, new) = (&m.state, &o.state);
+             let same = (old.layout, old.version, &old.fields) == (new.layout, new.version, &new.fields);
+-            let migrate = !same && old.version == new.version && !old.fields.is_empty() && !new.fields.is_empty();
++            let migrate = !same && !old.fields.is_empty() && !new.fields.is_empty();
+             let note = if same || migrate {
+                 m.call(Op::UNLOAD);
+                 if m.state_points_into_its_build() {

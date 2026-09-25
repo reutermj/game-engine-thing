@@ -1,0 +1,13 @@
+diff --git a/engine/ecs/world.rs b/engine/ecs/world.rs
+index 1800a44..b47dd33 100644
+--- a/engine/ecs/world.rs
++++ b/engine/ecs/world.rs
+@@ -519,7 +519,7 @@ impl World {
+             spatial: desc.spatial,
+             order: desc.order,
+             loaded_at: build.loaded_at,
+-            _keepalive: build.keepalive.clone(),
++            _keepalive: None,
+         };
+         let mut installed = info.installed.write().unwrap();
+         let Some(current) = installed.as_ref() else {

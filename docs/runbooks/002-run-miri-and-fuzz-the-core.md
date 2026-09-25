@@ -15,6 +15,9 @@
 What each finds is in
 [storage.md, "Testing the core"](../architecture/storage.md#testing-the-core).
 
+Hot reload, with the loader and real mod builds in the loop, has a fuzzer
+of its own: [runbook 003](003-fuzz-hot-reload.md).
+
 ## Miri
 
 ```sh
