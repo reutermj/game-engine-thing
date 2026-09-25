@@ -19,8 +19,12 @@ use std::time::Duration;
 use engine_ecs::par::{carve, even};
 use engine_ecs::{Executor, Scoped, Workers};
 
+use super::arrays::{Cached, DT};
 use super::pool::Pool;
+use super::solver::{Constraint, SolverBody};
 use super::*;
+use engine_ecs::World;
+use physics::{ContactPair, DYNAMIC, Impulse, KINEMATIC, Manifold, STATIC, Vec2, Velocity};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -401,7 +405,7 @@ fn measure(manifest: &engine_control::Manifest, (n, width, warmup): (u32, f32, u
         if exec.is_some() {
             arrays.step_par(&mut t, &workers);
         } else {
-            arrays.step(&mut t);
+            arrays.step(&mut t, solver::solve);
         }
     }
     let array_frame = (start.elapsed().as_secs_f64() * 1e6 - t.fresh_sweep) / frames as f64;

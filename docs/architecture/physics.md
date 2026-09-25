@@ -351,14 +351,25 @@ couple of dozen bodies. It's also the scene system parallelism and
 rigid bodies up to 10 000. Against the same step on plain arrays, checked
 to be the same computation bit for bit, the ECS is within 5% settled, even
 at rest, and 1.28× falling; what's left has known causes that need no
-change of design (below), on a real pile too (the first was columns; see
-below). The open risks: parallelism (measured: split across threads as
-built, the ECS's step gets slower where the arrays' gets faster, for
-reasons mostly unbuilt: [Parallelism](#parallelism)), contact churn (the
-contacts' re-sort, below), scenes unlike a pile (mixed sizes, bodies
-carrying many game components), and tuned engines (the
+change of design (below), on a real pile as on the columns first measured
+(see below). The open risks: parallelism, measured on this machine
+(the solver's colored solve is 6 to 9 times today's on one CCD,
+[Parallel solving](#parallel-solving); the rest of the step, split as
+built, gets slower in the ECS where it gets faster on arrays, for reasons
+mostly unbuilt, [Parallelism](#parallelism)); contact churn (the contacts'
+re-sort, below); scenes unlike a pile (mixed sizes, bodies carrying many
+game components); and tuned engines (the
 baseline is our own array code, not Box2D). Further optimization waits for
 a game that needs it.
+
+The 10 000 "pile" in the table below is easier than a pile: dropped 331 a
+row, an odd number, each column alternates circles and boxes, and without
+rotation a circle on a box stays put, so it settles as 331 columns that
+never touch, one contact a body. A real pile of 10 000 (a box 401 wide, 332
+a row) has about 14 750 contacts, and the solver takes 1303 µs on it where
+it takes 713 on the columns ([Parallel solving](#parallel-solving), timed
+alone; in the step, below, 1428 and 760). The same comparison on the real
+pile is [after the table's causes](#the-real-pile).
 
 2026-09-24. `./bazel run -c opt //engine/std/physics:tax` runs a pile in
 the engine to the frame to measure, copies its whole state (bodies, and
@@ -511,13 +522,11 @@ solver and the narrowphase cost the same either way, since they're the
 same code over the same arrays. The scheduler and frame cost about 7 µs.
 Bodies carrying many game components aren't measured.
 
-**The pile above is columns, not a pile** (found 2026-09-24 by the
-parallel solver's work). A box 40 or 400 wide holds an odd number of
-bodies a row, so each column alternates circles and boxes, and without
-rotation a circle on a box stays put: every body rests on one contact, and
-the 10 000 are 331 islands that never touch. One body more a row (41 and
-401 wide) packs them into one pile, with half again the contacts, which
-churn as it creeps. `:tax` runs both now. µs per step, ECS / arrays,
+### The real pile
+
+The table above is of the columns (see the verdict). `:tax` now runs the
+real pile beside them, one body more a row (41 and 401 wide), with half
+again the contacts, which churn as it creeps. µs per step, ECS / arrays,
 medians of three runs:
 
 | | 1000 settled | 10 000 falling | 10 000 settled | 10 000 at rest |
@@ -550,9 +559,9 @@ for bit the same as on one thread; on this machine, at 10 000 bodies, it
 makes the ECS's step slower, and the same split on arrays faster. What
 serializes each stage is below; most of it is unbuilt rather than the
 design, but the largest part is how the step moves its data between cores,
-which is the same on arrays. The solver's own parallelism is measured
-apart (the parallel solver's work, get-emj.30's other
-half).
+which is the same on arrays. The solver's own parallelism is
+[Parallel solving](#parallel-solving), measured on arrays; together they
+are get-emj.30's answer.
 
 **What's built.** In `engine_ecs`:
 
@@ -660,6 +669,13 @@ re-sorts); gravity, gathering, the merge and writing back never above
   is the biggest single loss, and it's unbuilt, not inherent: an ordered
   table that splices rather than rebuilds would cost little on any thread.
 
+**The pool here wasn't pinned**, where [Parallel solving](#parallel-solving)
+pinned its threads to one CCD and found the scheduler's own placement 2.5
+times slower, and idle cores clocked down
+([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md)): some of
+the loss below may be that, on both sides alike; the arrays' gains are
+then an underestimate too. Not measured pinned.
+
 **Where the data lives is most of it.** At 10 000 bodies the step's data
 fits in the last core's cache; a split stage pulls its share to other
 cores, and the next stage on the calling thread pulls it back. Keeping
@@ -712,7 +728,10 @@ stealing, which this pool doesn't do.
 - an ordered table that splices what changed instead of rebuilding;
 - an executor with affinity (chunks to the threads that had them) and
   work stealing, owned by the scheduler;
-- a parallel solver, gathering its own partitions' bodies (the other half).
+- the colored solver of [Parallel solving](#parallel-solving), with the
+  gather and write-back done by its own threads, each gathering what it
+  solves, so the bodies don't cross cores between the stages. It would
+  make the gather's coloring pass part of the step, as that section says.
 
 ## Sleeping
 
@@ -834,6 +853,167 @@ contacts, which now only delays its contact a step (the next step finds
 the pair moving and wakes it through its `Resting` contact), and whose
 setup, an island waking as a body touching it falls asleep, the tests
 don't make.[^prototype]
+
+## Parallel solving
+
+**Status: measured, not built** (2026-09-24, get-emj.30). The solver is
+one thread, sequential impulses over contacts in pair order. How far it
+parallelizes was measured on arrays, outside the mod:
+`./bazel run -c opt //engine/std/physics:parallel_solver` takes the solver's
+input from piles run in the engine (and a scene of separate stacks built
+there), and solves it three ways, each checked bit for bit:
+
+- **Colored**, Box2D v3's graph coloring: contacts colored so no two in a
+  color share a body that moves (statics don't count), taking the lowest
+  color free in pair order. Colors are solved in turn, each one's contacts
+  spread over the threads, with a barrier between them. It solves contacts
+  in another order than pair order, so it's a different computation from
+  today's, but one fixed by the contacts alone: the same colors, the same
+  order within each, the same arithmetic on any thread count. It is bit
+  for bit the same on 1 to 32 threads in every scene, and over 4000 whole
+  steps of a pile on 1 and 16 threads.
+- **Wide**: the same, with each color in batches of 8 contacts laid out
+  field by field, solved with AVX2, as Box2D does. The same operations
+  (no FMA), so it's the colored solve bit for bit.
+- **Islands**: groups of bodies joined by contacts, one thread each. They
+  share no moving body, so this is today's computation exactly, and
+  checked to be.
+
+**Verdict: coloring works; islands don't; the ECS needs nothing new for
+it; what's missing is threads.** On one CCD the colored solve of a real
+10 000 pile is 6.1× today's solver on 8 threads, and 8.9× wide on 16 (8
+cores and their SMT siblings); a 40 000 pile, 8.6× and 14×. It stops at one
+CCD, and it needs workers that stay placed and busy, which is the
+scheduler's to provide (get-znt.5).
+
+µs per solve, `-c opt`, the median of three runs of 41 solves each, pinned
+to fill one CCD first (so 12 and 16 threads are one CCD with SMT; 32 is
+both); speedup against `solver::solve` on one thread:
+
+| threads | real pile 10 000 (14 725 contacts) | real pile 40 000 (68 561) | columns 10 000 (10 000) | stacks 10 × 1000 (10 000) | real pile 1000 (1470) |
+|---|---|---|---|---|---|
+| serial | 1303 | 7018 | 713 | 1309 | 126 |
+| colored, 1 | 1015 (1.28×) | 5167 (1.36×) | 769 (0.93×) | 554 (2.4×) | 98 (1.29×) |
+| colored, 2 | 548 (2.4×) | 2574 (2.7×) | 391 (1.8×) | 284 (4.6×) | 67 (1.9×) |
+| colored, 4 | 324 (4.0×) | 1478 (4.7×) | 204 (3.5×) | 150 (8.7×) | 55 (2.3×) |
+| colored, 8 | 213 (6.1×) | 857 (8.2×) | 114 (6.3×) | 86 (15×) | 51 (2.5×) |
+| colored, 16 | 212 (6.2×) | 815 (8.6×) | 114 (6.3×) | 81 (16×) | 59 (2.1×) |
+| colored, 32 | 371 (3.5×) | 1043 (6.7×) | 132 (5.4×) | 155 (8.5×) | 106 (1.2×) |
+| wide, 1 | 932 (1.40×) | 4775 (1.47×) | 789 (0.90×) | 446 (2.9×) | 92 (1.37×) |
+| wide, 8 | 188 (6.9×) | 745 (9.4×) | 117 (6.1×) | 71 (18×) | 46 (2.7×) |
+| wide, 16 | 146 (8.9×) | 493 (14×) | 85 (8.4×) | 47 (28×) | 45 (2.8×) |
+| islands, 8 | 1415 (0.92×) | 8108 (0.87×) | 1041 (0.68×) | 272 (4.8×) | 141 (0.89×) |
+| island batches, 8 | 1454 (0.90×) | 8282 (0.85×) | 131 (5.4×) | 168 (7.8×) | 140 (0.90×) |
+
+Runs agreed to within about 2%, except the 10 000 pile on 2 threads
+(543–831 µs over the three).
+
+- **Colors.** A real pile needs 7 or 8 (10 000: 4863, 4741, 2909, 1650,
+  495, 64 and 3 contacts; 40 000, 8), columns and stacks 2. None overflowed
+  Box2D's 24. Keeping contacts with a static out of color 0, as Box2D
+  does, gave the same number of colors as plain greedy coloring and
+  nearly the same sizes (only Box2D's rule was timed). The
+  split impulse solves only contacts sunk past the slop (half, in a real
+  pile), per color the same way.
+- **Order alone** is part of the speedup. The loop is latency-bound:
+  consecutive contacts that share a body wait on each other's writes, and
+  independent ones overlap. A color's contacts are all independent, so
+  colored on one thread is 1.28–1.36× serial on real piles and 2.4× on
+  stacks, whose pair order walks each stack's chain of contacts. The
+  columns are the exception, and are why `:tax`'s pile flattered the
+  serial solver: their pair order interleaves 331 columns, which is
+  already independent work. The same shows in islands: one at a time,
+  each walks its own chain, 3× slower on the columns than serial.
+  *Island batches* give each thread a run of islands solved together in
+  pair order, which keeps the interleaving and serial's arithmetic.
+- **It stops at one CCD.** A barrier costs 0.19 µs on 8 cores of one CCD
+  and 0.24 on 16 threads of one, but 0.57 across both, and a solve of a
+  real pile is 120 of them (1 + 7 colors warm starting + 8 × 7 + 8 × 7).
+  The threads at the boundary between CCDs work longest, since bodies
+  written in one color are read in the next by a thread across it. Pinned
+  one thread per core across both CCDs, the 10 000 pile's colored solve is
+  386 µs on 12 threads and 366 on 16, against 213 on 8; unpinned, the
+  scheduler's placement, it's 533 on 8 and 548 on 16. SMT helps the wide
+  solve (146 against 188), whose gathers stall, and not the scalar one.
+  At 40 000 there's more work per barrier, and 16 threads on one CCD still
+  gain.
+- **SIMD gains little here**: on one thread, from 3% slower (the columns)
+  to 20% faster (the stacks), 8% on real piles. Without rotation a
+  contact is about 30 floating-point operations between gathering its two
+  bodies and scattering them back, which stay scalar loads and stores
+  (98 of them in the batch kernel); Box2D's contacts carry rotation and
+  two points, and more arithmetic per gather. The copy into batches is
+  another transpose a step (92 µs at 10 000 here, unoptimized).
+- **Islands don't help a pile.** A real pile is one island (9992 of
+  10 000 bodies, every contact but eight). They pay only for separate
+  groups: 1000 stacks, 7.8× on 8 threads as batches. The columns are 331
+  islands, and batches give them 5.4× bit for bit the same as today: the
+  pile the docs measure could be parallelized without changing a result,
+  but no real pile could.
+- **Settling.** The same pile from its first step, 4000 steps on arrays,
+  solved serially and colored: at step 400 the deepest overlap is 0.016
+  serially and 0.025 colored, and 9912 against 9772 bodies are slower than
+  0.1; from step 2000 both have all 10 000 resting, and from 3000 both
+  the same deepest overlap, 0.0051. Colored converges a little slower, as
+  a different order of Gauss-Seidel can; neither pile comes to rest bit
+  for bit by step 4000 (171 and 119 bodies still move), and the columns
+  do at step 2233 serially and 2546 colored.
+
+**What building it costs a step**, serial, in µs, at 10 000 real / 40 000:
+coloring 29 / 150; ordering and copying the contacts into color order
+40–45 / 320–350, and back 10–13 / 46–76 (both with the arrays allocated
+fresh); islands 85 / 490. At 10 000 that's about 85 µs to save about 1100;
+at 40 000 it's as long as the solve on 16 threads, the serial part that
+would stop further scaling. Recoloring from scratch each step, only 0.06%
+of the contacts that persist change color (538 of 869 704 over 60 steps),
+and a coloring that keeps each persisting contact's color needs no more
+colors (7).
+
+**What the ECS would provide:**
+
+- **Nothing new, for the solve.** The coloring is a pure function of the
+  contacts in pair order and of which bodies move, which the storage
+  already gives the gather, so the gather can color each contact and
+  write it at its color's place instead of the next, and writing back
+  reads it from there. That keeps the property the step has now, that
+  results don't depend on when a contact began, and a reload or a replay
+  needs no stored colors.
+- **Colors in storage, only for scale.** At 40 000 bodies the serial
+  coloring and copy are the limit. Then a contact's color could
+  persist, as Box2D keeps it: rarely changing, it would be cheap to keep in
+  storage (a table per color, each in pair order, so the merge walks all
+  of them merged, as `for_each_ordered` merges tables now, and the solve
+  walks them in turn), with only beginning contacts colored. The price is
+  that colors depend on history, so they'd be state a snapshot must carry,
+  and a merge of 8 tables instead of a walk of one. Not built, and not
+  needed at 10 000.
+- **Threads.** A pool that stays alive across steps: spawning scoped
+  threads costs 125 µs for 8 and 265 for 16, more than the solve. It
+  must not be the physics mod's (a mod that spawns a thread is never
+  unmapped: [lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)),
+  so it's the scheduler's workers (get-znt.5) with a data-parallel job
+  (step 3 of [scheduling](scheduling.md#toward-parallelism)): run this
+  closure on N workers, with a barrier they share. `engine_ecs::Executor`
+  and `Workers` ([Parallelism](#parallelism)) are that job's shape without
+  the barrier: the solve needs every worker at once, where they run tasks
+  in any order. Those workers need to
+  be placed on one CCD (the numbers above are pinned; unpinned they're
+  2.5× slower) and kept busy between jobs, or the governor clocks them
+  down: an idle core runs a solve at half speed
+  ([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md)).
+
+**Inherent, and unbuilt.** Inherent: a colored solve is another
+computation from today's, so switching changes every recorded replay once
+(and deterministically after); it converges slightly slower; a barrier per
+color per iteration, and the cross-CCD traffic of bodies shared between
+colors, cap it at one CCD for 10 000 bodies; islands can't split a pile;
+and SIMD buys little for a contact without rotation. Unbuilt: the pool and
+its job API, placement, a parallel or persistent coloring and copy, wide
+batches built straight from the world, and anything smarter across CCDs
+(each CCD solving its own half of the bodies, meeting only at the seam).
+The prototype stayed in the bench: in the mod it would need threads the
+mod can't own, and would change the simulation, where the single-threaded
+default must stay bit for bit what it is.
 
 ## What changes elsewhere
 

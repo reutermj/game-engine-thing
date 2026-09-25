@@ -154,6 +154,7 @@ rust_binary(
     srcs = [
         "narrow.rs",
         "solver.rs",
+        "tests/arrays.rs",
         "tests/pool.rs",
         "tests/tax.rs",
         "tests/tax_par.rs",
@@ -180,6 +181,30 @@ rust_binary(
         "tests/solver_layout.rs",
     ],
     crate_root = "tests/solver_layout.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
+
+# How far the solver parallelizes: sequential impulses over graph colors
+# and over islands, on 1 to 32 threads, against `solver::solve`, over a
+# 10 000 pile's contacts and a scene of separate stacks; checked bit for
+# bit across thread counts, and for how well the pile settles:
+#   ./bazel run -c opt //engine/std/physics:parallel_solver
+rust_binary(
+    name = "parallel_solver",
+    srcs = [
+        "narrow.rs",
+        "solver.rs",
+        "tests/arrays.rs",
+        "tests/parallel_solver.rs",
+    ],
+    crate_root = "tests/parallel_solver.rs",
     data = [":pile_game"],
     env = {"PILE": "$(rlocationpath :pile_game)"},
     deps = [
