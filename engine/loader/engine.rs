@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use engine_api::{
     API_VERSION, CallStatus, CallTarget, Declarations, DefaultFn, DropFn, ErasedFn, Host, INFO_SYMBOL,
-    InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc,
+    BUILD_SYMBOL, BuildFn, InfoFn, MAIN_SYMBOL, MainFn, ModContext, ModInfo, Op, PhaseDesc, Pumped, Status, SystemDesc,
 };
 use engine_api::scheduler::{FramePlan, PlannedNode, Ran};
 use engine_ecs::schema::{self, Field};
@@ -666,6 +666,21 @@ impl Engine {
         }
         out += &format!("\n{}", self.world.summary());
         out
+    }
+
+    /// The Bazel label mod `name`'s running build was built as, asked of that
+    /// build's own code: so a test swapping two builds of the same code can
+    /// tell which image is mapped, where the generation only says the loader
+    /// swapped something. `None` if it isn't loaded or doesn't say.
+    pub fn build_of(&self, name: &str) -> Option<String> {
+        let mods = self.mods.borrow();
+        let m = mods.iter().find(|m| &*m.name == name)?;
+        unsafe {
+            let build = *m.lib.get::<BuildFn>(BUILD_SYMBOL).ok()?;
+            let mut len = 0;
+            let bytes = build(&mut len);
+            Some(String::from_utf8_lossy(std::slice::from_raw_parts(bytes, len)).into_owned())
+        }
     }
 
     /// Where control requests go: the control socket's thread sends each one

@@ -13,6 +13,7 @@ engine_mod(
         "//platformer/core",
         "//platformer/walkers",
     ],
+    twin = True,
     visibility = ["//visibility:public"],
 )
 

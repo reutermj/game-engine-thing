@@ -6,5 +6,6 @@ load("//engine:defs.bzl", "engine_mod")
 engine_mod(
     name = "sequential",
     srcs = ["lib.rs"],
+    twin = True,
     visibility = ["//visibility:public"],
 )

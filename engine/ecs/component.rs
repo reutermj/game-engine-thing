@@ -319,11 +319,6 @@ unsafe impl<T: FieldType, const N: usize> FieldType for [T; N] {
     const FINGERPRINT: u64 = __fingerprint("Array", &[T::FINGERPRINT, N as u64]);
 }
 
-unsafe impl<K: FieldType + Eq + std::hash::Hash, V: FieldType> Crossing for std::collections::HashMap<K, V> {}
-unsafe impl<K: FieldType + Eq + std::hash::Hash, V: FieldType> FieldType for std::collections::HashMap<K, V> {
-    const KIND: FieldKind = FieldKind::OPAQUE;
-    const FINGERPRINT: u64 = __fingerprint("HashMap", &[K::FINGERPRINT, V::FINGERPRINT]);
-}
 
 unsafe impl<K: FieldType + Ord, V: FieldType> Crossing for std::collections::BTreeMap<K, V> {}
 unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BTreeMap<K, V> {

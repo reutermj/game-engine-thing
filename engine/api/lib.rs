@@ -53,9 +53,17 @@ pub const API_VERSION: u32 = 23;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
+/// Optional: the Bazel label a library was built as (`ENGINE_MOD_BUILD`,
+/// which `engine_mod` sets), for telling apart builds of one mod that run
+/// the same code. Not in `ModInfo`, so a library without it still loads;
+/// the loader only asks for it in `Engine::build_of`.
+pub const BUILD_SYMBOL: &[u8] = b"engine_mod_build\0";
 
 pub type InfoFn = unsafe extern "C" fn() -> ModInfo;
 pub type MainFn = unsafe extern "C" fn(ctx: *mut ModContext, op: Op) -> Status;
+/// Writes the label's length to `len` and returns its bytes, in the
+/// library's static memory.
+pub type BuildFn = unsafe extern "C" fn(len: *mut usize) -> *const u8;
 
 /// Lifecycle operation passed to `engine_mod_main`. A plain integer rather than a
 /// Rust enum so an unknown value from a newer loader isn't undefined behavior.
@@ -569,6 +577,16 @@ macro_rules! export_mod {
                 option_env!("ENGINE_MOD_RESIDENT").is_some(),
                 $bootstrap,
             )
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn engine_mod_build(len: *mut usize) -> *const u8 {
+            const BUILD: &str = match option_env!("ENGINE_MOD_BUILD") {
+                Some(build) => build,
+                None => "",
+            };
+            unsafe { *len = BUILD.len() };
+            BUILD.as_ptr()
         }
 
         #[unsafe(no_mangle)]

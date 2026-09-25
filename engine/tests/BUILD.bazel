@@ -12,6 +12,23 @@ rust_library(
     deps = ["//engine/api"],
 )
 
+# Replaying a game's route while reloading its mods, for the games' own
+# tests: see replay.rs.
+rust_library(
+    name = "replay",
+    testonly = True,
+    srcs = ["replay.rs"],
+    crate_name = "reload_replay",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+        "//engine/std/physics:physics_interface",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
 # A bootstrap shaped like a windowing library's event loop. See mods/fake_os.rs.
 engine_mod(
     name = "fake_os",

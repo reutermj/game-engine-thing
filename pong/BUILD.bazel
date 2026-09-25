@@ -27,3 +27,36 @@ rust_test(
         "//engine/loader",
     ],
 )
+
+# Twins of every mod that isn't resident, by mod name: see
+# //engine/tests:replay.rs.
+PONG_TWINS = {
+    "physics": "//engine/std/physics:physics_twin",
+    "pong": "//pong/core:core_twin",
+    "pong_ai": "//pong/ai:ai_twin",
+    "pong_text": "//pong/text:text_twin",
+    "sequential": "//engine/std/sequential:sequential_twin",
+}
+
+# The replays in pong_test, again while reloading pong's mods under them.
+# The heaviest plans stop early (a reload of all five mods takes about 90 ms
+# in a debug build); reload_test_full, run by hand, plays them to the end:
+#   ./bazel test //pong:reload_test_full
+[rust_test(
+    name = name,
+    srcs = ["reload_test.rs"],
+    data = [":pong"] + PONG_TWINS.values(),
+    env = {
+        "PONG_MANIFEST": "$(rlocationpath :pong)",
+        "TWINS": ";".join(["%s=$(rlocationpath %s)" % (mod, twin) for mod, twin in PONG_TWINS.items()]),
+    } | env,
+    tags = tags,
+    deps = [
+        "//engine/loader",
+        "//engine/tests:replay",
+        "//pong/core:core_interface",
+    ],
+) for name, env, tags in [
+    ("reload_test", {}, []),
+    ("reload_test_full", {"REPLAY_FULL": "1"}, ["manual"]),
+]]

@@ -8,5 +8,6 @@ engine_mod(
         "//pong/core",
     ],
     mod_name = "pong_ai",
+    twin = True,
     visibility = ["//visibility:public"],
 )

@@ -10,7 +10,7 @@
 //! the end of the frame after the one it was published in. See
 //! docs/architecture/storage.md.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, RwLock, RwLockReadGuard};
 
@@ -50,7 +50,7 @@ pub struct EventQueue {
     frames: Vec<u64>,
     next_seq: u64,
     /// The next sequence number each reader will read, by system name.
-    cursors: Mutex<HashMap<String, u64>>,
+    cursors: Mutex<BTreeMap<String, u64>>,
     /// After `values`, so they drop while it still maps their code.
     _keepalive: Option<Keepalive>,
 }
@@ -66,7 +66,7 @@ impl EventQueue {
             seqs: Vec::new(),
             frames: Vec::new(),
             next_seq: 0,
-            cursors: Mutex::new(HashMap::new()),
+            cursors: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -143,6 +143,23 @@ impl World {
                 Ok(())
             }
         }
+    }
+
+    /// A clone of every queued event of type `E`, oldest first, as (sequence
+    /// number, frame published for, event), and each reader's cursor by
+    /// system name: for code in the loader's own process (tests,
+    /// tooling), like [`World::values`]. `None` if `E` isn't installed with
+    /// this layout.
+    pub fn events_of<E: Event + Clone>(&self) -> Option<(Vec<(u64, u64, E)>, Vec<(String, u64)>)> {
+        let q = *self.events_by_name.lock().unwrap().get(E::NAME)?;
+        let queue = self.events.get(q).read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !queue.ty?.same_values(&ValueType::of::<E>()) {
+            return None;
+        }
+        let values = queue.values.as_ref().map_or(&[][..], |v| v.as_slice::<E>());
+        let events = queue.seqs.iter().zip(&queue.frames).zip(values).map(|((&s, &f), e)| (s, f, e.clone())).collect();
+        let cursors = queue.cursors.lock().unwrap().iter().map(|(k, &v)| (k.clone(), v)).collect();
+        Some((events, cursors))
     }
 
     pub(crate) fn event_queue(&self, q: usize) -> &RwLock<EventQueue> {

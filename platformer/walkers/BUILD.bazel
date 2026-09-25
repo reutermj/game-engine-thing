@@ -10,5 +10,6 @@ engine_mod(
         "//engine/std/physics",
         "//platformer/core",
     ],
+    twin = True,
     visibility = ["//visibility:public"],
 )

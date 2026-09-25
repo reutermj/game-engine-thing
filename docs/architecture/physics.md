@@ -848,12 +848,17 @@ sleep).[^sleep-counts] Physics numbers its islands after the greatest it
 has seen, so a game's numbers don't collide with ones already made, but
 may with later ones.
 
-**A reload keeps it asleep.** Who's asleep is in the world, so a new build
-reads it at load (`Sleepers`, the mod's copy by entity index, is rebuilt
-from `Asleep`), and the ticks it looks from (after `find_contacts`, and
-after the solve) are in the mod's state, so the new build doesn't take
-the old one's writes for a game's. Only how long each awake body has been
-still is lost, which makes those take `Sleep::time` longer to sleep.
+**A reload doesn't show.** `Sleepers`, the mod's copy of who's asleep by
+entity index, with how long each awake body has been still, is the
+transient part the step borrows, and the old build hands it to the new
+one through the mod's state (`unload`, then `load`). The ticks it looks
+from (after `find_contacts`, and after the solve) are in the state too,
+so the new build doesn't take the old one's writes for a game's. A build
+that starts without it (the first, or one whose state was reset) rebuilds
+it from `Asleep` in the world: what's asleep stays asleep, and only how
+long awake bodies have been still is lost.[^sleep-reload] The games'
+reload replays (//engine/tests:replay.rs) hold physics to this: a run
+reloaded every frame is the run without reloads, bit for bit.
 
 **`Touching`** on a sleeping body is as it fell asleep: its query excludes
 sleeping bodies, so it isn't reset. A side touched by something that
@@ -1308,6 +1313,13 @@ frame 508.
     meant to fix, were the awake pile's already (0.13 to 3.9 a second,
     the warm start of the contacts above solved without the floor), so it
     was taken out.
+
+[^sleep-reload]: *(History, 2026-09-25.)* `Sleepers` was rebuilt from the
+    world at every load, so a reload restarted each awake body's time
+    still and it fell asleep `Sleep::time` late: the platformer's player,
+    standing at the start with physics reloaded every frame, never slept.
+    The reload replays found it; `a_reload_keeps_how_long_awake_bodies_have_been_still`
+    in //engine/std/physics:physics_test pins it.
 
 [^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
     in the mod's transient state, by entity, and every walk looked each

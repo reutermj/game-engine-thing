@@ -34,3 +34,32 @@ rust_test(
         "@rules_rust//rust/runfiles",
     ],
 )
+
+# Twins of every mod that isn't resident, by mod name: see
+# //engine/tests:replay.rs.
+PLATFORMER_TWINS = {
+    "physics": "//engine/std/physics:physics_twin",
+    "platformer": "//platformer/core:core_twin",
+    "walkers": "//platformer/walkers:walkers_twin",
+    "level": "//platformer/level:level_twin",
+    "platformer_text": "//platformer/text:text_twin",
+    "sequential": "//engine/std/sequential:sequential_twin",
+}
+
+# The routes in platformer_test, again while reloading the game's mods under
+# them.
+rust_test(
+    name = "reload_test",
+    srcs = ["reload_test.rs"],
+    data = [":platformer"] + PLATFORMER_TWINS.values(),
+    env = {
+        "MANIFEST": "$(rlocationpath :platformer)",
+        "TWINS": ";".join(["%s=$(rlocationpath %s)" % (name, twin) for name, twin in PLATFORMER_TWINS.items()]),
+    },
+    deps = [
+        "//engine/loader",
+        "//engine/tests:replay",
+        "//platformer/core:core_interface",
+        "//platformer/walkers:walkers_interface",
+    ],
+)

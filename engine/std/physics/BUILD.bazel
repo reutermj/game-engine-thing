@@ -22,6 +22,7 @@ PHYSICS_INTERFACE = [
 engine_mod(
     name = "physics",
     srcs = PHYSICS_SRCS,
+    twin = True,
     interface = PHYSICS_INTERFACE,
     visibility = ["//visibility:public"],
 )

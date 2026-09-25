@@ -168,6 +168,7 @@ def engine_mod(
         deps = [],
         mod_name = None,
         resident = False,
+        twin = False,
         visibility = None,
         **kwargs):
     """A hot-reloadable mod, or a resident one.
@@ -189,9 +190,21 @@ def engine_mod(
         the session, so its transient part may own windows, devices and
         threads. A new build takes a restart, and every mod in `mod_deps` must
         be resident too. See docs/architecture/hot-reload.md, "Resident mods".
+      twin: Also declare `<name>_twin`, a testonly build of the same mod from
+        the same sources that differs only in its crate name and build label,
+        so its library is another file with the same code and layouts. Tests
+        swap a mod between the two to reload it for real, with nothing to
+        tell the builds apart but `Engine::build_of`: see
+        //engine/tests:replay.rs.
       visibility: Visibility of the mod target and its interface.
       **kwargs: Passed to the underlying `rust_shared_library`.
     """
+    if twin:
+        _declare_mod(name + "_twin", srcs, interface, mod_deps, deps, mod_name or name, resident, visibility, dict(kwargs, testonly = True))
+    _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visibility, kwargs)
+
+def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visibility, kwargs):
+    kwargs = dict(kwargs)
     mod_name = mod_name or name
     # Every target this macro declares is part of the mod, so all of them
     # share its testonly-ness.
@@ -227,7 +240,9 @@ def engine_mod(
         deps = deps + interface_deps + ([":" + name + "_interface"] if interface else []) + ["//engine/api"],
         # Bakes the interface digests into the library; see engine/tools/mod_links.rs.
         rustc_env_files = [":" + name + "_links"],
-        rustc_env = kwargs.pop("rustc_env", {}) | ({"ENGINE_MOD_RESIDENT": "1"} if resident else {}),
+        # ENGINE_MOD_BUILD is what `Engine::build_of` reports.
+        rustc_env = kwargs.pop("rustc_env", {}) | {"ENGINE_MOD_BUILD": "//%s:%s" % (native.package_name(), name)} |
+                    ({"ENGINE_MOD_RESIDENT": "1"} if resident else {}),
         # The engine copies each .so before dlopen, which breaks the $ORIGIN
         # RUNPATH a dynamically linked C++/unwind runtime would need.
         cc_runtime_linkage = "static",

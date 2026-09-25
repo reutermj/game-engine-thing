@@ -71,6 +71,8 @@ engine_api::mod_state! {
         /// step's writes for a game's.
         slept: u32,
         time: Timings,
+        /// The sleep bookkeeping, while no build has it: see `unload`.
+        sleep: Sleepers,
     }
 }
 
@@ -1031,10 +1033,21 @@ fn mark(t: &mut Touching, n: Vec2) {
 impl Mod for Physics {
     type Transient = Sleepers;
 
-    /// Who's asleep is in the world, so a new build (a reload) picks
-    /// sleeping bodies up where they are, rather than waking them all.
+    /// The bookkeeping the last build left in the state, if any; and who's
+    /// asleep in the world, which is all a first build (or one whose state
+    /// was reset) has to go on, and which the copy already has otherwise.
     fn load(&mut self, sleep: &mut Sleepers, cx: &mut Cx) {
+        *sleep = std::mem::take(&mut self.sleep);
         cx.world().for_each::<&Asleep>(|e, a| sleep.adopt(e, a.island));
+    }
+
+    /// Hands the bookkeeping to the next build. Rebuilt from the world
+    /// instead, each awake body's time still would restart at a reload, and
+    /// a body due to fall asleep would sleep that much later: a reload
+    /// would show. (History, 2026-09-25: it was rebuilt from the world,
+    /// until the games' reload replays caught the difference.)
+    fn unload(&mut self, sleep: &mut Sleepers, _: &mut Cx) {
+        self.sleep = std::mem::take(sleep);
     }
 
     fn systems(s: &mut Systems<Self>) {
