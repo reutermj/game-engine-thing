@@ -118,6 +118,9 @@ impl Arrays {
     }
 
     /// A scene built by hand, with no contacts yet: entity `i` is index `i`.
+    /// `parallel_solver` builds its scenes this way; `tax`, which compiles
+    /// this file too, snapshots a running pile instead.
+    #[allow(dead_code)]
     pub fn of(pos: Vec<Vec2>, collider: Vec<Collider>, body: Vec<Body>, moving: Vec<u32>, gravity: Vec2) -> Arrays {
         let n = pos.len() as u32;
         let mut a = Arrays {
