@@ -1092,7 +1092,7 @@ impl Loaded {
     /// holds whatever bytes were last there: physics's state, a `u32` beside
     /// padding that held the upper half of some pointer, read as an address in
     /// its build whenever that build straddled a 4 GiB boundary, and was reset
-    /// mid-game (found by the replays under poison mode, 2026-09-25).
+    /// mid-game (docs/lore/a-states-padding-can-look-like-a-pointer-into-its-build.md).
     fn state_points_into_its_build(&self) -> bool {
         if !self.state.fields.is_empty() {
             return false;
