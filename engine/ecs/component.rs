@@ -356,7 +356,8 @@ tuple_field_types! { (A, B), (A, B, C), (A, B, C, D) }
 /// fields take their value from the type's `Default`; a field whose non-scalar
 /// type changed (`Vec<u32>` to `Vec<u64>`) is reset to it. Every field must be
 /// a [`FieldType`]: scalars, `Entity`, `String`, `Vec`, `Option`, `Box`,
-/// arrays, `HashMap`, `BTreeMap`, and structs declared with [`field_struct!`].
+/// arrays, `BTreeMap` (not `HashMap`: see `docs/architecture/ecs.md`), and
+/// structs declared with [`field_struct!`].
 ///
 /// When a change keeps the layout valid but not the meaning (a field now in
 /// different units, say), bump the version so values are cleared instead:

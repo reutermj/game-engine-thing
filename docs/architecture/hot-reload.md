@@ -81,8 +81,9 @@ mapped image; if it finds one, it has the old build drop the state and the
 new one start over, with a warning, instead of crashing. The scan is shallow
 (a pointer inside a `Vec`'s buffer is invisible to it) and could in principle
 be fooled by an integer that looks like an address, so it's a mitigation, not
-a guarantee. It also finds an empty `HashMap`, which points at a static in
-the image that made it, so a state holding one is reset on every reload
+a guarantee. It also finds an empty `HashMap` in a hand-written state,
+which points at a static in the image that made it, so such a state is
+reset on every reload; that is one reason `HashMap` isn't a `FieldType`
 (see [lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
 
 ## Resident mods

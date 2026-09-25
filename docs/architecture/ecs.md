@@ -73,11 +73,8 @@ The macro adds `Clone` (add `Copy` yourself if every field is) and implements
 fingerprint and drop function in `Component::FIELDS`. Every field must be a
 `FieldType`: the integer and float types, `bool`, `Entity`, `String`, `Vec`,
 `Option`, `Box`, arrays, `BTreeMap`, and structs declared with
-`field_struct!`. Not `HashMap`: an empty one points at a static in the
-code that made it, which a reload unmaps (see
-[lore](../lore/an-empty-hashmap-points-into-the-code-that-made-it.md)). It is a
-`macro_rules!` macro rather than a derive, so it
-needs no proc-macro crate; the price is its fixed `struct Name: "id" { ... }`
+`field_struct!`. Not `HashMap` (see below). It is a `macro_rules!` macro
+rather than a derive, so it needs no proc-macro crate; the price is its fixed `struct Name: "id" { ... }`
 syntax. `Component` can still be implemented by hand, with no schema.
 
 The name is the identity, not the Rust type. `TypeId` can differ between
@@ -94,13 +91,15 @@ are `unsafe` traits; `component!` makes a component safe by accepting only
 `FieldType` fields, and `FieldType` is implemented only for types that obey
 it.
 
-**Open question:** `HashMap` breaks the image rule while it's empty. It
-allocates nothing then, and its control bytes point at a static in the std
-of the build that made it, so walking an empty map in a component after
-that build is unmapped segfaults (measured; see
+`HashMap` is not a `FieldType`, because it breaks the image rule while
+it's empty: it allocates nothing then, and its control bytes point at a
+static in the std of the build that made it, so walking an empty map after
+that build is unmapped segfaults (measured, in a component and in the
+world's own event cursors; see
 [lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
-Dropping it from `FieldType` (`BTreeMap` has no such pointer), or giving
-it a representation that owns its empty table, is undecided.
+`BTreeMap` has no such pointer and does the same job. Giving `HashMap` a
+representation that owns its empty table was the alternative; removing it
+closes the class instead of guarding one type.
 
 ### Heap data and whose code runs
 
