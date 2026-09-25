@@ -1454,8 +1454,10 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// `since` (a `now` from before), in page order: change detection. A
     /// page none of whose terms was written since is skipped whole, by its
     /// own tick, so a walk over things at rest costs a look per page, not
-    /// per row. Rows only moved (between tables or pages) keep their ticks;
-    /// a spawned row's are 0. Table components only, as page walks are.
+    /// per row. A spawned row's values, and an inserted value, are written
+    /// then; rows only moved (between tables or pages) keep their ticks.
+    /// Rows that left aren't here to be seen: `left_since` says whether any
+    /// did. Table components only, as page walks are.
     pub fn for_each_written(&mut self, since: u32, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
         let Query { world, decl, rows, states, filters, log, .. } = self;
         for (t, table) in rows.iter().enumerate() {
@@ -1473,6 +1475,36 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                 }
             }
         }
+    }
+
+    /// Whether a row left any table the query matches after tick `since`
+    /// (a `now` from before): despawned, or moved to another table by an
+    /// insert or a removal, whether or not the query would still match it.
+    /// What's gone has no value left to be written, so this is change
+    /// detection's other half, a look per table; it says only that some row
+    /// left, not which, and a row that left and came back still left.
+    pub fn left_since(&self, since: u32) -> bool {
+        self.rows.iter().any(|t| t.table.left.load(std::sync::atomic::Ordering::Relaxed) > since)
+    }
+
+    /// Whether a row arrived in any table the query matches after tick
+    /// `since`: spawned, or moved from another table. A look per table,
+    /// before a walk for which (`for_each_written`, since a spawned value
+    /// or an inserted one is written) when only new rows matter.
+    pub fn arrived_since(&self, since: u32) -> bool {
+        self.rows.iter().any(|t| t.table.arrived.load(std::sync::atomic::Ordering::Relaxed) > since)
+    }
+
+    /// The tick `e`'s row was last written at, the latest of the query's
+    /// terms, if the query matches it: change detection for one entity,
+    /// where `for_each_written` is for all of them. Table components only.
+    pub fn written(&self, e: Entity) -> Option<u32> {
+        if !self.world.entities.is_alive(e) || !Self::passes(&self.filters, e) {
+            return None;
+        }
+        let at = self.world.entities.location(e)?;
+        let t = self.table_ids.iter().position(|&id| id == at.table)?;
+        Some(D::written(&self.states, t, at.page as usize, Some(at.row as usize)))
     }
 
     /// How many rows the query's tables hold: the length of a page walk.

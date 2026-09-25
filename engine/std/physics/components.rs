@@ -272,7 +272,9 @@ component! {
     /// own, which the step's walks skip by what they match rather than
     /// looking each body up. `island` is the bodies it wakes with. A game
     /// wakes a body by removing it, or by writing its velocity, position,
-    /// collider or body.
+    /// collider or body, and puts one to sleep by giving it one, in an
+    /// island it numbers (physics numbers its own after the greatest it has
+    /// seen).
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Asleep: "physics::Asleep" {
         pub island: u32,

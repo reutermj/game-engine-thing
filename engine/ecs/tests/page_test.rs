@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::{Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, component};
+use engine_ecs::{Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, WorldMut, component};
 
 component! {
     /// A spatial key, so some rows are in pages of a dozen or so.
@@ -389,6 +389,71 @@ fn a_walk_for_what_changed_sees_exactly_the_rows_written_since() {
     assert_eq!(changed_now(), want);
     run(&w, mark, "mark");
     assert_eq!(changed_now(), [], "all of it older than the `now`");
+}
+
+/// Per query of `changed`: whether rows arrived in its tables, and left.
+static MOVED: Mutex<[bool; 4]> = Mutex::new([false; 4]);
+
+/// Rows new to a query are written as they arrive, spawned or given a
+/// term by an insert, so a walk for what changed sees them; rows that left
+/// a query's tables, despawned or moved out, have nothing left to see.
+/// `arrived_since` and `left_since` say whether any did, for each query
+/// only its own tables'. Rows that arrive by a removal keep their ticks,
+/// so only `arrived_since` sees them.
+#[test]
+fn rows_arriving_are_written_and_rows_leaving_are_seen_to_have_left() {
+    let _s = serial();
+    let w = World::new();
+    let live = populate(&w, &mut 13);
+    fn mark(_: &mut Cx, q: Query<&Val>) {
+        *SINCE.lock().unwrap() = q.now();
+    }
+    fn changed(_: &mut Cx, mut q: Query<(&Val, &At)>, mut vals: Query<&Val, Without<At>>) {
+        let since = *SINCE.lock().unwrap();
+        let mut seen = CHANGED.lock().unwrap();
+        q.for_each_written(since, |row, _| seen.push(row.entity()));
+        vals.for_each_written(since, |row, _| seen.push(row.entity()));
+        *MOVED.lock().unwrap() = [q.arrived_since(since), vals.arrived_since(since), q.left_since(since), vals.left_since(since)];
+    }
+    let changed_now = || {
+        run(&w, changed, "changed");
+        let mut seen = std::mem::take(&mut *CHANGED.lock().unwrap());
+        seen.sort();
+        (seen, *MOVED.lock().unwrap())
+    };
+    let between = |f: &mut dyn FnMut(&mut WorldMut<'_>) -> Vec<Entity>| {
+        run(&w, mark, "mark");
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let mut want = f(&mut m);
+        want.sort();
+        want
+    };
+    let (with_at, without_at): (Vec<Entity>, Vec<Entity>) = {
+        let m = w.between_frames(Build::default()).unwrap();
+        live.iter().partition(|&&e| m.get::<At>(e).is_some())
+    };
+
+    let want = between(&mut |_| Vec::new());
+    assert_eq!(changed_now(), (want, [false; 4]), "nothing arrived or left");
+    let want = between(&mut |m| vec![m.spawn((Val { n: 1 }, At { x: 3.0, y: 4.0 })), m.spawn((Val { n: 2 },))]);
+    assert_eq!(changed_now(), (want, [true, true, false, false]), "spawned: arrived, written, and nothing left");
+    let want = between(&mut |m| {
+        m.insert(without_at[0], At { x: 1.0, y: 1.0 });
+        vec![without_at[0]]
+    });
+    assert_eq!(changed_now(), (want, [true, false, false, true]), "given an `At`: arrived in one query's tables, left the other's");
+    let want = between(&mut |m| {
+        m.despawn(with_at[0]);
+        Vec::new()
+    });
+    assert_eq!(changed_now(), (want, [false, false, true, false]), "despawned: left, and nothing to see");
+    let want = between(&mut |m| {
+        m.remove::<At>(with_at[1]);
+        Vec::new()
+    });
+    assert_eq!(changed_now(), (want, [false, true, true, false]), "an `At` removed: left one query's tables, and arrived unwritten in the other's");
+    let want = between(&mut |_| Vec::new());
+    assert_eq!(changed_now(), (want, [false; 4]), "all of it older than the `now`");
 }
 
 /// Executors for the parallel walks: one thread, then threads spawned per

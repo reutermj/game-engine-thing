@@ -4,12 +4,22 @@
 //!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
 //!   sleep <speed> <time>  turn on sleeping (see `physics::Sleep`)
 //!   sleep off  turn it off again
-//!   kick <vx> <vy>  set the velocity of the first body dropped, as a game
-//!              would a sleeping body's
+//!   kick <vx> <vy> [newest | naps]  set the velocity of the first body
+//!              dropped (or one of the island last to fall asleep, or the
+//!              bodies `nap` spawned), as a game would a sleeping body's
 //!   despawn    despawn the first body dropped, at the bottom
+//!   despawn nap  that, and spawn a body asleep (with `Asleep`) above the box
+//!   nap later  spawn an entity asleep above the box that isn't a body yet
+//!   nap body   make those bodies
+//!   unsleep    remove the first body's `Asleep`, as a game waking it would
+//!   resleep    give it one again, as a game putting it to sleep would
+//!   post       spawn a static body with a velocity above the box, which the
+//!              solve never writes
+//!   resleep post  give those an `Asleep`
 //!   grow <h>   make the first body dropped a box h across each way
 //!   floor off  despawn the floor
 //!   floor falls  make the floor a body, which falls
+//!   floor swap despawn the floor and spawn a static far above the box
 //!   floor <dy> move the floor down by dy
 //!   touching   give every body a `Touching`
 //!   sensing    make every body sense the others: an `Overlap` each
@@ -20,9 +30,10 @@
 //!   shelves [sensing]  two shelves across the box at `SHELF`, one a body with no
 //!              velocity and one a velocity with no body, and a row of
 //!              bodies dropped on each: colliders physics gathers apart
+//!   lift <vy>  give the shelf that has no velocity one, up at vy
 
 use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
-use physics::{Body, Collider, Gravity, Placed, Position, Shape, Sleep, Touching, Vec2, Velocity};
+use physics::{Asleep, Body, Collider, Gravity, Placed, Position, Shape, Sleep, Touching, Vec2, Velocity};
 
 pub const WIDTH: f32 = 40.0;
 pub const HEIGHT: f32 = 30.0;
@@ -31,6 +42,10 @@ pub const SHELF: f32 = 10.0;
 const RADIUS: f32 = 0.45;
 /// Below this speed a body counts as at rest.
 const REST: f32 = 0.1;
+/// Where `despawn nap` spawns its sleeping body, above the box and clear
+/// of it, and the island it names: far from physics's own numbering.
+pub const NAP: f32 = -5.0;
+const NAP_ISLAND: u32 = 1 << 30;
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -41,7 +56,21 @@ engine_api::mod_state! {
         width: f32,
         /// The static box `block` places, once it has.
         block: Vec<Entity>,
+        /// The shelves `shelves` made: the kinematic one first.
+        shelves: Vec<Entity>,
+        /// What `despawn nap` and `nap later` spawned.
+        naps: Vec<Entity>,
+        later: Vec<Entity>,
+        /// What `post` spawned.
+        posts: Vec<Entity>,
     }
+}
+
+/// The first body dropped: the least entity with a body and a velocity.
+fn first_body(world: &mut WorldMut) -> Option<Entity> {
+    let mut first = None;
+    world.for_each::<(&Velocity, &Body)>(|e, _| first = Some(first.map_or(e, |f: Entity| f.min(e))));
+    first
 }
 
 fn wall(world: &mut WorldMut, cx: f32, cy: f32, hx: f32, hy: f32) -> Entity {
@@ -112,8 +141,14 @@ fn depth(a: &Placed, b: &Placed) -> f32 {
     let (ha, hb) = (a.shape.half_extents(), b.shape.half_extents());
     match (a.shape, b.shape) {
         (Shape::Circle(ra), Shape::Circle(rb)) => (ra + rb - d.len()).max(0.0),
-        // Boxes, and circles against boxes by their bounding boxes: an
-        // overestimate for the circles, which only makes the check stricter.
+        // A circle against a box by the box's point nearest its center: by
+        // the circle's bounding box, a circle resting on a box's corner (as
+        // they do in a real pile, not in columns) read as 0.12 deep.
+        (Shape::Circle(r), Shape::Box(h)) | (Shape::Box(h), Shape::Circle(r)) => {
+            let d = d.abs();
+            let outside = Vec2::new((d.x - h.x).max(0.0), (d.y - h.y).max(0.0));
+            if outside == Vec2::ZERO { r + (h.x - d.x).min(h.y - d.y) } else { (r - outside.len()).max(0.0) }
+        }
         _ => (ha.x + hb.x - d.x.abs()).min(ha.y + hb.y - d.y.abs()).max(0.0),
     }
 }
@@ -161,19 +196,88 @@ impl Mod for Pile {
             }
             Some(("kick", args)) => {
                 let mut args = args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}")));
-                let (Some(x), Some(y)) = (args.next(), args.next()) else { return Err("kick <vx> <vy>".into()) };
+                let (Some(x), Some(y)) = (args.next(), args.next()) else { return Err("kick <vx> <vy> [newest]".into()) };
                 let (x, y) = (x?, y?);
-                let mut first = None;
-                world.for_each::<(&Velocity, &Body)>(|e, _| first = Some(first.map_or(e, |f: Entity| f.min(e))));
-                let first = first.ok_or("nothing to kick")?;
-                world.with_mut::<Velocity, _>(first, |v| *v = Velocity { x, y });
-                Ok(format!("kicked {first:?}"))
+                let kicked = if message.ends_with("naps") {
+                    for &e in &self.naps {
+                        world.with_mut::<Velocity, _>(e, |v| *v = Velocity { x, y });
+                    }
+                    return Ok("kicked the naps".into());
+                } else if message.ends_with("newest") {
+                    let mut newest: Option<(u32, Entity)> = None;
+                    world.for_each::<(&Asleep, &Velocity)>(|e, (a, _)| newest = newest.max(Some((a.island, e))));
+                    newest.map(|(_, e)| e)
+                } else {
+                    first_body(&mut world)
+                };
+                let kicked = kicked.ok_or("nothing to kick")?;
+                world.with_mut::<Velocity, _>(kicked, |v| *v = Velocity { x, y });
+                Ok(format!("kicked {kicked:?}"))
             }
             None if message.trim() == "despawn" => {
                 let mut first = None;
                 world.for_each::<(&Velocity, &Body)>(|e, _| first = Some(first.map_or(e, |f: Entity| f.min(e))));
                 world.despawn(first.ok_or("nothing to despawn")?);
                 Ok("despawned".into())
+            }
+            // The same step (the same message) as something else, so a check
+            // that counts can't see either.
+            Some(("despawn", "nap")) => {
+                let first = first_body(&mut world).ok_or("nothing to despawn")?;
+                world.despawn(first);
+                let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
+                let at = Position { x: self.width() / 2.0, y: NAP };
+                self.naps.push(world.spawn((at, Velocity::default(), body, Collider::circle(RADIUS), Asleep { island: NAP_ISLAND })));
+                Ok("despawned, and napping".into())
+            }
+            Some(("nap", "later")) => {
+                let at = Position { x: self.width() / 2.0 + 3.0, y: NAP };
+                let later = world.spawn((at, Collider::circle(RADIUS), Asleep { island: NAP_ISLAND + 1 }));
+                self.naps.push(later);
+                self.later.push(later);
+                Ok("napping, not yet a body".into())
+            }
+            Some(("nap", "body")) => {
+                let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
+                for &e in &self.later {
+                    world.insert(e, Velocity::default());
+                    world.insert(e, body);
+                }
+                Ok("napping bodies".into())
+            }
+            None if message.trim() == "unsleep" => {
+                let first = first_body(&mut world).ok_or("nothing to wake")?;
+                world.remove::<Asleep>(first);
+                Ok(format!("woke {first:?}"))
+            }
+            None if message.trim() == "resleep" => {
+                let first = first_body(&mut world).ok_or("nothing to put to sleep")?;
+                world.insert(first, Asleep { island: NAP_ISLAND + 2 });
+                Ok(format!("put {first:?} to sleep"))
+            }
+            // A body the solve never writes (a static one with a velocity),
+            // so what's new about it once it's given `Asleep` is only that.
+            None if message.trim() == "post" => {
+                let at = Position { x: self.width() / 2.0 - 3.0, y: NAP };
+                self.posts.push(world.spawn((at, Velocity::default(), Body::fixed(), Collider::rect(RADIUS, RADIUS))));
+                Ok("post".into())
+            }
+            Some(("resleep", "post")) => {
+                for &e in &self.posts {
+                    world.insert(e, Asleep { island: NAP_ISLAND + 3 });
+                }
+                Ok("posts put to sleep".into())
+            }
+            Some(("floor", "swap")) => {
+                world.despawn(self.walls[0]);
+                self.walls[0] = wall(&mut world, self.width() / 2.0, -HEIGHT, 1.0, 0.5);
+                Ok("floor swapped".into())
+            }
+            Some(("lift", vy)) => {
+                let vy: f32 = vy.trim().parse().map_err(|e| format!("{vy:?}: {e}"))?;
+                let &shelf = self.shelves.first().ok_or("no shelves")?;
+                world.insert(shelf, Velocity { x: 0.0, y: -vy });
+                Ok("lifting".into())
             }
             Some(("floor", "falls")) => {
                 world.insert(self.walls[0], Velocity::default());
@@ -233,8 +337,7 @@ impl Mod for Pile {
                 let w = self.width();
                 let half = Collider::rect(w / 4.0 - 0.5, 0.25);
                 let (left, right) = (Position { x: w / 4.0, y: SHELF + 0.25 }, Position { x: w * 0.75, y: SHELF + 0.25 });
-                world.spawn((left, half, Body::kinematic()));
-                world.spawn((right, half, Velocity::default()));
+                self.shelves = vec![world.spawn((left, half, Body::kinematic())), world.spawn((right, half, Velocity::default()))];
                 let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
                 for k in 0..(w as u32 - 2) {
                     let at = Position { x: 1.5 + k as f32, y: SHELF - 1.0 };
@@ -242,7 +345,7 @@ impl Mod for Pile {
                 }
                 Ok("shelved".into())
             }
-            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | kick <vx> <vy> | grow <h> | despawn | floor off | floor falls | floor <dy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
+            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | kick <vx> <vy> [newest | naps] | grow <h> | despawn [nap] | nap later | nap body | unsleep | resleep [post] | post | floor off | floor falls | floor swap | floor <dy> | lift <vy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
         }
     }
 }

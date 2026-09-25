@@ -45,6 +45,15 @@ engine_mod(
     mod_deps = [":physics"],
 )
 
+# A pre-solve hook for the pile, apart so the pile the benchmarks run has
+# no system of its own.
+engine_mod(
+    name = "pile_hook",
+    srcs = ["tests/hook.rs"],
+    crate_root = "tests/hook.rs",
+    mod_deps = [":physics"],
+)
+
 engine_mod(
     name = "runner",
     srcs = ["tests/runner.rs"],
@@ -60,6 +69,15 @@ engine_game(
     name = "pile_game",
     bootstrap = "//engine/std/lockstep",
     mods = [":pile"],
+)
+
+engine_game(
+    name = "pile_hook_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [
+        ":pile",
+        ":pile_hook",
+    ],
 )
 
 engine_game(
@@ -99,6 +117,7 @@ rust_test(
 
 TEST_DATA = {
     "PILE": ":pile_game",
+    "PILE_HOOK": ":pile_hook_game",
     "RUNNER": ":runner_game",
     "PHYSICS_V2": ":physics_v2",
 }
