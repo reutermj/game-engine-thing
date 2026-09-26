@@ -88,7 +88,7 @@ mod pile {
         w.tables()
             .filter(|t| t.components.iter().any(|&c| w.name(c) == "physics::Body"))
             .filter_map(|t| t.spatial.as_ref())
-            .map(|s| s.pages.read().unwrap().rebounded)
+            .map(|s| s.pages.read().unwrap().rebounded())
             .sum()
     }
 

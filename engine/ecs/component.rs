@@ -463,7 +463,7 @@ pub unsafe trait Component: Default + Send + Sync + 'static {
 #[macro_export]
 macro_rules! __spatial {
     (spatial, $name:ident) => {
-        ::std::option::Option::Some($crate::spatial::SpatialDesc::of::<$name>())
+        ::std::option::Option::Some($crate::spatial::SpatialDesc::of::<$name, _>())
     };
     (key, $name:ident) => {
         ::std::option::Option::None

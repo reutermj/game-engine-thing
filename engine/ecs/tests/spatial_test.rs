@@ -90,7 +90,7 @@ fn check(w: &World) {
         pages.check(&rows, BIG, 1.0).unwrap_or_else(|e| panic!("table {:?}: {e}", t.id));
         for (p, page) in rows.iter().enumerate() {
             for (r, e) in page.iter().enumerate() {
-                assert_eq!(pages.row_bounds(p, r), now[e], "{e:?}'s stored box");
+                assert_eq!(pages.plane().unwrap().row_bounds(p, r), now[e], "{e:?}'s stored box");
                 let at = w.entities.location(*e).expect("alive");
                 assert_eq!((at.table, at.page, at.row), (t.id, p as u32, r as u32), "{e:?}'s location");
             }
@@ -429,6 +429,7 @@ fn pages_are_blocks_of_the_order() {
     check(&w);
     let t = w.tables().find(|t| t.spatial.is_some()).unwrap();
     let (rows, pages) = (t.rows.read().unwrap(), t.spatial.as_ref().unwrap().pages.read().unwrap());
+    let pages = pages.plane().unwrap();
     let used: Vec<usize> = pages.order.iter().map(|&p| p as usize).filter(|&p| !rows[p].is_empty()).collect();
     let span = |p: usize| (pages.bounds[p].max[0] - pages.bounds[p].min[0]) + (pages.bounds[p].max[1] - pages.bounds[p].min[1]);
     let mean = used.iter().map(|&p| span(p)).sum::<f32>() / used.len() as f32;
@@ -437,7 +438,7 @@ fn pages_are_blocks_of_the_order() {
 }
 
 fn rebounded(w: &World) -> usize {
-    w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum()
+    w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded()).sum()
 }
 
 #[test]

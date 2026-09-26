@@ -20,7 +20,7 @@ use crate::erased::ErasedColumn;
 use crate::events::{Event, EventQueue};
 use crate::ordered::OrderKey;
 use crate::par::{Workers, even};
-use crate::spatial::{Bounds, Lanes, PageKind, RUN, SpatialPages};
+use crate::spatial::{Axes, Bounds, Dims, Lanes, PageKind, RUN, SpatialOrder, SpatialPages};
 use crate::world::{ColumnGuard, ComponentId, NewRow, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, TakeGuard, World};
 
 // ---- Declaring ----
@@ -1022,8 +1022,12 @@ fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
 /// `Bounds::overlaps` without branches: a broadphase's box tests are
 /// about even odds in a dense pile, so branches on them mispredict.
 #[inline(always)]
-fn meets(a: &Bounds, b: &Bounds) -> bool {
-    (a.min[0] <= b.max[0]) & (b.min[0] <= a.max[0]) & (a.min[1] <= b.max[1]) & (b.min[1] <= a.max[1])
+fn meets<const D: usize>(a: &Bounds<D>, b: &Bounds<D>) -> bool {
+    let mut hit = true;
+    for i in 0..D {
+        hit &= (a.min[i] <= b.max[i]) & (b.min[i] <= a.max[i]);
+    }
+    hit
 }
 
 // ---- Parameters ----
@@ -1545,10 +1549,14 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// `region`, as `for_each` would hand it. Tables that aren't spatial
     /// have no boxes, and are skipped. Boxes are as of the last re-sort:
     /// after whoever last wrote the keys, never mid-system.
-    pub fn in_region(&mut self, region: Bounds, mut f: impl FnMut(Row<'_>, D::Items<'_>)) {
+    /// Tables whose order is in other dimensions than `region` are skipped too.
+    pub fn in_region<const N: usize>(&mut self, region: Bounds<N>, mut f: impl FnMut(Row<'_>, D::Items<'_>))
+    where
+        Axes<N>: Dims<N>,
+    {
         let Query { world, decl, rows, states, filters, log, .. } = self;
         for (t, table) in rows.iter().enumerate() {
-            let Some(order) = &table.spatial else { continue };
+            let Some(order) = table.spatial.as_deref().and_then(<Axes<N> as Dims<N>>::pages) else { continue };
             for p in order.pages_near(&region) {
                 let mut pages = D::pages(states, t, p);
                 let mut meeting = order.lanes[p].meeting(&region, 0.0);
@@ -1632,11 +1640,19 @@ pub trait NearSide {
 pub struct SideTable<'a> {
     id: TableId,
     rows: &'a [Vec<Entity>],
-    order: &'a SpatialPages,
+    order: &'a SpatialOrder,
     filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
 }
 
-impl SideTable<'_> {
+/// A `SideTable` with its order in the broadphase's dimensions.
+struct Side<'a, const D: usize> {
+    id: TableId,
+    rows: &'a [Vec<Entity>],
+    order: &'a SpatialPages<D>,
+    filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
+}
+
+impl<const D: usize> Side<'_, D> {
     /// Which rows of page `p` pass the filters, as bits by row.
     fn pass(&self, p: usize) -> u32 {
         let page = &self.rows[p];
@@ -1703,7 +1719,7 @@ pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) ->
 
 /// An active page as the broadphase sweeps it: its rows, which of them
 /// pass the filters, and its box grown.
-type SweptPage<'a> = (&'a Lanes, u32, Bounds);
+type SweptPage<'a, const D: usize> = (&'a Lanes<D>, u32, Bounds<D>);
 
 /// Where a broadphase's pair keys go: one list, or a list per range of
 /// lesser index when the pairs are sorted in parallel, a range a task.
@@ -1743,7 +1759,7 @@ impl Keys for Buckets {
 /// Active page `i` against itself and every page after it in the sweep
 /// that its box meets.
 #[inline(always)]
-fn sweep(keys: &mut impl Keys, pages: &[SweptPage<'_>], i: usize, grow: f32) {
+fn sweep<const D: usize>(keys: &mut impl Keys, pages: &[SweptPage<'_, D>], i: usize, grow: f32) {
     let (a, pass_a, box_a) = pages[i];
     let mut rows = pass_a;
     while rows != 0 {
@@ -1785,7 +1801,7 @@ enum Unit {
 
 impl Unit {
     /// Every unit of `table`, runs first.
-    fn of(table: &SideTable<'_>) -> impl Iterator<Item = Unit> {
+    fn of<const D: usize>(table: &Side<'_, D>) -> impl Iterator<Item = Unit> {
         let order = table.order;
         let big = (0..order.kind.len()).filter(move |&p| order.kind[p] != PageKind::Ordered && !table.rows[p].is_empty());
         (0..order.runs.len()).map(Unit::Run).chain(big.map(Unit::Big))
@@ -1798,17 +1814,17 @@ impl Unit {
 /// widest active page, bounds how far left of a unit one can start.
 /// `noted` gets each passive row a pair was found with.
 #[inline(always)]
-fn meet_unit(
+fn meet_unit<const D: usize>(
     keys: &mut impl Keys,
     noted: &mut impl FnMut(Entity),
-    (pages, widest, grow): (&[SweptPage<'_>], f32, f32),
-    table: &SideTable<'_>,
+    (pages, widest, grow): (&[SweptPage<'_, D>], f32, f32),
+    table: &Side<'_, D>,
     unit: Unit,
 ) {
     let order = table.order;
     // Passive page `p` (its box grown, `box_b`) against an active page
     // whose box meets it.
-    let mut visit = |keys: &mut _, (a, pass_a, box_a): SweptPage<'_>, p: usize, box_b: &Bounds| {
+    let mut visit = |keys: &mut _, (a, pass_a, box_a): SweptPage<'_, D>, p: usize, box_b: &Bounds<D>| {
         // The passive page's rows that reach the active one first: a big
         // page (a level's walls) meets every page near it, and few of
         // its rows reach any one of them.
@@ -1832,7 +1848,7 @@ fn meet_unit(
             }
         }
     };
-    let near = |unit: Bounds| {
+    let near = |unit: Bounds<D>| {
         let from = pages.partition_point(|p| p.2.min[0] < unit.min[0] - widest);
         pages[from..].iter().take_while(move |p| p.2.min[0] <= unit.max[0]).filter(move |p| meets(&p.2, &unit))
     };
@@ -1866,6 +1882,24 @@ pub fn near_pairs_with(workers: &Workers, active: &impl NearSide, passive: &impl
     let (mut act, mut pas) = (Vec::new(), Vec::new());
     active.spatial_tables(&mut act);
     passive.spatial_tables(&mut pas);
+    // Picked once a call: every page and row after is in one dimension's
+    // code. Tables of two dimensions meet nothing of each other's.
+    let dims = act.iter().chain(&pas).map(|t| t.order.dims()).next().unwrap_or(2);
+    assert!(act.iter().chain(&pas).all(|t| t.order.dims() == dims), "a broadphase is over tables of one dimension");
+    match dims {
+        3 => pairs_in::<3>(workers, &act, &pas, grow),
+        _ => pairs_in::<2>(workers, &act, &pas, grow),
+    }
+}
+
+fn pairs_in<'a, const D: usize>(workers: &Workers, act: &[SideTable<'a>], pas: &[SideTable<'a>], grow: f32) -> Vec<(Entity, Entity)>
+where
+    Axes<D>: Dims<D>,
+{
+    let typed = |t: &SideTable<'a>| -> Side<'a, D> {
+        Side { id: t.id, rows: t.rows, order: <Axes<D> as Dims<D>>::pages(t.order).expect("checked above"), filters: t.filters }
+    };
+    let (act, pas): (Vec<Side<'a, D>>, Vec<Side<'a, D>>) = (act.iter().map(typed).collect(), pas.iter().map(typed).collect());
     // A table matched twice (by two queries of a side, or by both sides)
     // pairs its rows twice, and a row in both with itself: the pairs are
     // made unique after, only then, since it's a pass over all of them.
@@ -1874,7 +1908,7 @@ pub fn near_pairs_with(workers: &Workers, active: &impl NearSide, passive: &impl
     let twice = ids.windows(2).any(|w| w[0] == w[1]);
     // Each active page in use. A filtered-out row still widens its page's
     // box, which only costs a test.
-    let mut pages: Vec<SweptPage<'_>> = Vec::new();
+    let mut pages: Vec<SweptPage<'_, D>> = Vec::new();
     // Each paired row's generation, by index: pairs are keyed by indices.
     let mut generation: Vec<u32> = Vec::new();
     let note = |generation: &mut Vec<u32>, e: Entity| {
@@ -2000,7 +2034,7 @@ fn pair_of(a: u32, b: u32) -> u64 {
 /// boxes meet, a row of `a` at a time against all of `b`'s at once.
 /// Returns whether it found any.
 #[inline(always)]
-fn cross(keys: &mut impl Keys, a: &Lanes, mut ma: u32, b: &Lanes, mb: u32, grow: f32) -> bool {
+fn cross<const D: usize>(keys: &mut impl Keys, a: &Lanes<D>, mut ma: u32, b: &Lanes<D>, mb: u32, grow: f32) -> bool {
     let before = keys.len();
     while ma != 0 {
         let x = ma.trailing_zeros() as usize;

@@ -31,7 +31,7 @@ use crate::events::EventQueue;
 use crate::ordered::{self, KeyOrder, OrderDesc};
 use crate::par::Executor;
 use crate::schema::{self, Field};
-use crate::spatial::{Resort, SPATIAL_PAGE_ROWS, SpatialDesc, SpatialPages};
+use crate::spatial::{ResortParts, SPATIAL_PAGE_ROWS, SpatialDesc, SpatialOrder};
 
 /// Rows per page: the unit of borrowing for data parallelism, and where a
 /// table grows.
@@ -209,6 +209,9 @@ pub struct ComponentInfo {
     /// Whether this component keeps its tables in spatial order: fixed at
     /// its first declaration, like its storage.
     pub spatial: bool,
+    /// A spatial key's dimensions (2 or 3; 0 if it isn't one): fixed like
+    /// `spatial`, since its tables' orders are made in them.
+    pub dims: usize,
     /// Whether this component keeps its tables sorted by it: fixed like
     /// `spatial`.
     pub ordered: bool,
@@ -270,7 +273,7 @@ pub struct OrderedTable {
 
 pub struct SpatialTable {
     pub key: ComponentId,
-    pub pages: RwLock<SpatialPages>,
+    pub pages: RwLock<SpatialOrder>,
 }
 
 impl Table {
@@ -469,6 +472,12 @@ impl World {
                     if info.spatial { "" } else { "not " }
                 ));
             }
+            if info.dims != desc.spatial.map_or(0, |s| s.dims()) {
+                return Err(format!(
+                    "{} is kept in {}D, and this build says otherwise; restart the engine to change it",
+                    desc.name, info.dims
+                ));
+            }
             return Ok(id);
         }
         if desc.spatial.is_some() && desc.storage == Storage::Sparse {
@@ -483,6 +492,7 @@ impl World {
             name: desc.name.into(),
             storage: desc.storage,
             spatial: desc.spatial.is_some(),
+            dims: desc.spatial.map_or(0, |s| s.dims()),
             ordered: desc.order.is_some(),
             installed: RwLock::new(None),
             sparse: OnceLock::new(),
@@ -676,7 +686,7 @@ impl World {
             .iter()
             .copied()
             .find(|&c| self.component(c).spatial)
-            .map(|key| SpatialTable { key, pages: RwLock::new(SpatialPages::default()) });
+            .map(|key| SpatialTable { key, pages: RwLock::new(SpatialOrder::new(self.component(key).dims)) });
         let page_rows = if spatial.is_some() { SPATIAL_PAGE_ROWS } else { PAGE_ROWS };
         let ordered = spatial
             .is_none()
@@ -866,7 +876,7 @@ struct LockedTable<'w> {
     table: &'w Table,
     rows: RwLockWriteGuard<'w, Vec<Vec<Entity>>>,
     columns: Vec<RwLockWriteGuard<'w, Vec<ErasedColumn>>>,
-    spatial: Option<RwLockWriteGuard<'w, SpatialPages>>,
+    spatial: Option<RwLockWriteGuard<'w, SpatialOrder>>,
     ordered: Option<RwLockWriteGuard<'w, KeyOrder>>,
 }
 
@@ -875,7 +885,7 @@ impl LockedTable<'_> {
     /// `Structural` drops.
     fn touch(&mut self) {
         if let Some(pages) = &mut self.spatial {
-            pages.dirty = true;
+            pages.mark();
         }
         if let Some(order) = &mut self.ordered {
             order.dirty = true;
@@ -1198,26 +1208,24 @@ impl Drop for Structural<'_> {
                 }
                 .run();
             }
-            let Some(pages) = t.spatial.as_mut().filter(|p| p.dirty) else { continue };
+            let Some(pages) = t.spatial.as_mut().filter(|p| p.dirty()) else { continue };
             let spatial = t.table.spatial.as_ref().expect("a spatial table");
             let desc = world.spatial_desc(spatial.key).expect("an installed spatial key");
             let key = t.table.column_index(spatial.key).expect("the key's own table");
             // The extent is read only as the layout the glue was built for.
             let extent =
                 world.id(desc.extent).filter(|&x| world.installed_as(x, desc.extent_fingerprint)).and_then(|x| t.table.column_index(x));
-            Resort {
+            pages.resort(ResortParts {
                 table: t.table.id,
                 rows: &mut t.rows,
                 columns: t.columns.iter_mut().map(|c| &mut **c).collect(),
-                pages,
                 key,
                 extent,
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),
                 workers: crate::par::Workers::new(world.executor()),
-            }
-            .run();
+            });
         }
     }
 }
@@ -1227,7 +1235,7 @@ impl Drop for Structural<'_> {
 pub struct TableRead<'w> {
     pub table: &'w Table,
     pub rows: RwLockReadGuard<'w, Vec<Vec<Entity>>>,
-    pub spatial: Option<RwLockReadGuard<'w, SpatialPages>>,
+    pub spatial: Option<RwLockReadGuard<'w, SpatialOrder>>,
     pub ordered: Option<RwLockReadGuard<'w, KeyOrder>>,
 }
 
