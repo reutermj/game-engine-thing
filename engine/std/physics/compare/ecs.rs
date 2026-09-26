@@ -65,6 +65,15 @@ impl Ecs {
     }
 }
 
+impl Ecs {
+    /// Bodies physics has asleep: its count, which its tests check against
+    /// the world's sleeping tables.
+    #[allow(dead_code)] // The quality tests read it; the comparison doesn't.
+    pub fn asleep(&self) -> usize {
+        field(&self.engine.send("physics", "sleeping").unwrap(), "asleep") as usize
+    }
+}
+
 impl Drop for Ecs {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);

@@ -137,7 +137,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
   `physics/compare` runs it beside Box2D and Rapier, fetched for that
-  package alone (runbook 005, [docs/CREDITS.md](docs/CREDITS.md)).
+  package alone (runbook 005, [docs/CREDITS.md](docs/CREDITS.md)); its
+  `:quality_test` (and 3D's in `bench/physics3d`) bounds how soon ours
+  settles and how deep it sinks by what they meet (physics.md, "Quality
+  as a test").
   `physics3d` is experimental: 3D spheres and boxes that turn, a mod like
   `physics` (its settings, `Gravity` and `Tuning`, in the world), on 3D
   spatial storage, with `pile3d`, a scene mod that builds the comparison's

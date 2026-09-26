@@ -66,6 +66,10 @@ pub enum Kind {
     /// fits badly.
     PlankPile,
     Rain,
+    /// Unit cubes stacked `n` high on a floor, each set off by up to 0.04
+    /// so the column leans a little: whether turning boxes stand it or rock
+    /// on their edges (2D's `Scene::Stack`).
+    Stack,
 }
 
 impl Kind {
@@ -75,11 +79,12 @@ impl Kind {
             Kind::BoxPile => "boxes",
             Kind::PlankPile => "planks",
             Kind::Rain => "rain",
+            Kind::Stack => "stack",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain].into_iter().find(|k| k.name() == s)
+        [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain, Kind::Stack].into_iter().find(|k| k.name() == s)
     }
 }
 
@@ -107,6 +112,7 @@ pub fn build(kind: Kind, n: usize) -> Scene {
         Kind::BoxPile => pile(kind, n, |_| Shape::Box([HALF; 3])),
         Kind::PlankPile => pile(kind, n, |_| Shape::Box(PLANK)),
         Kind::Rain => rain(n),
+        Kind::Stack => stack(n),
     }
 }
 
@@ -235,5 +241,22 @@ fn rain(n: usize) -> Scene {
         steps,
         phases: vec![("raining", 1..last_spawn), ("after rain", last_spawn..steps), ("settled", steps - 100..steps)],
         bounds: ([-floor, -0.1, -floor], [floor, f32::MAX, floor]),
+    }
+}
+
+fn stack(n: usize) -> Scene {
+    let off = |i: usize, k: usize| ((i * k) % 9) as f32 / 100.0 - 0.04;
+    let bodies = (0..n)
+        .map(|i| Spec { shape: Shape::Box([HALF; 3]), pos: [off(i, 7919), 0.5 + i as f32, off(i, 104_729)], vel: [0.0; 3], fixed: false })
+        .collect();
+    let steps = 1000;
+    Scene {
+        kind: Kind::Stack,
+        n,
+        statics: vec![fixed_box([0.0, -0.5, 0.0], [10.0, 0.5, 10.0])],
+        spawn: vec![bodies],
+        steps,
+        phases: vec![("standing", 1..steps)],
+        bounds: ([-10.0, -0.1, -10.0], [10.0, f32::MAX, 10.0]),
     }
 }

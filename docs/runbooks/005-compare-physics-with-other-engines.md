@@ -50,8 +50,10 @@ more than one scene before reading a difference into them.
 rain): each engine stepped that far and looked at every 10 steps, the
 step it was first at rest (every body under 0.05, the sleep threshold)
 and the step it stayed at rest from, fastest body at 100, 200 and 400,
-energy and deepest overlap at 400 and at the end, and for pyramids how far
-the top box moved. `TRACE=1` with it names the body that moved again. The
+energy and deepest overlap at 400 and at the end, the deepest and mean
+overlap at any look, contacts a body, islands, tilt, escapes, and for
+pyramids and stacks how far the top box moved. `TRACE=1` with it names
+the body that moved again. The
 `arrays:` variants are other solvers on the arrays, listed in
 `engine/std/physics/compare/variants.rs`: the split-impulse solver the
 soft step replaced (`split`, with friction on its pseudo velocities or a
@@ -72,6 +74,30 @@ Check before trusting a run:
   (see the lore on the 41-wide pile).
 
 Record what changed in physics.md, "Against other engines", with the date.
+
+## Refreshing the quality tests' bounds
+
+The quality tests (physics.md, "Quality as a test") hold ours to bounds
+set from the references' values on the same scenes, recorded beside each
+bound in `quality_test.rs` and `quality_long.rs` here and in
+`//bench/physics3d`. After bumping a library, or changing a scene, measure
+them again and set each bound by the rules in physics.md:
+
+```sh
+# 2D, the default suite's scenes, and the long ones
+ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run -c opt //engine/std/physics/compare
+ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run -c opt //engine/std/physics/compare
+# 3D
+./bazel run -c opt //bench/physics3d:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
+./bazel run -c opt //bench/physics3d:bench -- boxes 200,300,400,500 all --runs=1
+./bazel run -c opt //bench/physics3d:bench -- stack 5,10,15,20 all --rotate --runs=1
+./bazel run -c opt //bench/physics3d:bench -- boxes,planks 10000 all --rotate --runs=1
+```
+
+The quality numbers are deterministic, so one run each; about 5 minutes
+for 2D's small scenes, 15 for its long ones, and 25 for 3D's. A bound
+that ours no longer meets is a finding: a bead and an ignored test, never
+a looser bound.
 
 ## Bumping a library
 

@@ -46,6 +46,11 @@ pub enum Scene {
     /// Unit boxes in a pyramid `base` wide at the bottom, resting flush on
     /// a floor and on each other, as Box2D's pyramid benchmark stands.
     Pyramid { base: u32 },
+    /// Unit boxes `n` high, flush on a floor and on each other, each set off
+    /// sideways by up to 0.04 so the column leans a little: whether bodies
+    /// that turn stand it, or rock on their corners (Box2D's vertical stack
+    /// sample, which it offsets likewise).
+    Stack { n: u32 },
     /// Circles falling into the pile's box, `n / RAIN_LIFE` a step, each
     /// removed `RAIN_LIFE` steps after it came, so `n` are alive once it's
     /// full and contacts begin and end all the time. Only circles: boxes
@@ -71,6 +76,7 @@ impl Scene {
             "pile" => Some(Scene::Pile { n: num(1)? as u32, width: num(2)?, stagger: true }),
             "columns" => Some(Scene::Pile { n: num(1)? as u32, width: num(2)?, stagger: false }),
             "pyramid" => Some(Scene::Pyramid { base: num(1)? as u32 }),
+            "stack" => Some(Scene::Stack { n: num(1)? as u32 }),
             "rain" => Some(Scene::Rain { n: num(1)? as u32, width: num(2)? }),
             _ => None,
         }
@@ -82,6 +88,7 @@ impl Scene {
             Scene::Pile { n, width, stagger: true } => format!("pile {n} {width}"),
             Scene::Pile { n, width, stagger: false } => format!("columns {n} {width}"),
             Scene::Pyramid { base } => format!("pyramid {base}"),
+            Scene::Stack { n } => format!("stack {n}"),
             Scene::Rain { n, width } => format!("rain {n} {width}"),
         }
     }
@@ -125,6 +132,25 @@ impl Scene {
                 }
                 v
             }
+            Scene::Stack { n } => {
+                let mut v = vec![wall(0.0, 0.5, 10.0, 0.5)];
+                for i in 0..n {
+                    let x = ((i * 7919) % 9) as f32 / 100.0 - 0.04;
+                    v.push(Spec {
+                        dynamic: true,
+                        circle: false,
+                        x,
+                        y: -0.5 - i as f32,
+                        hx: 0.5,
+                        hy: 0.5,
+                        vx: 0.0,
+                        vy: 0.0,
+                        friction: 0.6,
+                        restitution: 0.0,
+                    });
+                }
+                v
+            }
             Scene::Rain { width, .. } => pile_walls(width),
         }
     }
@@ -160,6 +186,7 @@ impl Scene {
         match *self {
             Scene::Pile { width, .. } | Scene::Rain { width, .. } => x < 0.0 || x > width || y > HEIGHT || y < -HEIGHT / 2.0,
             Scene::Pyramid { base } => y > 0.0 || x.abs() > base as f32 + 10.0,
+            Scene::Stack { .. } => y > 0.0 || x.abs() > 10.0,
         }
     }
 }

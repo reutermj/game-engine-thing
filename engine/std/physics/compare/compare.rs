@@ -20,7 +20,7 @@
 //! `box2d:<substeps>`, `rapier:<iterations>`, and `arrays:<solver>`, our
 //! step with another solver from `variants.rs`), `SETTLE=<steps>` (how
 //! soon each comes to rest instead of the timings; `TRACE=1` names what
-//! moves again). What it found: docs/architecture/physics.md, "Against
+//! moves again; `SCENES=pile 800 41,stack 10` other scenes). What it found: docs/architecture/physics.md, "Against
 //! other engines" and "Settling".
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
@@ -33,6 +33,8 @@ mod narrow;
 mod quality;
 mod rapier;
 mod scene;
+mod settle;
+mod sim;
 #[path = "../solver.rs"]
 mod solver;
 #[allow(dead_code)] // The constants and tests only the experiments use.
@@ -43,53 +45,10 @@ mod variants;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+pub use sim::{Dyn, Sim};
+
 use quality::Quality;
 use scene::{RAIN_LIFE, Scene};
-
-/// A dynamic body as every engine reports it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Dyn {
-    pub circle: bool,
-    pub hx: f32,
-    pub hy: f32,
-    pub x: f32,
-    pub y: f32,
-    pub vx: f32,
-    pub vy: f32,
-    /// Radians: 0 always where rotation is locked, or a body turned that
-    /// should have been locked.
-    pub angle: f32,
-    /// Radians a second.
-    pub w: f32,
-}
-
-impl Dyn {
-    /// How fast it moves: its center, or its edge if that's faster, as
-    /// sleeping goes by in ours and Box2D.
-    pub fn speed(&self) -> f32 {
-        let reach = if self.circle { self.hx } else { self.hx.hypot(self.hy) };
-        (self.vx * self.vx + self.vy * self.vy).sqrt().max(self.w.abs() * reach)
-    }
-}
-
-/// One engine running one scene.
-pub trait Sim {
-    fn label(&self) -> String;
-    fn step(&mut self, n: u32);
-    /// Adds a rain step's arrivals and removes the oldest past `alive`.
-    fn rain(&mut self, arrivals: &[scene::Spec], alive: usize);
-    /// The dynamic bodies, in the order they came.
-    fn bodies(&self) -> Vec<Dyn>;
-    fn reset(&mut self);
-    /// µs spent since `reset`: `broadphase`, `narrowphase` and `solver`
-    /// first, as each engine's stages best map to them, then its own
-    /// stages under its prefix, and `engine step`, the step as timed.
-    fn stages(&self) -> Vec<(String, f64)>;
-    /// Contacts the engine is solving that touch.
-    fn contacts(&self) -> usize;
-    /// Its own counts, for the notes.
-    fn native(&self) -> String;
-}
 
 struct Case {
     name: String,
@@ -262,6 +221,18 @@ fn main() {
         // while: the churn of a steady state.
         cases.push(Case { turning: false, name: format!("rain {n}"), scene: Scene::Rain { n, width }, warmup: RAIN_LIFE + 240, steps: 60 });
     }
+    // `SCENES`: these scenes (`Scene::parse`, separated by commas) in place
+    // of the cases above, 400 steps in, as the quality tests' bounds are
+    // measured on (`quality_test.rs`).
+    if let Some(scenes) = env("SCENES") {
+        cases = scenes
+            .split(",")
+            .map(|t| {
+                let scene = Scene::parse(t).unwrap_or_else(|| panic!("SCENES: no scene {t:?}"));
+                Case { turning: false, name: scene.text(), scene, warmup: 400, steps: 60 }
+            })
+            .collect();
+    }
     // `TURN=0`: rotation locked everywhere, as the comparison was until
     // rotation (the default is both); `TURN=1`: only bodies that turn;
     // `TURN=2`: locked, ours with a `Rotation` on every body (see `ecs.rs`).
@@ -299,12 +270,8 @@ fn main() {
     }
 }
 
-/// Below this every body counts as at rest: the sleep threshold of ours
-/// and of Box2D.
-const REST: f32 = 0.05;
-
 /// How soon each engine comes to rest on each case's scene (rain left
-/// out): stepped `max` steps, looked at every 10.
+/// out): stepped `max` steps, looked at every 10 (`settle.rs`).
 fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
     let mut seen = Vec::new();
     for case in cases {
@@ -314,67 +281,24 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
         seen.push((case.scene, case.turning));
         let turning = if case.turning { ", turning" } else { "" };
         println!("### settling: {}{turning}, {max} steps\n", case.scene.text());
+        print!("| engine | first at rest / at rest from step | fastest at 100 / 200 / 400 | energy at 400 | deepest at 400 (over 0.01) ");
         println!(
-            "| engine | first at rest / at rest from step | fastest at 100 / 200 / 400 | energy at 400 | deepest at 400 (over 0.01) | deepest / mean at end (over 0.01) | energy at end | top moved | µs a step |"
+            "| deepest / mean at end (over 0.01) | energy at end | deepest / mean during | contacts a body, islands | tilt ° | escaped | top moved | µs a step |"
         );
-        println!("|---|---|---|---|---|---|---|---|---|");
-        let start: Vec<Dyn> = case
-            .scene
-            .build()
-            .iter()
-            .filter(|s| s.dynamic)
-            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 })
-            .collect();
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (_, make) in engines {
             let mut sim = make(&case.scene, case.turning);
-            let (mut rest_from, mut first_rest, mut fastest) = (None, None, Vec::new());
-            let mut q400 = None;
-            let mut wall = 0.0;
-            let mut step = 0;
-            while step < max {
-                let t = Instant::now();
-                sim.step(10);
-                wall += t.elapsed().as_secs_f64();
-                step += 10;
-                let bodies = sim.bodies();
-                let top = bodies.iter().map(Dyn::speed).fold(0.0, f32::max);
-                if top < REST {
-                    rest_from.get_or_insert(step);
-                    first_rest.get_or_insert(step);
-                } else {
-                    if rest_from.is_some() && std::env::var_os("TRACE").is_some() {
-                        let (i, b) = bodies.iter().enumerate().max_by(|a, b| a.1.speed().total_cmp(&b.1.speed())).unwrap();
-                        eprintln!("{}: moving again at {step}: body {i} at {:.2}, {:.2} at {top:.3}", sim.label(), b.x, b.y);
-                    }
-                    rest_from = None;
-                }
-                if [100, 200, 400].contains(&step) {
-                    fastest.push(top);
-                }
-                if step == 400 {
-                    q400 = Some(quality::measure(&case.scene, &bodies, case.turning));
-                }
-            }
-            let bodies = sim.bodies();
-            let q = quality::measure(&case.scene, &bodies, case.turning);
-            let q400 = q400.unwrap_or_default();
-            let top = match case.scene {
-                Scene::Pyramid { .. } => format!("{:.3}", bodies.last().unwrap().y - start.last().unwrap().y),
-                _ => "–".into(),
-            };
+            let s = settle::settle(sim.as_mut(), &case.scene, case.turning, max);
+            let (q, q400) = (&s.end, &s.at400);
             let at = |s: Option<u32>| s.map_or("never".to_string(), |s| s.to_string());
-            let rest = format!("{} / {}", at(first_rest), at(rest_from));
-            let fast: Vec<String> = fastest.iter().map(|f| format!("{f:.3}")).collect();
-            print!("| {} | {rest} | {} | {:.1e} | {:.4} ({}) ", sim.label(), fast.join(" / "), q400.energy, q400.max_depth, q400.deep);
-            println!(
-                "| {:.4} / {:.4} ({}) | {:.1e} | {top} | {:.0} |",
-                q.max_depth,
-                q.mean_depth,
-                q.deep,
-                q.energy,
-                wall * 1e6 / step as f64
-            );
-            eprintln!("settle {}: {} rest from {rest}", case.scene.text(), sim.label());
+            let rest = format!("{} / {}", at(s.first_rest), at(s.rest_from));
+            let fast: Vec<String> = s.fastest.iter().map(|f| format!("{f:.3}")).collect();
+            let top = s.top_moved.map_or("–".to_string(), |t| format!("{t:.3}"));
+            print!("| {} | {rest} | {} | {:.1e} | {:.4} ({}) ", s.label, fast.join(" / "), q400.energy, q400.max_depth, q400.deep);
+            print!("| {:.4} / {:.4} ({}) | {:.1e} ", q.max_depth, q.mean_depth, q.deep, q.energy);
+            print!("| {:.4} / {:.4} | {:.2}, {} ", s.deepest_during, s.mean_during, q.contacts_per_body, q.islands);
+            println!("| {:.1} | {} | {top} | {:.0} |", q.tilt, q.escaped, s.us);
+            eprintln!("settle {}{turning}: {} rest from {rest}", case.scene.text(), s.label);
         }
         println!();
     }

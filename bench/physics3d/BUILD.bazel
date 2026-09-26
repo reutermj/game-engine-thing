@@ -92,3 +92,28 @@ rust_test(
     srcs = ["smoke_test.rs"],
     deps = [":physics3d"],
 )
+
+# Quality as a test: how soon piles of the physics3d mod come to rest, how
+# deep they sink and whether stacks stand, against bounds from what Rapier
+# and Box3D meet on the same scenes (the source has the values; physics.md,
+# "Quality as a test"). TUNE=(a physics3d::Tuning) runs ours tuned so.
+rust_test(
+    name = "quality_test",
+    srcs = ["quality_test.rs"],
+    crate_root = "quality_test.rs",
+    deps = [":physics3d"],
+)
+
+# The same at 1000 and 10 000 bodies: minutes, so manual, and meant for -c opt:
+#   ./bazel test -c opt //bench/physics3d:quality_long_test
+rust_test(
+    name = "quality_long_test",
+    srcs = [
+        "quality_long.rs",
+        "quality_test.rs",
+    ],
+    crate_features = ["long"],
+    crate_root = "quality_test.rs",
+    tags = ["manual"],
+    deps = [":physics3d"],
+)

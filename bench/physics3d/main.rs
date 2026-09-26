@@ -91,14 +91,14 @@ fn report(scene: &Scene, runs: usize, results: &[(Run, Vec<f64>)]) {
     }
     println!();
     println!(
-        "| backend | native pairs/body | geometric pairs/body | partners/body | contacts 0..8+ | not columns | pen max | pen mean | settled at step | escaped | moving | max speed | KE | mean y |"
+        "| backend | native pairs/body | geometric pairs/body | partners/body | contacts 0..8+ | not columns | pen max | pen mean | settled at step | escaped | moving | max speed | KE | KE a body | mean y | pen max / mean during | tilt ° | top moved |"
     );
-    println!("|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for (run, _) in results {
         let q = &run.quality;
         let hist: Vec<String> = q.histogram.iter().map(|c| c.to_string()).collect();
         println!(
-            "| {} | {:.2} | {:.2} | {:.2} | {} | {:.2} of {} | {:.4} | {:.4} | {} | {} | {} | {:.3} | {:.3} | {:.2} |",
+            "| {} | {:.2} | {:.2} | {:.2} | {} | {:.2} of {} | {:.4} | {:.4} | {} | {} | {} | {:.3} | {:.3} | {:.1e} | {:.2} | {:.4} / {:.4} | {:.1} | {:.3} |",
             run.backend,
             run.native_touching as f64 / q.bodies.max(1) as f64,
             q.pairs as f64 / q.bodies.max(1) as f64,
@@ -113,7 +113,12 @@ fn report(scene: &Scene, runs: usize, results: &[(Run, Vec<f64>)]) {
             q.moving,
             q.max_speed,
             q.kinetic_energy,
+            q.kinetic_energy / q.bodies.max(1) as f64,
             q.mean_height,
+            run.pen_max_during,
+            run.pen_mean_during,
+            q.tilt,
+            run.top_moved,
         );
     }
     println!();

@@ -167,6 +167,9 @@ pub struct Quality {
     pub kinetic_energy: f64,
     pub mean_height: f64,
     pub escaped: usize,
+    /// The most any box is turned from lying on a face, in degrees (0 to
+    /// about 55): how far a stack has toppled.
+    pub tilt: f32,
 }
 
 /// How fast any point of the body moves, at most: its speed and its turn
@@ -224,6 +227,12 @@ pub fn quality(scene: &Scene, shapes: &[Shape], state: &[State]) -> Quality {
         q.moving += (speed >= REST_SPEED) as usize;
         q.kinetic_energy += energy(s, shape);
         q.mean_height += p[1] as f64;
+        if let Shape::Box(_) = shape {
+            let up = (0..3)
+                .map(|k| rotate(s.rot, [(k == 0) as u8 as f32, (k == 1) as u8 as f32, (k == 2) as u8 as f32])[1].abs())
+                .fold(0.0, f32::max);
+            q.tilt = q.tilt.max(up.min(1.0).acos().to_degrees());
+        }
         if (0..3).any(|k| p[k] < lo[k] || p[k] > hi[k]) {
             q.escaped += 1;
         }
@@ -244,7 +253,17 @@ pub struct Run {
     pub quality: Quality,
     /// The engine's own touching count at the end.
     pub native_touching: usize,
+    /// The deepest overlap, and the greatest mean, at any look (every
+    /// `LOOK` steps): sinking while it settles, landing included.
+    pub pen_max_during: f32,
+    pub pen_mean_during: f32,
+    /// How far the last body added (a stack's top) is from where it began.
+    pub top_moved: f32,
 }
+
+/// Steps between looks at overlap during a run: often enough to see a
+/// pile sink, rarely enough not to cost more than the step at 10 000.
+pub const LOOK: usize = 10;
 
 impl Run {
     pub fn phase_ms(&self, range: &std::ops::Range<usize>) -> f64 {
@@ -264,6 +283,7 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
     let mut step_us = Vec::with_capacity(scene.steps);
     let mut stages: Vec<(&'static str, f64)> = Vec::new();
     let mut last_moving = None;
+    let (mut pen_max_during, mut pen_mean_during) = (0.0f32, 0.0f32);
     for step in 0..scene.steps {
         if let Some(batch) = scene.spawn.get(step)
             && !batch.is_empty()
@@ -286,6 +306,10 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         if state.iter().zip(&shapes).any(|(s, &shape)| speed(s, shape) >= REST_SPEED) {
             last_moving = Some(step);
         }
+        if step % LOOK == LOOK - 1 {
+            let q = quality(scene, &shapes, &state);
+            (pen_max_during, pen_mean_during) = (pen_max_during.max(q.pen_max), pen_mean_during.max(q.pen_mean));
+        }
     }
     for s in &mut stages {
         s.1 /= scene.steps as f64;
@@ -303,5 +327,11 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         settled_at,
         quality: quality(scene, &shapes, &state),
         native_touching: backend.touching(),
+        pen_max_during,
+        pen_mean_during,
+        top_moved: match (scene.spawn.iter().flatten().last(), state.last()) {
+            (Some(a), Some(b)) => len([b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2]]),
+            _ => 0.0,
+        },
     }
 }

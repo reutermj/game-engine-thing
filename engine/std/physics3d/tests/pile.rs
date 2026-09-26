@@ -59,7 +59,7 @@ engine_api::mod_state! {
     }
 }
 
-const KINDS: [Kind; 4] = [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain];
+const KINDS: [Kind; 5] = [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain, Kind::Stack];
 
 fn collider(s: Shape) -> Collider {
     match s {

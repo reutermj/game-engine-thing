@@ -2445,6 +2445,136 @@ storage takes two extents, and physics3d uses them (choice 5).
     floats a body held twice (there and in the page lanes), and a write
     the solve had to remember. Its measurements are the table above.
 
+## Quality as a test
+
+**Status: built** (2026-09-26, get-emj.37). How soon a scene comes to rest,
+how deep it sinks while it does and once it has, what energy is left,
+whether stacks and pyramids stand and nothing escapes, and that sleeping
+then follows, are tests, in 2D and 3D, locked and turning, bounded by what
+the reference engines meet on the same scenes. Until then the tests asked
+whether a pile came to rest eventually, on a pile that stood in columns,
+and a solver that crept for thousands of steps passed them
+([Settling](#settling)).
+
+| target | what | runtime |
+|---|---|---|
+| `//engine/std/physics/compare:quality_test` | 2D: piles 400-1200, pyramids 120-325, stacks 10 and 20, sleeping, the mod bit for bit the arrays | 6.7 s (fastbuild) |
+| `//engine/std/physics/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid | 37 s at `-c opt` |
+| `//bench/physics3d:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 10-20 | 21 s, the slowest pile (500 planks) 19 s (fastbuild) |
+| `//bench/physics3d:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000 | 99 s at `-c opt`, the known failures included |
+
+**What runs.** The comparisons' own scenes and measures, not copies: 2D's
+`scene.rs` (a `Stack` scene added), `quality.rs` and `settle.rs` (the
+settling loop `SETTLE` prints, which the tests call), 3D's `scenes.rs` (a
+`Stack` kind added) and `measure.rs` (overlap now also looked at every 10
+steps while settling, and a stack's top and tilt). A bound is then the
+same number the comparison prints for Box2D, Rapier, Box3D and Jolt. 2D
+runs on the arrays, bit for bit the mod (`the_mod_is_the_arrays_bit_for_bit`
+holds that in the suite; before, only the comparison checked it, when run),
+so `SOLVER=<variant>` can put any of `variants.rs` in its place; sleeping,
+which the arrays don't have, runs on the mod. 3D runs the mod in the
+engine, `TUNE=<Tuning>` tuning it.
+
+**The measures**, each from positions and velocities alone, as every
+engine is measured:
+
+- **Steps to rest**: the look (every 10 steps) from which every body, at
+  its farthest point, stays under 0.05, the sleep threshold, to the end of
+  the run (700 steps in 2D, 2500 at 10 000; the bench's 1000 and 1500 in
+  3D).
+- **Overlap**: the deepest and the mean over touching pairs at the end, and
+  the worst of each at any look while settling, landings included.
+- **Energy** at the end, moving and turning, a body.
+- **Standing**: how far a pyramid's or a stack's top box moved, the most any
+  box leans, bodies out of the scene.
+- **That it is a pile**: contacts a body and islands in 2D, partners a body
+  and the share not in columns in 3D. A scene that went back to columns
+  (docs/lore) fails as not a pile, not as settling well.
+- **Sleeping**: every body of a pile of 1000 asleep within half a second
+  (the sleep time) of the rest bound.
+
+**How the bounds are set.** Options weighed for each:
+
+- *Steps to rest.* Bounding one run fails on noise: rest moves by 100-200
+  steps with rounding alone (docs/lore), and so does the references'. A
+  bound at the references' worst run is loose where one of theirs is an
+  outlier: Box3D rests turning planks at 209-302 steps, but at 823 at 200
+  planks. So piles run at several sizes (each size its own drop), and the
+  bound is on the distribution: **the worst of ours within twice, and the
+  median of ours within a quarter over, the later of the references'
+  medians over the sizes.** Pyramids and stacks stand and don't move with
+  rounding: one scene each, within twice the later reference.
+- *Depth.* A bound at the references' depth would let ours sink to theirs
+  unnoticed, and sinking a quarter to a fifth as deep is what the stiffer
+  contacts were chosen for ([Settling](#settling), choice 6 in 3D): **half
+  the shallower reference's worst** at rest, and a stack's or pyramid's top
+  within half the smaller reference's sinking. While settling, where every
+  engine lands as deep (push-out capped at 3 u/s in all), **a quarter over
+  the references' worst**, and the mean **within the shallower
+  reference's**.
+- *Energy.* **Ten times the references' worst** over the runs they came to
+  rest on (a pile that breathes isn't at rest), and never under 1e-8 a body,
+  below which it is rounding (every body under about 1e-4).
+- *Which references.* Box2D and Rapier in 2D. Rapier and Box3D in 3D, the
+  soft steps ours is one of; Jolt, whose hard contacts rest a turning box
+  pile last (502-1413) and a locked one first, is recorded beside them.
+
+**The bounds and what they came from** (2026-09-26; each test's comment
+has every reference value, by size). Rest in steps; the references' medians
+over the sizes, then ours, worst / median:
+
+| scene | references (median rest) | bound: worst / median | ours: worst / median | depth at rest: shallower reference / bound / ours |
+|---|---|---|---|---|
+| 2D pile 400-1200, locked | Box2D 200, Rapier 160 | 400 / 250 | 240 / 210 | 0.057 / 0.028 / 0.014 |
+| 2D pile 400-1200, turning | Box2D 210, Rapier 250 | 500 / 312 | 440 / 290 | 0.099 / 0.049 / 0.024 |
+| 2D pile 9000-11 000, locked | Box2D 200, Rapier 200 | 400 / 250 | 300 / 230 | 0.058 / 0.029 / 0.016 |
+| 2D pile 9000-11 000, turning | rest from Box2D 1760, Rapier 2490, neither staying at rest; first at rest 330, 430 | rest from 2490 / 1760, first at rest 860 / 537 | rest from 1620 / 350, first at rest 450 / 350 | 0.095 / 0.048 / 0.027 |
+| 3D cubes 200-500, turning | Rapier 203, Box3D 219 | 438 / 273 | 200 / 187 | 0.014 / 0.007 / 0.0055 |
+| 3D cubes 200-500, locked | Rapier 127, Box3D 250 | 500 / 312 | 83 / 69 | 0.0021 / 0.0011 / 0.0006 |
+| 3D planks 200-500, turning | Rapier 267, Box3D 302 | 604 / 377 | 354 / 341 | 0.031 / 0.015 / 0.0058 |
+| 3D cubes 1000 / 10 000, turning | Rapier 304 / 716, Box3D 299 / 713 | 608 / 1432 | 180 / 374 | 0.022, 0.042 / 0.011, 0.021 / 0.007, 0.013 |
+
+Stacks and pyramids rest within 10-30 steps in every engine but Box2D's
+turning 10-high stack (100); ours rest in 10-30, their tops sink a third as
+far (a 25-wide turning pyramid 0.017 lower where both references' are
+0.094), and nothing leans more than 0.1°.
+
+**Known failures**, each an ignored test naming its bead (run them with
+`--test_arg=--include-ignored`), not a looser bound:
+
+- **A 20-high stack of turning boxes in 2D rocks** (get-emj.41): at rest
+  for good only from 580 (880 over 1500 steps), energy 1.2e-5 a body at
+  step 700, where Rapier's rests from 220 (Box2D topples it).
+- **A five-high stack of turning cubes in 3D never rests** (get-emj.42):
+  two cubes still at 0.09 at step 1000, where Rapier and Box3D rest at
+  once; 10, 15 and 20 high it rests by 2-18.
+- **Turning planks in 3D** (get-emj.43): at 200-500 they rest in time but
+  keep up to 1e4 times the references' energy (1.4e-7 a body against under
+  1e-11: some still rock at about 5e-4); at 1000 they rest at 408 against
+  278 and 262; at 10 000 six never rest where Rapier and Box3D do by 392
+  and 369.
+
+**What the tests catch** (mutation-checked, 2026-09-26: each bug planted in
+the source, or chosen by `SOLVER`/`TUNE`, and the default suite run):
+
+| planted | 2D: fails | 3D: fails | survives |
+|---|---|---|---|
+| the split impulse this step replaced (`SOLVER=split`) | piles (never at rest at 1000 and 1200; 620 at 800; energy 1e-2), pyramids and stacks (twice the depth) | – | sleeping (the mod), bit for bit |
+| one relax pass, not two | piles (rest 510-never at 1000-1200), the turning stack, sleeping | locked cubes, planks, stacks | pyramids, locked stacks; 3D turning cubes |
+| softer contacts (30 Hz, the references' stiffness) | every pile, pyramid and stack, on depth | every test | – |
+| no warm starting | every test | every test | bit for bit |
+| contacts ignoring rotation (a point's separation not following its arms) | the turning stack (energy), a solver unit test | planks (rest 989) | 2D piles and pyramids; 3D cubes and stacks |
+| the separation to first order in the turn (3D `anchors=linear`) | – | planks (rest 950-998) | cubes, stacks |
+| sleeping ten times slower to take | sleeping | – | – |
+| piles dropped unstaggered, or in a lattice (columns) | piles, as not a pile (1.0 contacts a body, 31-32 islands) | cube and plank piles, as not a pile (0.00 not columns) | – |
+
+Contacts ignoring rotation is the weakest catch, as measured before
+([Rotation in the soft step](#rotation-in-the-soft-step): `sep=2` moves a
+1000-pile's rest within the noise, and a 10 000 pile's threefold): at the
+default suite's sizes only a stack's energy and planks see it.
+`:quality_long_test`'s turning 10 000 piles are where it shows: one of
+the three never rests.
+
 ## Open questions
 
 - **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation
