@@ -225,6 +225,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   reload sequence, or migration; runbooks 002-004 say how to run them. The
   default suite runs on every change. When a long check is skipped, say
   which and why; when one is warranted, say so before starting it.
+- **Credit what we build on.** Every library we compare against or take
+  an idea from has a section in [docs/CREDITS.md](docs/CREDITS.md):
+  project, authors and license as its own files state them, what we use it
+  for. Its license text travels with whatever links it, and code that
+  implements an idea from one (speculative contacts, the split impulse, a
+  graph-colored solve) names the source in a comment.
 - **`./bazel test` lints.** Clippy runs over every Rust target a test run
   builds (`.bazelrc`), so a lint fails the run like a compile error; `build`
   and `run` don't lint, so a lint never blocks a hot reload. Code that runs
