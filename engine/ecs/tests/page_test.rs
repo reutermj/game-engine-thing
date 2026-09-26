@@ -216,7 +216,7 @@ fn an_ordered_page_walk_is_in_key_order_across_tables() {
 /// Rows a spatial table's last re-sort recomputed boxes for: rows whose
 /// key's tick says they were written.
 fn rebounded(w: &World) -> usize {
-    w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum()
+    w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded()).sum()
 }
 
 fn spatial_rows(w: &World) -> usize {

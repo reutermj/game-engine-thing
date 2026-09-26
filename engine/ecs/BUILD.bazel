@@ -102,6 +102,20 @@ rust_test(
     deps = [":ecs"],
 )
 
+# The same in 3D, and a 2D key and a 3D one in one world.
+rust_test(
+    name = "spatial3d_test",
+    srcs = ["tests/spatial3d_test.rs"],
+    deps = [":ecs"],
+)
+
+#   ./bazel run -c opt //engine/ecs:spatial3d_bench
+rust_binary(
+    name = "spatial3d_bench",
+    srcs = ["tests/spatial3d_bench.rs"],
+    deps = [":ecs"],
+)
+
 #   ./bazel run -c opt //engine/ecs:spatial_bench
 rust_binary(
     name = "spatial_bench",

@@ -138,6 +138,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
   `physics/compare` runs it beside Box2D and Rapier, fetched for that
   package alone (runbook 005, [docs/CREDITS.md](docs/CREDITS.md)).
+  `physics3d` is experimental, not yet a mod: translation-only 3D bodies as plain
+  systems on the ECS harness, on 3D spatial storage (physics.md, "3D,
+  translation only").
+- `bench/physics3d/` — the 3D comparison: our step against Rapier 3D, Jolt
+  and Box3D on the same scenes, the C/C++ engines pinned by sha256 and built
+  as `cc_library`s. Credits and licences in [docs/CREDITS.md](docs/CREDITS.md).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's

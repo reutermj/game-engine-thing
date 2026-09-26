@@ -1,0 +1,18 @@
+[package]
+name = "physics3d_bench"
+version = "0.0.0"
+edition = "2024"
+# Keep in step with the toolchain version in MODULE.bazel (see
+# docs/runbooks/001-regenerate-cargo-lock.md).
+rust-version = "1.98"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# Default features (dim3, f32, std): no `parallel`, since the comparison is
+# single-threaded, and no `simd8`. (0.36 has no `simd-stable` feature.) Plus
+# `profiler`, without which Counters' timers are compiled out and read zero;
+# it costs a clock read at each stage boundary.
+rapier3d = { version = "0.36", features = ["profiler"] }

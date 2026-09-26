@@ -89,7 +89,7 @@ fn blanket_writer_frame(n: usize) {
     for _ in 0..frames {
         s.run_sequential(&w);
     }
-    let rebounded: usize = w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded).sum();
+    let rebounded: usize = w.tables().filter_map(|t| t.spatial.as_ref()).map(|s| s.pages.read().unwrap().rebounded()).sum();
     println!(
         "{n:>6} rows, writing 1%: {:>7.1} us/frame, the re-sort re-bounding {rebounded} rows",
         t.elapsed().as_secs_f64() * 1e6 / frames as f64

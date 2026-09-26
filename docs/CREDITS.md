@@ -2,8 +2,22 @@
 
 Libraries this repository builds against, compares with or draws on, and
 the ideas our code takes from them. One section a library, so entries
-merge cleanly. Licenses were read from each project's fetched source,
-not from memory.
+merge cleanly. Authors and licenses were read from each project's fetched
+source, not from memory.
+
+None of them is part of the engine or of any game: each is linked only
+into a comparison bench (`//engine/std/physics/compare` for 2D,
+`//bench/physics3d` for 3D), so our own solvers can be measured against
+established ones on identical scenes.
+
+Where the notices live: every library's license text is in its fetched
+source (Bazel's external repository for it), or committed or fetched
+beside the bench where the published package has none, and the bench that
+links it declares the license files as `data`, so they sit in the
+binary's runfiles beside it. That meets the MIT and Apache-2.0 conditions
+for the one form in which the code is copied, a bench binary with its
+runfiles. Nothing here is distributed as a binary; a release that shipped
+one would have to ship those files with it.
 
 ## Box2D
 
@@ -37,6 +51,10 @@ not from memory.
     v3's `constraint_graph.c`, which credits "High-Performance Physical
     Simulations on Next-Generation Architecture with Many Cores",
     Intel Technology Journal).
+  - the 3D step (`//engine/std/physics3d`, experimental) descends from the
+    2D one, and so inherits the same ideas: sequential impulses with warm
+    starting, speculative contacts, and mixing friction and restitution
+    per contact (`engine/std/physics3d/solver.rs`, `lib.rs`).
 
 ## Rapier
 
@@ -60,6 +78,39 @@ not from memory.
   file. We modify none of it.
 - **Ideas our physics takes from it:** none yet. What it does differently
   is in physics.md, "Against other engines".
+- **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
+  `bench/physics3d/Cargo.toml`, the comparison engine in `//bench/physics3d`
+  (single-threaded, rotations locked). Its license text is fetched pinned by
+  sha256 from the v0.36.0 tag (`@rapier_license`, MODULE.bazel) and put in
+  that bench's runfiles. It brings parry3d, nalgebra, simba and approx
+  (Apache-2.0, Dimforge), and glam, glamx, wide, arrayvec and others under
+  MIT, Apache-2.0, Zlib or a choice of them, per each crate's `license`.
+
+## Jolt Physics
+
+- **Project:** Jolt Physics, release v5.6.0:
+  <https://github.com/jrouwe/JoltPhysics>.
+- **Authors:** Jorrit Rouwe ("Copyright 2021 Jorrit Rouwe", LICENSE) and
+  the project's contributors.
+- **Licence:** MIT (LICENSE at the root of the release archive, exported as
+  `@jolt//:LICENSE`).
+- **What we use it for:** comparison only. `//bench/physics3d` builds it from
+  source (`bench/physics3d/jolt.BUILD`) behind a small C shim and runs the
+  same scenes on `JobSystemSingleThreaded` with translation-only bodies.
+- **Ideas our 3D code adopts:** none; it is the yardstick.
+
+## Box3D
+
+- **Project:** Box3D, release v0.1.0: <https://github.com/erincatto/box3d>.
+- **Authors:** Erin Catto ("Copyright (c) 2026 Erin Catto", LICENSE).
+- **Licence:** MIT (LICENSE at the root of the release archive, exported as
+  `@box3d//:LICENSE`).
+- **What we use it for:** comparison only. `//bench/physics3d` builds it from
+  source (`bench/physics3d/box3d.BUILD`) behind a small C shim and runs the
+  same scenes with one worker and all three angular motion locks.
+- **Ideas our 3D code adopts:** none taken from Box3D's source; the step in
+  `//engine/std/physics3d` descends from our 2D one, whose ideas are
+  Box2D's (below).
 
 ## Bullet Physics
 

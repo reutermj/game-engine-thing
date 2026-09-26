@@ -45,7 +45,7 @@ pub use service::{__begin_call, __end_call, __serve};
 pub use service::{CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
-pub const API_VERSION: u32 = 24;
+pub const API_VERSION: u32 = 25;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
