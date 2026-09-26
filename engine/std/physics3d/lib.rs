@@ -362,7 +362,8 @@ fn solve(
     let mut entities = Vec::with_capacity(moving.len());
     moving.for_each(|row, (body, v, _)| {
         entities.push(row.entity());
-        bodies.push(SolverBody { v: Vec3::new(v.x, v.y, v.z), inv_mass: body.inv_mass, pseudo: Vec3::ZERO });
+        let gravity = if body.inv_mass > 0.0 { GRAVITY * dt } else { Vec3::ZERO };
+        bodies.push(SolverBody::new(Vec3::new(v.x, v.y, v.z), body.inv_mass, gravity));
     });
     // Statics all stand for one immovable body at the end.
     let still = bodies.len() as u32;
@@ -380,6 +381,7 @@ fn solve(
             restitution: m.restitution,
             jn: j.normal,
             jt: Vec3::new(j.tx, j.ty, j.tz),
+            speed: 0.0,
         })
     });
     let gathered = Instant::now();
@@ -399,9 +401,8 @@ fn solve(
         let b = &bodies[k];
         k += 1;
         (v.x, v.y, v.z) = (b.v.x, b.v.y, b.v.z);
-        let step = b.v + b.pseudo;
         // Written only when it moves, as in 2D: a write re-bounds the row.
-        let to = (p.x + step.x * dt, p.y + step.y * dt, p.z + step.z * dt);
+        let to = (p.x + b.moved.x, p.y + b.moved.y, p.z + b.moved.z);
         if (to.0.to_bits(), to.1.to_bits(), to.2.to_bits()) != (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()) {
             (p.x, p.y, p.z) = to;
         }

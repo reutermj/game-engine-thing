@@ -22,8 +22,8 @@ pub struct Ours {
 
 impl Ours {
     pub fn new(config: &Config) -> Ours {
-        // One setting: 8 velocity and 8 position iterations, which is what
-        // both of the harness's modes ask for.
+        // One setting: the soft step has its own substeps, whatever the
+        // harness asks of the others.
         let _ = matches!(config.iters, Iters::Default | Iters::Eight);
         let world = World::new();
         let schedule = physics3d::step(&world);
@@ -38,10 +38,10 @@ impl Backend for Ours {
     }
 
     fn solver(&self) -> String {
+        use physics3d::solver::{RELAX_ITERATIONS, STIFFNESS, SUBSTEPS};
         format!(
-            "sequential impulses, {} velocity + {} split-impulse position iterations, speculative margin {}",
-            physics3d::solver::ITERATIONS,
-            physics3d::solver::ITERATIONS,
+            "soft step, {SUBSTEPS} substeps ({} Hz, 1 solve + {RELAX_ITERATIONS} relax each), speculative margin {}",
+            STIFFNESS * SUBSTEPS as f32 * 60.0,
             physics3d::narrow::MARGIN
         )
     }
