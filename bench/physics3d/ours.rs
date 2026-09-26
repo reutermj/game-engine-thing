@@ -64,15 +64,15 @@ impl Backend for Ours {
                     Shape::Box([x, y, z]) => Collider::cuboid(Vec3::new(x, y, z)),
                 };
                 let e = if s.fixed {
-                    let (p, q, r, c, mut body, st) = fixed(at, Quat::IDENTITY, c);
+                    let (p, q, c, mut body, st) = fixed(at, Quat::IDENTITY, c);
                     (body.friction, body.restitution) = (crate::FRICTION, crate::RESTITUTION);
-                    m.spawn((p, q, r, c, body, st))
+                    m.spawn((p, q, c, body, st))
                 } else {
                     let inv_mass = 1.0 / crate::MASS;
                     let mut body = if self.rotate { Body::solid(inv_mass, &c) } else { Body::new(inv_mass) };
                     (body.friction, body.restitution) = (crate::FRICTION, crate::RESTITUTION);
-                    let (p, q, r, c, body, _, w) = dynamic(at, Quat::IDENTITY, c, body);
-                    let e = m.spawn((p, q, r, c, body, Velocity { x: s.vel[0], y: s.vel[1], z: s.vel[2] }, w));
+                    let (p, q, c, body, _, w) = dynamic(at, Quat::IDENTITY, c, body);
+                    let e = m.spawn((p, q, c, body, Velocity { x: s.vel[0], y: s.vel[1], z: s.vel[2] }, w));
                     self.dynamic.push(e);
                     e
                 };

@@ -29,8 +29,8 @@ impl Sim {
 
     fn body(&self, at: Vec3, rot: Quat, c: Collider, v: Vec3, w: Vec3) -> Entity {
         let mut m = self.world.between_frames(Build::default()).unwrap();
-        let (p, q, r, c, b, _, _) = dynamic(at, rot, c, Body::solid(1.0, &c));
-        m.spawn((p, q, r, c, b, Velocity { x: v.x, y: v.y, z: v.z }, AngularVelocity { x: w.x, y: w.y, z: w.z }))
+        let (p, q, c, b, _, _) = dynamic(at, rot, c, Body::solid(1.0, &c));
+        m.spawn((p, q, c, b, Velocity { x: v.x, y: v.y, z: v.z }, AngularVelocity { x: w.x, y: w.y, z: w.z }))
     }
 
     fn run(&self, steps: usize) {
@@ -159,4 +159,26 @@ fn bodies_dropped_turning_land_on_the_floor() {
     for (k, b) in &all {
         assert!(s.at(*b).y > 0.3, "body {k} fell through, at {:?}", s.at(*b));
     }
+}
+
+/// A body is bounded as it is turned, and re-bounded as it turns: a plank
+/// standing on end rests on it, and one tipping as it falls meets the floor
+/// with its low end. Bounded as if it lay flat, a plank is paired with the
+/// floor only once its center is within its thin side of it, so it sinks
+/// that far first.
+#[test]
+fn a_planks_bounds_follow_its_turn() {
+    let s = Sim::new();
+    let plank = Collider::cuboid(Vec3::new(1.0, 0.1, 0.25));
+    let on_end = Quat::axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2);
+    let standing = s.body(Vec3::new(0.0, 1.0, 0.0), on_end, plank, Vec3::ZERO, Vec3::ZERO);
+    let tipping = s.body(Vec3::new(5.0, 1.5, 0.0), Quat::IDENTITY, plank, Vec3::ZERO, Vec3::new(0.0, 0.0, 4.0));
+    let mut lowest = f32::MAX;
+    for _ in 0..120 {
+        s.run(1);
+        lowest = lowest.min(s.at(tipping).y - plank.turned_half(s.rot(tipping)).y);
+    }
+    assert!(lowest > -0.03, "the tipping plank went {lowest} into the floor");
+    assert!((s.at(standing).y - 1.0).abs() < 0.02, "the plank on end sank to {:?}", s.at(standing));
+    assert!(s.w(tipping).len() < 4.0, "it landed: {:?}", s.w(tipping));
 }

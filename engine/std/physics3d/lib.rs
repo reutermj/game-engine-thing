@@ -38,54 +38,22 @@ component! {
     pub struct Position: "physics3d::Position", order = spatial { pub x: f32, pub y: f32, pub z: f32 }
 }
 
+/// A position's box is its collider's, turned by its rotation: both are
+/// extents, so turning a body re-bounds its row in storage as moving it
+/// does, and no copy of the turned box is kept (spatial-storage.md,
+/// "Bounds from several components"). Without a collider, a point.
 impl SpatialKey<3> for Position {
-    type Extent = Reach;
+    type Extent = (Collider, Rotation);
+    // Inline, as `SpatialKey` says: the glue calls it for every row it
+    // re-bounds.
     #[inline]
-    fn bounds(&self, r: Option<&Reach>) -> Bounds<3> {
-        let r = r.copied().unwrap_or_default();
-        Bounds::around([self.x, self.y, self.z], [r.x, r.y, r.z])
-    }
-}
-
-component! {
-    /// Half the size of a body's bounds along each world axis: the key's
-    /// extent, so writing it re-bounds the row. The collider can't be the
-    /// extent once bodies turn, since a turned box's bounds depend on its
-    /// rotation too and a key's bounds see one extent. Which bounds a body
-    /// gets is `Tuning::bounds` (physics.md, "Rotation in 3D").
-    #[derive(Debug, Default, PartialEq, Copy)]
-    pub struct Reach: "physics3d::Reach" { pub x: f32, pub y: f32, pub z: f32 }
-}
-
-/// Which bounds a body's `Reach` holds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum BoundsOf {
-    /// The box around the collider as it is turned now, rewritten as it
-    /// turns: what Box3D, Jolt and Rapier all do.
-    #[default]
-    Turned,
-    /// A cube around the sphere around the collider, for bodies that can
-    /// turn: never rewritten, but a box's is up to 1.7 times as wide.
-    /// Bodies that can't turn (statics, locked) get the box around them.
-    Sphere,
-    /// A sphere around every collider, statics too: what the collider as
-    /// the extent could give.
-    SphereAll,
-}
-
-impl Reach {
-    /// The bounds of `c` turned to `q`, for a body that `turns` or not.
-    pub fn of(c: &Collider, q: Quat, turns: bool, how: BoundsOf) -> Reach {
-        let sphere = how == BoundsOf::SphereAll || (how == BoundsOf::Sphere && turns);
-        if c.shape != BOX || sphere {
-            let r = c.reach();
-            return Reach { x: r, y: r, z: r };
-        }
-        let m = q.matrix().cols;
-        let h = Vec3::new(c.hx, c.hy, c.hz);
-        // Each world axis: the box's axes' reach along it, |R| h.
-        let along = |k: usize| h.x * m[0].get(k).abs() + h.y * m[1].get(k).abs() + h.z * m[2].get(k).abs();
-        Reach { x: along(0), y: along(1), z: along(2) }
+    fn bounds(&self, (c, q): (Option<&Collider>, Option<&Rotation>)) -> Bounds<3> {
+        let h = match (c, q) {
+            (Some(c), Some(q)) if c.shape == BOX => c.turned_half(q.quat()),
+            (Some(c), _) => Vec3::new(c.hx, c.hy, c.hz),
+            (None, _) => Vec3::ZERO,
+        };
+        Bounds::around([self.x, self.y, self.z], [h.x, h.y, h.z])
     }
 }
 
@@ -236,6 +204,19 @@ impl Collider {
         if self.shape == BOX { Shape::Box(Vec3::new(self.hx, self.hy, self.hz)) } else { Shape::Sphere(self.hx) }
     }
 
+    /// Half the box around it turned to `q`, along each world axis: the
+    /// box's axes' reach along each, |R| h (Box3D's `b3AABB_Transform`).
+    /// A sphere's is its radius, whichever way it's turned.
+    #[inline]
+    pub fn turned_half(&self, q: Quat) -> Vec3 {
+        if self.shape != BOX {
+            return Vec3::splat(self.hx);
+        }
+        let m = q.matrix().cols;
+        let along = |k: usize| self.hx * m[0].get(k).abs() + self.hy * m[1].get(k).abs() + self.hz * m[2].get(k).abs();
+        Vec3::new(along(0), along(1), along(2))
+    }
+
     /// The radius of a sphere around it, whichever way it's turned.
     pub fn reach(&self) -> f32 {
         if self.shape == BOX { (self.hx * self.hx + self.hy * self.hy + self.hz * self.hz).sqrt() } else { self.hx }
@@ -243,15 +224,13 @@ impl Collider {
 }
 
 /// What a static body is spawned with.
-pub fn fixed(at: Vec3, rot: Quat, c: Collider) -> (Position, Rotation, Reach, Collider, Body, Static) {
-    let reach = Reach::of(&c, rot, false, tuning().bounds);
-    (Position { x: at.x, y: at.y, z: at.z }, Rotation::from(rot), reach, c, Body::new(0.0), Static {})
+pub fn fixed(at: Vec3, rot: Quat, c: Collider) -> (Position, Rotation, Collider, Body, Static) {
+    (Position { x: at.x, y: at.y, z: at.z }, Rotation::from(rot), c, Body::new(0.0), Static {})
 }
 
 /// What a moving body is spawned with, at rest.
-pub fn dynamic(at: Vec3, rot: Quat, c: Collider, body: Body) -> (Position, Rotation, Reach, Collider, Body, Velocity, AngularVelocity) {
-    let reach = Reach::of(&c, rot, body.turns(), tuning().bounds);
-    (Position { x: at.x, y: at.y, z: at.z }, Rotation::from(rot), reach, c, body, Velocity::default(), AngularVelocity::default())
+pub fn dynamic(at: Vec3, rot: Quat, c: Collider, body: Body) -> (Position, Rotation, Collider, Body, Velocity, AngularVelocity) {
+    (Position { x: at.x, y: at.y, z: at.z }, Rotation::from(rot), c, body, Velocity::default(), AngularVelocity::default())
 }
 
 impl Body {
@@ -289,7 +268,6 @@ pub struct Tuning {
     pub narrow: Narrow,
     pub warm: Warm,
     pub solver: solver::Tuning,
-    pub bounds: BoundsOf,
 }
 
 /// How a contact's points find the last step's impulses.
@@ -336,9 +314,6 @@ impl Tuning {
                 ("bb", "gjk") => t.narrow.box_box = BoxBox::GjkEpa,
                 ("reduce", "area") => t.narrow.reduce = Reduce::Area,
                 ("reduce", "line") => t.narrow.reduce = Reduce::Line,
-                ("bounds", "turned") => t.bounds = BoundsOf::Turned,
-                ("bounds", "sphere") => t.bounds = BoundsOf::Sphere,
-                ("bounds", "sphere_all") => t.bounds = BoundsOf::SphereAll,
                 _ => return Err(format!("{kv}: unknown")),
             }
         }
@@ -569,8 +544,7 @@ fn find_contacts(
     (t.pairs, t.contacts, t.points, t.kept, t.matched) = (near.len(), found.len(), points, kept, matched);
 }
 
-type Bodies<'w, 'a> =
-    Query<'w, (&'a Body, &'a Collider, &'a mut Velocity, &'a mut AngularVelocity, &'a mut Position, &'a mut Rotation, &'a mut Reach)>;
+type Bodies<'w, 'a> = Query<'w, (&'a Body, &'a mut Velocity, &'a mut AngularVelocity, &'a mut Position, &'a mut Rotation)>;
 
 fn solve(
     _: &mut engine_ecs::harness::Cx,
@@ -583,7 +557,7 @@ fn solve(
     let dt = *dt;
     let mut bodies = Vec::with_capacity(moving.len() + 1);
     let mut entities = Vec::with_capacity(moving.len());
-    moving.for_each(|row, (body, _, v, w, _, q, _)| {
+    moving.for_each(|row, (body, v, w, _, q)| {
         entities.push(row.entity());
         let gravity = if body.inv_mass > 0.0 { GRAVITY * dt } else { Vec3::ZERO };
         let (v, w) = (Vec3::new(v.x, v.y, v.z), Vec3::new(w.x, w.y, w.z));
@@ -631,7 +605,7 @@ fn solve(
         }
     });
     let mut k = 0;
-    moving.for_each(|_, (body, c, mut v, mut w, mut p, mut q, mut reach)| {
+    moving.for_each(|_, (_, mut v, mut w, mut p, mut q)| {
         let b = &bodies[k];
         k += 1;
         (v.x, v.y, v.z) = (b.v.x, b.v.y, b.v.z);
@@ -641,16 +615,10 @@ fn solve(
         if (to.0.to_bits(), to.1.to_bits(), to.2.to_bits()) != (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()) {
             (p.x, p.y, p.z) = to;
         }
+        // A write re-bounds the row (the rotation is an extent), so only
+        // a body that turned is written.
         if b.turned != Quat::IDENTITY {
-            let turned = b.rotation();
-            *q = Rotation::from(turned);
-            // Only a box turned re-bounds, and only when its box changed.
-            if how.bounds == BoundsOf::Turned && c.shape == BOX {
-                let r = Reach::of(c, turned, body.turns(), how.bounds);
-                if (r.x.to_bits(), r.y.to_bits(), r.z.to_bits()) != (reach.x.to_bits(), reach.y.to_bits(), reach.z.to_bits()) {
-                    *reach = r;
-                }
-            }
+            *q = Rotation::from(b.rotation());
         }
     });
     let end = Instant::now();
@@ -693,14 +661,17 @@ mod tests {
     }
 
     #[test]
-    fn a_turned_boxs_reach_is_the_box_around_it() {
+    fn a_turned_boxs_bounds_are_the_box_around_it() {
         let c = Collider::cuboid(Vec3::new(1.0, 0.25, 0.5));
         let q = Quat::axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2);
-        let r = Reach::of(&c, q, true, BoundsOf::Turned);
-        assert!((Vec3::new(r.x, r.y, r.z) - Vec3::new(0.25, 1.0, 0.5)).len() < 1e-5, "{r:?}");
-        let s = Reach::of(&c, q, true, BoundsOf::Sphere);
-        assert!((s.x - c.reach()).abs() < 1e-6 && s.x == s.y && s.y == s.z);
-        let fixed = Reach::of(&c, Quat::IDENTITY, false, BoundsOf::Sphere);
-        assert_eq!((fixed.x, fixed.y, fixed.z), (1.0, 0.25, 0.5), "a body that can't turn keeps its box");
+        let h = c.turned_half(q);
+        assert!((h - Vec3::new(0.25, 1.0, 0.5)).len() < 1e-5, "{h:?}");
+        let at = Position { x: 1.0, y: 2.0, z: 3.0 };
+        let b = at.bounds((Some(&c), Some(&Rotation::from(q))));
+        assert!((b.max[1] - 3.0).abs() < 1e-5 && (b.max[0] - 1.25).abs() < 1e-5, "{b:?}");
+        let b = at.bounds((Some(&c), None));
+        assert_eq!((b.max[0], b.max[1], b.max[2]), (2.0, 2.25, 3.5), "without a rotation, the box as it is");
+        let s = Collider::sphere(0.5).turned_half(q);
+        assert_eq!(s, Vec3::splat(0.5), "a sphere is its radius, turned or not");
     }
 }
