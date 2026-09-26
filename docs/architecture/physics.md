@@ -2027,22 +2027,26 @@ in "Rotation in 3D", below**):**
 
 ## Rotation in 3D
 
-**Status: built, experimental** (2026-09-26, get-emj.38, branch
-`physics3d-rotation`). `//engine/std/physics3d` bodies turn: spheres and
-boxes with orientation, angular velocity and inertia, contacts of up to
-four points, the soft step with angular terms. Still left out: layers,
+**Status: built, experimental, a mod** (2026-09-26, get-emj.38; turning
+on branch `physics3d-rotation`, a mod since `physics3d-land`).
+`//engine/std/physics3d` bodies turn: spheres and boxes with orientation,
+angular velocity and inertia, contacts of up to four points, the soft
+step with angular terms. It is a mod as `//engine/std/physics` is, and
+hot-reloads under a running pile ([A mod](#a-mod)). Still left out: layers,
 sensors, kinematic bodies, sleeping, events, parallelism, rolling
 resistance, gyroscopic terms. The comparison runs every engine locked (as
 before) or turning (`--rotate`).
 
 ### What it is
 
-- **Components.** `Position` stays the spatial key; `Rotation` (a unit
-  quaternion), `AngularVelocity`, `Body` (with the inverse inertia about the
-  body's own axes, zero for a body that doesn't turn: `Body::new` locked,
-  `Body::solid` a solid of the collider's shape) and `Reach`, the half size
-  of the body's bounds along each world axis, which is now the key's
-  extent (see the bounds, below). `fixed` and `dynamic` spawn the bundles.
+- **Components** (the interface crate, `components.rs`). `Position` stays
+  the spatial key, bounded by the collider turned by the rotation, both
+  extents (choice 5, below); `Rotation` (a unit quaternion),
+  `AngularVelocity`, `Body` (with the inverse inertia about the body's own
+  axes, zero for a body that doesn't turn: `Body::new` locked,
+  `Body::solid` a solid of the collider's shape). `fixed` and `dynamic`
+  spawn the bundles. The step's settings are components too: `Gravity`,
+  and `Tuning`, every choice below that was measured more than one way.
 - **Contacts** stay entities in an ordered table by pair. `Manifold` holds
   the normal, the offset between the two centers and up to four points
   inline, each its anchor on `a` (from `a`'s center, in world axes) and
@@ -2074,10 +2078,98 @@ before) or turning (`--rotate`).
   the inverse inertias, so a pass is dot products and adds: that took the
   solver from 3147 to 2245 µs on 1000 turning boxes.
 
+### A mod
+
+Since 2026-09-26 (`physics3d-land`) the step is a mod, laid out as 2D's:
+an interface crate other mods depend on (`components.rs` and `math.rs`,
+crate `physics3d`), and the mod (`lib.rs`, `narrow.rs`, `gjk.rs`,
+`solver.rs`): three systems, `integrate_velocities`, `find_contacts` and
+`solve`, in the phase `physics3d::step`, after `simulate` and before
+`late` at the simulation's rate, as `physics::step` is. Its messages are
+`stats` (steps, contacts, time per system), `stages` (time per stage, and
+the last step's pairs, contacts, points and warm starts) and
+`reset_timings`. `pile3d` (`tests/pile.rs`) is its scene mod: it builds
+the comparison's scenes from `tests/scenes.rs`, the file the bench builds
+them in the other engines from, statics at `build` and each step's
+arrivals from a system in `simulate`, where a game's spawns would be; and
+single bodies for the tests. `pile3d_game` runs it on lockstep:
+
+    ./bazel run //engine/std/physics3d:pile3d_game
+    bazel-bin/engine/modctl/modctl send pile3d build boxes 1000
+    bazel-bin/engine/modctl/modctl send lockstep step 300
+    bazel-bin/engine/modctl/modctl send pile3d stats
+    ./bazel run //engine/std/physics3d:physics3d    # reloads the step
+
+**No static state.** The experimental step kept its settings and timings
+in static `Mutex`es, since harness systems are plain functions.[^static3d]
+A mod's statics are its image's: a reload maps a new image, whose statics
+start over. Where each could live, measured by the reload replay below
+(a pile tuned `relax=3,warm=nearest` reloaded every frame) and by what a
+step pays to read it:
+
+| settings in | survive a reload | a game or test sets them by | read, a step |
+|---|---|---|---|
+| a static in the mod | no: the replay differs at frame 3 (planted: the `Tuning` gone at load, what a new image's static is) | a call into the mod's code | a lock |
+| the mod's state | yes | a message to physics3d only | a field |
+| **a component in the world (`Tuning`, `Gravity`), as 2D's `Gravity` and `Sleep`** | **yes, and the replay compares it** | **writing it, like any data; `pile3d tune ...` does** | **a one-entity query: with a `Tuning` entity or none, every stage the same within 1 µs (1000 boxes, 1000 spheres, two runs each)** |
+
+Timings are different: they are the mod's own bookkeeping, not what a
+game sets, so they are its state (`Timings`, `Found`), as 2D's physics
+keeps them, and a reload keeps them too.
+
+**Through the engine, at the harness's cost.** The bench's ours is now the
+mod in an engine, stepped by `lockstep step 1` (so a step is a frame, with
+the schedule and apply nodes in it), as `//engine/std/physics:tax` drives
+2D's. The same scenes, turning, whole run in ms a step (one run each, the
+harness's the second batch of choice 5):
+
+| | spheres 1000 | boxes 1000 | planks 1000 | rain 1000 | spheres 10 000 | boxes 10 000 | planks 10 000 | rain 10 000 |
+|---|---|---|---|---|---|---|---|---|
+| harness, plain systems | 1.91 | 2.73 | 3.48 | 1.60 | 22.4 | 31.2 | 46.1 | 20.6 |
+| **the mod in the engine** | **1.92** | **2.85** | **3.51** | **1.66** | **25.0** | **29.6** | **46.0** | **21.5** |
+
+Every quality number (pairs, contacts, depths, when it settled, what moved)
+is the same in both, to the last digit printed, and the plank that tips
+off its turn goes the same 0.7449574 into the floor with its bounds
+planted wrong: the same computation. The frame costs the engine 1-4% at
+1000 bodies, within the machine's spread at 10 000.
+
+**Reloads are invisible.** `//engine/std/physics3d:reload_test` replays
+64 boxes dropped in a walled box with the step tuned away from its
+defaults, and a sphere spun onto them at frame 60, 160 frames, while
+reloading physics3d, pile3d and the scheduler (each swapped with its
+`engine_mod(twin = True)` build) every frame, one a frame in turn, and in
+mixed batches now and then, poison mode on; every frame must equal the
+run without reloads bit for bit: every physics3d component in storage
+order (contacts, manifolds with their cached axes and ids, impulses, the
+`Gravity` and `Tuning`), the change ticks, what physics3d and pile3d
+report of their state. Planted in physics3d's `load`, each of these fails
+all three plans: impulses zeroed, `Manifold` removed from contacts,
+contacts despawned, `Tuning` despawned, the cached axis zeroed, steps
+reset. `a_tuning_in_the_world_is_the_steps` checks both systems read the
+`Tuning` (planted: either ignoring it fails it).
+
+**What is shared with 2D.** Options, with what each would cost:
+
+| | components | a 3D interface change rebuilds (measured, `bazel build //...`, fastbuild) | mods to reload after it | 2D |
+|---|---|---|---|---|
+| **separate interfaces (built)** | none shared; the ECS's spatial key, `near_pairs`, ordered tables and `pair_key` are the common part | 17 actions, 0.9 s: physics3d, pile3d and their twins, the bench | physics3d, pile3d | untouched: `:tax` bit for bit, the games' replays |
+| a common interface (a transform, a velocity) both mods use | `Position`, `Velocity` at most: no layout matches (x, y against x, y, z; a rotation as (cos, sin) against a quaternion; 2D's `Body` has a kind, layers and a gravity scale, 3D's an inertia per axis) | what a 2D interface change rebuilds today: 72 actions, 1.8 s, 23 mod libraries | every mod of pong, the platformer and the demos, which reload with it | every 2D row a z and a quaternion, or a second set of names |
+| one mod over a dimension | all, generic over D | everything physics touches | every game's | as above, and `component!` has no generics |
+
+So nothing is shared but the storage: a 3D change never reaches a 2D
+game's build or its running mods, which is what mod-deps are for. What is
+copied is small: `Slots` (entity to index, 15 lines) and the pattern of
+the step's systems.
+
+[^static3d]: 2026-09-26: `TUNING` and `TIMINGS` were static `Mutex`es in
+    the experimental step (plain systems on the ECS harness, "one
+    simulation runs at a time"). Removed when it became a mod.
+
 ### The choices, measured
 
 Every option is behind `physics3d::Tuning` (`--tune=...` on the bench,
-`P3_TUNE` in `rotation_test`), so each can be run again. 1000 turning
+`P3_TUNE` in `physics3d_test`), so each can be run again. 1000 turning
 bodies, ours only, one thread, `-c opt`; "settled" is the step from which
 every body is under 0.05 m/s at its farthest point. Settling a pile is
 chaotic: one late wobble moves it by hundreds of steps, so box piles were
@@ -2184,8 +2276,28 @@ step); the contacts found are the same in every row, so quality is too:
 The sphere around a wall reaches every body in the pile (docs/lore); even
 for unit cubes the sphere, 1.7 times as wide, finds four to six times
 the pairs, and the broadphase doubles at 10 000.
-Rewriting `Reach` costs nothing visible: its writes come with the
-position's, which re-bound the row anyway.
+
+**Now: the collider and rotation as the key's two extents.** Once the
+storage took a pair of extents (2D's rotation, spatial-storage.md, "Bounds
+from several components"), `Position` got `type Extent = (Collider,
+Rotation)` and `bounds` computes `|R| h` itself (`Collider::turned_half`),
+so a turn re-bounds the row through storage and no derived copy is kept:
+the solve writes a rotation only when the body turned, as it writes a
+position only when it moved.[^reach3d] The same bounds, so the same pairs
+and contacts: every quality number of every scene below is identical,
+before and after. Turning, one thread, `-c opt`, two batches each (the
+second pair run side by side on separate cores), µs a step:
+
+| | boxes 1000: pairs, broadphase, narrowphase, outside systems, step ms | boxes 10 000 | planks 10 000 | spheres 10 000 |
+|---|---|---|---|---|
+| `Reach`, the solve rewriting it | 2440, 44-48, 343-350, 21, 2.71-2.75 | 25 688, 1177-1198, 3402-3466, 255-261, 28.7-29.2 | 67 876, 2137-2149, 7298-7995, 986-1639, 45.8-49.5 | 51 269, 1787-1852, 1449-1645, 783-837, 24.5-24.9 |
+| **(Collider, Rotation) extents** | **2440, 45, 348-351, 27, 2.73-2.74** | **25 688, 1191-1209, 3498-3727, 331-674, 29.1-31.2** | **67 876, 2147-2194, 7318-7385, 1028-1095, 45.5-46.1** | **51 269, 1753-1790, 1034-1038, 431-472, 22.4-22.6** |
+
+Level, within the batches' spread: the broadphase is the same walk over the
+same boxes, and the re-sort ("outside systems") does a little more for
+boxes (every turned row is re-bounded, where `Reach` was rewritten only
+when its box changed) and less for spheres (a column fewer to move). The
+spread at 10 000 (a single run each) is the machine's, not the variant's.
 
 **6. The soft step, as 2D's or not.** 2D chose 5 substeps, contacts at a
 quarter of the substep rate (75 Hz), two relaxing passes, friction only in
@@ -2294,23 +2406,19 @@ resistance; sleeping, which piles that settle would fall into.
 
 ### What 3D asks of the storage design
 
-What the step works around today, and what it would want instead, for
-the design of rotated bounds (get-emj.38's 2D side):
+What the step worked around, and what it wanted instead, for the design
+of rotated bounds (get-emj.38's 2D side). Items 1 and 2 are done: the
+storage takes two extents, and physics3d uses them (choice 5).
 
-1. **Bounds from more than one extent.** A turned box's bounds depend on
-   the key (its position), its rotation and its shape; `SpatialKey::bounds`
-   sees the key and one extent. So the step keeps a derived `Reach` (world
-   half extents) as the extent and rewrites it when a box turns: three
-   floats a body, a write the solver must remember, and one value held
-   twice (in `Reach` and in the page lanes). Wanted: extents as a tuple
-   (`Collider` and `Rotation`) so the glue computes `|R| h` itself and a
-   write to either re-bounds the row; or a key whose bounds a system
-   writes directly. The glue already runs a page at a time, so a 3x3
-   absolute rotation times a half extent a row would sit in the loop that
-   re-boxes pages.
-2. **Turning alone re-bounds.** A box spinning in place writes no
-   position, and its bounds still change. `Reach` covers it because it is
-   written; a design where only writes of the key re-bound would miss it.
+1. **Bounds from more than one extent** (done). A turned box's bounds
+   depend on the key (its position), its rotation and its shape. With one
+   extent a key, the step kept a derived `Reach` as the extent;[^reach3d]
+   now `(Collider, Rotation)` are the extents and the glue computes `|R| h`
+   itself, a page at a time, in the loop that re-boxes pages.
+2. **Turning alone re-bounds** (done). A box spinning in place writes no
+   position, and its bounds still change; writing the rotation, an extent,
+   re-bounds the row (`a_planks_bounds_follow_its_turn`: a plank bounded
+   as if unturned goes 0.74 into the floor).
 3. **Not a sphere.** Rotation-invariant bounds are the cheap way out, and
    cost 4 to 6 times the pairs (above), ten times the broadphase once
    statics get them too. Whatever the storage offers, statics and bodies
@@ -2319,13 +2427,21 @@ the design of rotated bounds (get-emj.38's 2D side):
    it moves, where Box3D re-inserts a body in its tree only when it leaves
    a box grown by up to 0.05 (`aabbMargin`). The broadphase that keeps its
    pairs, second on the retrospective's list, would cover both.
-5. **Wider tuples.** A turning body is seven components, the most a bundle
-   takes, and the solve's query eight, the most a query takes. Layers,
-   sleeping or a kinematic flag won't fit without nested bundles or more
-   arity.
+5. **Wider tuples.** Without `Reach`, a turning body is six components and
+   the solve's query five, against limits of eight (bundles, query data)
+   and four (a parameter group): the mod hit none of them. Layers,
+   sleeping or a kinematic flag would take a turning body to eight or
+   nine, where the limit would be raised in `engine_ecs` rather than
+   bundles nested.
 6. **What needed nothing.** Four points inline as `[f32; 16]` and
    `[u32; 4]` (`OPAQUE` fields), the ordered contact table, change
    detection: unchanged from the spike.
+
+[^reach3d]: 2026-09-26: until then, with one extent a key, the step kept
+    the box around each body as turned in a derived `Reach` component (the
+    key's extent), rewritten by the solve when a box's box changed: three
+    floats a body held twice (there and in the page lanes), and a write
+    the solve had to remember. Its measurements are the table above.
 
 ## Open questions
 
