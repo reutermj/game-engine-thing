@@ -15,6 +15,7 @@ struct Box3dWorld {
 	b3WorldId world;
 	int substeps;
 	bool allow_sleep;
+	bool rotate;
 	b3BodyId* bodies;
 	bool* fixed;
 	uint32_t count;
@@ -33,6 +34,7 @@ Box3dWorld* p3_box3d_create(const P3Config* config) {
 	w->world = b3CreateWorld(&def);
 	w->substeps = config->velocity_iters > 0 ? config->velocity_iters : DEFAULT_SUBSTEPS;
 	w->allow_sleep = config->allow_sleep != 0;
+	w->rotate = config->rotate != 0;
 	return w;
 }
 
@@ -60,9 +62,9 @@ void p3_box3d_add(Box3dWorld* w, uint32_t n, const P3Spec* specs, uint32_t* out_
 		bd.enableSleep = w->allow_sleep;
 		if (!fixed) {
 			bd.linearVelocity = (b3Vec3){s->vel[0], s->vel[1], s->vel[2]};
-			bd.motionLocks.angularX = true;
-			bd.motionLocks.angularY = true;
-			bd.motionLocks.angularZ = true;
+			bd.motionLocks.angularX = !w->rotate;
+			bd.motionLocks.angularY = !w->rotate;
+			bd.motionLocks.angularZ = !w->rotate;
 		}
 		b3BodyId body = b3CreateBody(w->world, &bd);
 
@@ -95,13 +97,22 @@ void p3_box3d_read(const Box3dWorld* w, uint32_t n, const uint32_t* handles, flo
 		b3BodyId id = w->bodies[handles[i]];
 		b3Pos p = b3Body_GetPosition(id);
 		b3Vec3 v = b3Body_GetLinearVelocity(id);
-		float* o = out + 6 * i;
+		b3Quat q = b3Body_GetRotation(id);
+		b3Vec3 a = b3Body_GetAngularVelocity(id);
+		float* o = out + 13 * i;
 		o[0] = (float)p.x;
 		o[1] = (float)p.y;
 		o[2] = (float)p.z;
 		o[3] = v.x;
 		o[4] = v.y;
 		o[5] = v.z;
+		o[6] = q.v.x;
+		o[7] = q.v.y;
+		o[8] = q.v.z;
+		o[9] = q.s;
+		o[10] = a.x;
+		o[11] = a.y;
+		o[12] = a.z;
 	}
 }
 

@@ -1,7 +1,7 @@
-//! A comparison harness for translation-only 3D rigid bodies: the same scenes
-//! and the same quality measures over several engines, each single-threaded
-//! with rotations locked, so a new solver can be judged against established
-//! ones on identical input.
+//! A comparison harness for 3D rigid bodies: the same scenes and the same
+//! quality measures over several engines, each single-threaded, with
+//! rotations locked (as the translation-only step had them) or free, so a new
+//! solver can be judged against established ones on identical input.
 //!
 //! An engine plugs in as a [`Backend`] and is named in [`BACKENDS`] and
 //! [`make_backend`]; everything else (the scenes, the timing, the metrics)
@@ -20,7 +20,7 @@ pub mod scenes;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
     Sphere(f32),
-    /// Half-extents, axis-aligned for good since rotation is locked.
+    /// Half-extents, along the body's own axes.
     Box([f32; 3]),
 }
 
@@ -70,6 +70,18 @@ pub struct Config {
     pub sleep: bool,
     /// An upper bound on bodies in the world, for engines that preallocate.
     pub max_bodies: u32,
+    /// Bodies turn; off, every engine locks their rotation.
+    pub rotate: bool,
+}
+
+/// A dynamic body as the harness reads it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct State {
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    /// A unit quaternion, (x, y, z, w).
+    pub rot: [f32; 4],
+    pub ang: [f32; 3],
 }
 
 /// One engine behind the harness.
@@ -81,9 +93,9 @@ pub trait Backend {
     /// spec. The harness only relies on the add order, not on the handles.
     fn add(&mut self, bodies: &[Spec]) -> Vec<u32>;
     fn step(&mut self, dt: f32);
-    /// Overwrites `out` with (position, velocity) of every dynamic body, in the
-    /// order they were added.
-    fn state(&self, out: &mut Vec<([f32; 3], [f32; 3])>);
+    /// Overwrites `out` with the state of every dynamic body, in the order
+    /// they were added.
+    fn state(&self, out: &mut Vec<State>);
     /// The engine's own count of body pairs in contact after the last step.
     fn touching(&self) -> usize;
     /// Per-stage times of the last step in microseconds, where the engine

@@ -3,13 +3,14 @@
 
 use rapier3d::prelude::*;
 
-use crate::{Backend, Config, FRICTION, GRAVITY, Iters, MASS, RESTITUTION, Shape, Spec};
+use crate::{Backend, Config, FRICTION, GRAVITY, Iters, MASS, RESTITUTION, Shape, Spec, State};
 
 pub struct Rapier {
     world: PhysicsWorld,
     dynamic: Vec<RigidBodyHandle>,
     count: u32,
     sleep: bool,
+    rotate: bool,
 }
 
 impl Rapier {
@@ -21,7 +22,7 @@ impl Rapier {
         }
         // Needs the crate's `profiler` feature, or every timer reads zero.
         world.physics_pipeline.counters.enable();
-        Rapier { world, dynamic: Vec::new(), count: 0, sleep: config.sleep }
+        Rapier { world, dynamic: Vec::new(), count: 0, sleep: config.sleep, rotate: config.rotate }
     }
 }
 
@@ -45,11 +46,9 @@ impl Backend for Rapier {
             let body = if s.fixed {
                 RigidBodyBuilder::fixed().translation(pos)
             } else {
-                RigidBodyBuilder::dynamic()
-                    .translation(pos)
-                    .linvel(Vector::new(s.vel[0], s.vel[1], s.vel[2]))
-                    .lock_rotations()
-                    .can_sleep(self.sleep)
+                let b =
+                    RigidBodyBuilder::dynamic().translation(pos).linvel(Vector::new(s.vel[0], s.vel[1], s.vel[2])).can_sleep(self.sleep);
+                if self.rotate { b } else { b.lock_rotations() }
             };
             let collider = match s.shape {
                 Shape::Sphere(r) => ColliderBuilder::ball(r),
@@ -74,12 +73,12 @@ impl Backend for Rapier {
         self.world.step();
     }
 
-    fn state(&self, out: &mut Vec<([f32; 3], [f32; 3])>) {
+    fn state(&self, out: &mut Vec<State>) {
         out.clear();
         for &h in &self.dynamic {
             let b = &self.world.bodies[h];
-            let (p, v) = (b.translation(), b.linvel());
-            out.push(([p.x, p.y, p.z], [v.x, v.y, v.z]));
+            let (p, v, q, w) = (b.translation(), b.linvel(), b.rotation(), b.angvel());
+            out.push(State { pos: [p.x, p.y, p.z], vel: [v.x, v.y, v.z], rot: [q.x, q.y, q.z, q.w], ang: [w.x, w.y, w.z] });
         }
     }
 

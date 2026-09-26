@@ -26,6 +26,8 @@ typedef struct P3Config {
 	int32_t velocity_iters;
 	int32_t position_iters;
 	int32_t allow_sleep;
+	// 0 locks every dynamic body's rotation; 1 lets bodies turn.
+	int32_t rotate;
 } P3Config;
 
 typedef struct JoltWorld JoltWorld;
@@ -35,7 +37,8 @@ void p3_jolt_destroy(JoltWorld* world);
 // Adds n bodies; out_handles[i] is spec i's handle, dense in add order from 0.
 void p3_jolt_add(JoltWorld* world, uint32_t n, const P3Spec* specs, uint32_t* out_handles);
 void p3_jolt_step(JoltWorld* world, float dt);
-// Writes position then velocity (6 floats) for each of the n handles.
+// Writes position, velocity, rotation (x, y, z, w) and angular velocity
+// (13 floats) for each of the n handles.
 void p3_jolt_read(const JoltWorld* world, uint32_t n, const uint32_t* handles, float* out);
 // Body pairs with a contact manifold in the last step (touching or speculative).
 uint32_t p3_jolt_touching(const JoltWorld* world);

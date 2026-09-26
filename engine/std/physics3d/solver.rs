@@ -1,52 +1,151 @@
 //! The contact solver over arrays: bodies and contacts gathered from the
-//! world, solved, written back. No rotation, so a body is a velocity and an
-//! inverse mass, and a contact a normal, a depth and its impulses.
+//! world, solved, written back. A body is a velocity and an angular one,
+//! an inverse mass and a world inverse inertia; a contact a normal and up
+//! to four points.
 //!
 //! The 2D solver's soft step (engine/std/physics, solver.rs; Box2D v3's,
-//! physics.md "Settling") in 3D: `SUBSTEPS` substeps, each gravity, warm
-//! start, one soft pushing pass, positions, `RELAX_ITERATIONS` rigid
-//! passes with friction; then restitution once, from the closing speed
-//! before the step. The constants are the 2D ones; why each is what it is
-//! is there.
+//! physics.md "Settling") with rotation, as Box3D (contact_solver.c,
+//! solver.c) runs it: `SUBSTEPS` substeps, each gravity, warm start, one
+//! soft pushing pass, positions and rotations moved, `RELAX_ITERATIONS`
+//! rigid passes; then restitution once, from each point's closing speed
+//! before the step. Everything a point needs is fixed once a step: its
+//! anchors on both bodies (relative to their centers), its effective mass,
+//! and each body's world inverse inertia. Within the step a point's
+//! separation is its separation when found plus how far its anchors have
+//! moved along the normal, from each body's accumulated move and turn
+//! (Box3D's `b3SolveContact`), so contacts aren't found again per substep.
 //!
-//! Friction is the one thing 3D changes: the tangent is a plane, not a line.
-//! The friction impulse is kept as a vector in that plane and clamped to a
-//! disc of radius `friction * normal impulse` (a circular Coulomb cone), not
-//! each of two tangent axes on its own, a box that would let a body slide
-//! faster diagonally (`friction_is_a_disc_not_a_box`). Stored as a world
-//! vector, not two numbers in a tangent basis, so warm starting needs no
-//! basis that stays put from step to step: last step's is projected onto
-//! this step's plane.
+//! Friction is per contact, not per point, as Box3D, Rapier and Jolt all
+//! do it: one tangent impulse at the points' centroid, clamped to a disc
+//! of radius friction times the points' total normal impulse (a circular
+//! Coulomb cone, so a body slides no faster diagonally), and a twist
+//! impulse about the normal, limited by each point's normal impulse times
+//! its distance from the centroid. Only in the relax passes, as in 2D and
+//! in Box3D. The tangent impulse is kept as a world vector, so warm
+//! starting needs no tangent basis that stays put from step to step: the
+//! last step's is projected onto this step's plane.
 
-use crate::Vec3;
+use crate::{Mat3, Quat, Vec3};
 
 pub const SUBSTEPS: usize = 5;
 pub const RELAX_ITERATIONS: usize = 2;
 /// Of the substep rate, between two moving bodies; against a static one.
-pub const STIFFNESS: f32 = 0.25;
-pub const STATIC_STIFFNESS: f32 = 0.5;
+pub const STIFFNESS: f32 = 0.2;
+pub const STATIC_STIFFNESS: f32 = 0.4;
 pub const DAMPING_RATIO: f32 = 10.0;
 /// The fastest a contact pushes bodies apart.
 pub const MAX_PUSH: f32 = 3.0;
 /// Closing speeds below this don't bounce, so resting bodies settle.
 pub const BOUNCE_THRESHOLD: f32 = 1.0;
+/// The most a body turns in a step, as in Box3D, Rapier and Jolt (a
+/// quarter turn is where a first-order rotation step goes badly wrong).
+pub const MAX_ROTATION: f32 = 0.25 * std::f32::consts::PI;
+
+/// How a rotation is stepped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Integrate {
+    /// q + h/2 w q, normalized every substep (Box3D, Rapier).
+    Linear,
+    /// The same, normalized once, at the end of the step.
+    LinearOnce,
+    /// The exact turn about w by |w| h (Jolt).
+    Exact,
+}
+
+/// How a point's separation follows its bodies' turns within a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchors {
+    /// Each anchor turned by its body's rotation so far (Box3D).
+    Exact,
+    /// To first order: a body turned by the small rotation θ moves an
+    /// anchor r by θ x r, so the separation moves by θ . (r x n), a dot
+    /// product with what the row already holds.
+    Linear,
+}
+
+/// When a body's world inverse inertia is formed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inertia {
+    /// Once a step, from its rotation then (Box3D, Rapier).
+    Step,
+    /// Again every substep, from its rotation so far.
+    Substep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    pub substeps: usize,
+    pub relax: usize,
+    pub stiffness: f32,
+    pub static_stiffness: f32,
+    /// Friction in the pushing pass too (Box2D's), not only relaxing
+    /// (Rapier's and Box3D's).
+    pub friction_in_push: bool,
+    pub integrate: Integrate,
+    pub inertia: Inertia,
+    pub anchors: Anchors,
+}
+
+impl Default for Tuning {
+    fn default() -> Tuning {
+        Tuning {
+            substeps: SUBSTEPS,
+            relax: RELAX_ITERATIONS,
+            stiffness: STIFFNESS,
+            static_stiffness: STATIC_STIFFNESS,
+            friction_in_push: false,
+            integrate: Integrate::Linear,
+            inertia: Inertia::Step,
+            anchors: Anchors::Exact,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SolverBody {
     pub v: Vec3,
+    pub w: Vec3,
     /// 0 for static bodies.
     pub inv_mass: f32,
+    /// Its own inverse inertia, about its axes: zero when it can't turn.
+    pub inv_inertia: Vec3,
+    /// Its rotation when the step began.
+    pub q: Quat,
     /// The step's gravity, already in `v`: given back a substep at a time
     /// (see the 2D solver).
     pub gravity: Vec3,
-    /// Output: how far the body moved this step.
+    /// The world inverse inertia, and output: how far the body moved and
+    /// turned this step.
+    pub inv_i: Mat3,
     pub moved: Vec3,
+    pub turned: Quat,
 }
 
 impl SolverBody {
-    pub fn new(v: Vec3, inv_mass: f32, gravity: Vec3) -> SolverBody {
-        SolverBody { v, inv_mass, gravity, moved: Vec3::ZERO }
+    pub fn new(v: Vec3, w: Vec3, inv_mass: f32, inv_inertia: Vec3, q: Quat, gravity: Vec3) -> SolverBody {
+        SolverBody { v, w, inv_mass, inv_inertia, q, gravity, inv_i: Mat3::ZERO, moved: Vec3::ZERO, turned: Quat::IDENTITY }
     }
+
+    /// Where it is turned to now.
+    pub fn rotation(&self) -> Quat {
+        self.turned.times(self.q).normalize()
+    }
+
+    fn form_inertia(&mut self, q: Quat) {
+        self.inv_i = if self.inv_inertia == Vec3::ZERO { Mat3::ZERO } else { Mat3::rotated_diagonal(&q.matrix(), self.inv_inertia) };
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContactPoint {
+    /// From `a`'s center to the point, in the world, when found.
+    pub ra: Vec3,
+    pub depth: f32,
+    /// In, the last step's normal impulse here (warm starting); out, this
+    /// step's.
+    pub jn: f32,
+    /// Output: the closing speed along the normal before solving.
+    pub speed: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -54,15 +153,17 @@ pub struct Constraint {
     pub a: u32,
     pub b: u32,
     pub normal: Vec3,
-    pub depth: f32,
+    /// `a`'s center less `b`'s when found: `b`'s anchors are `a`'s plus
+    /// this.
+    pub offset: Vec3,
     pub friction: f32,
     pub restitution: f32,
-    /// Accumulated impulses over the step: in, the last step's (warm
-    /// starting); out, this step's. `jt` is in the tangent plane.
-    pub jn: f32,
+    pub count: usize,
+    pub points: [ContactPoint; 4],
+    /// Accumulated friction and twist impulses over the step, in and out
+    /// as the points' normal ones. `jt` is in the tangent plane.
     pub jt: Vec3,
-    /// Output: the closing speed along the normal before solving.
-    pub speed: f32,
+    pub twist: f32,
 }
 
 /// Box2D's `b2MakeSoft`, as in 2D.
@@ -83,179 +184,341 @@ impl Softness {
     }
 }
 
+/// What the passes read and write of a body, in a cache line of its own:
+/// the rest of `SolverBody` (its inertia, gravity, rotation) is only read
+/// when the rows are made.
+#[derive(Clone, Copy, Default)]
+#[repr(align(64))]
+struct Hot {
+    v: Vec3,
+    w: Vec3,
+    moved: Vec3,
+    inv_mass: f32,
+    /// How far it has turned this step, as a rotation vector, the sum of
+    /// w h: what `Anchors::Linear` reads.
+    theta: Vec3,
+}
+
+/// A contact point as the substeps solve it. The crossed anchors and what
+/// the inverse inertias make of them are worked out once a step, so a pass
+/// is dot products and adds, no matrices.
+#[derive(Clone, Copy, Default)]
+struct PointRow {
+    ra: Vec3,
+    rb: Vec3,
+    /// ra x n and rb x n; I_a (ra x n) and I_b (rb x n).
+    rna: Vec3,
+    rnb: Vec3,
+    ia: Vec3,
+    ib: Vec3,
+    /// Separation when found, less the anchors' offset along the normal:
+    /// the anchors' moves add to it.
+    base: f32,
+    mass: f32,
+    jn: f32,
+    /// Distance from the centroid, which twist friction acts at.
+    lever: f32,
+}
+
+/// A contact's friction, at the points' centroid: the tangents crossed with
+/// its anchors on each body, and what the inverse inertias make of them.
+#[derive(Clone, Copy, Default)]
+struct Tangents {
+    ca: [Vec3; 2],
+    cb: [Vec3; 2],
+    ia: [Vec3; 2],
+    ib: [Vec3; 2],
+}
+
 struct Row {
     a: usize,
     b: usize,
-    normal: Vec3,
-    mass: f32,
-    base: f32,
+    n: Vec3,
+    t: [Vec3; 2],
+    /// Its points, in `points`.
+    start: usize,
+    count: usize,
     soft: Softness,
     friction: f32,
-    jn: f32,
-    jt: Vec3,
+    tan: Tangents,
+    /// The inverse of the 2x2 tangent mass (xx, xy, yy).
+    tmass: [f32; 3],
+    jt: [f32; 2],
+    /// I_a n and I_b n, for twist.
+    na: Vec3,
+    nb: Vec3,
+    twist_mass: f32,
+    twist: f32,
 }
 
-pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32) {
-    let h = dt / SUBSTEPS as f32;
+pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, how: &Tuning) {
+    let n_sub = how.substeps.max(1);
+    let h = dt / n_sub as f32;
     let inv_h = 1.0 / h;
-    let moving = Softness::new(STIFFNESS * inv_h, DAMPING_RATIO, h);
-    let fixed = Softness::new(STATIC_STIFFNESS * inv_h, DAMPING_RATIO, h);
-    let share = 1.0 / SUBSTEPS as f32;
-    let mut rows: Vec<Row> = contacts
-        .iter_mut()
-        .map(|c| {
-            let (a, b) = (c.a as usize, c.b as usize);
-            let (ia, ib) = (bodies[a].inv_mass, bodies[b].inv_mass);
-            c.speed = -(bodies[b].v - bodies[a].v).dot(c.normal);
-            let k = ia + ib;
-            let jt = c.jt - c.normal * c.jt.dot(c.normal);
-            let row = Row {
-                a,
-                b,
-                normal: c.normal,
-                mass: if k > 0.0 { 1.0 / k } else { 0.0 },
-                base: -c.depth,
-                soft: if ia == 0.0 || ib == 0.0 { fixed } else { moving },
-                friction: c.friction,
-                jn: c.jn * share,
-                jt: jt * share,
-            };
-            (c.jn, c.jt) = (0.0, Vec3::ZERO);
-            row
-        })
-        .collect();
+    let moving = Softness::new(how.stiffness * inv_h, DAMPING_RATIO, h);
+    let fixed = Softness::new(how.static_stiffness * inv_h, DAMPING_RATIO, h);
+    let share = 1.0 / n_sub as f32;
     for b in bodies.iter_mut() {
-        b.v = b.v - b.gravity;
-        b.moved = Vec3::ZERO;
+        b.form_inertia(b.q);
     }
+    let mut points = Vec::with_capacity(contacts.len() * 2);
+    let mut rows: Vec<Row> = contacts.iter_mut().map(|c| row(bodies, c, &mut points, share, moving, fixed)).collect();
+    let mut hot: Vec<Hot> =
+        bodies.iter().map(|b| Hot { v: b.v - b.gravity, w: b.w, moved: Vec3::ZERO, inv_mass: b.inv_mass, theta: Vec3::ZERO }).collect();
+    // Apart from the hot bodies: only `Anchors::Exact` reads it in a pass.
+    let mut turned = vec![Quat::IDENTITY; bodies.len()];
+    let exact = how.anchors == Anchors::Exact;
+    let max_w = MAX_ROTATION / dt;
 
-    for _ in 0..SUBSTEPS {
-        for b in bodies.iter_mut() {
-            b.v = b.v + b.gravity * share;
+    for sub in 0..n_sub {
+        for (x, b) in hot.iter_mut().zip(bodies.iter()) {
+            x.v += b.gravity * share;
+            let w = x.w.len();
+            if w > max_w {
+                x.w = x.w * (max_w / w);
+            }
         }
-        for r in rows.iter().filter(|r| r.mass != 0.0) {
-            apply(bodies, r, r.normal * r.jn + r.jt);
+        for r in &rows {
+            warm_start(&mut hot, r, &points);
         }
-        pass(bodies, &mut rows, inv_h, true);
-        for b in bodies.iter_mut() {
-            b.moved = b.moved + b.v * h;
+        pass(&mut hot, &turned, &mut rows, &mut points, inv_h, true, how.friction_in_push, exact);
+        let last = sub + 1 == n_sub;
+        for ((x, b), q) in hot.iter_mut().zip(bodies.iter_mut()).zip(turned.iter_mut()) {
+            x.moved += x.v * h;
+            if b.inv_inertia == Vec3::ZERO {
+                continue;
+            }
+            x.theta += x.w * h;
+            *q = match how.integrate {
+                Integrate::Linear => q.integrate(x.w, h).normalize(),
+                Integrate::LinearOnce => {
+                    let q = q.integrate(x.w, h);
+                    if last { q.normalize() } else { q }
+                }
+                Integrate::Exact => q.integrate_exact(x.w, h),
+            };
+            if how.inertia == Inertia::Substep {
+                b.form_inertia(q.times(b.q).normalize());
+            }
         }
-        for _ in 0..RELAX_ITERATIONS {
-            pass(bodies, &mut rows, inv_h, false);
+        if how.inertia == Inertia::Substep {
+            for r in rows.iter_mut() {
+                refresh(bodies, r, &mut points);
+            }
+        }
+        for _ in 0..how.relax {
+            pass(&mut hot, &turned, &mut rows, &mut points, inv_h, false, true, exact);
         }
         for (r, c) in rows.iter().zip(contacts.iter_mut()) {
-            c.jn += r.jn;
-            c.jt = c.jt + r.jt;
+            for (p, cp) in points[r.start..r.start + r.count].iter().zip(c.points.iter_mut()) {
+                cp.jn += p.jn;
+            }
+            c.jt += r.t[0] * r.jt[0] + r.t[1] * r.jt[1];
+            c.twist += r.twist;
         }
     }
 
-    for (r, c) in rows.iter_mut().zip(contacts.iter_mut()) {
-        if c.restitution == 0.0 || c.speed <= BOUNCE_THRESHOLD || c.jn == 0.0 || r.mass == 0.0 {
+    // Restitution, once, from the closing speed before the step, for the
+    // points that pushed, as in 2D.
+    for (r, c) in rows.iter().zip(contacts.iter_mut()) {
+        if c.restitution == 0.0 {
             continue;
         }
-        let vn = (bodies[r.b].v - bodies[r.a].v).dot(r.normal);
-        let jn = (r.jn - r.mass * (vn - c.restitution * c.speed)).max(0.0);
-        let d = jn - r.jn;
-        r.jn = jn;
-        c.jn += d;
-        apply(bodies, r, r.normal * d);
+        for (p, cp) in points[r.start..r.start + r.count].iter_mut().zip(c.points.iter_mut()) {
+            if cp.speed <= BOUNCE_THRESHOLD || cp.jn == 0.0 || p.mass == 0.0 {
+                continue;
+            }
+            let vn = normal_speed(&hot, r, p);
+            let jn = (p.jn - p.mass * (vn - c.restitution * cp.speed)).max(0.0);
+            let d = jn - p.jn;
+            p.jn = jn;
+            cp.jn += d;
+            push(&mut hot, r.a, r.b, r.n * d, p.ia * d, p.ib * d);
+        }
+    }
+    for ((b, x), q) in bodies.iter_mut().zip(&hot).zip(turned) {
+        (b.v, b.w, b.moved, b.turned) = (x.v, x.w, x.moved, q);
     }
 }
 
-fn pass(bodies: &mut [SolverBody], rows: &mut [Row], inv_h: f32, push: bool) {
-    for r in rows.iter_mut() {
-        if r.mass == 0.0 {
-            continue;
-        }
-        let (a, b) = (&bodies[r.a], &bodies[r.b]);
-        let sep = r.base + (b.moved - a.moved).dot(r.normal);
-        let (bias, mass, relax) = if sep > 0.0 {
-            (sep * inv_h, 1.0, 0.0)
-        } else if push {
-            ((r.soft.rate * sep).max(-MAX_PUSH), r.soft.mass, r.soft.impulse)
-        } else {
-            (0.0, 1.0, 0.0)
-        };
-        let vn = (b.v - a.v).dot(r.normal);
-        let jn = (r.jn - r.mass * mass * (vn + bias) - relax * r.jn).max(0.0);
-        let d = jn - r.jn;
-        r.jn = jn;
-        apply(bodies, r, r.normal * d);
-        if push {
-            continue;
-        }
-
-        let rel = bodies[r.b].v - bodies[r.a].v;
-        let slip = rel - r.normal * rel.dot(r.normal);
-        let limit = r.friction * r.jn;
-        let mut jt = r.jt - slip * r.mass;
-        let len2 = jt.dot(jt);
-        if len2 > limit * limit {
-            jt = jt * (limit / len2.sqrt());
-        }
-        let d = jt - r.jt;
-        r.jt = jt;
-        apply(bodies, r, d);
+/// A contact as the substeps solve it, from what was found, and its
+/// impulses zeroed to be summed again.
+fn row(bodies: &[SolverBody], c: &mut Constraint, points: &mut Vec<PointRow>, share: f32, moving: Softness, fixed: Softness) -> Row {
+    let (ai, bi) = (c.a as usize, c.b as usize);
+    let (a, b) = (&bodies[ai], &bodies[bi]);
+    let n = c.normal;
+    let t1 = n.perp();
+    let t = [t1, n.cross(t1)];
+    let m = a.inv_mass + b.inv_mass;
+    let count = c.count.min(4);
+    let start = points.len();
+    let mut centroid = Vec3::ZERO;
+    for cp in c.points[..count].iter_mut() {
+        let (ra, rb) = (cp.ra, cp.ra + c.offset);
+        let (rna, rnb) = (ra.cross(n), rb.cross(n));
+        let (ia, ib) = (a.inv_i.apply(rna), b.inv_i.apply(rnb));
+        let k = m + ia.dot(rna) + ib.dot(rnb);
+        cp.speed = -(b.v - a.v).dot(n) - b.w.dot(rnb) + a.w.dot(rna);
+        // The last step's impulse was over the whole step: a substep's
+        // share of it is where each substep starts.
+        let jn = cp.jn * share;
+        let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
+        points.push(PointRow { ra, rb, rna, rnb, ia, ib, base: -cp.depth - n.dot(c.offset), mass, jn, lever: 0.0 });
+        cp.jn = 0.0;
+        centroid += ra;
     }
+    let ca = centroid * (1.0 / count.max(1) as f32);
+    let cb = ca + c.offset;
+    for p in points[start..].iter_mut() {
+        let d = p.ra - ca;
+        p.lever = (d - n * d.dot(n)).len();
+    }
+    let tan = Tangents {
+        ca: [ca.cross(t[0]), ca.cross(t[1])],
+        cb: [cb.cross(t[0]), cb.cross(t[1])],
+        ia: [a.inv_i.apply(ca.cross(t[0])), a.inv_i.apply(ca.cross(t[1]))],
+        ib: [b.inv_i.apply(cb.cross(t[0])), b.inv_i.apply(cb.cross(t[1]))],
+    };
+    let k = |i: usize, j: usize| tan.ia[i].dot(tan.ca[j]) + tan.ib[i].dot(tan.cb[j]);
+    let (k11, k12, k22) = (m + k(0, 0), k(0, 1), m + k(1, 1));
+    let det = k11 * k22 - k12 * k12;
+    let tmass = if det > 0.0 { [k22 / det, -k12 / det, k11 / det] } else { [0.0; 3] };
+    let (na, nb) = (a.inv_i.apply(n), b.inv_i.apply(n));
+    let kt = na.dot(n) + nb.dot(n);
+    let r = Row {
+        a: ai,
+        b: bi,
+        n,
+        t,
+        start,
+        count,
+        soft: if a.inv_mass == 0.0 || b.inv_mass == 0.0 { fixed } else { moving },
+        friction: c.friction,
+        tan,
+        tmass,
+        jt: [c.jt.dot(t[0]) * share, c.jt.dot(t[1]) * share],
+        na,
+        nb,
+        twist_mass: if kt > 0.0 { 1.0 / kt } else { 0.0 },
+        twist: c.twist * share,
+    };
+    (c.jt, c.twist) = (Vec3::ZERO, 0.0);
+    r
+}
+
+/// The row's angular terms again, from the bodies' inverse inertias now
+/// (`Inertia::Substep`); the masses stay the step's.
+fn refresh(bodies: &[SolverBody], r: &mut Row, points: &mut [PointRow]) {
+    let (a, b) = (&bodies[r.a], &bodies[r.b]);
+    for p in points[r.start..r.start + r.count].iter_mut() {
+        (p.ia, p.ib) = (a.inv_i.apply(p.rna), b.inv_i.apply(p.rnb));
+    }
+    for i in 0..2 {
+        (r.tan.ia[i], r.tan.ib[i]) = (a.inv_i.apply(r.tan.ca[i]), b.inv_i.apply(r.tan.cb[i]));
+    }
+    (r.na, r.nb) = (a.inv_i.apply(r.n), b.inv_i.apply(r.n));
 }
 
 #[inline(always)]
-fn apply(bodies: &mut [SolverBody], r: &Row, impulse: Vec3) {
-    let (ia, ib) = (bodies[r.a].inv_mass, bodies[r.b].inv_mass);
-    bodies[r.a].v = bodies[r.a].v - impulse * ia;
-    bodies[r.b].v = bodies[r.b].v + impulse * ib;
+fn normal_speed(hot: &[Hot], r: &Row, p: &PointRow) -> f32 {
+    let (a, b) = (&hot[r.a], &hot[r.b]);
+    (b.v - a.v).dot(r.n) + b.w.dot(p.rnb) - a.w.dot(p.rna)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DT: f32 = 1.0 / 60.0;
-
-    fn falling(v: Vec3) -> SolverBody {
-        SolverBody::new(v, 1.0, Vec3::ZERO)
+fn warm_start(hot: &mut [Hot], r: &Row, points: &[PointRow]) {
+    for p in &points[r.start..r.start + r.count] {
+        push(hot, r.a, r.b, r.n * p.jn, p.ia * p.jn, p.ib * p.jn);
     }
+    let (j1, j2) = (r.jt[0], r.jt[1]);
+    push(hot, r.a, r.b, r.t[0] * j1 + r.t[1] * j2, r.tan.ia[0] * j1 + r.tan.ia[1] * j2, r.tan.ib[0] * j1 + r.tan.ib[1] * j2);
+    push(hot, r.a, r.b, Vec3::ZERO, r.na * r.twist, r.nb * r.twist);
+}
 
-    /// Body 0 is the ground, below body 1 (y up): the normal from 1 to 0
-    /// points down.
-    fn on_ground(depth: f32) -> Constraint {
-        Constraint { a: 1, b: 0, normal: Vec3::new(0.0, -1.0, 0.0), depth, friction: 0.5, ..Default::default() }
+/// One pass of sequential impulses over the contacts: soft and pushing
+/// out when `push_out`, else rigid; with friction when `friction`.
+#[allow(clippy::too_many_arguments)]
+fn pass(
+    hot: &mut [Hot],
+    turned: &[Quat],
+    rows: &mut [Row],
+    points: &mut [PointRow],
+    inv_h: f32,
+    push_out: bool,
+    friction: bool,
+    exact: bool,
+) {
+    for r in rows.iter_mut() {
+        let mut total = 0.0;
+        let mut twisting = 0.0;
+        for p in points[r.start..r.start + r.count].iter_mut() {
+            if p.mass == 0.0 {
+                continue;
+            }
+            let (a, b) = (&hot[r.a], &hot[r.b]);
+            // Where the anchors are now, by each body's move and turn.
+            let sep = if exact {
+                p.base + (b.moved - a.moved + turned[r.b].rotate(p.rb) - turned[r.a].rotate(p.ra)).dot(r.n)
+            } else {
+                p.base + (b.moved - a.moved).dot(r.n) + (p.rb - p.ra).dot(r.n) + b.theta.dot(p.rnb) - a.theta.dot(p.rna)
+            };
+            // A gap may close this substep, and no more: speculative, in
+            // either pass.
+            let (bias, mass, relax) = if sep > 0.0 {
+                (sep * inv_h, 1.0, 0.0)
+            } else if push_out {
+                ((r.soft.rate * sep).max(-MAX_PUSH), r.soft.mass, r.soft.impulse)
+            } else {
+                (0.0, 1.0, 0.0)
+            };
+            let vn = normal_speed(hot, r, p);
+            let jn = (p.jn - p.mass * mass * (vn + bias) - relax * p.jn).max(0.0);
+            let dj = jn - p.jn;
+            p.jn = jn;
+            push(hot, r.a, r.b, r.n * dj, p.ia * dj, p.ib * dj);
+            total += jn;
+            twisting += jn * p.lever;
+        }
+        if friction && r.tmass != [0.0; 3] {
+            rub(hot, r, total, twisting);
+        }
     }
+}
 
-    #[test]
-    fn a_landing_body_stops() {
-        let mut bodies = [SolverBody::default(), falling(Vec3::new(0.0, -10.0, 0.0))];
-        solve(&mut bodies, &mut [on_ground(0.0)], DT);
-        assert!(bodies[1].v.y.abs() < 1e-4, "{:?}", bodies[1]);
+/// Friction at the centroid, clamped to its disc, then twist.
+fn rub(hot: &mut [Hot], r: &mut Row, total: f32, twisting: f32) {
+    let (a, b) = (&hot[r.a], &hot[r.b]);
+    let dv = b.v - a.v;
+    let v1 = dv.dot(r.t[0]) + b.w.dot(r.tan.cb[0]) - a.w.dot(r.tan.ca[0]);
+    let v2 = dv.dot(r.t[1]) + b.w.dot(r.tan.cb[1]) - a.w.dot(r.tan.ca[1]);
+    let m = r.tmass;
+    let mut j = [r.jt[0] - (m[0] * v1 + m[1] * v2), r.jt[1] - (m[1] * v1 + m[2] * v2)];
+    let limit = r.friction * total;
+    let len2 = j[0] * j[0] + j[1] * j[1];
+    if len2 > limit * limit {
+        let s = limit / len2.sqrt();
+        j = [j[0] * s, j[1] * s];
     }
+    let (d1, d2) = (j[0] - r.jt[0], j[1] - r.jt[1]);
+    r.jt = j;
+    push(hot, r.a, r.b, r.t[0] * d1 + r.t[1] * d2, r.tan.ia[0] * d1 + r.tan.ia[1] * d2, r.tan.ib[0] * d1 + r.tan.ib[1] * d2);
 
-    #[test]
-    fn friction_is_a_disc_not_a_box() {
-        // Sliding diagonally at 10 while pressed down at 1: friction can take
-        // 0.5 of the speed, along the slide, not 0.5 on each axis.
-        let d = 10.0 / 2f32.sqrt();
-        let mut bodies = [SolverBody::default(), falling(Vec3::new(d, -1.0, d))];
-        solve(&mut bodies, &mut [on_ground(0.0)], DT);
-        let v = bodies[1].v;
-        assert!(((v.x * v.x + v.z * v.z).sqrt() - 9.5).abs() < 1e-3, "{v:?}");
-        assert!((v.x - v.z).abs() < 1e-5);
+    if r.twist_mass > 0.0 {
+        let wn = hot[r.b].w.dot(r.n) - hot[r.a].w.dot(r.n);
+        let limit = r.friction * twisting;
+        let t = (r.twist - r.twist_mass * wn).clamp(-limit, limit);
+        let d = t - r.twist;
+        r.twist = t;
+        push(hot, r.a, r.b, Vec3::ZERO, r.na * d, r.nb * d);
     }
+}
 
-    #[test]
-    fn warm_starting_projects_last_steps_friction_onto_this_plane() {
-        let mut bodies = [SolverBody::default(), falling(Vec3::ZERO)];
-        let mut c = [Constraint { jt: Vec3::new(0.0, 3.0, 0.0), ..on_ground(0.0) }];
-        solve(&mut bodies, &mut c, DT);
-        // Along the normal, the last step's friction is no friction.
-        assert!(c[0].jt.len() < 1e-6, "{:?}", c[0]);
-    }
-
-    #[test]
-    fn penetration_is_pushed_out_at_most_max_push_and_leaves_no_speed() {
-        let mut bodies = [SolverBody::default(), falling(Vec3::ZERO)];
-        solve(&mut bodies, &mut [on_ground(0.2)], DT);
-        assert!(bodies[1].v.len() < 1e-4, "{:?}", bodies[1]);
-        let moved = bodies[1].moved.y;
-        assert!(moved > 0.9 * MAX_PUSH * DT && moved <= MAX_PUSH * DT + 1e-6, "moved {moved}");
-    }
+/// An impulse: `linear` on `b` and its opposite on `a`, with the angular
+/// velocity it gives each (already through their inverse inertias).
+#[inline(always)]
+fn push(hot: &mut [Hot], a: usize, b: usize, linear: Vec3, wa: Vec3, wb: Vec3) {
+    let (ma, mb) = (hot[a].inv_mass, hot[b].inv_mass);
+    hot[a].v -= linear * ma;
+    hot[a].w -= wa;
+    hot[b].v += linear * mb;
+    hot[b].w += wb;
 }

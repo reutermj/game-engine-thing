@@ -11,7 +11,9 @@ rust_library(
     name = "physics3d",
     srcs = [
         "lib.rs",
+        "math.rs",
         "narrow.rs",
+        "gjk.rs",
         "solver.rs",
     ],
     crate_root = "lib.rs",
@@ -38,6 +40,16 @@ rust_test(
 rust_binary(
     name = "stages",
     srcs = ["tests/stages.rs"],
+    deps = [
+        ":physics3d",
+        "//engine/ecs",
+    ],
+)
+
+# Bodies that turn: tipping, rolling, twisting, stacking.
+rust_test(
+    name = "rotation_test",
+    srcs = ["tests/rotation_test.rs"],
     deps = [
         ":physics3d",
         "//engine/ecs",

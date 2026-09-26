@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use engine_ecs::{Build, World};
-use physics3d::{Body, Collider, Position, Static, TIMINGS, Timings, Vec3, Velocity, step};
+use physics3d::{Body, Collider, Quat, TIMINGS, Timings, Vec3, dynamic, fixed, step};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -20,7 +20,7 @@ fn main() {
     {
         let mut m = w.between_frames(Build::default()).unwrap();
         let mut wall = |at: Vec3, h: Vec3| {
-            m.spawn((Position { x: at.x, y: at.y, z: at.z }, Collider::cuboid(h), Body::new(0.0), Static {}));
+            m.spawn(fixed(at, Quat::IDENTITY, Collider::cuboid(h)));
         };
         wall(Vec3::new(0.0, -0.5, 0.0), Vec3::new(half + 1.0, 0.5, half + 1.0));
         let tall = 40.0;
@@ -44,7 +44,7 @@ fn main() {
                 (j as f32 - per as f32 / 2.0 + 0.5) * 1.05 + jitter(),
             );
             let c = if boxes { Collider::cuboid(Vec3::splat(0.5)) } else { Collider::sphere(0.5) };
-            m.spawn((Position { x: at.x, y: at.y, z: at.z }, c, Body::new(1.0), Velocity::default()));
+            m.spawn(dynamic(at, Quat::IDENTITY, c, Body::solid(1.0, &c)));
         }
     }
     println!("{n} {}, {side} wide: µs per step by stage (ECS, one thread)", if boxes { "boxes" } else { "spheres" });

@@ -1,16 +1,16 @@
-//! A pile of spheres and boxes dropped into a walled box settles in the
+//! A pile of turning boxes dropped into a walled box settles in the
 //! world: at rest, above the floor, inside the walls, barely overlapping,
 //! touching several neighbors each (a pile, not columns), with the 3D
 //! spatial order intact.
 
 use engine_ecs::{Build, World};
-use physics3d::{Body, Collider, ContactPair, Manifold, Position, Static, Vec3, Velocity, step};
+use physics3d::{Body, Collider, ContactPair, Manifold, Position, Quat, Vec3, Velocity, dynamic, fixed, step};
 
 /// Half the floor's inner width.
 const HALF: f32 = 3.0;
 
 fn wall(m: &mut engine_ecs::WorldMut<'_>, at: Vec3, half: Vec3) {
-    m.spawn((Position { x: at.x, y: at.y, z: at.z }, Collider::cuboid(half), Body::new(0.0), Static {}));
+    m.spawn(fixed(at, Quat::IDENTITY, Collider::cuboid(half)));
 }
 
 fn pile(n: usize) -> World {
@@ -36,8 +36,8 @@ fn pile(n: usize) -> World {
         for k in 0..n {
             let (i, j, l) = (k % per, (k / per) % per, k / (per * per));
             let at = Vec3::new(i as f32 * 1.1 - 2.2 + jitter(), 1.0 + l as f32 * 1.2, j as f32 * 1.1 - 2.2 + jitter());
-            let c = if k % 2 == 0 { Collider::sphere(0.5) } else { Collider::cuboid(Vec3::splat(0.5)) };
-            m.spawn((Position { x: at.x, y: at.y, z: at.z }, c, Body::new(1.0), Velocity::default()));
+            let c = Collider::cuboid(Vec3::splat(0.5));
+            m.spawn(dynamic(at, Quat::IDENTITY, c, Body::solid(1.0, &c)));
         }
     }
     w
@@ -61,11 +61,11 @@ fn a_pile_settles_in_the_world() {
         assert!(p.y > 0.4 && p.x.abs() < HALF && p.z.abs() < HALF, "{e:?} at {p:?}");
     }
     let manifolds = w.values::<Manifold>().unwrap();
-    let deepest = manifolds.iter().map(|(_, m)| m.depth).fold(0.0, f32::max);
+    let deepest = manifolds.iter().map(|(_, m)| m.deepest()).fold(0.0, f32::max);
     assert!(deepest < 0.02, "a contact {deepest} deep");
     // A pile: bodies rest on several others. Columns would be about two
     // contacts a body, the one below and the one above (4.1 measured here).
-    let touching = manifolds.iter().filter(|(_, m)| m.depth > -0.01).count();
+    let touching = manifolds.iter().filter(|(_, m)| m.deepest() > -0.01).count();
     let per_body = 2.0 * touching as f32 / n as f32;
     assert!(per_body > 3.0, "{touching} touching contacts for {n} bodies: {per_body} a body");
     assert_eq!(w.values::<ContactPair>().unwrap().len(), manifolds.len());

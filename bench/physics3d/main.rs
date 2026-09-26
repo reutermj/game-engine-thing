@@ -3,9 +3,11 @@
 //! Each positional argument is a comma-separated list or "all" (the default):
 //! scenes are spheres, boxes and rain; sizes are body counts (default
 //! 1000,10000); backends are those in physics3d_bench::BACKENDS. Flags:
-//! --iters8 sets every engine's iteration knob to 8, --sleep lets bodies
+//! --iters8 sets every engine's iteration knob to 8, --rotate lets bodies
+//! turn (locked by default), --sleep lets bodies
 //! sleep, --runs N repeats each run and reports the median phase times
-//! (default 3 up to 2000 bodies, 1 above). Prints markdown tables.
+//! (default 3 up to 2000 bodies, 1 above), --tune=... runs a variant of ours
+//! (physics3d::Tuning::parse). Prints markdown tables.
 
 use physics3d_bench::measure::{self, Run};
 use physics3d_bench::scenes::{self, Kind, Scene};
@@ -23,12 +25,15 @@ fn main() {
     let (flags, positional): (Vec<&String>, Vec<&String>) = args.iter().partition(|a| a.starts_with("--"));
     let mut iters = Iters::Default;
     let mut sleep = false;
+    let mut rotate = false;
     let mut runs = None;
     for f in flags {
         match f.as_str() {
             "--iters8" => iters = Iters::Eight,
             "--sleep" => sleep = true,
+            "--rotate" => rotate = true,
             f if f.starts_with("--runs=") => runs = f["--runs=".len()..].parse().ok(),
+            f if f.starts_with("--tune=") => physics3d_bench::ours::tune(&f["--tune=".len()..]),
             f => panic!("unknown flag {f}"),
         }
     }
@@ -36,13 +41,13 @@ fn main() {
     let sizes: Vec<usize> = list(positional.get(1).copied(), &["1000", "10000"]).iter().map(|s| s.parse().expect("size")).collect();
     let backends = list(positional.get(2).copied(), BACKENDS);
 
-    println!("iterations: {iters:?}, sleep: {sleep}, dt 1/60, single-threaded, rotations locked\n");
+    println!("iterations: {iters:?}, sleep: {sleep}, rotate: {rotate}, dt 1/60, single-threaded\n");
     for s in &scenes {
         let kind = Kind::parse(s).unwrap_or_else(|| panic!("unknown scene {s}"));
         for &n in &sizes {
             let scene = scenes::build(kind, n);
             let runs = runs.unwrap_or(if n <= 2000 { 3 } else { 1 });
-            let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32 };
+            let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32, rotate };
             let mut results = Vec::new();
             for b in &backends {
                 let mut all: Vec<Run> = (0..runs)

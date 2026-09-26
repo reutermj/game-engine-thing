@@ -88,6 +88,7 @@ struct JoltWorld {
 	std::vector<BodyID> bodies;
 	uint32_t touching = 0;
 	bool allow_sleep = true;
+	bool rotate = false;
 };
 
 extern "C" JoltWorld* p3_jolt_create(const P3Config* config) {
@@ -104,6 +105,7 @@ extern "C" JoltWorld* p3_jolt_create(const P3Config* config) {
 	w->physics.SetGravity(Vec3(0.0f, -9.81f, 0.0f));
 	w->physics.SetContactListener(&w->counter);
 	w->allow_sleep = config->allow_sleep != 0;
+	w->rotate = config->rotate != 0;
 	return w;
 }
 
@@ -138,7 +140,7 @@ extern "C" void p3_jolt_add(JoltWorld* w, uint32_t n, const P3Spec* specs, uint3
 		b.mRestitution = 0.0f;
 		b.mAllowSleeping = w->allow_sleep;
 		if (!is_fixed) {
-			b.mAllowedDOFs = EAllowedDOFs::TranslationX | EAllowedDOFs::TranslationY | EAllowedDOFs::TranslationZ;
+			if (!w->rotate) b.mAllowedDOFs = EAllowedDOFs::TranslationX | EAllowedDOFs::TranslationY | EAllowedDOFs::TranslationZ;
 			b.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
 			b.mMassPropertiesOverride.mMass = 1.0f;
 			b.mLinearVelocity = Vec3(s.vel[0], s.vel[1], s.vel[2]);
@@ -175,13 +177,22 @@ extern "C" void p3_jolt_read(const JoltWorld* w, uint32_t n, const uint32_t* han
 		const BodyID id = w->bodies[handles[i]];
 		const RVec3 p = bi.GetPosition(id);
 		const Vec3 v = bi.GetLinearVelocity(id);
-		float* o = out + 6 * i;
+		const Quat q = bi.GetRotation(id);
+		const Vec3 a = bi.GetAngularVelocity(id);
+		float* o = out + 13 * i;
 		o[0] = float(p.GetX());
 		o[1] = float(p.GetY());
 		o[2] = float(p.GetZ());
 		o[3] = v.GetX();
 		o[4] = v.GetY();
 		o[5] = v.GetZ();
+		o[6] = q.GetX();
+		o[7] = q.GetY();
+		o[8] = q.GetZ();
+		o[9] = q.GetW();
+		o[10] = a.GetX();
+		o[11] = a.GetY();
+		o[12] = a.GetZ();
 	}
 }
 

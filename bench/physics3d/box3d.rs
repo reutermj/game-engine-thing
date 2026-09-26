@@ -2,7 +2,7 @@
 //! locked by motion locks, and Box3D's usual 4 substeps unless [`Iters::Eight`].
 
 use crate::ffi;
-use crate::{Backend, Config, Iters, Spec};
+use crate::{Backend, Config, Iters, Spec, State};
 
 pub struct Box3d {
     world: *mut ffi::Box3dWorld,
@@ -19,6 +19,7 @@ impl Box3d {
             },
             position_iters: 0,
             allow_sleep: config.sleep as i32,
+            rotate: config.rotate as i32,
         };
         // SAFETY: the shim copies what it needs from the config.
         let world = unsafe { ffi::p3_box3d_create(&c) };
@@ -59,8 +60,8 @@ impl Backend for Box3d {
         unsafe { ffi::p3_box3d_step(self.world, dt) }
     }
 
-    fn state(&self, out: &mut Vec<([f32; 3], [f32; 3])>) {
-        let mut buf = vec![0f32; 6 * self.dynamic.len()];
+    fn state(&self, out: &mut Vec<State>) {
+        let mut buf = vec![0f32; ffi::STATE_FLOATS * self.dynamic.len()];
         // SAFETY: every handle came from this world; buf holds 6 floats each.
         unsafe { ffi::p3_box3d_read(self.world, self.dynamic.len() as u32, self.dynamic.as_ptr(), buf.as_mut_ptr()) };
         ffi::unpack(&buf, out);
