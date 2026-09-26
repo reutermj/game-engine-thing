@@ -109,6 +109,13 @@ rust_test(
     deps = [":ecs"],
 )
 
+#   ./bazel run -c opt //engine/ecs:spatial3d_bench
+rust_binary(
+    name = "spatial3d_bench",
+    srcs = ["tests/spatial3d_bench.rs"],
+    deps = [":ecs"],
+)
+
 #   ./bazel run -c opt //engine/ecs:spatial_bench
 rust_binary(
     name = "spatial_bench",
