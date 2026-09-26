@@ -1,0 +1,34 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# A spike: translation-only 3D rigid bodies on the ECS's 3D spatial
+# storage, as plain systems for the ECS harness (not a mod). See lib.rs and
+# docs/architecture/spatial-storage.md, "In 3D". The comparison with Rapier
+# and Jolt is //bench/physics3d.
+
+rust_library(
+    name = "physics3d",
+    srcs = [
+        "lib.rs",
+        "narrow.rs",
+        "solver.rs",
+    ],
+    crate_root = "lib.rs",
+    visibility = ["//visibility:public"],
+    deps = ["//engine/ecs"],
+)
+
+rust_test(
+    name = "physics3d_test",
+    crate = ":physics3d",
+)
+
+# A small pile settles, in the world, against the storage's own checks.
+rust_test(
+    name = "pile_test",
+    srcs = ["tests/pile_test.rs"],
+    deps = [
+        ":physics3d",
+        "//engine/ecs",
+    ],
+)
