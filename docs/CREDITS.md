@@ -30,6 +30,7 @@ shipped one would have to ship that filegroup with it.
   `license` field.
 - **What we use it for:** comparison only. `//bench/physics3d` runs its
   scenes through Rapier's `PhysicsWorld`, single-threaded, rotations locked.
+- **Ideas our 3D code adopts:** none; it is the yardstick.
 
 ## Jolt Physics
 
@@ -42,6 +43,7 @@ shipped one would have to ship that filegroup with it.
 - **What we use it for:** comparison only. `//bench/physics3d` builds it from
   source (`bench/physics3d/jolt.BUILD`) behind a small C shim and runs the
   same scenes on `JobSystemSingleThreaded` with translation-only bodies.
+- **Ideas our 3D code adopts:** none; it is the yardstick.
 
 ## Box3D
 
@@ -52,3 +54,16 @@ shipped one would have to ship that filegroup with it.
 - **What we use it for:** comparison only. `//bench/physics3d` builds it from
   source (`bench/physics3d/box3d.BUILD`) behind a small C shim and runs the
   same scenes with one worker and all three angular motion locks.
+- **Ideas our 3D code adopts:** none taken from Box3D's source; the step in
+  `//engine/std/physics3d` descends from our 2D one, whose ideas are
+  Box2D's (below).
+
+## Box2D (ideas in //engine/std/physics3d)
+
+Not built against by the 3D spike; credited here for the ideas the 3D step
+inherits from our 2D solver, which took them from Box2D (Erin Catto,
+<https://github.com/erincatto/box2d>, MIT): sequential impulses with
+accumulated, clamped impulses and warm starting, speculative contacts, and
+mixing friction by geometric mean and restitution by the larger
+(`engine/std/physics3d/solver.rs`, `lib.rs`). The 2D side's own entry, with its
+version and licence, is kept by the 2D comparison.
