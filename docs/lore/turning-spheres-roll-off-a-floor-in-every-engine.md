@@ -23,6 +23,6 @@ in Rapier.
 So the rain scene has low walls now, for every engine (they change nothing
 locked), and "settled" on turning spheres measures rolling, not the solver.
 A test that a sphere stops needs rolling resistance, which none of these
-engines give by default; `tests/rotation_test.rs` checks what friction does
+engines give by default; `engine/std/physics3d/tests/physics3d_test.rs` checks what friction does
 do instead: a sliding sphere rolls at 5/7 of its speed, a spinning one at
 2/7 of its spin times its radius.

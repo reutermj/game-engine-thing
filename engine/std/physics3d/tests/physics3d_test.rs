@@ -196,3 +196,27 @@ fn a_pile_settles_in_the_world() {
     let stats = s.engine.send("physics3d", "stats").unwrap();
     assert!(stats.starts_with(&format!("steps 600 contacts {} ", manifolds.len())), "{stats}");
 }
+
+/// The step reads its settings from the world, both systems that have
+/// any: a box on the floor, run at the defaults, with fewer substeps (the
+/// solve's), and without warm starting (the contacts').
+#[test]
+fn a_tuning_in_the_world_is_the_steps() {
+    let run = |test: &str, tune: Option<&str>| {
+        let s = floor(test);
+        if let Some(t) = tune {
+            s.send(&format!("tune {t}"));
+        }
+        let b = s.body(UNIT, Vec3::new(0.0, 0.6, 0.0), (Vec3::Y, 0.3), Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO);
+        s.run(30);
+        let stages = s.engine.send("physics3d", "stages").unwrap();
+        let count = |k: &str| stages.split_whitespace().skip_while(|w| *w != k).nth(1).unwrap().parse::<u64>().unwrap();
+        (s.at(b), count("kept"), count("matched"))
+    };
+    let (at, kept, matched) = run("tuned_default", None);
+    assert!(kept > 0 && matched == kept, "warm-started {matched} of {kept}");
+    let (fewer, _, _) = run("tuned_substeps", Some("sub=2"));
+    assert_ne!(fewer, at, "two substeps a step moved it as five do");
+    let (_, kept, matched) = run("tuned_cold", Some("warm=cold"));
+    assert!(kept > 0 && matched == 0, "warm-started {matched} of {kept} cold");
+}

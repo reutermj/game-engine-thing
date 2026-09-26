@@ -545,13 +545,13 @@ bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
   pages whatever the dimension), mixed sizes in 3D, and big bodies in 3D
   beyond a floor and walls.
 - **Turned boxes** (2026-09-26): a turned box's bounds depend on its
-  rotation as well as its position and shape, and a key's bounds see one
-  extent. The 3D step keeps the box around each body as turned in a
-  `Reach` component, the key's extent, rewritten as it turns; a sphere
-  around each collider instead cost 4-6 times the pairs, and ten times the
-  broadphase once walls got it too. What 3D would want from the storage
-  instead (extents as a tuple, turning alone re-bounding, fat bounds, wider
-  bundles): [physics.md](physics.md#what-3d-asks-of-the-storage-design).
+  rotation as well as its position and shape. The 3D step's `Position`
+  has `(Collider, Rotation)` as its extents, as 2D's does (below), so a
+  turn re-bounds the row through storage; a sphere around each collider
+  instead cost 4-6 times the pairs, and ten times the broadphase once
+  walls got it too. What 3D still wants from the storage (fat bounds or
+  kept pairs, wider tuples):
+  [physics.md](physics.md#what-3d-asks-of-the-storage-design).[^reach]
 
 ## Bounds from several components
 
@@ -568,7 +568,7 @@ key does; the glue takes a column per extent (`BoundsFn`, `API_VERSION`
 second extent, beside the existing ones in `spatial.rs`. Nothing in the
 order, the re-sort's moves, the lanes or the broadphase changed: they see
 boxes, however they were made. It is as generic over dimensions as the rest
-(3D's would be `(Collider, Orientation)`).
+(3D's is `(Collider, Rotation)`, a quaternion).
 
 The ways rotation could reach storage, measured on the same rows
 (`./bazel run -c opt //engine/ecs:spatial_turn_bench`: 10 000 boxes 0.8
@@ -608,8 +608,16 @@ pairs found; median of 3):
 
 So the pair: it costs a world where nothing turns nothing, which is every
 game today, and pays a pose key's price only where bodies turn. The same
-reasoning gives 3D a `(Collider, Orientation)` pair.
+reasoning gave 3D its `(Collider, Rotation)` pair: every 3D body turns or
+is static, so there the pair splits no tables.
 
 [^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
     its tests and `//engine/ecs:spatial_bench` had superseded it; it is in
     git history up to c7be223.
+
+[^reach]: 2026-09-26: until two extents landed, the 3D step kept the box
+    around each body as turned in a derived `Reach` component, the key's
+    one extent, rewritten by the solver when a box's box changed: a copy
+    of what the collider and rotation already say, and a write the solver
+    had to remember. Removed for the pair, at the same pairs and within a
+    few percent of the step (physics.md, "Rotation in 3D", choice 5).

@@ -119,8 +119,9 @@ one would have to ship those files with it.
   and put in the comparison binary's runfiles. Rapier has no `NOTICE`
   file. We modify none of it.
 - **Ideas our physics takes from it:** friction solved only in the
-  relaxing passes of the soft step (in 3D too, where Box3D does the same), not in the pass that pushes contacts
-  apart (`solver.rs`; Rapier's `IntegrationParameters::friction_in_bias_pass`,
+  relaxing passes of the soft step (in 3D too, where Box3D does the
+  same), not in the pass that pushes contacts apart (`solver.rs`;
+  Rapier's `IntegrationParameters::friction_in_bias_pass`,
   off by default, whose doc explains that friction reacting to the push
   pumps stacks until they topple). Read in the fetched 0.36.0 source.
   What else it does differently is in physics.md, "Against other engines"
@@ -216,7 +217,8 @@ one would have to ship those files with it.
     the contact (`contact.c`), with ids of our own encoding
     (`narrow.rs`, `lib.rs`);
   - bounds of a turned box, center plus or minus |R| h (`b3AABB_Transform`),
-    rewritten as it turns (`lib.rs`, `Reach::of`).
+    re-bounded by storage as it turns (`components.rs`,
+    `Collider::turned_half`, the spatial key's `bounds`).
   Our stiffness (a fifth of the substep rate, where Box3D has 30 Hz at 4
   substeps) and our two relaxing passes are our own measurements
   (physics.md, "Rotation in 3D").

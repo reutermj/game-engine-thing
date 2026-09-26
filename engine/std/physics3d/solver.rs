@@ -519,7 +519,7 @@ mod tests {
     /// One point straight under its center: where an impulse turns nothing,
     /// so what a step does is exact. Four corners, solved one after
     /// another, turn the box a little until the passes converge, which
-    /// takes more than a step (the tests in tests/rotation_test.rs).
+    /// takes more than a step (the tests in tests/physics3d_test.rs).
     fn under(depth: f32, restitution: f32) -> Constraint {
         let mut c = on_ground(depth, restitution);
         c.count = 1;

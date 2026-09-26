@@ -27,6 +27,6 @@ Two things follow. A body that can't turn (a static, a locked body)
 should keep the box around it, whatever a turning one gets. And even for
 unit cubes, whose sphere is only 1.7 times as wide as the cube, the sphere
 costs four times the pairs of the box turned with them: in a pile every
-body's neighbours are within a sphere's reach. The step writes each turned
-box's half extents to a `Reach` component, the key's extent, as it turns
-(physics.md, "Rotation in 3D").
+body's neighbours are within a sphere's reach. The step bounds each body
+by its box as turned, from its `Collider` and `Rotation`, the key's two
+extents (physics.md, "Rotation in 3D").

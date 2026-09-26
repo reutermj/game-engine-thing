@@ -151,7 +151,8 @@ impl Backend for Ours {
             ("merge contacts", f("merge")),
             ("solve: copy in/out", f("solve_gather") + f("write_back")),
             ("solver", f("solver")),
-            ("outside systems (re-sorts, the frame)", self.total_us - inside),
+            // The re-sorts at apply nodes, and the rest of the frame.
+            ("outside systems", self.total_us - inside),
             ("pairs", f("pairs")),
             ("contacts", f("contacts")),
             ("points", f("points")),
