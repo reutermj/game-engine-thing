@@ -56,6 +56,8 @@ field_struct! {
         /// Within `solve_gather`: the bodies, and their angular state.
         solve_bodies: u64,
         solve_turning: u64,
+        /// Within `write_back`: sleeping's bookkeeping after the solve.
+        sleeping: u64,
     }
 }
 
@@ -75,6 +77,9 @@ engine_api::mod_state! {
         time: Timings,
         /// The sleep bookkeeping, while no build has it: see `unload`.
         sleep: Sleepers,
+        /// `sleep` is a build's, handed over: false in a first build's state,
+        /// or one reset.
+        handed: bool,
     }
 }
 
@@ -981,6 +986,7 @@ impl Physics {
             out.began.into_iter().for_each(|c| began.send(c));
         }
         if let Some(c) = config {
+            let t_sleeping = Instant::now();
             self.fall_asleep(
                 sleep,
                 &c,
@@ -992,6 +998,7 @@ impl Physics {
                 &mut contacts,
             );
             Self::move_woken(sleep, &mut sleeping, &mut resting);
+            self.time.sleeping += nanos(t_sleeping);
         }
         // After every write of the step's, the stopping of bodies that fell
         // asleep included.
@@ -1231,21 +1238,32 @@ fn mark(t: &mut Touching, n: Vec2) {
 impl Mod for Physics {
     type Transient = Sleepers;
 
-    /// The bookkeeping the last build left in the state, if any; and who's
-    /// asleep in the world, which is all a first build (or one whose state
-    /// was reset) has to go on, and which the copy already has otherwise.
+    /// The bookkeeping the last build left in the state, or, with none (a
+    /// first build, or one whose state was reset), who's asleep in the
+    /// world. Not both: what the world has asleep that the copy doesn't, a
+    /// game put to sleep since the last step, and the next step's
+    /// `wake_by_games` takes it as the game's; taken here as physics's own,
+    /// its values written since would wake it. (History, 2026-09-26: both
+    /// were taken, so a body a game put to sleep between frames woke if a
+    /// reload came between.)
     fn load(&mut self, sleep: &mut Sleepers, cx: &mut Cx) {
-        *sleep = std::mem::take(&mut self.sleep);
-        cx.world().for_each::<&Asleep>(|e, a| sleep.adopt(e, a.island));
+        if std::mem::take(&mut self.handed) {
+            *sleep = std::mem::take(&mut self.sleep);
+        } else {
+            cx.world().for_each::<&Asleep>(|e, a| sleep.adopt(e, a.island));
+        }
     }
 
     /// Hands the bookkeeping to the next build. Rebuilt from the world
     /// instead, each awake body's time still would restart at a reload, and
-    /// a body due to fall asleep would sleep that much later: a reload
-    /// would show. (History, 2026-09-25: it was rebuilt from the world,
-    /// until the games' reload replays caught the difference.)
+    /// a body due to fall asleep would sleep that much later; and a sleeping
+    /// body a game despawned or woke between frames would wake nothing,
+    /// the world no longer having it asleep: a reload would show.
+    /// (History, 2026-09-25: it was rebuilt from the world, until the
+    /// games' reload replays caught the difference.)
     fn unload(&mut self, sleep: &mut Sleepers, _: &mut Cx) {
         self.sleep = std::mem::take(sleep);
+        self.handed = true;
     }
 
     fn systems(s: &mut Systems<Self>) {
@@ -1289,7 +1307,12 @@ impl Mod for Physics {
                     per(t.solve_gather),
                     per(t.solver),
                     per(t.write_back)
-                ) + &format!(" solve_bodies {:.1} solve_turning {:.1}", per(t.solve_bodies), per(t.solve_turning)))
+                ) + &format!(
+                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1}",
+                    per(t.solve_bodies),
+                    per(t.solve_turning),
+                    per(t.sleeping)
+                ))
             }
             "sleeping" => Ok(format!("asleep {}", sleep.asleep)),
             "wake" => {

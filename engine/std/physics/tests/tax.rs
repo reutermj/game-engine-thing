@@ -10,7 +10,7 @@
 //! different computations. Then each stage is timed on both.
 //!
 //! With `-- parallel`, the same at 1 to 16 threads instead: see `tax_par.rs`.
-//! With `-- sleeping`, only the sleeping table at the end.
+//! With `-- sleeping`, only the sleeping tables at the end.
 
 #[path = "arrays.rs"]
 mod arrays;
@@ -63,6 +63,7 @@ fn main() {
     const FRAMES: u32 = 60;
     if std::env::args().any(|a| a == "sleeping") {
         sleeping(&manifest, FRAMES);
+        before_asleep(&manifest, FRAMES);
         return;
     }
     println!("µs per step, {FRAMES} steps, -c opt, one thread; ECS / arrays\n");
@@ -149,6 +150,7 @@ fn main() {
         }
     }
     sleeping(&manifest, FRAMES);
+    before_asleep(&manifest, FRAMES);
 }
 
 /// Sleeping, which changes the simulation, so the ECS alone: the pile with
@@ -221,5 +223,49 @@ fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
             pair("solver"),
             pair("write_back"),
         );
+    }
+}
+
+/// Sleeping on, before the pile is asleep: what the bookkeeping costs a
+/// step while bodies fall (every one moving) and settle (most slower than
+/// the threshold, few islands asleep), against the same pile with sleeping
+/// off at the same step. The real piles only: in columns, each island falls
+/// asleep on its own, and there's little settling to see.
+fn before_asleep(manifest: &engine_control::Manifest, frames: u32) {
+    println!("\nSleeping on / off, before asleep: µs per step\n");
+    println!("| bodies | box | from step | asleep then / after | frame | write back | of it, sleeping |");
+    println!("|---|---|---|---|---|---|---|");
+    for (n, width) in [(1000, 41.0), (10000, 401.0)] {
+        for warmup in [1u32, 60, 120] {
+            let run = |on: bool| {
+                let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{width}-before-{warmup}-{on}", std::process::id()));
+                let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
+                e.load_batch(&manifest.mods).expect("loading the pile");
+                e.send("pile", &format!("widen {width}")).unwrap();
+                e.send("pile", &format!("drop {n}")).unwrap();
+                if on {
+                    e.send("pile", "sleep 0.05 0.5").unwrap();
+                }
+                e.send("lockstep", &format!("step {warmup}")).unwrap();
+                let then = field(&e.send("physics", "sleeping").unwrap(), "asleep");
+                e.send("physics", "reset_timings").unwrap();
+                let start = Instant::now();
+                e.send("lockstep", &format!("step {frames}")).unwrap();
+                let frame = start.elapsed().as_secs_f64() * 1e6 / frames as f64;
+                let stages = e.send("physics", "stages").unwrap();
+                let after = field(&e.send("physics", "sleeping").unwrap(), "asleep");
+                drop(e);
+                let _ = std::fs::remove_dir_all(dir);
+                (frame, stages, then, after)
+            };
+            let (frame, stages, then, after) = run(true);
+            let (frame_off, stages_off, _, _) = run(false);
+            println!(
+                "| {n} | {width} | {warmup} | {then} / {after} | {frame:.0} / {frame_off:.0} | {:.0} / {:.0} | {:.1} |",
+                field(&stages, "write_back"),
+                field(&stages_off, "write_back"),
+                field(&stages, "sleeping"),
+            );
+        }
     }
 }

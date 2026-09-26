@@ -776,8 +776,9 @@ node of the system that decided them, and happen only as islands do.
 It changes the simulation (a body stops when a threshold says so, not
 when the solver does), which is why the pile, the benchmarks' scene,
 turns it off unless asked, and why `:tax` measures it apart, the ECS
-alone, with no arrays to agree with (`:tax -- sleeping` runs only that
-table). From ten steps after the whole pile is asleep,
+alone, with no arrays to agree with (`:tax -- sleeping` runs only its
+tables: this one, and the real piles before they're asleep, sleeping on
+and off, under "Why the copy is per-entity data" below). From ten steps after the whole pile is asleep,
 against the same pile awake at the same step (speed 0.05, 0.5 s), µs per
 step, medians of three runs, on the columns (40 and 400 wide) and on real
 piles (41 and 401; see [the scenes](#the-scenes)):
@@ -877,9 +878,61 @@ from (after `find_contacts`, and after the solve) are in the state too,
 so the new build doesn't take the old one's writes for a game's. A build
 that starts without it (the first, or one whose state was reset) rebuilds
 it from `Asleep` in the world: what's asleep stays asleep, and only how
-long awake bodies have been still is lost.[^sleep-reload] The games'
-reload replays (//engine/tests:replay.rs) hold physics to this: a run
-reloaded every frame is the run without reloads, bit for bit.
+long awake bodies have been still is lost.[^sleep-reload] A build handed
+one takes nothing from the world: what the world has asleep that the copy
+doesn't, a game put to sleep since the last step, and the next step takes
+it as the game's.[^sleep-adopt] The games' reload replays
+(//engine/tests:replay.rs) hold physics to this: a run reloaded every
+frame is the run without reloads, bit for bit; and
+`a_reload_between_a_games_change_and_the_next_step_does_not_show` holds
+it to what a game changes between frames (a message), reloaded before
+the next step.
+
+**Why the copy is per-entity data outside the world** (2026-09-26,
+get-emj.40): it holds two things a step carries, and neither moves into
+the world for free.
+
+- *Who's asleep, as physics last saw it*, is the baseline a game's
+  changes are found against. The world has who's asleep now; a body a
+  game despawned, or woke by removing its `Asleep`, isn't in it, and its
+  island wakes only because the copy remembers it. Rebuilt from the world
+  at a reload that followed such a change, the island stayed asleep (999
+  of the real pile's 1000, against 1 without the reload). So the handoff
+  stays whatever happens to the times below.
+- *How long each awake body has been still* would be a component, as
+  Box2D keeps `sleepTime` on each body (`b2Body`) and Rapier
+  `time_since_can_sleep` on each body's activation, and it would survive
+  a reset state too. Awake islands aren't kept (they're found afresh each
+  step), so there's no island to keep it on.
+
+But a settling pile's bodies cross `Sleep::speed` all the time: at 10 000
+in a real pile (401 wide), about 400 a step while it falls and 1000 while
+it settles. Each shape was built as a prototype written only when a body
+crosses (the copy still holding the times, so this is the least each
+costs): `Still { since }`, the step it went slower, sparse and only on
+bodies slower than the threshold (an insert or a remove a crossing), or on
+every awake dynamic body (a column in each body's table, written a
+crossing). `:tax -- sleeping`, µs a step, sleeping on / off, medians of
+three runs on a quiet machine, 60 steps from the step given:
+
+| 10 000, 401 wide | the copy (now) | sparse `Still` | `Still` on every body |
+|---|---|---|---|
+| falling (from step 1) | 985 / 872 | 1033 / 886 | 1071 / 887 |
+| settling (from step 60) | 1796 / 1658 | 1895 / 1673 | 1904 / 1666 |
+| falling asleep (from step 120) | 1848 / 1614 | 1940 / 1644 | 1947 / 1643 |
+| of it, the `sleeping` stage (settling, on) | 130 | 166 | 149 |
+| asleep, ten steps after all of it (on) | 23 | 23 | 36 |
+
+Against sleeping off at the same step, the sparse component costs 3 to 5%
+of a step more than the copy, two thirds of it outside the systems,
+where the apply node makes the inserts and removes (a boxed change each),
+and the dense one 3.5 to 7%, and half again the
+asleep pile's step (its bodies' tables are wider). Written every step
+(seconds, not the step it went slower), either costs at least that. At
+1000 (41 wide) settling it's 181, 191 and 187 µs. So the times stay in
+the copy: what components would buy (the times kept through a reset
+state, and seen by games) isn't worth 3 to 5% of every step before a
+pile is asleep.
 
 **`Touching`** on a sleeping body is as it fell asleep: its query excludes
 sleeping bodies, so it isn't reset. A side touched by something that
@@ -2782,6 +2835,13 @@ frame 508.
     standing at the start with physics reloaded every frame, never slept.
     The reload replays found it; `a_reload_keeps_how_long_awake_bodies_have_been_still`
     in //engine/std/physics:physics_test pins it.
+
+[^sleep-adopt]: *(History, 2026-09-26.)* A build handed the copy also
+    adopted everything the world had asleep, as the first build does, so
+    a body a game put to sleep between frames (a message) was physics's
+    own to the next step, which found its values written since and woke
+    it: only if a reload came between. Found while measuring whether the
+    copy could move into the world (get-emj.40).
 
 [^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
     in the mod's transient state, by entity, and every walk looked each
