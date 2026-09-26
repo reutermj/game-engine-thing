@@ -2327,18 +2327,20 @@ two, so two stay. Friction in the pushing pass is worse here, as in 2D.
 at its defaults (Rapier 4 substeps at 30 Hz; Jolt 10 velocity and 2
 position iterations; Box3D 4 substeps at 30 Hz; ours 5 substeps at 60 Hz, 2
 relax); 1000 bodies the median of three runs, 10 000 one. Whole run, ms a
-step:
+step; ours is the mod in the engine, a step a lockstep frame (run again
+2026-09-26 once it was a mod: every quality number is what the plain
+systems gave, so the tables below stand):
 
 | turning | ours | Rapier | Jolt | Box3D |
 |---|---|---|---|---|
-| spheres 1000 | 1.85 | 0.85 | 1.79 | 1.43 |
-| boxes 1000 | 2.68 | 0.91 | 1.35 | 1.09 |
-| planks 1000 | 3.46 | 1.18 | 2.21 | 1.59 |
-| rain 1000 | 1.60 | 0.87 | 1.23 | 1.07 |
-| spheres 10 000 | 24.9 | 19.0 | 28.2 | 18.6 |
-| boxes 10 000 | 29.8 | 13.8 | 19.1 | 11.9 |
-| planks 10 000 | 44.3 | 25.8 | 38.4 | 23.1 |
-| rain 10 000 | 20.8 | 15.8 | 16.1 | 14.2 |
+| spheres 1000 | 2.00 | 0.87 | 1.84 | 1.58 |
+| boxes 1000 | 2.85 | 0.91 | 1.36 | 1.11 |
+| planks 1000 | 3.59 | 1.21 | 2.27 | 1.57 |
+| rain 1000 | 1.67 | 0.87 | 1.23 | 1.07 |
+| spheres 10 000 | 26.2 | 17.6 | 26.7 | 18.2 |
+| boxes 10 000 | 30.6 | 13.6 | 18.9 | 11.5 |
+| planks 10 000 | 44.5 | 23.5 | 36.3 | 22.5 |
+| rain 10 000 | 21.2 | 15.7 | 16.8 | 14.1 |
 
 | locked | ours | Rapier | Jolt | Box3D |
 |---|---|---|---|---|
