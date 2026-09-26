@@ -362,6 +362,24 @@ pub fn solve_with(
     points: &mut [Points],
     dt: f32,
 ) {
+    // Nothing turns and no contact has points: the step compiled without
+    // them, which is what a world before rotation ran (the tests for them,
+    // though never taken, cost the 5050 pyramid's solve 3%).
+    if points.is_empty() && spinning.is_empty() {
+        solve_all::<false>(params, (bodies, spinning), contacts, points, dt);
+    } else {
+        solve_all::<true>(params, (bodies, spinning), contacts, points, dt);
+    }
+}
+
+#[inline(always)]
+fn solve_all<const POINTS: bool>(
+    params: &Params,
+    (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+    contacts: &mut [Constraint],
+    points: &mut [Points],
+    dt: f32,
+) {
     let substeps = params.substeps;
     let h = dt / substeps as f32;
     let inv_h = 1.0 / h;
@@ -386,7 +404,7 @@ pub fn solve_with(
             let (a, b) = (c.a as usize, c.b as usize);
             let (ia, ib) = (bodies[a].inv_mass, bodies[b].inv_mass);
             let k = ia + ib;
-            let turns = c.points > 0 && (spins(a) || spins(b));
+            let turns = POINTS && c.points > 0 && (spins(a) || spins(b));
             let at = if turns {
                 let at = c.points as usize - 1;
                 let (t, speed) = prepare((&bodies[a], &ang[a]), (&bodies[b], &ang[b]), c.normal, &points[at], at, warm);
@@ -435,7 +453,7 @@ pub fn solve_with(
             b.v += b.gravity * share;
         }
         for r in rows.iter().filter(|r| r.mass != 0.0) {
-            if r.points == LINEAR {
+            if !POINTS || r.points == LINEAR {
                 apply(lin, r, r.normal * r.jn + r.normal.perp() * r.jt);
             } else {
                 let t = r.normal.perp();
@@ -446,7 +464,7 @@ pub fn solve_with(
                 }
             }
         }
-        passes(params, lin, &mut ang, &mut rows, &mut turning, inv_h, true);
+        passes::<POINTS>(params, lin, &mut ang, &mut rows, &mut turning, inv_h, true);
         for b in lin.iter_mut() {
             b.moved += b.v * h;
         }
@@ -459,10 +477,10 @@ pub fn solve_with(
             };
         }
         for _ in 0..params.relax {
-            passes(params, lin, &mut ang, &mut rows, &mut turning, inv_h, false);
+            passes::<POINTS>(params, lin, &mut ang, &mut rows, &mut turning, inv_h, false);
         }
         for (r, c) in rows.iter().zip(contacts.iter_mut()) {
-            if r.points == LINEAR {
+            if !POINTS || r.points == LINEAR {
                 c.jn += r.jn;
                 c.jt += r.jt;
             } else {
@@ -480,7 +498,7 @@ pub fn solve_with(
     // the surface bounces it at the speed it came in at, not at what was
     // left of it. Per point with points, as Box2D's `b2ApplyRestitution`.
     for (r, c) in rows.iter_mut().zip(contacts.iter_mut()) {
-        if r.points != LINEAR {
+        if POINTS && r.points != LINEAR {
             let t = &mut turning[r.points as usize];
             let out = &mut points[t.at];
             if c.restitution != 0.0 && r.mass != 0.0 {
@@ -545,8 +563,16 @@ fn prepare((a, qa): (&SolverBody, &Ang), (b, qb): (&SolverBody, &Ang), n: Vec2, 
 /// `pass`, with no test for points in a step where no contact has them,
 /// so a world where nothing turns runs the loop it ran before rotation.
 #[inline(always)]
-fn passes(params: &Params, lin: &mut [Lin], ang: &mut [Ang], rows: &mut [Row], turning: &mut [Turning], inv_h: f32, push: bool) {
-    if turning.is_empty() {
+fn passes<const POINTS: bool>(
+    params: &Params,
+    lin: &mut [Lin],
+    ang: &mut [Ang],
+    rows: &mut [Row],
+    turning: &mut [Turning],
+    inv_h: f32,
+    push: bool,
+) {
+    if !POINTS || turning.is_empty() {
         pass::<false>(params, lin, ang, rows, turning, inv_h, push);
     } else {
         pass::<true>(params, lin, ang, rows, turning, inv_h, push);
