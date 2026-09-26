@@ -234,6 +234,7 @@ pub fn exact(world: &World, log: &[Change]) -> Footprint {
             }
             Change::Event { queue, .. } => fp.add_events(*queue),
             Change::Reorder(t) => table(&mut fp, *t),
+            Change::Sparse(run) => fp.add_sparse(run.component()),
             Change::Spawn { e, components, .. } => {
                 let i = match last_spawn {
                     Some((last, i)) if Arc::ptr_eq(last, components) => i,

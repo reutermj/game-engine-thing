@@ -407,6 +407,90 @@ Still planned: **the equivalence test** for the scheduler, pong and the
 platformer replayed under the parallel and sequential schedulers, frame by
 frame.
 
+## Sparse changes are runs, not closures
+
+**Status: spike** (2026-09-26, get-znt.18, branch `spike/sparse-changes`;
+the user decides whether it lands). A sparse component's insert or remove
+moves no row, but it went through the general structural-change path:
+a boxed closure per insert, a hash lookup of the set per change at the
+apply, and a walk of the whole set at every apply that took it, purging
+dead entries. `//engine/ecs:change_bench` measures each part.
+
+What the spike does, all of it safe Rust:
+
+- **A system's sparse changes are logged as runs**: `Change::Sparse`
+  holds a typed `Vec<(Entity, Option<T>)>` of one component's inserts
+  (`Some`) and removes (`None`), boxed once per run (`SparseRun` in
+  query.rs). A change joins its component's latest run if that's among
+  the log's last eight entries, else starts one. Applying a run looks
+  its set up once and loops over it; its exact footprint is its set.
+  Flecs's command queue is the model: commands by value in one vector,
+  values bump-allocated from a stack reset at each merge, and no
+  per-entity merging for components that move no row
+  ([CREDITS](../CREDITS.md#flecs)).
+- **Order is the log's, where anything could tell.** Joining a run past
+  other entries applies the change before them, and nothing can tell: no
+  other change touches that set, and a despawn in between leaves an
+  insert's entry dead, which is invisible, as a dropped insert is. A
+  component's own changes stay in order, since they only join its latest
+  run. So the visibility rules above hold unchanged: a system never sees
+  its own changes, every later one does.
+- **Hot reload is unaffected**: a run's code is the build's that logged
+  it, as a closure's was, and a log never outlives its frame.
+- **`Structural` holds sparse guards by component id**, as it holds
+  tables by id, not in a `HashMap` (SipHash, twice a change).
+- **A set purges its dead entries once they could be a quarter of it**:
+  at most as many as entities have died since its last purge
+  (`Entities::deaths`), so a set written every step no longer walks all
+  its entries every step, and the walk is paid for by the deaths that
+  made it worth doing. EnTT instead removes a destroyed entity from every
+  pool at once, and Flecs from every non-fragmenting set the entity is
+  flagged as having; ours can't, since a despawn doesn't hold every set's
+  guard.
+- **`Query::get` on a table-only query checks the entity's table**
+  instead of fetching its items: a lookup is most of what a change by
+  entity costs a system (physics changes the bodies its step chose).
+
+**Measured** (`change_bench`, ns per change, medians of three runs of 41
+frames each, 20 000 rows, changes by `Query::get` on every how-many-th
+row; the system's cost is over the same frame making none, which takes
+8 ns an entity for the lookup alone, 6.4 with the table-only `get`):
+
+| 1000 changes a run | as it was | guards by id | and runs of consecutive changes | and the purge amortized | and runs joined within 8 |
+|---|---|---|---|---|---|
+| sparse insert: system + apply | 16.9 + 31.0 | 16.8 + 19.2 | 12.1 + 5.5 | 12.2 + 5.5 | 12.4 + 5.5 |
+| sparse remove | 12.8 + 27.5 | 12.7 + 12.9 | 12.5 + 5.6 | 12.3 + 4.3 | 13.4 + 4.3 |
+| insert, beside 10 000 in the set (100 changes) | 19.6 + 149.4 | 19.6 + 135.9 | 12.5 + 120.5 | 13.9 + 6.1 | 13.8 + 6.1 |
+| two sparse components alternating (2000) | 16.4 + 37.2 | 16.4 + 25.2 | 262.6 + 84.3 | 26.9 + 34.5 | 11.1 + 5.5 |
+| table insert, for contrast | 19.6 + 191.7 | 19.5 + 190.5 | 19.9 + 200.5 | 19.8 + 198.2 | 19.6 + 200.3 |
+
+(The consecutive runs were measured with room for 64 changes each, which
+made a run of one an allocation of 1.5 KB; runs now start empty.) The
+apply's parts as it was, on a log built as `Row::insert` built it: the
+boxed closure 11 ns to make and 10 to free, the exact footprint 1.2, the
+purge 1.1 ns per entry in the set per apply, and the apply itself 30, a
+third of it the two hash lookups. What's left is the system's side, about
+12 ns a change whatever is logged: a plain unboxed `Change::Remove` cost
+the same, and forcing inlining of the world's accessors made the
+difference larger, not smaller. Where it goes wasn't found (`perf` isn't
+allowed on this machine); the apply is at 4 to 6 ns.
+
+**Sleep's time still as a sparse component, again** (physics.md,
+"Sleeping"; the prototype `Still { since }`, inserted when a body goes
+slower than the threshold and removed when it speeds up):
+[the table is in physics.md](physics.md#sleeping). It takes the
+component from 3.5 to 4.6% of a 10 000-body pile's step over the copy
+down to 1.8 to 2.1%, on the 2% bar rather than clearly under it. What's
+left is mostly in the system that decides the changes (its sleeping stage
+151 µs against the copy's 128, settling): noticing each crossing, looking
+the body up and logging the change, which now cost more than applying it.
+
+**Not done:** table inserts and spawns still box a closure each (runs of
+one bundle's spawns, and of a table component's inserts, are get-emj.29),
+as do a spawned bundle's sparse values; the parallel executor computes
+footprints the same way, so it gains the cheaper `exact` too, untested
+beyond the equivalence tests.
+
 ## Other open questions
 
 - **Page size**, and whether it's per table.

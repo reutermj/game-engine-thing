@@ -8,7 +8,8 @@ source, not from memory.
 None of them is part of the engine or of any game: each is linked only
 into a comparison bench (`//engine/std/physics/compare` for 2D,
 `//bench/physics3d` for 3D), so our own solvers can be measured against
-established ones on identical scenes.
+established ones on identical scenes. Flecs and EnTT, last, were read
+for the ECS's design, and aren't built at all.
 
 Where the notices live: every library's license text is in its fetched
 source (Bazel's external repository for it), or committed or fetched
@@ -237,3 +238,53 @@ one would have to ship those files with it.
   measured it (`engine/std/physics/tests/split_impulse.rs`; Bullet's
   `btContactSolverInfo::m_splitImpulse` and its push velocities in
   `btSequentialImpulseConstraintSolver`).
+
+## Flecs
+
+- **Project:** Flecs, an entity component system for C and C++.
+  <https://www.flecs.dev>, <https://github.com/SanderMertens/flecs>
+- **Author:** Sander Mertens (`LICENSE`: "Copyright (c) 2025 Sander
+  Mertens", with portions copyright Meta Platforms).
+- **License:** MIT.
+- **Version read:** v4.1.6, its release tarball (sha256
+  `29ccf56961b7ffbd38cce2227a06c0722c7df464422e86619a65ee37bb31bae7`)
+  fetched into a scratch directory to read, 2026-09-26. Not fetched by the
+  build, not linked, and none of its code is copied.
+- **What for:** design reference for the ECS (`engine/ecs`).
+- **Ideas the ECS takes from it:**
+  - storage chosen per component, archetype tables or a sparse set
+    (Flecs's `Sparse` trait): docs/architecture/storage.md;
+  - a deferred change that costs no allocation of its own
+    (get-znt.18, spike): Flecs queues commands by value in one vector per
+    stage and bump-allocates their values from a stack reset at each merge
+    (`flecs_cmd_new` in `src/commands.c`, `flecs_stack_alloc` in
+    `src/datastructures/stack_allocator.c`). A system's sparse inserts and
+    removes are logged as runs of one component's changes, values in a
+    typed `Vec` (`SparseRun` in `engine/ecs/query.rs`);
+  - no per-entity merging for changes that move no row: Flecs skips its
+    per-entity batching for non-fragmenting components (`src/commands.c`,
+    "Nothing to batch for non-fragmenting components"), and a run's exact
+    footprint is its set, with no per-change table replay (`exact` in
+    `engine/ecs/graph.rs`).
+
+## EnTT
+
+- **Project:** EnTT, an entity component system for C++.
+  <https://github.com/skypjack/entt>
+- **Author:** Michele Caini (`LICENSE`: "Copyright (c) 2017-2026 Michele
+  Caini, author of EnTT").
+- **License:** MIT.
+- **Version read:** v4.0.0, its release tarball (sha256
+  `32a2ff2c72cb047dfd57306006ef238820b70da7c6ce4e7e8a507ac63365212e`)
+  fetched into a scratch directory to read, 2026-09-26. Not fetched by the
+  build, not linked, and none of its code is copied.
+- **What for:** design reference for the ECS's sparse sets.
+- **Compared, not taken** (get-znt.18, spike): EnTT's sparse set, a paged
+  index by entity into packed entities and values, swap-and-pop removal
+  (`basic_sparse_set`, `src/entt/entity/sparse_set.hpp`), is the shape
+  `SparseSet` already has (an unpaged index). EnTT removes a destroyed
+  entity from every pool at once (`basic_registry::destroy`,
+  `src/entt/entity/registry.hpp`) and defers nothing; our sets keep a dead
+  entity's entry, invisible, and purge once the dead could be a quarter of
+  the set (`SparseSet::purge_dead`), since a despawn doesn't hold every
+  set's guard.

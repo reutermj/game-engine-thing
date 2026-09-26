@@ -155,6 +155,14 @@ rust_binary(
     deps = [":ecs"],
 )
 
+# What a structural change costs, by part, sparse against tables:
+#   ./bazel run -c opt //engine/ecs:change_bench
+rust_binary(
+    name = "change_bench",
+    srcs = ["tests/change_bench.rs"],
+    deps = [":ecs"],
+)
+
 # Miri: the crate's own tests, and the integration tests that drive the
 # unsafe core, under each aliasing model. Manual, since they take minutes:
 #   ./bazel test //engine/ecs:miri

@@ -130,6 +130,9 @@ pub struct Entities {
     next: AtomicU32,
     free: Mutex<Vec<u32>>,
     alive: AtomicUsize,
+    /// Entities killed, ever: a sparse set purges its dead entries only
+    /// once this has grown enough since it last did (`SparseSet::purge_dead`).
+    deaths: AtomicU64,
 }
 
 impl Entities {
@@ -139,6 +142,7 @@ impl Entities {
             next: AtomicU32::new(0),
             free: Mutex::new(Vec::new()),
             alive: AtomicUsize::new(0),
+            deaths: AtomicU64::new(0),
         }
     }
 
@@ -192,6 +196,7 @@ impl Entities {
         l.store(DEAD, Ordering::Release);
         g.fetch_add(1, Ordering::AcqRel);
         self.alive.fetch_sub(1, Ordering::Relaxed);
+        self.deaths.fetch_add(1, Ordering::Relaxed);
     }
 
     fn free(&self, slots: &mut Vec<u32>) {
@@ -302,11 +307,13 @@ pub struct SparseSet {
     entities: Vec<Entity>,
     /// By entity index: the slot in `entities`/`values`, or `EMPTY`.
     slots: Vec<u32>,
+    /// `Entities::deaths` when this last purged its dead entries.
+    purged_at: u64,
 }
 
 impl SparseSet {
     fn new(ty: ValueType) -> SparseSet {
-        SparseSet { values: ErasedColumn::new(ty), entities: Vec::new(), slots: Vec::new() }
+        SparseSet { values: ErasedColumn::new(ty), entities: Vec::new(), slots: Vec::new(), purged_at: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -349,7 +356,7 @@ impl SparseSet {
         Some((&mut values[slot], &mut ticks[slot]))
     }
 
-    fn insert<T: crate::Component>(&mut self, e: Entity, value: T) {
+    pub(crate) fn insert<T: crate::Component>(&mut self, e: Entity, value: T) {
         match self.slots.get(e.index as usize).copied().filter(|&s| s != EMPTY).map(|s| s as usize) {
             // The same entity replaces its value; a dead one's stale entry is
             // reused by the index's new owner.
@@ -378,13 +385,26 @@ impl SparseSet {
         }
     }
 
-    fn remove(&mut self, e: Entity) {
+    pub(crate) fn remove(&mut self, e: Entity) {
         if let Some(slot) = self.slot(e) {
             self.remove_slot(slot);
         }
     }
 
+    /// Drops dead entities' entries, once they could be a quarter of the
+    /// set: there are at most as many as entities have died since the last
+    /// purge, so a set written every step no longer walks all its entries
+    /// every step (a settling pile's `Still`, change_bench), and the walk is
+    /// paid for by the deaths that made it worth doing. Entries left are
+    /// invisible, as between writes. EnTT and Flecs remove a dead entity
+    /// from every set at once (docs/CREDITS.md); a despawn here holds no
+    /// set's guard, so it can't. (SPIKE, get-znt.18.)
     fn purge_dead(&mut self, entities: &Entities) {
+        let deaths = entities.deaths.load(Ordering::Relaxed);
+        if deaths - self.purged_at <= self.entities.len() as u64 / 4 {
+            return;
+        }
+        self.purged_at = deaths;
         let mut slot = 0;
         while slot < self.entities.len() {
             if entities.is_alive(self.entities[slot]) {
@@ -847,7 +867,9 @@ pub struct Structural<'w> {
     /// By table id: a spawn looks its table up several times, and a hash
     /// of the id per lookup was a fifth of a spawn's cost.
     tables: Vec<Option<LockedTable<'w>>>,
-    sparse: HashMap<ComponentId, RwLockWriteGuard<'w, SparseSet>>,
+    /// By component id, as tables are by table id: a sparse change looked
+    /// its set up twice in a hash map, a third of its apply (change_bench).
+    sparse: Vec<Option<RwLockWriteGuard<'w, SparseSet>>>,
     events: HashMap<usize, RwLockWriteGuard<'w, EventQueue>>,
     /// The table the last shared component list spawned into: a system's
     /// spawns share one list, so a log of them resolves it once.
@@ -898,7 +920,7 @@ impl<'w> Structural<'w> {
         Structural {
             world,
             tables: Vec::new(),
-            sparse: HashMap::new(),
+            sparse: Vec::new(),
             events: HashMap::new(),
             spawned_into: None,
             freed: Vec::new(),
@@ -944,14 +966,24 @@ impl<'w> Structural<'w> {
     /// `purge: false` leaves dead entities' entries in place, as they are
     /// between writes: for tests of the paths that meet them.
     pub fn lock_sparse_with(&mut self, c: ComponentId, purge: bool) {
-        if self.sparse.contains_key(&c) {
+        if self.sparse.get(c.0 as usize).is_some_and(Option::is_some) {
             return;
         }
         let mut set = self.world.sparse_set(c).take_write();
         if purge {
             set.purge_dead(&self.world.entities);
         }
-        self.sparse.insert(c, set);
+        let i = c.0 as usize;
+        if self.sparse.len() <= i {
+            self.sparse.resize_with(i + 1, || None);
+        }
+        self.sparse[i] = Some(set);
+    }
+
+    /// Sparse set `c`, taken now if it isn't held yet.
+    pub(crate) fn sparse_mut(&mut self, c: ComponentId) -> &mut SparseSet {
+        self.lock_sparse(c);
+        self.sparse[c.0 as usize].as_mut().expect("just locked")
     }
 
     /// Event queue `q`, for publishing; taken now if it isn't held yet.
@@ -1095,8 +1127,7 @@ impl<'w> Structural<'w> {
         let world = self.world;
         if world.storage(c) == Storage::Sparse {
             if world.entities.is_alive(e) {
-                self.lock_sparse(c);
-                self.sparse.get_mut(&c).expect("locked").insert(e, value);
+                self.sparse_mut(c).insert(e, value);
             }
             return;
         }
@@ -1133,8 +1164,7 @@ impl<'w> Structural<'w> {
     pub fn remove_id(&mut self, e: Entity, c: ComponentId) {
         let world = self.world;
         if world.storage(c) == Storage::Sparse {
-            self.lock_sparse(c);
-            self.sparse.get_mut(&c).expect("locked").remove(e);
+            self.sparse_mut(c).remove(e);
             return;
         }
         let Some(at) = world.entities.location(e) else { return };
@@ -1161,8 +1191,7 @@ impl<'w> Structural<'w> {
     pub fn get<T: crate::Component>(&mut self, e: Entity, c: ComponentId) -> Option<&mut T> {
         let world = self.world;
         if world.storage(c) == Storage::Sparse {
-            self.lock_sparse(c);
-            return self.sparse.get_mut(&c)?.get_mut::<T>(e);
+            return self.sparse_mut(c).get_mut::<T>(e);
         }
         let at = world.entities.location(e)?;
         let t = self.tables.get_mut(at.table.0 as usize)?.as_mut()?;

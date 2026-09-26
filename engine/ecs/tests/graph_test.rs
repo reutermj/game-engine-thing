@@ -446,3 +446,173 @@ mod equivalence {
         assert!(after.iter().any(|l| l.contains("Position { x: 1.5,")), "walkers spawned");
     }
 }
+
+/// Sparse changes, which a system logs as runs of one component's changes
+/// (query.rs, `SparseRun`), and sparse sets' dead entries.
+mod sparse_runs {
+    use engine_ecs::harness::{Cx, IntoSystem};
+    use engine_ecs::{Adds, Build, Entity, Query, Removes, component};
+
+    use super::*;
+
+    component! {
+        #[derive(Debug, Default, PartialEq, Copy)]
+        struct Ice: "Runs::Ice" { n: u32 }
+    }
+
+    component! {
+        #[derive(Debug, Default, PartialEq, Copy)]
+        struct Chill: "Runs::Chill", storage = sparse { n: u32 }
+    }
+
+    component! {
+        #[derive(Debug, Default, PartialEq, Copy)]
+        struct Damp: "Runs::Damp", storage = sparse { n: u32 }
+    }
+
+    component! {
+        #[derive(Debug, Default, PartialEq, Copy)]
+        struct Mark: "Runs::Mark" {}
+    }
+
+    fn world(n: u32) -> (World, Vec<Entity>) {
+        let w = World::new();
+        let es = {
+            let mut m = w.between_frames(Build::default()).unwrap();
+            m.id::<Chill>();
+            m.id::<Damp>();
+            m.id::<Mark>();
+            (0..n).map(|n| m.spawn((Ice { n },))).collect()
+        };
+        (w, es)
+    }
+
+    fn get<T: engine_ecs::Component + Copy>(w: &World, e: Entity) -> Option<T> {
+        w.between_frames(Build::default()).unwrap().get::<T>(e)
+    }
+
+    type Everything<'w, 'a> = Query<'w, &'a Ice, (), (Adds<(Chill, Damp, Mark)>, Removes<(Chill, Damp, Mark)>)>;
+
+    #[test]
+    fn a_rows_sparse_changes_land_in_its_order_whatever_it_changes_between() {
+        let (w, es) = world(4);
+        fn change(_: &mut Cx, mut q: Everything) {
+            q.for_each(|row, ice| match ice.n {
+                // Chill's second insert joins its run past Damp's: the last
+                // value still wins.
+                0 => {
+                    row.insert(Chill { n: 1 });
+                    row.insert(Damp { n: 1 });
+                    row.insert(Chill { n: 2 });
+                }
+                // Past a table change: the remove still comes second.
+                1 => {
+                    row.insert(Chill { n: 1 });
+                    row.insert(Mark {});
+                    row.remove::<Chill>();
+                }
+                2 => {
+                    row.insert(Damp { n: 5 });
+                    row.remove::<Damp>();
+                    row.insert(Damp { n: 6 });
+                }
+                _ => {}
+            });
+        }
+        Schedule { systems: vec![change.system(&w, "change")] }.run_sequential(&w);
+        assert_eq!((get::<Chill>(&w, es[0]), get::<Damp>(&w, es[0])), (Some(Chill { n: 2 }), Some(Damp { n: 1 })));
+        assert_eq!((get::<Chill>(&w, es[1]), get::<Mark>(&w, es[1])), (None, Some(Mark {})));
+        assert_eq!((get::<Chill>(&w, es[2]), get::<Damp>(&w, es[2])), (None, Some(Damp { n: 6 })));
+        assert_eq!((get::<Chill>(&w, es[3]), get::<Damp>(&w, es[3])), (None, None));
+    }
+
+    fn chilled(w: &World) -> usize {
+        let mut n = 0;
+        w.between_frames(Build::default()).unwrap().for_each::<&Chill>(|_, _| n += 1);
+        n
+    }
+
+    fn entries(w: &World) -> usize {
+        w.sparse_set(w.id("Runs::Chill").unwrap()).read().unwrap().len()
+    }
+
+    #[test]
+    fn get_gives_a_row_only_for_what_the_query_matches() {
+        use std::sync::Mutex;
+        static ASKED: Mutex<Vec<Entity>> = Mutex::new(Vec::new());
+        static FOUND: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+        let (w, es) = world(2);
+        let other = {
+            let mut m = w.between_frames(Build::default()).unwrap();
+            m.insert(es[1], Chill { n: 1 });
+            m.spawn((Mark {},))
+        };
+        // A table-only query, which `get` answers from the entity's table
+        // and the sparse filter, without fetching the row's items.
+        fn look(_: &mut Cx, mut q: Query<&Ice, engine_ecs::Without<Chill>, Adds<Damp>>) {
+            let found = ASKED.lock().unwrap().iter().map(|&e| q.get(e).is_some()).collect();
+            *FOUND.lock().unwrap() = found;
+        }
+        *ASKED.lock().unwrap() = vec![es[0], es[1], other];
+        Schedule { systems: vec![look.system(&w, "look")] }.run_sequential(&w);
+        assert_eq!(*FOUND.lock().unwrap(), [true, false, false], "matched, filtered out, in another table");
+    }
+
+    #[test]
+    fn an_insert_after_its_entitys_despawn_is_never_seen() {
+        let (w, es) = world(2);
+        // The insert joins the run before the despawn, so it lands first;
+        // the entry it leaves is a dead entity's, which nothing sees.
+        fn change(_: &mut Cx, mut q: Query<&Ice, (), (Adds<Chill>, engine_ecs::Despawns)>) {
+            q.for_each(|row, ice| {
+                row.insert(Chill { n: 1 });
+                if ice.n == 1 {
+                    row.despawn();
+                    row.insert(Chill { n: 2 });
+                }
+            });
+        }
+        Schedule { systems: vec![change.system(&w, "change")] }.run_sequential(&w);
+        assert!(!w.entities.is_alive(es[1]));
+        assert_eq!(get::<Chill>(&w, es[0]), Some(Chill { n: 1 }));
+        assert_eq!(chilled(&w), 1);
+    }
+
+    #[test]
+    fn a_few_deaths_leave_their_entries_until_they_are_worth_a_walk() {
+        let (w, _) = world(0);
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let es: Vec<Entity> = (0..100).map(|n| m.spawn((Ice { n }, Chill { n }))).collect();
+        // Written to later, by an insert that can't reuse a dead entry, as
+        // a spawn given a dead entity's index would.
+        let plain = [m.spawn((Ice { n: 100 },)), m.spawn((Ice { n: 101 },))];
+        m.despawn(es[0]);
+        // A write takes the set, and one death in a hundred isn't worth
+        // walking it for.
+        m.insert(plain[0], Chill { n: 100 });
+        drop(m);
+        assert_eq!((entries(&w), chilled(&w)), (101, 100));
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for &e in &es[1..31] {
+            m.despawn(e);
+        }
+        // Thirty-one since the last walk is more than a quarter of the set.
+        m.insert(plain[1], Chill { n: 101 });
+        drop(m);
+        assert_eq!((entries(&w), chilled(&w)), (71, 71));
+    }
+
+    #[test]
+    fn a_set_whose_entities_keep_dying_stays_the_size_of_the_living() {
+        let (w, _) = world(0);
+        for round in 0..200 {
+            let mut m = w.between_frames(Build::default()).unwrap();
+            let es: Vec<Entity> = (0..10).map(|n| m.spawn((Ice { n }, Chill { n }))).collect();
+            for e in es {
+                m.despawn(e);
+            }
+            drop(m);
+            assert!(entries(&w) <= 20, "{} entries after round {round}", entries(&w));
+        }
+    }
+}

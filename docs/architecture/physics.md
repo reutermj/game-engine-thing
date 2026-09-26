@@ -934,6 +934,30 @@ the copy: what components would buy (the times kept through a reset
 state, and seen by games) isn't worth 3 to 5% of every step before a
 pile is asleep.
 
+**With sparse changes as runs** (2026-09-26, get-znt.18, a spike:
+storage.md, ["Sparse changes are runs, not
+closures"](storage.md#sparse-changes-are-runs-not-closures)), the sparse
+`Still` again, the same prototype, against the copy on the same ECS;
+µs a step, sleeping on / off, medians of seven runs interleaved, 60 steps
+from the step given:
+
+| 10 000, 401 wide | the copy (ECS as it was / spike) | sparse `Still`, as it was | sparse `Still`, runs |
+|---|---|---|---|
+| falling (from step 1) | 965 / 852, 965 / 854 | 995 / 853 | 980 / 854 |
+| settling (from step 60) | 1759 / 1607, 1758 / 1609 | 1833 / 1611 | 1792 / 1609 |
+| falling asleep (from step 120) | 1807 / 1592, 1816 / 1590 | 1864 / 1581 | 1845 / 1589 |
+| of it, the `sleeping` stage (settling, on) | 128, 129 | 162 | 151 |
+| asleep, ten steps after all of it (on) | 23, 22 | 23 | 23 |
+
+Over the copy that is 3.5 to 4.6% of a step as it was (this run's
+measure of the 3 to 5% above), and 1.8 to 2.1% with runs; at 1000 (41
+wide) settling, 4.3% and 1.9%. Its extra cost outside the `sleeping` stage,
+mostly the apply, went from about 40 µs a step to 12; what's left is in
+that stage, where each crossing is noticed, looked up (`Query::get`) and
+logged. So the copy
+stays while the spike is undecided, and the component is now on the 2%
+bar rather than over it.
+
 **`Touching`** on a sleeping body is as it fell asleep: its query excludes
 sleeping bodies, so it isn't reset. A side touched by something that
 arrives while it sleeps (a still body settling against it) isn't marked.

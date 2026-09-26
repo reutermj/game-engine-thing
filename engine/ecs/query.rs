@@ -845,6 +845,58 @@ pub enum Change {
     /// A spatial table whose keys or extents the system could write, to
     /// re-sort after it.
     Reorder(TableId),
+    /// Inserts and removes of one sparse component, made one after another.
+    Sparse(Box<dyn SparseRun>),
+}
+
+/// A run of one sparse component's inserts and removes, logged by a system
+/// one after another: one entry in the log, so a change costs a push onto
+/// a typed `Vec` where it was a boxed closure (an allocation) each, and its
+/// apply looks the set up once for the run. (SPIKE, get-znt.18; the batch
+/// get-emj.29 asks for, for sparse changes.) Which run a change joins, and
+/// why the order that makes is the log's wherever it could show, is
+/// `Row::sparse_change`'s. The code is the build's that
+/// logged it, as a closure's was: a log never outlives the frame. Flecs
+/// queues its deferred commands by value the same way, their values
+/// bump-allocated, and doesn't merge them per entity for components that
+/// move no row (docs/CREDITS.md, Flecs).
+pub trait SparseRun: Send {
+    fn component(&self) -> ComponentId;
+    fn apply(self: Box<Self>, s: &mut Structural<'_>);
+    fn as_any(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// How far back in the log a sparse change looks for its component's run:
+/// as many components as a system plausibly alternates between.
+const RUN_WINDOW: usize = 8;
+
+/// Each change's entity, and the value it inserts, or none for a remove.
+struct Run<T> {
+    c: ComponentId,
+    ops: Vec<(Entity, Option<T>)>,
+}
+
+impl<T: Component> SparseRun for Run<T> {
+    fn component(&self) -> ComponentId {
+        self.c
+    }
+
+    fn apply(self: Box<Self>, s: &mut Structural<'_>) {
+        let world = s.world;
+        let set = s.sparse_mut(self.c);
+        for (e, value) in self.ops {
+            match value {
+                // A dead entity's insert is dropped, as `insert_id` does.
+                Some(value) if world.entities.is_alive(e) => set.insert(e, value),
+                Some(_) => {}
+                None => set.remove(e),
+            }
+        }
+    }
+
+    fn as_any(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 impl Change {
@@ -858,6 +910,7 @@ impl Change {
                 publish(s.events(queue), frame)
             }
             Change::Reorder(t) => s.resort(t),
+            Change::Sparse(run) => run.apply(s),
         }
     }
 }
@@ -887,12 +940,43 @@ impl Row<'_> {
     pub fn insert<T: Component>(&self, value: T) {
         let c = declared::<T>(self.world, &self.changes.adds).unwrap_or_else(|| panic!("{} isn't in this query's Adds", T::NAME));
         let e = self.entity;
+        if self.world.storage(c) == Storage::Sparse {
+            return self.sparse_change(c, Some(value));
+        }
         self.log.borrow_mut().push(Change::Insert { e, c, apply: Box::new(move |s| s.insert_id(e, c, value)) });
     }
 
     pub fn remove<T: Component>(&self) {
         let c = declared::<T>(self.world, &self.changes.removes).unwrap_or_else(|| panic!("{} isn't in this query's Removes", T::NAME));
+        if self.world.storage(c) == Storage::Sparse {
+            return self.sparse_change::<T>(c, None);
+        }
         self.log.borrow_mut().push(Change::Remove { e: self.entity, c });
+    }
+
+    /// Adds a sparse change to `c`'s latest run, if it's among the log's
+    /// last few entries, or starts one.
+    ///
+    /// Joining a run past other entries applies the change before them,
+    /// which nothing can tell: no other change touches `c`'s set, and a
+    /// despawn between leaves an insert's entry dead, which is invisible, as
+    /// one dropped is. It keeps a system that alternates components (a
+    /// woken body loses `Asleep` and `Still`) from paying a run each change,
+    /// and joining only the latest run of `c` keeps `c`'s own changes in
+    /// order. (SPIKE, get-znt.18.)
+    fn sparse_change<T: Component>(&self, c: ComponentId, value: Option<T>) {
+        let mut log = self.log.borrow_mut();
+        for change in log.iter_mut().rev().take(RUN_WINDOW) {
+            if let Change::Sparse(run) = change
+                && run.component() == c
+            {
+                // The same component is the same type: one build logged it.
+                let run = run.as_any().downcast_mut::<Run<T>>().expect("a run of one component has one type");
+                run.ops.push((self.entity, value));
+                return;
+            }
+        }
+        log.push(Change::Sparse(Box::new(Run { c, ops: vec![(self.entity, value)] })));
     }
 
     pub fn despawn(&self) {
@@ -1585,6 +1669,18 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// The row of `e`, if the query matches it: how a system changes an
     /// entity it didn't iterate to (one kept in state, or named by an event).
     pub fn get(&mut self, e: Entity) -> Option<Row<'_>> {
+        // A table-only query matches an entity by its table, so knowing
+        // needs no fetch of its items, which was most of a lookup's cost:
+        // physics looks up each body whose `Still` it changes. (SPIKE,
+        // get-znt.18.)
+        if D::TABLE && !self.decl.sparse_driven(self.world) {
+            let Query { world, decl, table_ids, filters, log, .. } = self;
+            if !world.entities.is_alive(e) || !Self::passes(filters, e) {
+                return None;
+            }
+            let at = world.entities.location(e)?;
+            return table_ids.contains(&at.table).then(|| Self::row(world, decl, log, e));
+        }
         self.with(e, |_, _| ())?;
         Some(Self::row(self.world, self.decl, self.log, e))
     }
