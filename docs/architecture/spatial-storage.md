@@ -544,6 +544,14 @@ bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
 - **What the spike doesn't cover:** a hierarchy over pages (runs are 16
   pages whatever the dimension), mixed sizes in 3D, and big bodies in 3D
   beyond a floor and walls.
+- **Turned boxes** (2026-09-26): a turned box's bounds depend on its
+  rotation as well as its position and shape, and a key's bounds see one
+  extent. The 3D step keeps the box around each body as turned in a
+  `Reach` component, the key's extent, rewritten as it turns; a sphere
+  around each collider instead cost 4-6 times the pairs, and ten times the
+  broadphase once walls got it too. What 3D would want from the storage
+  instead (extents as a tuple, turning alone re-bounding, fat bounds, wider
+  bundles): [physics.md](physics.md#what-3d-asks-of-the-storage-design).
 
 ## Bounds from several components
 

@@ -2,7 +2,7 @@
 //! DOFs only, and Jolt's default solver unless [`Iters::Eight`].
 
 use crate::ffi;
-use crate::{Backend, Config, Iters, Spec};
+use crate::{Backend, Config, Iters, Spec, State};
 
 pub struct Jolt {
     world: *mut ffi::JoltWorld,
@@ -15,8 +15,13 @@ impl Jolt {
             Iters::Default => 0,
             Iters::Eight => 8,
         };
-        let c =
-            ffi::P3Config { max_bodies: config.max_bodies, velocity_iters: iters, position_iters: iters, allow_sleep: config.sleep as i32 };
+        let c = ffi::P3Config {
+            max_bodies: config.max_bodies,
+            velocity_iters: iters,
+            position_iters: iters,
+            allow_sleep: config.sleep as i32,
+            rotate: config.rotate as i32,
+        };
         // SAFETY: the shim copies what it needs from the config.
         let world = unsafe { ffi::p3_jolt_create(&c) };
         assert!(!world.is_null());
@@ -57,8 +62,8 @@ impl Backend for Jolt {
         unsafe { ffi::p3_jolt_step(self.world, dt) }
     }
 
-    fn state(&self, out: &mut Vec<([f32; 3], [f32; 3])>) {
-        let mut buf = vec![0f32; 6 * self.dynamic.len()];
+    fn state(&self, out: &mut Vec<State>) {
+        let mut buf = vec![0f32; ffi::STATE_FLOATS * self.dynamic.len()];
         // SAFETY: every handle came from this world; buf holds 6 floats each.
         unsafe { ffi::p3_jolt_read(self.world, self.dynamic.len() as u32, self.dynamic.as_ptr(), buf.as_mut_ptr()) };
         ffi::unpack(&buf, out);

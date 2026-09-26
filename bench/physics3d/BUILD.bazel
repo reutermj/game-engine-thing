@@ -1,6 +1,6 @@
 # A comparison harness for 3D rigid-body physics: the same scenes and the same
-# quality measures over Rapier 3D, Jolt and Box3D, all single-threaded with
-# rotations locked. See lib.rs's module docs; main.rs for the command line.
+# quality measures over Rapier 3D, Jolt and Box3D, all single-threaded, bodies
+# turning or locked. See lib.rs's module docs; main.rs for the command line.
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")

@@ -33,6 +33,10 @@ impl Rng {
 pub enum Kind {
     SpherePile,
     BoxPile,
+    /// Boxes a unit long but thin: what turning does to bodies whose
+    /// inertia isn't the same about every axis, and whose bounds a sphere
+    /// fits badly.
+    PlankPile,
     Rain,
 }
 
@@ -41,12 +45,13 @@ impl Kind {
         match self {
             Kind::SpherePile => "spheres",
             Kind::BoxPile => "boxes",
+            Kind::PlankPile => "planks",
             Kind::Rain => "rain",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        [Kind::SpherePile, Kind::BoxPile, Kind::Rain].into_iter().find(|k| k.name() == s)
+        [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain].into_iter().find(|k| k.name() == s)
     }
 }
 
@@ -66,11 +71,13 @@ pub struct Scene {
 
 pub const RADIUS: f32 = 0.5;
 pub const HALF: f32 = 0.5;
+pub const PLANK: [f32; 3] = [0.5, 0.125, 0.25];
 
 pub fn build(kind: Kind, n: usize) -> Scene {
     match kind {
         Kind::SpherePile => pile(kind, n, |_| Shape::Sphere(RADIUS)),
         Kind::BoxPile => pile(kind, n, |_| Shape::Box([HALF; 3])),
+        Kind::PlankPile => pile(kind, n, |_| Shape::Box(PLANK)),
         Kind::Rain => rain(n),
     }
 }
@@ -144,7 +151,9 @@ fn pile(kind: Kind, n: usize, shape: impl Fn(usize) -> Shape) -> Scene {
 }
 
 /// Spheres and boxes, alternating, dropped a batch a step at random spots
-/// over a square, onto a floor wide enough to hold the heap without walls.
+/// over a square, onto a floor wide enough to hold the heap, with low walls
+/// round it: turning, spheres roll, in every engine, and without walls about
+/// one in twenty rolled off the edge.
 /// Spots are continuous, not a grid, so bodies land off-centre on each other
 /// instead of stacking into columns. A spot within 1.1 (sideways) of anything
 /// spawned in the last 30 steps is refused, since a body at rest falls only
@@ -187,7 +196,13 @@ fn rain(n: usize) -> Scene {
     Scene {
         kind: Kind::Rain,
         n,
-        statics: vec![fixed_box([0.0, -0.5, 0.0], [floor, 0.5, floor])],
+        statics: vec![
+            fixed_box([0.0, -0.5, 0.0], [floor, 0.5, floor]),
+            fixed_box([floor + 0.5, 1.0, 0.0], [0.5, 1.0, floor + 1.0]),
+            fixed_box([-floor - 0.5, 1.0, 0.0], [0.5, 1.0, floor + 1.0]),
+            fixed_box([0.0, 1.0, floor + 0.5], [floor + 1.0, 1.0, 0.5]),
+            fixed_box([0.0, 1.0, -floor - 0.5], [floor + 1.0, 1.0, 0.5]),
+        ],
         spawn,
         steps,
         phases: vec![("raining", 1..last_spawn), ("after rain", last_spawn..steps), ("settled", steps - 100..steps)],

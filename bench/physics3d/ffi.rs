@@ -1,6 +1,6 @@
 //! The C ABI of shim.h, mirrored by hand: change both together.
 
-use crate::{Shape, Spec};
+use crate::{Shape, Spec, State};
 
 #[repr(C)]
 pub struct P3Spec {
@@ -27,6 +27,7 @@ pub struct P3Config {
     pub velocity_iters: i32,
     pub position_iters: i32,
     pub allow_sleep: i32,
+    pub rotate: i32,
 }
 
 #[repr(C)]
@@ -63,8 +64,17 @@ pub fn to_c(bodies: &[Spec]) -> Vec<P3Spec> {
     bodies.iter().map(P3Spec::from).collect()
 }
 
-/// Unpacks a shim's read buffer (position then velocity, 6 floats a body).
-pub fn unpack(buf: &[f32], out: &mut Vec<([f32; 3], [f32; 3])>) {
+/// Floats a shim's read writes per body.
+pub const STATE_FLOATS: usize = 13;
+
+/// Unpacks a shim's read buffer (position, velocity, rotation, angular
+/// velocity).
+pub fn unpack(buf: &[f32], out: &mut Vec<State>) {
     out.clear();
-    out.extend(buf.as_chunks::<6>().0.iter().map(|c| ([c[0], c[1], c[2]], [c[3], c[4], c[5]])));
+    out.extend(buf.as_chunks::<STATE_FLOATS>().0.iter().map(|c| State {
+        pos: [c[0], c[1], c[2]],
+        vel: [c[3], c[4], c[5]],
+        rot: [c[6], c[7], c[8], c[9]],
+        ang: [c[10], c[11], c[12]],
+    }));
 }

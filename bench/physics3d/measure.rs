@@ -1,4 +1,4 @@
-//! Running a scene on a backend, and judging the result from positions alone,
+//! Running a scene on a backend, and judging the result from poses alone,
 //! with the same geometry for every engine, so no engine is graded by its own
 //! notion of contact.
 
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::scenes::Scene;
-use crate::{Backend, DT, Shape, Spec};
+use crate::{Backend, DT, Shape, Spec, State};
 
 /// Bodies closer than this count as touching. Above every engine's resting
 /// gap, below its speculative margin, so it means "in contact", not "near".
@@ -15,7 +15,65 @@ pub const TOUCH_GAP: f32 = 0.01;
 /// Below this top speed the scene counts as at rest.
 pub const REST_SPEED: f32 = 0.05;
 
-/// Penetration depth of two shapes; negative is the gap between them.
+pub const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// `v` turned by the unit quaternion `q` (x, y, z, w).
+pub fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let u = [q[0], q[1], q[2]];
+    let t = cross(u, v).map(|c| 2.0 * c);
+    let c = cross(u, t);
+    [v[0] + q[3] * t[0] + c[0], v[1] + q[3] * t[1] + c[1], v[2] + q[3] * t[2] + c[2]]
+}
+
+fn conj(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Penetration depth of two shapes turned by `qa` and `qb`; negative is
+/// the gap between them. Two boxes not both axis-aligned are measured by
+/// their separating axes: the least overlap when every axis overlaps, else
+/// the most any axis separates, which is under the true gap only past an
+/// edge or a corner, so a pair a hair farther apart there counts as touching.
+pub fn depth_turned(a: Shape, pa: [f32; 3], qa: [f32; 4], b: Shape, pb: [f32; 3], qb: [f32; 4]) -> f32 {
+    if qa == IDENTITY && qb == IDENTITY {
+        return depth(a, pa, b, pb);
+    }
+    let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    match (a, b) {
+        (Shape::Sphere(ra), Shape::Sphere(rb)) => ra + rb - len(d),
+        (Shape::Sphere(r), Shape::Box(h)) => sphere_box(r, rotate(conj(qb), d.map(|v| -v)), h),
+        (Shape::Box(h), Shape::Sphere(r)) => sphere_box(r, rotate(conj(qa), d), h),
+        (Shape::Box(ha), Shape::Box(hb)) => {
+            let ax = [0, 1, 2].map(|i| rotate(qa, [(i == 0) as u8 as f32, (i == 1) as u8 as f32, (i == 2) as u8 as f32]));
+            let bx = [0, 1, 2].map(|i| rotate(qb, [(i == 0) as u8 as f32, (i == 1) as u8 as f32, (i == 2) as u8 as f32]));
+            let mut axes: Vec<[f32; 3]> = ax.iter().chain(bx.iter()).copied().collect();
+            for u in ax {
+                for v in bx {
+                    let c = cross(u, v);
+                    let l = len(c);
+                    if l > 1e-4 {
+                        axes.push(c.map(|x| x / l));
+                    }
+                }
+            }
+            let reach = |r: &[[f32; 3]; 3], h: [f32; 3], n: [f32; 3]| (0..3).map(|k| h[k] * dot(r[k], n).abs()).sum::<f32>();
+            // The least overlap: the depth if every axis overlaps, else
+            // minus the most any axis separates.
+            axes.iter().map(|&n| reach(&ax, ha, n) + reach(&bx, hb, n) - dot(d, n).abs()).fold(f32::MAX, f32::min)
+        }
+    }
+}
+
+/// Penetration depth of two axis-aligned shapes; negative is the gap
+/// between them.
 pub fn depth(a: Shape, pa: [f32; 3], b: Shape, pb: [f32; 3]) -> f32 {
     let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
     match (a, b) {
@@ -49,7 +107,7 @@ pub struct Pair {
 }
 
 /// Every touching pair, found through a uniform grid over the dynamic bodies.
-pub fn touching_pairs(shapes: &[Shape], pos: &[[f32; 3]], statics: &[Spec]) -> Vec<Pair> {
+pub fn touching_pairs(shapes: &[Shape], pos: &[[f32; 3]], rot: &[[f32; 4]], statics: &[Spec]) -> Vec<Pair> {
     let n = shapes.len();
     let reach = shapes.iter().map(|s| s.bounding_radius()).fold(0.0f32, f32::max);
     let cell = 2.0 * reach + TOUCH_GAP;
@@ -69,7 +127,7 @@ pub fn touching_pairs(shapes: &[Shape], pos: &[[f32; 3]], statics: &[Spec]) -> V
                         if j <= i {
                             continue;
                         }
-                        let d = depth(shapes[i], pos[i], shapes[j], pos[j]);
+                        let d = depth_turned(shapes[i], pos[i], rot[i], shapes[j], pos[j], rot[j]);
                         if d > -TOUCH_GAP {
                             pairs.push(Pair { a: i, b: j, depth: d });
                         }
@@ -78,7 +136,7 @@ pub fn touching_pairs(shapes: &[Shape], pos: &[[f32; 3]], statics: &[Spec]) -> V
             }
         }
         for (s, st) in statics.iter().enumerate() {
-            let d = depth(shapes[i], pos[i], st.shape, st.pos);
+            let d = depth_turned(shapes[i], pos[i], rot[i], st.shape, st.pos, IDENTITY);
             if d > -TOUCH_GAP {
                 pairs.push(Pair { a: i, b: n + s, depth: d });
             }
@@ -111,10 +169,28 @@ pub struct Quality {
     pub escaped: usize,
 }
 
-pub fn quality(scene: &Scene, shapes: &[Shape], state: &[([f32; 3], [f32; 3])]) -> Quality {
-    let pos: Vec<[f32; 3]> = state.iter().map(|s| s.0).collect();
+/// How fast any point of the body moves, at most: its speed and its turn
+/// at its farthest point, as Box3D judges a body at rest.
+pub fn speed(s: &State, shape: Shape) -> f32 {
+    len(s.vel) + len(s.ang) * shape.bounding_radius()
+}
+
+/// Kinetic energy, moving and turning, of a body of mass `MASS`.
+pub fn energy(s: &State, shape: Shape) -> f64 {
+    let w = rotate(conj(s.rot), s.ang);
+    let i = match shape {
+        Shape::Sphere(r) => [0.4 * r * r; 3],
+        Shape::Box([x, y, z]) => [(y * y + z * z) / 3.0, (x * x + z * z) / 3.0, (x * x + y * y) / 3.0],
+    };
+    let turning = (0..3).map(|k| i[k] * w[k] * w[k]).sum::<f32>();
+    0.5 * crate::MASS as f64 * (dot(s.vel, s.vel) + turning) as f64
+}
+
+pub fn quality(scene: &Scene, shapes: &[Shape], state: &[State]) -> Quality {
+    let pos: Vec<[f32; 3]> = state.iter().map(|s| s.pos).collect();
+    let rot: Vec<[f32; 4]> = state.iter().map(|s| s.rot).collect();
     let n = pos.len();
-    let pairs = touching_pairs(shapes, &pos, &scene.statics);
+    let pairs = touching_pairs(shapes, &pos, &rot, &scene.statics);
     let mut partners = vec![0usize; n];
     // The smallest sideways offset to any dynamic body below, per body.
     let mut below = vec![f32::INFINITY; n];
@@ -141,11 +217,12 @@ pub fn quality(scene: &Scene, shapes: &[Shape], state: &[([f32; 3], [f32; 3])]) 
     q.pen_max = pairs.iter().map(|p| p.depth).fold(0.0, f32::max);
     q.pen_mean = pairs.iter().map(|p| p.depth.max(0.0)).sum::<f32>() / pairs.len().max(1) as f32;
     let (lo, hi) = scene.bounds;
-    for (p, v) in state {
-        let speed = len(*v);
+    for (s, &shape) in state.iter().zip(shapes) {
+        let p = &s.pos;
+        let speed = speed(s, shape);
         q.max_speed = q.max_speed.max(speed);
         q.moving += (speed >= REST_SPEED) as usize;
-        q.kinetic_energy += 0.5 * (speed as f64).powi(2);
+        q.kinetic_energy += energy(s, shape);
         q.mean_height += p[1] as f64;
         if (0..3).any(|k| p[k] < lo[k] || p[k] > hi[k]) {
             q.escaped += 1;
@@ -201,7 +278,7 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
             stages[i].1 += us;
         }
         backend.state(&mut state);
-        if state.iter().any(|(_, v)| len(*v) >= REST_SPEED) {
+        if state.iter().zip(&shapes).any(|(s, &shape)| speed(s, shape) >= REST_SPEED) {
             last_moving = Some(step);
         }
     }
