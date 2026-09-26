@@ -1111,6 +1111,112 @@ default must stay bit for bit what it is.
 - The recorded routes in `platformer_test` and `pong_test` pass
   unchanged (see below).
 
+## 3D, translation only (spike)
+
+**Status: a spike** (2026-09-25, branch `spike/physics3d`): what 3D asks of
+the storage core, before more is built on 2D alone. Rotation is its own
+investigation, so bodies have a 3D position and velocity and no
+orientation. `//engine/std/physics3d` is the 2D step's shape in 3D, as plain
+systems on the ECS harness rather than a mod: `Position` a 3D spatial key
+([spatial-storage.md](spatial-storage.md#in-3d)) with `Collider` (a sphere or
+an axis-aligned box) as its extent, statics in tables of their own on the
+broadphase's passive side, contacts as entities in an ordered table by pair
+(`ContactPair`, `Manifold`, `Impulse`), and the 2D solver (sequential
+impulses, 8 iterations, warm-started, a split impulse for penetration,
+speculative contacts within 0.05) in 3D. Friction is the one thing 3D
+changes in the solver: the tangent is a plane, so the friction impulse is a
+vector in it, clamped to a disc, and kept as a world vector that warm
+starting projects onto the next step's plane, so no tangent basis has to
+stay put. Left out: layers, sensors, kinematic bodies, sleeping, events,
+parallelism.
+
+**Against Rapier 3D, Jolt and Box3D** (`./bazel run -c opt
+//bench/physics3d:bench`; the harness, scenes and how each engine is
+brought in are in `bench/physics3d`, credits in [CREDITS.md](../CREDITS.md)).
+One thread, rotations locked, sleep off, every engine at its own defaults
+(Rapier 0.36: 4 iterations; Jolt 5.6: 10 velocity and 2 position steps;
+Box3D 0.1: 4 substeps; ours 8 + 8), ms per step over the whole run, 10 000
+bodies a single run and 1000 the median of three:
+
+| | spheres 1k | spheres 10k | boxes 1k | boxes 10k | rain 1k | rain 10k |
+|---|---|---|---|---|---|---|
+| ours | 0.38 | 6.1 | 0.36 | 4.9 | 0.26 | 3.6 |
+| Rapier | 0.61 | 11.0 | 0.86 | 13.7 | 0.54 | 8.4 |
+| Jolt | 1.18 | 16.4 | 1.12 | 13.1 | 0.73 | 9.3 |
+| Box3D | 1.01 | 12.2 | 1.02 | 11.5 | 0.64 | 7.4 |
+
+Quality, the harness's own geometry over every engine's positions: every
+pile is a pile (about 0.95 of supported bodies rest off-center on what's
+below them; 3.3 to 4.1 bodies touched each), nothing escapes, and ours
+settles (in 174 to 612 steps) with penetration at its slop, 0.005 at most;
+Rapier's and Box3D's box piles never settle at their defaults (they breathe;
+see the bench's lore), and their sphere piles reach 0.10 and 0.16 deep at
+10 000. With every engine at 8 iterations ours is 2.4 to 4 times faster.
+
+**What the numbers say, and don't.** Ours is 1.6 to 2.8 times faster, and
+nearly all of that is the solver: it has no angular terms, no contact
+points and one constraint per pair, where the others run their general
+solvers, a constraint per contact point with angular terms the locks only
+zero (a translation-only step is simply less work, so this is no verdict
+on the solvers). The stages that are the storage core's say the
+opposite. At 10 000, µs per step:
+
+| | broadphase: ours / Rapier / Box3D | narrowphase: ours / Rapier / Box3D | ours: copies in and out | ours: re-sorts |
+|---|---|---|---|---|
+| spheres | 1560 / 155 / 326 | 555 / 2413 / 2638 | 210 | 154 |
+| boxes | 1129 / 393 / 437 | 336 / 966 / 1979 | 194 | 153 |
+| rain | 977 / 277 / 516 | 371 / 1111 / 1282 | 178 | 254 |
+
+The broadphase is 3 to 10 times Rapier's and 2 to 5 times Box3D's, and
+the largest thing in our step that isn't the solver. The others keep their
+pairs from step to step (Box3D a tree of fattened boxes, re-queried only
+for shapes that left theirs, `broad_phase.c`'s move array; Rapier a BVH whose
+pairs persist and are re-examined only beside colliders whose boxes
+changed, `broad_phase_bvh`, both read in the fetched source), where `near_pairs` finds
+every pair afresh from pages every step: in 3D that is 85 000 box pairs for
+25 000 contacts among 10 000 spheres, about 18 ns each. Pages of 32 rows
+cut it 13 to 15% ([spatial-storage.md](spatial-storage.md#in-3d)); keeping
+pairs between pages that haven't changed, open since the 2D broadphase was
+reworked, is what 3D makes necessary. Copies in and out of the solver and
+the re-sorts cost what they do in 2D per body. Rapier's and Box3D's
+narrowphase numbers include contact manifolds with points; ours has none.
+
+**Contacts with several points.** Translation only, a contact needs no
+points (an impulse through any point moves a body the same), so a box on
+a box is one normal and a depth. Rotation needs them: a box resting on a
+box is four points, each with its own impulses to warm-start, matched from
+step to step by feature. Measured as storage, four points inline on the
+contact (`[f32; 12]` and a count on `Manifold`, four normal impulses on
+`Impulse`; 10 000 boxes, 67 000 contacts) cost the merge and the solver's
+gather about 5.7 ns a contact a step (0.38 ms of 17.8, 2%), and the
+contacts' re-sort, falling, 40 µs more. Inline fixed arrays are what the
+schema already has; a `Vec` per contact would be a heap allocation a
+contact and a pointer chase in the gather, and points as entities would
+be four rows a contact in another ordered table, four times the churn the
+contacts' re-sort already pays for (What the ECS costs), with the pair's
+points no longer together. Four inline is the recommendation: Box3D caps a
+manifold at four (`B3_MAX_MANIFOLD_POINTS`) and Jolt prunes face contacts to
+four (`PruneContactPoints`), as read in their fetched source.
+
+**What rotation will add (predicted, not measured):**
+
+- **Orientation and angular state as components**: a quaternion (16
+  bytes) and an angular velocity (12), and the solver body grows from 7
+  floats to about 20 (a world inverse inertia, 6 floats, recomputed each
+  step from the body's and its rotation), so the copies in and out, 190 µs
+  here, about triple.
+- **The spatial key's bounds depend on two components**, position and
+  rotation, and on the collider: `SpatialKey` has one extent, so either a
+  `Transform` key (position and rotation together) or extents that are a
+  tuple. A body that only turns must still be re-bounded, so fewer rows are
+  still bit for bit, and re-bounding a rotated box is a matrix, not an add.
+- **Manifolds and the narrowphase**: points (above), per-point feature ids
+  for warm starting, and a clipping or GJK/EPA narrowphase, several times
+  today's per pair; a per-pair cache (the last separating axis) belongs on
+  the contact entity with the points.
+- **Islands and sleeping matter more**, since solving a settled pile is
+  where the time goes, as it is in 2D.
+
 ## Open questions
 
 - **Rotation.** Without it, boxes don't tip over and the stress demo

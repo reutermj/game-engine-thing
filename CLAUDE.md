@@ -136,6 +136,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   both publish); `sequential`, the default scheduler; and `physics`, 2D
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
+  `physics3d` is a spike, not a mod: translation-only 3D bodies as plain
+  systems on the ECS harness, on 3D spatial storage (physics.md, "3D,
+  translation only").
+- `bench/physics3d/` — the 3D comparison: our step against Rapier 3D, Jolt
+  and Box3D on the same scenes, the C/C++ engines pinned by sha256 and built
+  as `cc_library`s. Credits and licences in [docs/CREDITS.md](docs/CREDITS.md).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's
