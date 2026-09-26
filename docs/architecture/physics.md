@@ -1622,7 +1622,8 @@ points no longer together. Four inline is the recommendation: Box3D caps a
 manifold at four (`B3_MAX_MANIFOLD_POINTS`) and Jolt prunes face contacts to
 four (`PruneContactPoints`), as read in their fetched source.
 
-**What rotation will add (predicted, not measured):**
+**What rotation will add (predicted, not measured;** what it did add is
+in "Rotation in 3D", below**):**
 
 - **Orientation and angular state as components**: a quaternion (16
   bytes) and an angular velocity (12), and the solver body grows from 7
@@ -1641,12 +1642,315 @@ four (`PruneContactPoints`), as read in their fetched source.
 - **Islands and sleeping matter more**, since solving a settled pile is
   where the time goes, as it is in 2D.
 
+## Rotation in 3D
+
+**Status: built, experimental** (2026-09-26, get-emj.38, branch
+`physics3d-rotation`). `//engine/std/physics3d` bodies turn: spheres and
+boxes with orientation, angular velocity and inertia, contacts of up to
+four points, the soft step with angular terms. Still left out: layers,
+sensors, kinematic bodies, sleeping, events, parallelism, rolling
+resistance, gyroscopic terms. The comparison runs every engine locked (as
+before) or turning (`--rotate`).
+
+### What it is
+
+- **Components.** `Position` stays the spatial key; `Rotation` (a unit
+  quaternion), `AngularVelocity`, `Body` (with the inverse inertia about the
+  body's own axes, zero for a body that doesn't turn: `Body::new` locked,
+  `Body::solid` a solid of the collider's shape) and `Reach`, the half size
+  of the body's bounds along each world axis, which is now the key's
+  extent (see the bounds, below). `fixed` and `dynamic` spawn the bundles.
+- **Contacts** stay entities in an ordered table by pair. `Manifold` holds
+  the normal, the offset between the two centers and up to four points
+  inline, each its anchor on `a` (from `a`'s center, in world axes) and
+  depth, four floats a point, with a feature id each and the separating
+  axis that found it; `Impulse` a normal impulse per point, and friction
+  (a vector in the tangent plane) and twist for the whole contact: 31 and
+  8 words. The spike measured four points inline at about 2% of a step.
+- **The narrowphase** (`narrow.rs`): sphere against sphere or box, one
+  point halfway between the surfaces; box against box, the separating
+  axis test over the 15 axes, the last step's axis tried first, the face
+  that separates most as the reference (a face of `b` only when clearly
+  better), an edge pair only where it makes a face of the Minkowski
+  difference and separates clearly more, the incident face clipped to the
+  reference face, points halfway between the faces, more than four
+  reduced to four. All of that is Box3D's (`b3CollideHulls`), credited in
+  [CREDITS.md](../CREDITS.md).
+- **The solver** (`solver.rs`) is the 2D soft step with Box3D's angular
+  terms: per point, anchors on both bodies and an effective mass with the
+  angular terms, and each body's world inverse inertia, all fixed once a
+  step; within the step a point's separation is its separation when found
+  plus its anchors' moves along the normal, from each body's accumulated
+  move and turn (`b3SolveContact`). Friction is per contact at the points'
+  centroid (a 2x2 tangent mass, clamped to a disc of friction times the
+  points' normal impulse) with twist friction about the normal, only in
+  the relaxing passes, as Box3D, Rapier and Jolt all have it. A rotation is
+  stepped to first order and normalized every substep, at most a quarter
+  turn a step. The passes read a 64-byte copy of each body (velocities,
+  moves, inverse mass) and each point's crossed anchors already through
+  the inverse inertias, so a pass is dot products and adds: that took the
+  solver from 3147 to 2245 µs on 1000 turning boxes.
+
+### The choices, measured
+
+Every option is behind `physics3d::Tuning` (`--tune=...` on the bench,
+`P3_TUNE` in `rotation_test`), so each can be run again. 1000 turning
+bodies, ours only, one thread, `-c opt`; "settled" is the step from which
+every body is under 0.05 m/s at its farthest point. Settling a pile is
+chaotic: one late wobble moves it by hundreds of steps, so box piles were
+run at 900, 1000 and 1100 bodies, and planks (half extents 0.5, 0.125,
+0.25), noisier still (the same variant settles anywhere from 260 to never),
+are quoted only where a variant fails outright. Times are single runs at
+1000 and move by up to 10% between batches; each table's are one batch.
+
+**1. Box against box.** Box3D: the separating axis test with a cached
+axis, and clipping. Parry (Rapier): all 15 axes every step, then the
+faces clipped. Jolt: GJK and EPA for the penetration axis, then the two
+supporting faces clipped along it, the axis kept as the normal
+(`gjk.rs`: our implementation of Jolt's approach, with brute-force
+Johnson subsets and an allocating EPA, so its time is an upper bound on
+Jolt's).
+
+| 1000 bodies | box pile settled (900 / 1000 / 1100) | step ms | narrowphase µs | warm-started | planks | rain step ms |
+|---|---|---|---|---|---|---|
+| **SAT, last axis first (Box3D)** | **272 / 180 / 198** | **2.72** | **346** | **98%** | settles | **1.58** |
+| SAT, every axis every step (Parry) | 249 / 985 / 476 | 3.70 | 1083 | 97% | settles | 1.80 |
+| GJK, EPA, clipping (Jolt's way) | never | 26.0 | 23 322 | 89% | never | 9.8 |
+
+The cache is not only cheaper (one axis for a resting pair, not 15): it
+is hysteresis. Two faces of a resting box separate within a slop of each
+other; without the cache the test flips between them, the points' ids
+change and warm starting loses them. The EPA normal, the true least
+translation, is not a face normal and moves a little every step, so its
+manifold flickers too.
+
+**2. Reducing to four, and storing them.** Box3D: the deepest point, the
+farthest from it, the largest triangle, the point adding the most area.
+Rapier and Jolt: the deepest, the farthest, and the farthest either side
+of the line through them. Or all eight a clipped face gives, inline
+(`MAX_POINTS = 8`, a rebuild).
+
+| 1000 bodies | box pile settled | pen max | step ms |
+|---|---|---|---|
+| **area (Box3D)** | **272 / 180 / 198** | **0.0071** | **2.99** |
+| line (Rapier, Jolt) | 232 / 177 / 255 | 0.0071 | 3.08 |
+| eight, inline | 265 / 242 / 159 | 0.0076 | 3.08 |
+
+Area and line are level, and eight points buy nothing for their 3%. Area stays,
+as the one Box3D pairs with its ids. Points stay inline: a contact's
+points are read and written together, and a table of points would be four
+rows a contact to churn (the spike's measurement).
+
+**3. Warm starting.** Box3D and Parry: by feature id. Jolt: the nearest
+last point within 1 cm, in each body's frame (ours compares anchors in
+world axes, the same thing for bodies at rest). Or none.
+
+| 1000 bodies | box pile settled | warm-started | pen max | turning spheres, top speed at the end |
+|---|---|---|---|---|
+| **feature ids** | **272 / 180 / 198** | **98%** | **0.0071** | **0.057** |
+| nearest within 1 cm | 331 / 163 / 202 | 98% | 0.0066 | 0.284 |
+| none | never | 0% | 0.023-0.046 | 0.620 |
+
+Ids and nearest are level on boxes; ids stay, since they cost nothing to
+match and don't depend on how far a body moved or turned in between.
+
+**4. Stepping rotation, and inertia.** Box3D and Rapier: q + h/2 w q,
+normalized every substep. Jolt: the exact turn about w. Or normalized
+once, at the end of the step. The world inverse inertia formed once a step
+(Box3D, Rapier) or again every substep. Cubes and spheres have the same
+inertia about every axis, so only planks can tell these apart, and there
+the noise is larger than any difference.
+
+| 1000 bodies | box pile settled | step ms |
+|---|---|---|
+| **first order, normalized every substep (Box3D)** | **272 / 180 / 198** | **2.99** |
+| first order, normalized once a step | 290 / 196 / 175 | 3.07 |
+| the exact turn (Jolt) | 190 / 189 / 187 | 3.02 |
+| inertia again every substep | 238 / 194 / 214 | 3.33 |
+
+None settles a pile better, and inertia every substep costs 11%. Skipping
+the normalization lets a fast spin grow the quaternion
+(`a_spinning_body_stays_a_rotation` fails without it). Also measured: a
+point's separation to first order in the turn (θ x r for a turn θ, a dot
+product with what the row holds, in place of two quaternion rotations):
+7% off the solver, and the box pile never settled. Gyroscopic terms
+(Box3D and Rapier have them on, Jolt off) are left out: they vanish for
+cubes and spheres.
+
+**5. Bounds, without changing `engine/ecs`.** A key's bounds see the key
+and one extent; a turned box's depend on its position, its rotation and
+its shape. Options: the sphere around every collider, the collider
+staying the extent (so a body that only turns is never re-bounded); the
+same for turning bodies only, statics and locked bodies keeping their
+box; or a `Reach` extent holding the box around the collider as turned
+(`|R| h`, Box3D's `b3AABB_Transform`), rewritten by the solver when a box
+turns. A pose key (position and rotation in one component) gives the same
+bounds as `Reach` and was not built: it changes every query of
+`Position`, and a write of either half re-bounds the row, where `Reach`
+is written only when a box's box changes.
+
+Ours, turning, µs a step over the run (pairs are the broadphase's, a
+step); the contacts found are the same in every row, so quality is too:
+
+| | boxes 1000: pairs | broadphase | narrowphase | step ms | boxes 10 000: pairs | broadphase | step ms | planks 10 000: pairs | broadphase | step ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| a sphere around every collider | 14 417 | 496 | 448 | 3.20 | 157 999 | 34 835 | 64.5 | 315 835 | 43 184 | 91.0 |
+| a sphere for turning bodies, statics their box | 10 114 | 138 | 408 | 2.83 | 115 613 | 2253 | 31.2 | 268 064 | 5040 | 51.3 |
+| **the box as turned (`Reach`)** | **2477** | **45** | **295** | **2.58** | **25 688** | **1180** | **30.7** | **67 876** | **2165** | **48.1** |
+
+The sphere around a wall reaches every body in the pile (docs/lore); even
+for unit cubes the sphere, 1.7 times as wide, finds four to six times
+the pairs, and the broadphase doubles at 10 000.
+Rewriting `Reach` costs nothing visible: its writes come with the
+position's, which re-bound the row anyway.
+
+**6. The soft step, as 2D's or not.** 2D chose 5 substeps, contacts at a
+quarter of the substep rate (75 Hz), two relaxing passes, friction only in
+them. Box3D: 4 substeps at 30 Hz, one relax. Box2D's rule has friction in
+the pushing pass too.
+
+| 1000 turning bodies | box pile settled | pen max | step ms | 10 boxes stacked, 600 steps |
+|---|---|---|---|---|
+| 2D's: 5 x 75 Hz, 2 relax | 216 | 0.0054 | 2.57 | never still, 0.13 m/s |
+| **5 x 60 Hz, 2 relax** | **180** | **0.0071** | **2.65** | **at rest by 600** |
+| 5 x 45 Hz, 2 relax | 191 | 0.0104 | 2.61 | at rest by 300 |
+| 5 x 45 Hz, 1 relax | 199 | 0.0114 | 2.01 | |
+| Box3D's: 4 x 30 Hz, 1 relax | 225 | 0.0227 | 1.69 | at rest by 600, 0.026 lower |
+| Box3D's, friction pushing too | 258 | 0.0239 | 1.84 | |
+
+The same step, a notch softer. At 2D's stiffness a column of ten turning
+boxes never comes to rest: each box rocks on its four points, a mode a
+locked box doesn't have. A fifth of the substep rate is the stiffest that
+stands the stack, and sinks a third as deep as Box3D's. One relax pass is
+a quarter cheaper and settles the pile about as soon, but the stack took
+two, so two stay. Friction in the pushing pass is worse here, as in 2D.
+
+### Against the others, turning
+
+`./bazel run -c opt //bench/physics3d:bench -- all 1000,10000 all --rotate`
+(and without `--rotate` for locked). One thread, sleeping off, every engine
+at its defaults (Rapier 4 substeps at 30 Hz; Jolt 10 velocity and 2
+position iterations; Box3D 4 substeps at 30 Hz; ours 5 substeps at 60 Hz, 2
+relax); 1000 bodies the median of three runs, 10 000 one. Whole run, ms a
+step:
+
+| turning | ours | Rapier | Jolt | Box3D |
+|---|---|---|---|---|
+| spheres 1000 | 1.85 | 0.85 | 1.79 | 1.43 |
+| boxes 1000 | 2.68 | 0.91 | 1.35 | 1.09 |
+| planks 1000 | 3.46 | 1.18 | 2.21 | 1.59 |
+| rain 1000 | 1.60 | 0.87 | 1.23 | 1.07 |
+| spheres 10 000 | 24.9 | 19.0 | 28.2 | 18.6 |
+| boxes 10 000 | 29.8 | 13.8 | 19.1 | 11.9 |
+| planks 10 000 | 44.3 | 25.8 | 38.4 | 23.1 |
+| rain 10 000 | 20.8 | 15.8 | 16.1 | 14.2 |
+
+| locked | ours | Rapier | Jolt | Box3D |
+|---|---|---|---|---|
+| spheres 1000 | 1.21 | 0.64 | 1.21 | 1.05 |
+| boxes 1000 | 2.62 | 0.90 | 1.13 | 1.07 |
+| spheres 10 000 | 14.2 | 13.8 | 19.9 | 12.7 |
+| boxes 10 000 | 29.0 | 14.3 | 13.6 | 12.0 |
+| planks 10 000 | 21.7 | 10.7 | 13.5 | 9.4 |
+| rain 10 000 | 12.0 | 8.5 | 9.6 | 7.6 |
+
+By stage at 10 000 turning, µs a step (Jolt exposes none):
+
+| | broadphase: ours / Rapier / Box3D | narrowphase | solver | ours: copies, re-sorts |
+|---|---|---|---|---|
+| spheres | 1825 / 198 / 391 | 1604 / 3237 / 4012 | 18 891 / 14 923 / 14 222 | 700, 835 |
+| boxes | 1190 / 121 / 202 | 4120 / 1021 / 2048 | 23 141 / 11 928 / 9626 | 678, 269 |
+| planks | 2069 / 159 / 300 | 7473 / 5132 / 6367 | 32 291 / 19 742 / 16 375 | 1051, 654 |
+
+Quality, from the harness's own geometry: deepest overlap at the end, and
+the step from which every body stays under 0.05 m/s at its farthest point:
+
+| turning | ours | Rapier | Jolt | Box3D |
+|---|---|---|---|---|
+| boxes 1000: deepest, settled | 0.007, 180 | 0.022, 304 | 0.020, 502 | 0.023, 299 |
+| boxes 10 000 | 0.013, 374 | 0.042, 716 | 0.028, 1413 | 0.043, 713 |
+| planks 1000 | 0.010, 408 | 0.030, 278 | 0.026, 840 | 0.034, 262 |
+| planks 10 000 | 0.024, never (6 moving, 0.34 m/s) | 0.076, 392 | 0.060, never (27) | 0.078, 369 |
+| spheres 10 000: deepest, energy at the end | 0.017, 0.12 | 0.063, 0.007 | 0.036, 0.010 | 0.062, 0.017 |
+| rain 10 000: deepest | 0.002 | 0.010 | 0.056 | 0.098 |
+
+No engine's turning spheres or rain come to rest: spheres roll, and none
+has rolling resistance on (docs/lore). Nothing escapes in any run.
+
+**What it shows.**
+- **It works, and piles of boxes settle best.** Turning box piles come to
+  rest sooner than in any of the three and sink a third as deep, the depth
+  bought, as in 2D, by substeps and a stiffer contact. Planks are the weak
+  spot: at 10 000 six still wobble at step 1500, where Rapier and Box3D are
+  at rest by 400.
+- **It costs 1.3 to 3 times Rapier and Box3D**, most of it the solver,
+  and most of that the passes: 5 substeps of 3 passes (and 5 warm starts)
+  against their 4 of 2. Per pass, ours is about 1.3 times Box3D's (23.1 ms
+  over 15 passes against 9.6 over 8, theirs including integration), scalar
+  against their 4-wide SIMD. Box3D's own settings in ours (choice 6) cost
+  1.69 ms at 1000 boxes against their 1.09, and sink as deep as theirs.
+- **The narrowphase is 2-4 times theirs on boxes** because they keep a
+  contact's manifold while its bodies barely move (Box3D recycles it,
+  Rapier's `try_update_contacts`, Jolt's body-pair cache), where ours
+  clips every pair every step; the cached axis only saves the axis test.
+- **The broadphase is still 5-10 times theirs**, as before rotation: they
+  keep pairs.
+- **Locked bodies now pay for manifolds.** A locked box pile runs the same
+  clipping and four-point solve as a turning one: 29 ms at 10 000, where
+  the translation-only step took 4.9 (the spike) and 6.3 (its soft step).
+  And at 60 Hz a locked 10 000 box pile breathes, 9130 bodies never at rest
+  in 1500 steps, as Rapier's and Box3D's do at their defaults
+  (docs/lore/a-locked-box-pile-breathes-forever-under-soft-contacts-at-4-iterations.md);
+  at 1000 it settles by 95. The translation-only step settled it by 204.
+
+What would close the gaps, in order: manifolds kept while bodies barely
+move (the narrowphase, and fewer re-found contacts); a broadphase that
+keeps its pairs (both comparisons now); a colored SIMD solve; stiffness
+per contact (locked pairs as stiff as 2D's, turning ones softer); rolling
+resistance; sleeping, which piles that settle would fall into.
+
+### What 3D asks of the storage design
+
+What the step works around today, and what it would want instead, for
+the design of rotated bounds (get-emj.38's 2D side):
+
+1. **Bounds from more than one extent.** A turned box's bounds depend on
+   the key (its position), its rotation and its shape; `SpatialKey::bounds`
+   sees the key and one extent. So the step keeps a derived `Reach` (world
+   half extents) as the extent and rewrites it when a box turns: three
+   floats a body, a write the solver must remember, and one value held
+   twice (in `Reach` and in the page lanes). Wanted: extents as a tuple
+   (`Collider` and `Rotation`) so the glue computes `|R| h` itself and a
+   write to either re-bounds the row; or a key whose bounds a system
+   writes directly. The glue already runs a page at a time, so a 3x3
+   absolute rotation times a half extent a row would sit in the loop that
+   re-boxes pages.
+2. **Turning alone re-bounds.** A box spinning in place writes no
+   position, and its bounds still change. `Reach` covers it because it is
+   written; a design where only writes of the key re-bound would miss it.
+3. **Not a sphere.** Rotation-invariant bounds are the cheap way out, and
+   cost 4 to 6 times the pairs (above), ten times the broadphase once
+   statics get them too. Whatever the storage offers, statics and bodies
+   that can't turn must keep exact boxes.
+4. **Fat bounds, or kept pairs.** A turning body is re-bounded every step
+   it moves, where Box3D re-inserts a body in its tree only when it leaves
+   a box grown by up to 0.05 (`aabbMargin`). The broadphase that keeps its
+   pairs, second on the retrospective's list, would cover both.
+5. **Wider tuples.** A turning body is seven components, the most a bundle
+   takes, and the solve's query eight, the most a query takes. Layers,
+   sleeping or a kinematic flag won't fit without nested bundles or more
+   arity.
+6. **What needed nothing.** Four points inline as `[f32; 16]` and
+   `[u32; 4]` (`OPAQUE` fields), the ordered contact table, change
+   detection: unchanged from the spike.
+
 ## Open questions
 
 - **Rotation.** Without it, boxes don't tip over and the stress demo
   stacks like tetris. Adding it is an angle and angular velocity per body,
   inertia, and contact points instead of a manifold's center: roughly
-  doubling the solver. Neither game needs it. *(Proposed: not in the MVP.)*
+  doubling the solver. Neither game needs it. *(Proposed: not in the MVP
+  for 2D. Built in the experimental 3D step: "Rotation in 3D".)*
 - **Kinematic characters.** The platformer's player as a dynamic body with
   no friction is the simplest thing that works; a dedicated character
   controller (slopes, steps, one-way platforms) is the usual next step and

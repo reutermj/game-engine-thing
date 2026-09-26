@@ -1,4 +1,4 @@
-//! Our own step: `//engine/std/physics3d`, translation-only bodies in the
+//! Our own step: `//engine/std/physics3d`, bodies turning or locked, in the
 //! ECS (3D spatial storage for the broadphase, contacts as entities in an
 //! ordered table), run on the ECS harness, one thread.
 

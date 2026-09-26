@@ -405,9 +405,9 @@ pub(crate) fn face_contact(
 /// `b` between `b1`, `b2` cross on the Gauss map: whether they make a face
 /// of the Minkowski difference, so that their axis is one the boxes can
 /// touch along: Box3D's `b3IsMinkowskiFace` (convex_manifold.c). Every
-/// axis still separates or not, but an edge pair that fails this isn't
-/// where the boxes meet: a box tipped on a wide floor has edge axes with
-/// the floor's far rims that separate more than its faces do.
+/// axis still separates or not; this only decides which edge pairs may
+/// make the contact. On our scenes it changed nothing measurable (physics.md,
+/// "Rotation in 3D"): the guard that did is the one in `edge_contact`.
 fn builds_face(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> bool {
     let (c, d) = (-b1, -b2);
     let (bxa, dxc) = (a2.cross(a1), d.cross(c));
@@ -417,7 +417,10 @@ fn builds_face(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> bool {
 
 /// One point, halfway between the closest points of the two edges; none if
 /// the edges don't make a face of the Minkowski difference or their closest
-/// points aren't on them.
+/// points aren't on them. Clamping such points back onto the edges, as a
+/// segment-to-segment distance would, made contacts between edges that
+/// don't touch: box piles went from settling in about 200 steps to never
+/// (`every_point_is_where_both_boxes_are`).
 fn edge_contact(p: &Pair, axis: u32, sep: f32, n: Vec3) -> Option<Manifold> {
     let (ra, rb) = (p.a.rot.cols, p.b.rot.cols);
     let (i, j) = (((axis - EDGES) / 3) as usize, ((axis - EDGES) % 3) as usize);
@@ -566,9 +569,8 @@ mod tests {
 
     #[test]
     fn a_box_tipped_on_a_wide_floor_touches_the_floor_not_its_far_edges() {
-        // The floor's edge axes with the box's separate more than its face
-        // does; without the Gauss map test the contact went to the floor's
-        // rim, 20 away, and boxes fell through.
+        // The floor is a box too, with edges 20 away: the contact is its
+        // face, near the box.
         let floor = Solid { at: Vec3::new(0.0, -0.5, 0.0), rot: Quat::IDENTITY.matrix(), shape: Shape::Box(Vec3::new(20.0, 0.5, 20.0)) };
         let q = Quat::axis_angle(Vec3::new(1.0, 0.0, 0.3), 0.5);
         let b = cube(Vec3::new(3.0, 0.62, 1.0), q);
@@ -629,6 +631,42 @@ mod tests {
         // A stale axis is tried and dropped.
         let stale = collide(&a, &b, (FACE_A, full.axis_sep + 1.0), Narrow::default()).unwrap();
         assert_eq!(full.normal, stale.normal);
+    }
+
+    /// How far `p` is outside the cube `s` (0 inside).
+    fn outside(s: &Solid, p: Vec3) -> f32 {
+        let r = s.rot.cols;
+        let d = p - s.at;
+        let l = Vec3::new(d.dot(r[0]), d.dot(r[1]), d.dot(r[2]));
+        (l - l.clamp(Vec3::splat(-0.5), Vec3::splat(0.5))).len()
+    }
+
+    #[test]
+    fn every_point_is_where_both_boxes_are() {
+        // Halfway between two surfaces within the margin: never farther
+        // than the margin from either box. An edge pair whose closest
+        // points lie off the edges, clamped back onto them, made points
+        // up to a box away from both (and piles that never settled).
+        let mut seed = 0x1234_5678u32;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let mut seen = 0;
+        for _ in 0..4000 {
+            let qa = Quat::axis_angle(Vec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5), rand() * 6.0);
+            let qb = Quat::axis_angle(Vec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5), rand() * 6.0);
+            let dir = Vec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
+            let (a, b) = (cube(Vec3::ZERO, qa), cube(dir * (0.9 + rand() * 0.6), qb));
+            let Some(m) = collide(&a, &b, (0, 0.0), Narrow { box_box: BoxBox::Sat, reduce: Reduce::Area }) else { continue };
+            seen += 1;
+            for p in m.points() {
+                assert!(outside(&a, p.at) < MARGIN && outside(&b, p.at) < MARGIN, "{p:?} of {m:?}");
+            }
+        }
+        assert!(seen > 1000, "{seen}");
     }
 
     #[test]
