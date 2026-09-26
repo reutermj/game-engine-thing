@@ -30,7 +30,21 @@ ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run -c opt //engine/std/phys
 SLEEP=1 ./bazel run -c opt //engine/std/physics/compare   # each engine's default sleeping
 SETTLE=1500 ./bazel run -c opt //engine/std/physics/compare  # how soon each comes to rest
 VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run -c opt //engine/std/physics/compare
+TURN=1 ./bazel run -c opt //engine/std/physics/compare   # only bodies that turn
+TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run -c opt //engine/std/physics/compare
 ```
+
+Every case runs twice by default: with rotation locked (every engine), as
+the comparison was until rotation, and with bodies turning (`, turning`
+in the case's name: Box2D and Rapier unlocked, each dynamic body given its
+shape's inertia at mass 1, ours with a `Rotation` and a `Spin`). `TURN=0`
+runs the locked cases only, `TURN=1` the turning ones, `TURN=2` the locked
+ones with ours giving every body a `Rotation` and no `Spin` (what a lock by
+a flag would leave). The `arrays:rot/...` variants change rotation's
+choices (physics.md, "Rotation"): `sep`, `int`, `relax`, `sub`, `warm`,
+`deepest`, listed in `variants.rs`. A settling run's steps to rest vary by
+a hundred or more with rounding alone (physics.md, "Contact points"): run
+more than one scene before reading a difference into them.
 
 `SETTLE=<steps>` replaces the timing with a settling table per scene (not
 rain): each engine stepped that far and looked at every 10 steps, the

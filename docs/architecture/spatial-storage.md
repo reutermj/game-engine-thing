@@ -173,8 +173,10 @@ spatial key with any extent, and physics is one user. What it assumes:
   Inherent to storing space as structure. An ordered key
   ([relationships.md](relationships.md#ordered-tables)) in a spatial table
   gives way: ranges of it there are scanned.
-- **One extent per key**: no compound shapes, which ties into several
-  colliders per body (the physics retrospective's first flaw).
+- **Up to two extents per key** ([Bounds from several
+  components](#bounds-from-several-components)): no compound shapes,
+  which ties into several colliders per body (the physics retrospective's
+  first flaw).
 - **2D or 3D ([In 3D](#in-3d)), boxes, two size classes** (ordered and big, at a threshold the
   key sets), and global page and run sizes (16 and 16).
 - **A query's `near_pairs` returns every pair**, statics' included;
@@ -542,6 +544,63 @@ bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
 - **What the spike doesn't cover:** a hierarchy over pages (runs are 16
   pages whatever the dimension), mixed sizes in 3D, and big bodies in 3D
   beyond a floor and walls.
+
+## Bounds from several components
+
+**Status: built** (2026-09-26, with rotation in physics:
+[physics.md](physics.md#rotation)). A turned box's bounds depend on where
+it is, which way it faces, and its shape, where a `SpatialKey` had one key
+and one extent. Now a key's `Extent` is an `Extents`: one component, as
+before, or a pair, each of which a row may lack (`bounds` gets
+`(Option<&A>, Option<&B>)`). Physics's `Position` has `(Collider,
+Rotation)`, and a body that doesn't turn has no `Rotation`, so it is
+bounded as it was. Writing either extent re-bounds the row, as writing the
+key does; the glue takes a column per extent (`BoundsFn`, `API_VERSION`
+26). The unsafe reads are the same kind as before, one more per row with a
+second extent, beside the existing ones in `spatial.rs`. Nothing in the
+order, the re-sort's moves, the lanes or the broadphase changed: they see
+boxes, however they were made. It is as generic over dimensions as the rest
+(3D's would be `(Collider, Orientation)`).
+
+The ways rotation could reach storage, measured on the same rows
+(`./bazel run -c opt //engine/ecs:spatial_turn_bench`: 10 000 boxes 0.8
+across a unit apart, so axis-aligned they are out of reach and turned they
+meet; µs a frame, the writer / the re-sort after it / `near_pairs`, and the
+pairs found; median of 3):
+
+| way | nothing turns, creeping | all turn, creeping | all turn, only turning | all turn, falling | 1 in 10 turns, creeping |
+|---|---|---|---|---|---|
+| no rotation at all | 15 / 62 / 111 (4962) | – | – | – | – |
+| **extents a pair (collider, rotation)** | **14 / 64 / 111 (4962)** | **38 / 76 / 301 (31783)** | **36 / 76 / 339** | **49 / 212 / 627** | **19 / 69 / 186 (8613)** |
+| a pose key (x, y, cos, sin) | 22 / 71 / 112 | 32 / 71 / 297 | 32 / 71 / 335 | 42 / 199 / 626 | 24 / 71 / 151 (8613) |
+| a pose key with an angle | 20 / 81 / 109 | 21 / 109 / 303 | 22 / 114 / 337 | 31 / 276 / 625 | 22 / 87 / 152 |
+| conservative (the circle around the box) | 15 / 67 / 263 (34414) | 37 / 70 / 268 (34414) | 36 / 18 / 274 | 50 / 207 / 651 (63437) | 20 / 73 / 400 (34414) |
+
+- **Where nothing turns, the pair costs nothing** (14 / 64 / 111 against 15
+  / 62 / 111). A pose key makes every row carry a rotation, 50% more to
+  write and 15% more to re-sort, whether it turns or not; conservative
+  bounds make every box a circle, 7 times the pairs and 2.4 times the
+  broadphase.
+- **Where everything turns, a pose key is 5–15% cheaper** to write and
+  re-sort (one column, not two), with the same bounds, so the same
+  broadphase.
+- **An angle costs the re-sort a sine and a cosine a row**: 45% slower
+  than storing the rotation as a cosine and sine, as Box2D's `b2Rot` and
+  Rapier's unit complex do.
+- **Conservative bounds win only where bodies turn in place**: turning
+  never re-bounds (18 µs against 76). Bodies that turn also move, and it
+  pays in pairs everywhere else.
+- **A pair of extents splits the rows that lack one into tables of their
+  own**, and where those interleave in space (one body in ten turning) the
+  broadphase sweeps two sets of pages over the same ground: 186 µs against
+  151 for one table (lore:
+  [an extent some rows lack splits their tables](../lore/an-extent-some-rows-lack-splits-their-tables-and-the-broadphase-pays.md)).
+  A game's bodies mostly all turn or all don't; a mix (a platformer's
+  crates among its tiles) is small.
+
+So the pair: it costs a world where nothing turns nothing, which is every
+game today, and pays a pose key's price only where bodies turn. The same
+reasoning gives 3D a `(Collider, Orientation)` pair.
 
 [^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
     its tests and `//engine/ecs:spatial_bench` had superseded it; it is in

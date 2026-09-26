@@ -30,8 +30,8 @@ Decided 2026-09-23:
   up many bodies, as a benchmark and a later test of system and data
   parallelism.
 
-Not goals for the MVP: rotation (see [Open questions](#open-questions)),
-joints, continuous collision detection, arbitrary polygons.
+Not goals for the MVP: joints, continuous collision detection, arbitrary
+polygons. Rotation, once one, is built: [Rotation](#rotation).
 
 ## Components
 
@@ -85,6 +85,20 @@ component! {
 }
 
 component! {
+    /// Which way a body faces, as the cosine and sine of its angle: its
+    /// collider turned about its position. None is axis-aligned. Part of
+    /// the body's box in storage, with the collider.
+    pub struct Rotation: "physics::Rotation" { pub c: f32, pub s: f32 }
+}
+
+component! {
+    /// Radians a second. A dynamic body with a `Rotation` and a `Spin`
+    /// turns, with its shape's inertia at its mass; without a `Spin` it
+    /// keeps its rotation (the rotation lock).
+    pub struct Spin: "physics::Spin" { pub w: f32 }
+}
+
+component! {
     /// The world's gravity, on one entity. None means none: pong has no
     /// entity with it.
     pub struct Gravity: "physics::Gravity" { pub x: f32, pub y: f32 }
@@ -125,8 +139,10 @@ component! {
     pub struct ContactPair: "physics::ContactPair", order = key { pub a: Entity, pub b: Entity }
 }
 // With it on each contact: `Manifold` (normal from a to b, depth, pressed
-// now and the step before), `Response` (friction, restitution, disabled:
-// what the solver does with it this step) and `Impulse` (for warm starting).
+// now and the step before, how many points), `Response` (friction,
+// restitution, disabled: what the solver does with it this step), `Impulse`
+// (for warm starting) and `ContactPoints` (up to two points, each with its
+// arms, separation, feature id and last impulses: used when an end turns).
 
 component! {
     /// Two colliders overlapping where one is a sensor or senses the
@@ -163,8 +179,8 @@ contacts in `late`:
 1. **`integrate_velocities`**: gravity into every dynamic body's velocity.
 2. **`find_contacts`**: the [broadphase](#broadphase) finds candidate
    pairs, then a narrowphase per pair (box–box, box–circle,
-   circle–circle): a normal and a depth, and no contact points, which
-   without rotation change nothing.
+   circle–circle): a normal and a depth; and, where either is turned, up
+   to two contact points ([Rotation](#rotation)).
    Pairs filtered by layer and mask; overlaps of sensors (and sensed
    layers) become `Overlap`s, a sensor's new ones a `Trigger` too, and go
    no further. The rest bring the world's contacts in line: this step's
@@ -214,7 +230,8 @@ libm differ).
 
 ## Broadphase
 
-`Position` is a spatial key, with `Collider` as its extent, so the ECS
+`Position` is a spatial key, with `Collider` and `Rotation` as its
+extents ([Rotation](#rotation)), so the ECS
 keeps every table of positions in spatial order
 ([spatial-storage.md](spatial-storage.md)). The broadphase is
 `near_pairs` over a query of positions and colliders: pairs whose boxes,
@@ -1517,6 +1534,14 @@ would extend too (Bullet and Box2D v2.4 turn bodies), but carry their
 creep with them, and the position iterations need contact points
 recomputed every iteration.
 
+[^rotation]: 2026-09-26: until then an open question, proposed to stay out
+    of the MVP: "Without it, boxes don't tip over and the stress demo
+    stacks like tetris. Adding it is an angle and angular velocity per
+    body, inertia, and contact points instead of a manifold's center:
+    roughly doubling the solver." A turning contact costs 5–7 times a
+    locked one in the solver, not 2, and a world where nothing turns
+    costs what it did.
+
 [^split]: 2026-09-26: until then, sequential impulses with a split
     impulse (Bullet's push velocities): eight velocity iterations, then
     eight passes of pseudo velocities pushing apart contacts sunk past a
@@ -1525,6 +1550,364 @@ recomputed every iteration.
     normals slid bodies where no friction acted, and its velocity solve,
     with a step's gravity at once, didn't converge on tall stacks. Kept,
     unchanged, as `tests/split_impulse.rs`.
+
+## Rotation
+
+**Status: built** (2026-09-26, get-emj.38). Bodies turn: boxes tip over
+edges, stacks and pyramids of boxes stand on two points a contact, discs
+roll. A body that doesn't turn is the same computation as before, bit for
+bit, and every game's recorded routes pass unchanged, since no game's
+bodies turn yet. Each choice below was measured against the others it
+could have been, on the same scenes; what Box2D v3.1.1 and Rapier 0.36
+(parry2d 0.31) do was read in their fetched source.
+
+What was built:
+
+- **Components.** `Rotation` (the cosine and sine of the angle, as Box2D's
+  `b2Rot` and Rapier's unit complex keep it: turning a vector is four
+  multiplies, and bounding a box no sine) on any collider, and `Spin`
+  (radians a second) on a body. A dynamic body with both turns, with its
+  shape's inertia at its mass (a box's `m (w² + h²) / 12`, a disc's `m r² /
+  2`; `Collider::inertia_per_mass`); a kinematic one turns at its spin; a
+  static with a `Rotation` is a turned plank.
+- **Storage.** A body's box is its collider turned: `Position`'s extents
+  are `(Collider, Rotation)`, a pair each of which a row may lack
+  ([spatial-storage.md](spatial-storage.md#bounds-from-several-components)).
+- **The narrowphase.** Where either shape is turned, contacts have points
+  (`narrow::collide_turned`): turned boxes by Box2D's separating axis and
+  clipping (two points), a turned box and a circle or two circles at one.
+  Each point has its arms from both centers, its separation and its
+  feature id, the edges it came from. Where neither is turned, the tests
+  are the ones before rotation, with no points.
+- **Contact points** on each contact as a `ContactPoints` component, and
+  warm starting by feature id ([Contact points](#contact-points)).
+- **The solver.** A contact is solved at its points when an end turns:
+  Box2D's angular terms (each point's effective mass with its arms' cross
+  products; impulses turning the bodies; the separation following the arms
+  as the bodies turn within the step), in the same soft step, substeps,
+  relax passes and speculative margin; restitution per point. A contact
+  whose ends don't turn keeps its one row at the normal, and a step with
+  no points and nothing spinning runs a solve compiled without them
+  (`solver::solve_all::<false>`).
+- **Sleeping** goes by a turning body's edge as well as its center (Box2D's
+  `maxExtent`), stops its spin as it falls asleep, and wakes it when a game
+  writes its rotation or spin.
+- **Spatial queries** (`Spatial`) test turned colliders by their turned
+  shapes: overlaps by separating axes, rays in the box's frame.
+
+### The rotation lock
+
+A body keeps its rotation by not having a `Spin`: the lock is a component
+that's absent, not a flag. Box2D locks by a flag on the body
+(`fixedRotation`, which leaves its inverse inertia 0, `body.c`), Rapier
+by locked axes (`LockedAxes::ROTATION_LOCKED`, which zero the effective
+inverse inertia, `rigid_body_components.rs`); in both, every body carries
+an orientation. Measured here as its cost (`TURN=2` in the comparison: every
+dynamic body given a `Rotation` and no `Spin`, which is what a flag or an
+infinite inertia leaves each body with), ours, µs a step, one thread; the
+same quality either way, to three digits (a turned test of a box that
+isn't turned rounds a little differently):
+
+| scene | locked by having no `Spin` (and no `Rotation`) | every body with a `Rotation`, locked |
+|---|---|---|
+| pile 10 000, falling | 1637 (narrowphase 64) | 1815 (167) |
+| pile 10 000, settled | 3581 (218) | 3988 (509) |
+| pyramid 5050 | 2754 (126) | 3643 (754) |
+| rain 10 000 (circles) | 4573 | 4466 |
+
+A body with a rotation is tested as a turned shape, whether it turns or
+not, and pays for points it never uses: 11% on a pile, 32% on a pyramid of
+boxes. A flag could fast-path a rotation that is still the identity, but
+then every body still carries one in storage, which the storage bench
+measured at half again as much to write and 15% more to re-sort. By
+absence, a world where nothing turns pays nothing, and `Rotation` without
+`Spin` is still there for what should face a way and stay so.
+
+**The games.** The platformer's player and walkers have no `Spin`, so they
+stay upright; pong's ball has none either, and keeps its behaviour exactly:
+it is a circle with no friction, so no contact could turn it anyway (a
+normal through its center has no arm, and friction 0 no tangent), and
+giving it a spin would change nothing but what the step computes. Their
+routes (`platformer_test`, `pong_test`, the reload replays) pass
+unchanged.
+
+### The narrowphase for turned shapes
+
+Box2D and Rapier both meet boxes by the separating axis: Box2D's
+`b2CollidePolygons` (the face of either box the other is farthest out
+along, the other's most opposed edge clipped to that face's sides,
+`b2ClipPolygons`), parry's `contact_manifold_cuboid_cuboid` the same for
+cuboids. For convex shapes without a routine of their own parry takes the
+general route, GJK for the distance (or that they overlap) and EPA for the
+depth, then clips the faces the normal picks (`contact_manifold_pfm_pfm`).
+Both measured on the same 100 000 pairs of turned boxes, from 0.03 apart
+to sunk 0.12 (`./bazel run -c opt //engine/std/physics:narrow_bench`, two
+runs):
+
+| way | ns a pair | contacts |
+|---|---|---|
+| **SAT and clipping, as Box2D** | **63** | 99 840 |
+| GJK and EPA, then clipping (allocation-free) | 370 | 99 998 |
+
+They agree on the normal and depth for 99.93% of the pairs both find; GJK
+also finds 158 pairs corner to corner within the margin, which our clip
+drops as disjoint and Box2D keeps through the closest features of the two
+faces (`b2SegmentDistance`, for rounded polygons and the speculative
+corner case), a branch ours leaves out: such a pair is found the step it
+touches, not the step before. Six times faster, so SAT for boxes. How many
+points: two, as Box2D and parry make them for faces. Kept to the deepest
+alone (`arrays:rot/deepest=1`), no pile or pyramid comes to rest and every
+pyramid topples, as a box on one point rocks (below).
+
+### Contact points
+
+Each contact has a `ContactPoints` component: two points, each its arms
+from both centers, its separation and its feature id, and the last solve's
+impulses at each, by feature; `Manifold::points` says how many are this
+step's and `Manifold::solved` how many the last solve solved at, so a
+contact without points never reads its `ContactPoints`. The component is
+on every contact (contacts stay one ordered table: a component some have
+would split them, as it splits spatial tables) but written only where
+there are points. The 3D spike measured four points inline on the
+contact at 2% of a step; in 2D, where every game's contacts have none
+today, the question was what they cost a world where nothing turns.
+`:tax`, µs a step at 10 000 settled (the 401-wide pile), the ECS, each
+row beside a run of the build before rotation in the same session:
+
+| points | step: before rotation → with | narrowphase | merge | solve: gather | solver |
+|---|---|---|---|---|---|
+| inline in `Manifold` and `Impulse` (first cut: every contact 76 bytes more, and the solver’s bodies 44 bytes) | 1547 → 1776 (+15%) | 92 → 162 | 35 → 42 | 80 → 130 | 1021 → 1112 |
+| inline, the solver’s bodies and contacts made small again | 1547 → 1658 (+7%) | 92 → 108 | 35 → 42 | 80 → 120 | 1021 → 1063 |
+| a `ContactPoints` component, written only where used | 1547 → 1572 (+1.6%) | 92 → 99 | 35 → 40 | 80 → 91 | 1021 → 1022 |
+| **the same, the solve compiled without points where there are none** | **1519 → 1557 (+2.5%)** | **93 → 105** | **34 → 40** | **76 → 92** | **1002 → 998** |
+
+Bit for bit the same throughout; across `:tax`’s piles the last is 1–3%
+slower (the 1000 pile 153 → 158, falling at 10 000 845 → 863). What’s left
+is a turned-or-not test per pair (the narrowphase), the contact’s points’
+index in what the merge carries, and a fifth column the solve’s gather
+walks. What the first cut showed is that a body’s angular state costs a
+world where nothing turns wherever it rides along: a `SolverBody` with
+angular fields (44 bytes, not 28) cost the solver 4%, so turning bodies
+are a list of their own (`solver::Spinning`), and a step with no points
+and nothing spinning runs a solve compiled without them
+(`solve_all::<false>`). Points as entities (four rows a contact in another
+ordered table) the 3D spike already measured as four times the churn; not
+tried again. In the comparison, locked, the ECS is within 2% of before on
+every pile and pyramid, and 3% slower in rain, where contacts begin and
+end every step and each carries its `ContactPoints` column through the
+contacts’ re-sort.
+
+**Warm starting** (read in the fetched source): Box2D matches this step's
+points to last step's by feature id (`b2UpdateContact`), and a new point
+starts from nothing; parry does the same (`ContactManifold::match_contacts`)
+and has matching by position too (`match_contacts_using_positions`); and
+nothing at all is the third choice. On the arrays, bodies turning, with
+`SETTLE=1500` (the step every body, edges included, was slower than 0.05
+from; deepest overlap at step 400):
+
+| warm start | pile 1000: at rest from | deepest at 400 | pyramid 5050: at rest from | top moved | pile 10 000: at rest from | deepest at 400 |
+|---|---|---|---|---|---|---|
+| **by feature id, as Box2D** | **290 / 180** | **0.020 / 0.019** | **440 / 440** | **0.26** | **390 / 550** | **0.024 / 0.025** |
+| by the nearest last point, within 0.1 | 280 / 410 | 0.024 / 0.031 | 440 / 440 | 0.26 | 340 / 620 | 0.024 / 0.024 |
+| by feature id, a new feature's by the nearest | – / 320 | – / 0.020 | – / 440 | 0.26 | – / 290 | – / 0.027 |
+| not at all | never | 0.10 | never: falls apart (top 15.9 lower) | | never | 0.12 |
+| Box2D (ids) | 240 | 0.12 | 160 | 1.46 | 1160 | 0.11 |
+| Rapier (ids) | 230 | 0.10 | 1100 | 1.50 | 1200 | 0.087 |
+
+Two runs a cell, the same computation but for the order of a few
+multiplies (the second after keeping each point's cross products rather
+than computing them again in each pass): a pile's step to rest moves by
+a hundred or more with rounding alone, so **only what clears that decides**.
+Without warm starting nothing comes to rest, and the big pyramid falls
+apart: a contact's impulse has to carry its load from one step to the
+next, and two points of a box on a box can't rebuild it in a step's
+passes. Between ids and positions nothing clears the noise; feature ids,
+then, as Box2D and parry have them: cheaper (no distances, no threshold
+that depends on the bodies' size), and a match that depends on which
+features the points are, not where.
+
+
+### Rotation in the soft step
+
+Box2D carries a body's turn through the substeps as a rotation stepped by
+the first order and normalized (`b2IntegrateRotation`), and a point's
+separation by its arms turned with the bodies (`b2SolveContact`). Rapier
+integrates the angular velocity as a rotation too, and updates a point's
+separation from its local points moved by the bodies' poses (`update`, in
+`contact_with_coulomb_friction.rs`): the arms turned, as Box2D. Both relax
+once a substep, with friction in it, and bounce once after. On the arrays,
+bodies turning, `SETTLE=1500`, `arrays:rot/<key>=<value>`
+(`compare/variants.rs`), µs a step over the whole run; two runs where
+there are two, as above:
+
+| variant | pile 1000: at rest from | µs | pyramid 5050: at rest from | pile 10 000: at rest from | µs |
+|---|---|---|---|---|---|
+| **as built: a rotation, arms turned, 2 relax, 2 points** | **290 / 180** | **1026 / 909** | **440 / 440** | **390 / 550** | **12 111 / 10 933** |
+| an angle, its sine and cosine each substep (`int=1`) | 220 / 230 | 1031 / 906 | 440 / 440 | 300 / 330 | 12 119 / 10 979 |
+| arms moved to first order, `r + θ × r` (`sep=1`) | 400 | 1019 | 440 | 350 | 12 026 |
+| arms fixed, turning ignored (`sep=2`) | 330 | 1034 | 440 | 1080 | 11 947 |
+| 1 relax pass (`relax=1`) | 310 | 746 | never | 490 | 9252 |
+| 3 relax passes (`relax=3`) | 240 | 1285 | 510 | 260 | 15 131 |
+| one point a contact, the deepest (`deepest=1`) | never | | never: topples | never | |
+| Box2D | 240 | 372 | 160 | 1160 | 4371 |
+| Rapier | 230 | 377 | 1100 | 1200 | 5200 |
+
+- **Two points, two relax passes, the arms turned.** One point topples
+  every pyramid; one relax pass never lets the big pyramid rest, as
+  without rotation ([Settling](#settling)); three cost a quarter more for
+  nothing that clears the noise; ignoring the arms' turn takes the big
+  pile three times as long.
+- **A rotation or an angle; turned arms or first-order ones**: within the
+  noise, at the same cost. Box2D's rotation (no sine or cosine) and its
+  turned arms were kept. The first-order arm has one thing for it: a
+  rolling disc's turned arm lifts off the ground within the step and
+  leaves the disc's `Velocity` a quarter of a step's gravity downward
+  though it doesn't sink, which the first-order arm doesn't
+  (`a_rolling_disc_leaves_a_step_falling_unless_its_arm_is_followed_to_first_order`;
+  [lore](../lore/a-rolling-disc-leaves-each-step-falling-toward-the-ground-it-rolls-on.md)).
+- **Restitution per point**, once, from each point's closing speed before
+  the step, for points that pushed (`b2ApplyRestitution`); a contact of
+  bodies that don't turn bounces as before.
+- **The speculative margin** needed nothing new: a point's separation is
+  tracked through the substeps, and a gap may close no faster than the
+  substep allows, per point. Corner-to-corner pairs just apart are the
+  one case Box2D keeps and ours drops (the narrowphase, above).
+- **Where the time goes.** A turning contact costs 5–7 times one that
+  doesn't (two points, each with angular terms, in 20 passes a step): the
+  pile of 1000 solves in 909 µs turning against about 100 locked. Box2D
+  does the same work in 8 passes and 4 warm starts of SIMD over colored
+  contacts; Rapier in 4 substeps of one biased and one unbiased pass. The
+  colored, wide solve that was measured at 1.3–1.4 times the scalar one
+  without rotation ([Parallel solving](#parallel-solving)) is where the
+  gap closes, more so with rotation's longer rows.
+
+### Against other engines, bodies turning
+
+The comparison ([Against other engines](#against-other-engines), runbook
+005) now runs every case twice: rotation locked everywhere, as before, and
+bodies turning (Box2D and Rapier unlocked, each dynamic body given its
+shape's inertia at mass 1; ours with a `Rotation` and a `Spin`). The same
+scenes, rain still circles (it towered as locked boxes; turning, it could
+be boxes). One thread, sleeping off, `-c opt`, the median of 3 runs
+(2026-09-26); each cell the step, then broadphase, narrowphase, solver
+and the rest, µs:
+
+| scene, turning | ours (ECS) | ours (arrays) | Box2D | Rapier |
+|---|---|---|---|---|
+| pile 1000, falling | 293: 21, 18, 162, 92 | 290: 87, 24, 161, 17 | 219: 91, 45, 61, 22 | 235: 59, 38, 91, 47 |
+| pile 1000, settled | 958: 32, 83, 734, 109 | 955: 66, 113, 728, 47 | 379: 0, 106, 257, 16 | 388: 4, 32, 325, 27 |
+| pile 10 000, falling | 3028: 209, 185, 1812, 822 | 3036: 814, 254, 1795, 174 | 2756: 1272, 600, 644, 241 | 2578: 682, 426, 1010, 461 |
+| pile 10 000, settled | 10 681: 519, 901, 8215, 1047 | 11 540: 1666, 1234, 8149, 491 | 4392: 0, 1616, 2626, 150 | 4900: 89, 531, 3999, 281 |
+| pyramid 210 | 372: 7, 33, 296, 37 | 360: 12, 42, 294, 12 | 111: 0, 35, 72, 4 | 106: 1, 6, 94, 5 |
+| pyramid 5050 | 8875: 184, 801, 7324, 565 | 9541: 905, 1050, 7305, 280 | 2925: 0, 1116, 1725, 84 | 2802: 92, 166, 2425, 118 |
+| rain 1000 | 786: 48, 36, 511, 191 | 700: 103, 59, 496, 42 | 445: 126, 97, 199, 23 | 538: 124, 130, 219, 64 |
+| rain 10 000 | 8487: 528, 386, 5624, 1949 | 7654: 1157, 599, 5466, 431 | 5110: 1587, 1287, 2010, 227 | 6877: 1507, 1867, 2511, 992 |
+
+And how they stood, at the end of the steps timed: deepest / mean overlap,
+mean speed, kinetic energy a body (the turning part too), and the most any
+box is tilted from resting on a face:
+
+| scene, turning | ours | Box2D | Rapier |
+|---|---|---|---|
+| pile 10 000, settled | 0.023 / 0.0024, 0.0004, 1.8e-7, 45° | 0.11 / 0.015, 0.0002, 1.3e-5, 45° | 0.087 / 0.015, 0.0002, 5.7e-8, 45° |
+| pyramid 5050 | 0.0059 / 0.0025, 0.002, 3.3e-6, 0.3° | 0.041 / 0.014, 0.0005, 2.1e-7, 1.5° | 0.035 / 0.015, 0.016, 2.2e-4, 1.8° |
+| pyramid 5050, a minute on | 0.0059 / 0.0025, 0, 3.4e-10, 0.3° | 0.041 / 0.014, 0, 6.5e-10, 1.5° | 0.035 / 0.015, 0.0003, 7.4e-8, 1.8° |
+| rain 10 000 | 0.47 / 0.0039 | 0.53 / 0.011 | 0.51 / 0.011 |
+
+(A pile is 45° tilted somewhere in every engine: a box wedged between
+circles. The pyramids stand in all three.)
+
+- **The quality holds.** Every engine's turning piles and pyramids come to
+  rest (settling tables above: ours at 180–550 steps on the piles against
+  Box2D's 240 and 1160 and Rapier's 230 and 1200, at 440 on the big
+  pyramid against 160 and 1100). Ours sinks a fifth as deep, and its big
+  pyramid leans 0.3° where theirs lean 1.5–1.8°, as its stiffer contacts
+  did locked.
+- **The time doesn't: the solver is 2–4 times theirs** where contacts
+  press (8215 µs against 2626 and 3999 on the settled pile, 7324 against
+  1725 and 2425 on the pyramid), and the step 2.2–3 times. Falling at
+  10 000, where few contacts press and our broadphase leads, ours is 10–17%
+  slower (at 1000, 25–34%). The
+  gap is the one [Rotation in the soft step](#rotation-in-the-soft-step)
+  names: a turning contact is two points of angular terms in 20 passes a
+  step, scalar and in pair order, where Box2D's are 12 passes of SSE2 over
+  colored contacts and Rapier's 8.
+- **The narrowphase is in their range**: 901 µs on the settled pile against
+  Box2D's 1616 (it clips every pair whose fat boxes overlap) and Rapier's
+  531 (it reuses manifolds of pairs that barely moved). The broadphase is
+  as it was, since boxes are boxes to it.
+- **Storage upkeep grows with what turns**: the ECS's rest over the arrays'
+  is 556 µs on the settled pile (1047 against 491), where locked it was
+  307, the rotations and spins now written and re-bounded each step.
+- **Locked, little moved**: against the build before rotation in the same
+  session, the ECS's step is within 2% on every pile and pyramid (the
+  settled 10 000 pile 3572 → 3484, the 5050 pyramid 2743 → 2741) and 3%
+  slower in rain (4476 → 4613: contacts' churn carries `ContactPoints`);
+  `:tax` 1–3% slower, bit for bit.
+
+
+### What the 3D spike predicted, and what 3D needs
+
+The spike ([3D, translation only](#3d-translation-only-spike)) predicted
+four things of rotation; in 2D:
+
+- **A spatial key that takes the transform, or extents that are a
+  tuple:** extents a pair, measured against a pose key, an angle and
+  conservative bounds (spatial-storage.md). 3D wants the same:
+  `impl SpatialKey<3> for Position { type Extent = (Collider,
+  Orientation); }`, the box of a turned box `|R| h` (nine products, where
+  2D's is four), and rows without an orientation bounded as now. A
+  sibling spike doing 3D rotation without changing `engine_ecs` would need
+  a pose key or conservative bounds, which in 2D cost every row (a pose's
+  columns, 50% more to write and 15% to re-sort) or every pair (7 times
+  the pairs); the pair lands in `engine_ecs` as generic over dimensions as
+  the rest, with `type Extent = Collider` unchanged for keys with one.
+- **The solver body growing from 7 floats to about 20, and the copies
+  tripling:** avoided, for bodies that don't turn. A body's angular state
+  is a list beside the bodies (`Spinning`), dense only inside the solve
+  and only if something spins; a 44-byte body had cost the solver 4%. In 3D
+  a spinning body adds a world inverse inertia (6 floats) and a
+  quaternion, which the same split keeps off the bodies that don't.
+- **Per-point feature ids and a clipping narrowphase, several times a
+  point-less pair:** SAT and clipping at 63 ns a turned pair, against 370
+  for GJK and EPA (and about 10 for an axis-aligned pair). Points in a
+  component of their own, written only where used (`ContactPoints`); in 3D
+  four, as Box3D and Jolt cap them.
+- **Islands and sleeping mattering more:** a turning pile solves in 3–4
+  times the time a locked one does, so its sleeping is worth that much
+  more; it falls asleep as soon (the pile test).
+
+What the 3D rotation spike (branch `physics3d-rotation`, which left
+`engine_ecs` alone and keeps a derived `Reach`, the turned box, as its
+key's extent, rewritten as a box turns) asks of the storage, and how the
+pair of extents answers:
+
+1. **Bounds from more than one extent, or bounds a system writes
+   directly.** Both: `type Extent = (Collider, Orientation)` bounds from
+   the key and both, with no derived component to keep in step; and a key
+   whose one extent is a box a system writes (`Reach`) still works, since
+   `type Extent = Collider` is the pair's first case unchanged.
+2. **Turning alone must re-bound a row.** Writing either extent marks the
+   row as writing the key does (`engine_ecs`'s
+   `a_box_from_two_extents_re_sorts_when_either_is_written`, with its
+   three mutations caught: a second extent's ticks unchecked, its name not
+   registered as moving rows, its value not passed to `bounds`).
+3. **Never sphere bounds for statics.** None here: a turned static is
+   bounded as its turned box, one that isn't by its box. The one sphere is
+   a look for what to wake around a static a game moved (`any_way`), a
+   region query, not what storage keeps.
+4. **Fat bounds or kept pairs, later (get-emj.36).** Not precluded:
+   `bounds` returns whatever box it likes, a grown one included, and the
+   order, lanes and broadphase take it as they take any.
+5. **Bigger tuples.** Not needed in 2D: a turning body is six components
+   (`Position`, `Velocity`, `Body`, `Collider`, `Rotation`, `Spin`), under
+   bundles' and query data's eight; the solve's turning query has four
+   terms and the contacts' five. The limit rotation did meet is a system
+   parameter group's four (`integrate_velocities` regrouped its queries to
+   add the sleeping bodies' rotations). A 3D solve query of eight is at
+   the data limit; the pair of extents adds nothing to a body's count
+   over a derived `Reach`, and one fewer component to keep in step.
+
 
 ## What changes elsewhere
 
@@ -1643,10 +2026,7 @@ four (`PruneContactPoints`), as read in their fetched source.
 
 ## Open questions
 
-- **Rotation.** Without it, boxes don't tip over and the stress demo
-  stacks like tetris. Adding it is an angle and angular velocity per body,
-  inertia, and contact points instead of a manifold's center: roughly
-  doubling the solver. Neither game needs it. *(Proposed: not in the MVP.)*
+- **Rotation**: built ([Rotation](#rotation)).[^rotation]
 - **Kinematic characters.** The platformer's player as a dynamic body with
   no friction is the simplest thing that works; a dedicated character
   controller (slopes, steps, one-way platforms) is the usual next step and

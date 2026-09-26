@@ -64,6 +64,34 @@ one would have to ship those files with it.
     v3's `constraint_graph.c`, which credits "High-Performance Physical
     Simulations on Next-Generation Architecture with Many Cores",
     Intel Technology Journal).
+  - rotation in the 2D step (2026-09-26, physics.md, "Rotation"), read
+    in v3.1.1's `manifold.c`, `contact.c`, `contact_solver.c`, `solver.c`
+    and `math_functions.h`:
+    - a rotation kept as its cosine and sine (`b2Rot`), turned a substep
+      at a time by the first-order step and normalized
+      (`b2IntegrateRotation`), and a body's final rotation its step's
+      turn after its start (`shapes.rs`, `Rot`; `solver.rs`);
+    - turned boxes by the separating axis of least overlap, the other
+      box's most opposed edge clipped to the reference face's sides, each
+      point halfway between the faces and numbered by the edges it came
+      from (`b2CollidePolygons`, `b2ClipPolygons`, `B2_MAKE_ID`), and a
+      circle against a turned box, or a circle, at one point halfway
+      between the surfaces (`b2CollidePolygonAndCircle`,
+      `b2CollideCircles`) (`narrow.rs`);
+    - warm starting each point from last step's impulse at the point with
+      the same feature id, and a point new this step from nothing
+      (`b2UpdateContact`; `components.rs`, `ContactPoints::last`);
+    - each point's arms from both bodies' centers, its effective masses
+      along the normal and the tangent with the arms' cross products, and
+      its separation updated in the substeps by the arms turned with their
+      bodies, the normal held fixed (`b2PrepareContactsTask`,
+      `b2SolveContact`); restitution per point, from its closing speed
+      before the step, for points that pushed (`b2ApplyRestitution`)
+      (`solver.rs`);
+    - a turning body as fast as its edge for sleeping (`maxExtent` in
+      `b2FinalizeBodies`) (`lib.rs`, `fall_asleep`);
+    - in the comparison, a turning body's mass set with its shape's inertia
+      at mass 1 (`b2Body_SetMassData`, `compare/box2d_shim.c`).
   - the 3D step (`//engine/std/physics3d`, experimental) descends from the
     2D one, and so inherits the same ideas: sequential impulses with warm
     starting, speculative contacts, and mixing friction and restitution
@@ -96,6 +124,15 @@ one would have to ship those files with it.
   pumps stacks until they topple). Read in the fetched 0.36.0 source.
   What else it does differently is in physics.md, "Against other engines"
   and "Settling".
+- **Measured against, not taken** (physics.md, "Rotation"): parry2d
+  0.31's other ways with contact points, read in its fetched source:
+  matching last step's points to this step's by position
+  (`ContactManifold::match_contacts_using_positions`), a variant of the
+  comparison (`arrays:rot/warm=2`), and GJK and EPA then clipping the
+  polygonal features the normal picks (`contact_manifold_pfm_pfm`, which
+  parry uses for convex shapes without a dedicated routine; for boxes it
+  uses SAT, `contact_manifold_cuboid_cuboid`), in
+  `//engine/std/physics:narrow_bench`.
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
   `bench/physics3d/Cargo.toml`, the comparison engine in `//bench/physics3d`
   (single-threaded, rotations locked). Its license text is fetched pinned by
