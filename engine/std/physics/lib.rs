@@ -56,6 +56,8 @@ field_struct! {
         /// Within `solve_gather`: the bodies, and their angular state.
         solve_bodies: u64,
         solve_turning: u64,
+        /// Within `write_back`: sleeping's bookkeeping after the solve.
+        sleeping: u64,
     }
 }
 
@@ -981,6 +983,7 @@ impl Physics {
             out.began.into_iter().for_each(|c| began.send(c));
         }
         if let Some(c) = config {
+            let t_sleeping = Instant::now();
             self.fall_asleep(
                 sleep,
                 &c,
@@ -992,6 +995,7 @@ impl Physics {
                 &mut contacts,
             );
             Self::move_woken(sleep, &mut sleeping, &mut resting);
+            self.time.sleeping += nanos(t_sleeping);
         }
         // After every write of the step's, the stopping of bodies that fell
         // asleep included.
@@ -1289,7 +1293,12 @@ impl Mod for Physics {
                     per(t.solve_gather),
                     per(t.solver),
                     per(t.write_back)
-                ) + &format!(" solve_bodies {:.1} solve_turning {:.1}", per(t.solve_bodies), per(t.solve_turning)))
+                ) + &format!(
+                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1}",
+                    per(t.solve_bodies),
+                    per(t.solve_turning),
+                    per(t.sleeping)
+                ))
             }
             "sleeping" => Ok(format!("asleep {}", sleep.asleep)),
             "wake" => {
