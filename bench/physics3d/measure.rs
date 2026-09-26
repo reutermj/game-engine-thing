@@ -255,7 +255,10 @@ impl Run {
 }
 
 pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
-    backend.add(&scene.statics);
+    let builds = backend.builds(scene);
+    if !builds {
+        backend.add(&scene.statics);
+    }
     let mut shapes = Vec::with_capacity(scene.n);
     let mut state = Vec::with_capacity(scene.n);
     let mut step_us = Vec::with_capacity(scene.steps);
@@ -265,7 +268,9 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         if let Some(batch) = scene.spawn.get(step)
             && !batch.is_empty()
         {
-            backend.add(batch);
+            if !builds {
+                backend.add(batch);
+            }
             shapes.extend(batch.iter().map(|s| s.shape));
         }
         let t = Instant::now();

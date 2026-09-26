@@ -26,13 +26,7 @@
 //! last step's is projected onto this step's plane.
 
 use crate::narrow::MAX_POINTS;
-use crate::{Mat3, Quat, Vec3};
-
-pub const SUBSTEPS: usize = 5;
-pub const RELAX_ITERATIONS: usize = 2;
-/// Of the substep rate, between two moving bodies; against a static one.
-pub const STIFFNESS: f32 = 0.2;
-pub const STATIC_STIFFNESS: f32 = 0.4;
+use crate::{Anchors, Inertia, Integrate, Mat3, Quat, Vec3};
 pub const DAMPING_RATIO: f32 = 10.0;
 /// The fastest a contact pushes bodies apart.
 pub const MAX_PUSH: f32 = 3.0;
@@ -41,37 +35,6 @@ pub const BOUNCE_THRESHOLD: f32 = 1.0;
 /// The most a body turns in a step, as in Box3D, Rapier and Jolt (a
 /// quarter turn is where a first-order rotation step goes badly wrong).
 pub const MAX_ROTATION: f32 = 0.25 * std::f32::consts::PI;
-
-/// How a rotation is stepped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Integrate {
-    /// q + h/2 w q, normalized every substep (Box3D, Rapier).
-    Linear,
-    /// The same, normalized once, at the end of the step.
-    LinearOnce,
-    /// The exact turn about w by |w| h (Jolt).
-    Exact,
-}
-
-/// How a point's separation follows its bodies' turns within a step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchors {
-    /// Each anchor turned by its body's rotation so far (Box3D).
-    Exact,
-    /// To first order: a body turned by the small rotation θ moves an
-    /// anchor r by θ x r, so the separation moves by θ . (r x n), a dot
-    /// product with what the row already holds.
-    Linear,
-}
-
-/// When a body's world inverse inertia is formed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Inertia {
-    /// Once a step, from its rotation then (Box3D, Rapier).
-    Step,
-    /// Again every substep, from its rotation so far.
-    Substep,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
@@ -87,18 +50,24 @@ pub struct Tuning {
     pub anchors: Anchors,
 }
 
+impl Tuning {
+    pub fn of(t: &crate::Tuning) -> Tuning {
+        Tuning {
+            substeps: t.substeps as usize,
+            relax: t.relax as usize,
+            stiffness: t.stiffness,
+            static_stiffness: t.static_stiffness,
+            friction_in_push: t.friction_in_push,
+            integrate: t.integrate(),
+            inertia: t.inertia(),
+            anchors: t.anchors(),
+        }
+    }
+}
+
 impl Default for Tuning {
     fn default() -> Tuning {
-        Tuning {
-            substeps: SUBSTEPS,
-            relax: RELAX_ITERATIONS,
-            stiffness: STIFFNESS,
-            static_stiffness: STATIC_STIFFNESS,
-            friction_in_push: false,
-            integrate: Integrate::Linear,
-            inertia: Inertia::Step,
-            anchors: Anchors::Exact,
-        }
+        Tuning::of(&crate::Tuning::default())
     }
 }
 

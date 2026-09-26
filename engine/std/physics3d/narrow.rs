@@ -16,13 +16,13 @@
 //! physics.md, "Rotation in 3D". `gjk.rs` is Jolt's way, kept to measure
 //! against.
 
-use crate::{Mat3, Shape, Vec3};
+pub use crate::MAX_POINTS;
+use crate::{BoxBox, Mat3, Reduce, Shape, Vec3};
 
 pub const MARGIN: f32 = 0.05;
 /// Box3D's linear slop: the scale of the biases that keep a manifold from
 /// flickering between features of nearly the same separation.
 pub const SLOP: f32 = 0.005;
-pub const MAX_POINTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
@@ -58,6 +58,7 @@ impl Manifold {
         &self.points[..self.count]
     }
 
+    #[cfg(test)]
     pub fn deepest(&self) -> f32 {
         self.points().iter().map(|p| p.depth).fold(f32::MIN, f32::max)
     }
@@ -72,36 +73,16 @@ pub struct Solid {
     pub shape: Shape,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BoxBox {
-    /// All 15 axes every step (Parry).
-    Sat,
-    /// The last step's axis first, kept if its separation changed by
-    /// under `SLOP` (Box3D).
-    SatCached,
-    /// GJK and EPA for the normal, then the faces clipped (Jolt).
-    GjkEpa,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reduce {
-    /// The deepest, the farthest from it, the largest triangle, the most
-    /// area added (Box3D).
-    Area,
-    /// The deepest, the farthest from it, and the farthest either side of
-    /// the line through them (Rapier's and Jolt's).
-    Line,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How pairs are collided: `Tuning`'s choices for the narrowphase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Narrow {
     pub box_box: BoxBox,
     pub reduce: Reduce,
 }
 
-impl Default for Narrow {
-    fn default() -> Narrow {
-        Narrow { box_box: BoxBox::SatCached, reduce: Reduce::Area }
+impl Narrow {
+    pub fn of(t: &crate::Tuning) -> Narrow {
+        Narrow { box_box: t.box_box(), reduce: t.reduce() }
     }
 }
 

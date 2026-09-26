@@ -60,15 +60,22 @@ rust_library(
         "measure.rs",
         "ours.rs",
         "rapier.rs",
-        "scenes.rs",
+        "//engine/std/physics3d:tests/scenes.rs",
     ],
     crate_name = "physics3d_bench",
-    data = [":licenses"],
+    # Ours is the physics3d mod in the engine, on pile3d's scenes.
+    data = [
+        ":licenses",
+        "//engine/std/physics3d:pile3d_game",
+    ],
+    rustc_env = {"PILE3D": "$(rlocationpath //engine/std/physics3d:pile3d_game)"},
     deps = [
         ":box3d_shim",
         ":jolt_shim",
+        "//engine/control",
         "//engine/ecs",
-        "//engine/std/physics3d",
+        "//engine/loader",
+        "//engine/std/physics3d:physics3d_interface",
         "@crates//:rapier3d",
     ],
 )

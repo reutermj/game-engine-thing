@@ -1,57 +1,136 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
-load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
 
-# Experimental: 3D rigid bodies that turn, on the ECS's 3D spatial
-# storage, as plain systems for the ECS harness (not a mod). See lib.rs and
-# docs/architecture/spatial-storage.md, "In 3D". The comparison with Rapier
-# and Jolt is //bench/physics3d.
+# Experimental 3D rigid bodies that turn, on the ECS's 3D spatial storage:
+# a mod, as //engine/std/physics is, with every piece of state in the world
+# or its state, so the step hot-reloads under a running simulation. See
+# lib.rs and docs/architecture/physics.md, "Rotation in 3D". The comparison
+# with Rapier, Jolt and Box3D is //bench/physics3d.
 
-rust_library(
+engine_mod(
     name = "physics3d",
     srcs = [
-        "lib.rs",
-        "math.rs",
-        "narrow.rs",
         "gjk.rs",
+        "lib.rs",
+        "narrow.rs",
         "solver.rs",
     ],
-    crate_root = "lib.rs",
+    interface = [
+        "components.rs",
+        "math.rs",
+    ],
+    twin = True,
     visibility = ["//visibility:public"],
-    deps = ["//engine/ecs"],
 )
 
+# Scenes for it, apart from any game: the comparison's (tests/scenes.rs,
+# which the bench builds in the other engines too) and single bodies for
+# the tests. See the source.
+#
+#   ./bazel run //engine/std/physics3d:pile3d_game
+#   bazel-bin/engine/modctl/modctl send pile3d build boxes 1000
+#   bazel-bin/engine/modctl/modctl send lockstep step 300
+#   bazel-bin/engine/modctl/modctl send pile3d stats
+engine_mod(
+    name = "pile3d",
+    srcs = [
+        "tests/pile.rs",
+        "tests/scenes.rs",
+    ],
+    crate_root = "tests/pile.rs",
+    mod_deps = [":physics3d"],
+    twin = True,
+    visibility = ["//bench/physics3d:__pkg__"],
+)
+
+engine_game(
+    name = "pile3d_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":pile3d"],
+    visibility = ["//bench/physics3d:__pkg__"],
+)
+
+exports_files(
+    ["tests/scenes.rs"],
+    visibility = ["//bench/physics3d:__pkg__"],
+)
+
+# The components' own tests, in the interface crate.
+rust_test(
+    name = "interface_test",
+    crate = ":physics3d_interface",
+)
+
+# The narrowphase and solver alone.
+rust_test(
+    name = "core_test",
+    srcs = [
+        "gjk.rs",
+        "narrow.rs",
+        "solver.rs",
+        "tests/core_test.rs",
+    ],
+    crate_root = "tests/core_test.rs",
+    deps = [":physics3d_interface"],
+)
+
+# The mod in a running engine: bodies that turn (tipping, rolling,
+# twisting, stacking), and a pile settling, against the storage's checks.
 rust_test(
     name = "physics3d_test",
-    crate = ":physics3d",
-)
-
-# A small pile settles, in the world, against the storage's own checks.
-rust_test(
-    name = "pile_test",
-    srcs = ["tests/pile_test.rs"],
+    srcs = [
+        "tests/physics3d_test.rs",
+        "tests/sim.rs",
+    ],
+    crate_root = "tests/physics3d_test.rs",
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"} | POISON_ENV,
     deps = [
-        ":physics3d",
+        ":physics3d_interface",
+        "//engine/control",
         "//engine/ecs",
+        "//engine/loader",
     ],
 )
 
-#   ./bazel run -c opt //engine/std/physics3d:stages -- 10000 sphere
+# Twins of every mod the scene game has that isn't resident, by mod name:
+# see //engine/tests:replay.rs.
+PILE3D_TWINS = {
+    "physics3d": ":physics3d_twin",
+    "pile3d": ":pile3d_twin",
+    "sequential": "//engine/std/sequential:sequential_twin",
+}
+
+# A 3D pile replayed while physics3d reloads under it every few frames, and
+# every frame: bit for bit the pile without reloads.
+rust_test(
+    name = "reload_test",
+    srcs = ["tests/reload_test.rs"],
+    data = [":pile3d_game"] + PILE3D_TWINS.values(),
+    env = {
+        "PILE3D": "$(rlocationpath :pile3d_game)",
+        "TWINS": ";".join(["%s=$(rlocationpath %s)" % (mod, twin) for mod, twin in PILE3D_TWINS.items()]),
+    } | POISON_ENV,
+    deps = [
+        ":physics3d_interface",
+        "//engine/ecs",
+        "//engine/loader",
+        "//engine/tests:replay",
+    ],
+)
+
+# Where a 3D pile's step goes, by stage, in the engine:
+#   ./bazel run -c opt //engine/std/physics3d:stages -- [n] [spheres|boxes|planks]
+# The comparison with other engines is //bench/physics3d; this is the
+# breakdown behind it.
 rust_binary(
     name = "stages",
     srcs = ["tests/stages.rs"],
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"},
     deps = [
-        ":physics3d",
-        "//engine/ecs",
-    ],
-)
-
-# Bodies that turn: tipping, rolling, twisting, stacking.
-rust_test(
-    name = "rotation_test",
-    srcs = ["tests/rotation_test.rs"],
-    deps = [
-        ":physics3d",
-        "//engine/ecs",
+        "//engine/control",
+        "//engine/loader",
     ],
 )

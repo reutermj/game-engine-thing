@@ -27,13 +27,14 @@ fn main() {
     let mut sleep = false;
     let mut rotate = false;
     let mut runs = None;
+    let mut tune = "";
     for f in flags {
         match f.as_str() {
             "--iters8" => iters = Iters::Eight,
             "--sleep" => sleep = true,
             "--rotate" => rotate = true,
             f if f.starts_with("--runs=") => runs = f["--runs=".len()..].parse().ok(),
-            f if f.starts_with("--tune=") => physics3d_bench::ours::tune(&f["--tune=".len()..]),
+            f if f.starts_with("--tune=") => tune = f["--tune=".len()..].to_string().leak(),
             f => panic!("unknown flag {f}"),
         }
     }
@@ -47,7 +48,7 @@ fn main() {
         for &n in &sizes {
             let scene = scenes::build(kind, n);
             let runs = runs.unwrap_or(if n <= 2000 { 3 } else { 1 });
-            let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32, rotate };
+            let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32, rotate, tune };
             let mut results = Vec::new();
             for b in &backends {
                 let mut all: Vec<Run> = (0..runs)

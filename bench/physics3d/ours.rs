@@ -1,41 +1,79 @@
-//! Our own step: `//engine/std/physics3d`, bodies turning or locked, in the
-//! ECS (3D spatial storage for the broadphase, contacts as entities in an
-//! ordered table), run on the ECS harness, one thread.
+//! Our own step: the physics3d mod in the engine (on the lockstep
+//! bootstrap, one thread), on the scene mod pile3d, which builds each scene
+//! from the same code (`scenes.rs`) the other engines are given theirs by:
+//! its statics at `build`, and each step's arrivals from a system in that
+//! step, where a game's spawns would be. So its step is the engine's frame,
+//! with what the ECS costs around the systems (the re-sorts at apply nodes,
+//! the schedule) in it, as `//engine/std/physics:tax` measures the 2D mod.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
-use engine_ecs::harness::Schedule;
-use engine_ecs::{Build, Entity, World};
-use physics3d::{AngularVelocity, Body, Collider, Manifold, Position, Quat, Rotation, TIMINGS, Timings, Vec3, Velocity, dynamic, fixed};
+use engine_ecs::Entity;
+use engine_loader::engine::Engine;
+use physics3d::{AngularVelocity, Manifold, Position, Rotation, Tuning, Velocity};
 
-use crate::{Backend, Config, Iters, Shape, Spec, State};
+use crate::scenes::Scene;
+use crate::{Backend, Config, Spec, State};
 
 pub struct Ours {
-    world: World,
-    schedule: Schedule,
-    /// Dynamic bodies, in the order they were added.
-    dynamic: Vec<Entity>,
-    last: Timings,
+    engine: Box<Engine>,
+    dir: PathBuf,
+    /// Dynamic bodies, in the order the scene adds them: looked up after a
+    /// step, in `state`, not in the step the harness times.
+    dynamic: RefCell<Vec<Entity>>,
+    /// The last frame's wall time, in µs.
     total_us: f64,
-    rotate: bool,
+    config: Config,
 }
 
-/// Runs ours with a variant of its step, named as `physics3d::Tuning::parse`
-/// reads it.
-pub fn tune(variant: &str) {
-    *physics3d::TUNING.lock().unwrap() = Some(physics3d::Tuning::parse(variant).unwrap_or_else(|e| panic!("--tune: {e}")));
+/// The number after `key` in `text`.
+fn field(text: &str, key: &str) -> f64 {
+    let mut words = text.split_whitespace();
+    words.find(|w| *w == key).unwrap_or_else(|| panic!("no {key} in {text}"));
+    words.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no number after {key} in {text}"))
 }
 
 impl Ours {
     pub fn new(config: &Config) -> Ours {
-        // One setting: the soft step has its own substeps, whatever the
-        // harness asks of the others.
-        let _ = matches!(config.iters, Iters::Default | Iters::Eight);
-        let world = World::new();
-        let schedule = physics3d::step(&world);
-        *TIMINGS.lock().unwrap() = Timings::default();
-        Ours { world, schedule, dynamic: Vec::new(), last: Timings::default(), total_us: 0.0, rotate: config.rotate }
+        static RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let run = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let manifest = engine_control::read_manifest(env!("PILE3D")).unwrap();
+        let dir = std::env::temp_dir().join(format!("physics3d-bench-{}-{run}", std::process::id()));
+        let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
+        engine.load_batch(&manifest.mods).expect("loading pile3d");
+        let ours = Ours { engine, dir, dynamic: RefCell::default(), total_us: 0.0, config: *config };
+        if !config.tune.is_empty() {
+            ours.send("pile3d", &format!("tune {}", config.tune));
+        }
+        // One setting for iterations: the soft step has its own substeps,
+        // whatever the harness asks of the others.
+        if !config.rotate {
+            ours.send("pile3d", "lock");
+        }
+        ours
+    }
+
+    fn send(&self, to: &str, message: &str) -> String {
+        self.engine.send(to, message).unwrap_or_else(|e| panic!("{to} {message:?}: {e}"))
+    }
+
+    /// The bodies pile3d has added since the last look.
+    fn arrived(&self) {
+        let mut dynamic = self.dynamic.borrow_mut();
+        let said = self.send("pile3d", &format!("bodies {}", dynamic.len()));
+        dynamic.extend(said.split_whitespace().map(|e| {
+            let (index, generation) = e.split_once(':').expect("index:generation");
+            Entity { index: index.parse().unwrap(), generation: generation.parse().unwrap() }
+        }));
+    }
+}
+
+impl Drop for Ours {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -45,59 +83,49 @@ impl Backend for Ours {
     }
 
     fn solver(&self) -> String {
-        use physics3d::solver::{RELAX_ITERATIONS, STIFFNESS, SUBSTEPS};
+        let t = Tuning::parse(self.config.tune).unwrap_or_else(|e| panic!("--tune: {e}"));
+        let variant = if self.config.tune.is_empty() { String::new() } else { format!(", tuned {}", self.config.tune) };
         format!(
-            "soft step, {SUBSTEPS} substeps ({} Hz, 1 solve + {RELAX_ITERATIONS} relax each), speculative margin {}",
-            STIFFNESS * SUBSTEPS as f32 * 60.0,
-            physics3d::narrow::MARGIN
+            "physics3d mod in the engine: soft step, {} substeps ({} Hz, 1 solve + {} relax each){variant}",
+            t.substeps,
+            t.stiffness * t.substeps as f32 * 60.0,
+            t.relax
         )
     }
 
-    fn add(&mut self, bodies: &[Spec]) -> Vec<u32> {
-        let mut m = self.world.between_frames(Build::default()).unwrap();
-        bodies
-            .iter()
-            .map(|s| {
-                let at = Vec3::new(s.pos[0], s.pos[1], s.pos[2]);
-                let c = match s.shape {
-                    Shape::Sphere(r) => Collider::sphere(r),
-                    Shape::Box([x, y, z]) => Collider::cuboid(Vec3::new(x, y, z)),
-                };
-                let e = if s.fixed {
-                    let (p, q, c, mut body, st) = fixed(at, Quat::IDENTITY, c);
-                    (body.friction, body.restitution) = (crate::FRICTION, crate::RESTITUTION);
-                    m.spawn((p, q, c, body, st))
-                } else {
-                    let inv_mass = 1.0 / crate::MASS;
-                    let mut body = if self.rotate { Body::solid(inv_mass, &c) } else { Body::new(inv_mass) };
-                    (body.friction, body.restitution) = (crate::FRICTION, crate::RESTITUTION);
-                    let (p, q, c, body, _, w) = dynamic(at, Quat::IDENTITY, c, body);
-                    let e = m.spawn((p, q, c, body, Velocity { x: s.vel[0], y: s.vel[1], z: s.vel[2] }, w));
-                    self.dynamic.push(e);
-                    e
-                };
-                e.index
-            })
-            .collect()
+    /// Built by pile3d from the scene's kind and size, which make the same
+    /// scene every time (checked: the scene it was given is the one it
+    /// would build).
+    fn builds(&mut self, scene: &Scene) -> bool {
+        let same = crate::scenes::build(scene.kind, scene.n);
+        assert!(same.statics.len() == scene.statics.len() && same.spawn.len() == scene.spawn.len(), "a scene pile3d can't build");
+        self.send("pile3d", &format!("build {} {}", scene.kind.name(), scene.n));
+        true
     }
 
+    fn add(&mut self, _: &[Spec]) -> Vec<u32> {
+        unreachable!("pile3d adds the bodies: see `load`")
+    }
+
+    /// One frame, and nothing else in the time the harness takes of it:
+    /// the timings are read and reset after, in `stages`.
     fn step(&mut self, dt: f32) {
-        // The harness runs every system at 1/60 s, the bench's step too.
-        assert!((dt - crate::DT).abs() < 1e-9, "the ECS harness steps at 1/60 s");
-        *TIMINGS.lock().unwrap() = Timings::default();
+        // Lockstep steps at 1/60 s, the bench's step too.
+        assert!((dt - crate::DT).abs() < 1e-9, "lockstep steps at 1/60 s");
         let t = Instant::now();
-        self.schedule.run_sequential(&self.world);
+        self.send("lockstep", "step 1");
         self.total_us = t.elapsed().as_secs_f64() * 1e6;
-        self.last = *TIMINGS.lock().unwrap();
     }
 
     fn state(&self, out: &mut Vec<State>) {
-        let at: HashMap<Entity, Position> = self.world.values::<Position>().unwrap().into_iter().collect();
-        let v: HashMap<Entity, Velocity> = self.world.values::<Velocity>().unwrap().into_iter().collect();
-        let q: HashMap<Entity, Rotation> = self.world.values::<Rotation>().unwrap().into_iter().collect();
-        let w: HashMap<Entity, AngularVelocity> = self.world.values::<AngularVelocity>().unwrap().into_iter().collect();
+        self.arrived();
+        let w = self.engine.world();
+        let at: HashMap<Entity, Position> = w.values::<Position>().unwrap().into_iter().collect();
+        let v: HashMap<Entity, Velocity> = w.values::<Velocity>().unwrap().into_iter().collect();
+        let q: HashMap<Entity, Rotation> = w.values::<Rotation>().unwrap().into_iter().collect();
+        let w: HashMap<Entity, AngularVelocity> = w.values::<AngularVelocity>().unwrap().into_iter().collect();
         out.clear();
-        out.extend(self.dynamic.iter().map(|e| {
+        out.extend(self.dynamic.borrow().iter().map(|e| {
             let (p, v, q, w) = (at[e], v[e], q[e], w[e]);
             State { pos: [p.x, p.y, p.z], vel: [v.x, v.y, v.z], rot: [q.x, q.y, q.z, q.w], ang: [w.x, w.y, w.z] }
         }));
@@ -105,25 +133,29 @@ impl Backend for Ours {
 
     fn touching(&self) -> usize {
         // Speculative contacts (apart, negative depth) aren't touching.
-        self.world.values::<Manifold>().map_or(0, |m| m.iter().filter(|(_, m)| m.deepest() >= 0.0).count())
+        self.engine.world().values::<Manifold>().map_or(0, |m| m.iter().filter(|(_, m)| m.deepest() >= 0.0).count())
     }
 
+    /// physics3d's own timings of the last step, which it keeps per stage;
+    /// reset for the next.
     fn stages(&self) -> Vec<(&'static str, f64)> {
-        let t = &self.last;
-        let us = |ns: u64| ns as f64 / 1e3;
-        let inside = [t.gravity, t.gather, t.broadphase, t.narrowphase, t.merge, t.solve_gather, t.solver, t.write_back];
+        let t = self.send("physics3d", "stages");
+        self.send("physics3d", "reset_timings");
+        let f = |k: &str| field(&t, k);
+        let inside: f64 =
+            ["gravity", "gather", "broadphase", "narrowphase", "merge", "solve_gather", "solver", "write_back"].iter().map(|k| f(k)).sum();
         vec![
-            ("gather", us(t.gravity + t.gather)),
-            ("broadphase", us(t.broadphase)),
-            ("narrowphase", us(t.narrowphase)),
-            ("merge contacts", us(t.merge)),
-            ("solve: copy in/out", us(t.solve_gather + t.write_back)),
-            ("solver", us(t.solver)),
-            ("re-sorts (outside systems)", self.total_us - us(inside.iter().sum())),
-            ("pairs", t.pairs as f64),
-            ("contacts", t.contacts as f64),
-            ("points", t.points as f64),
-            ("warm-started %", 100.0 * t.matched as f64 / t.kept.max(1) as f64),
+            ("gather", f("gravity") + f("gather")),
+            ("broadphase", f("broadphase")),
+            ("narrowphase", f("narrowphase")),
+            ("merge contacts", f("merge")),
+            ("solve: copy in/out", f("solve_gather") + f("write_back")),
+            ("solver", f("solver")),
+            ("outside systems (re-sorts, the frame)", self.total_us - inside),
+            ("pairs", f("pairs")),
+            ("contacts", f("contacts")),
+            ("points", f("points")),
+            ("warm-started %", 100.0 * f("matched") / f("kept").max(1.0)),
         ]
     }
 }

@@ -285,7 +285,7 @@ pub fn physics(e: &Engine, out: &mut String) {
 /// the world's tick: what change detection reads (physics wakes a sleeping
 /// body a game wrote to by them), so a reload that rewrote them shows
 /// before anything they decide does.
-fn ticks(e: &Engine, out: &mut String) {
+pub fn ticks(e: &Engine, out: &mut String) {
     let w = e.world();
     writeln!(out, "tick {}", w.current_tick()).unwrap();
     for t in w.tables() {

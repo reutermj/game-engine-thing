@@ -8,8 +8,9 @@
 //! (physics.md, "Rotation in 3D"). No convex radius: Jolt shrinks its boxes
 //! by one and adds it back, which rounds their edges; these stay sharp.
 
+use crate::Reduce;
 use crate::Vec3;
-use crate::narrow::{MARGIN, Manifold, Point, Reduce, Solid, face_contact};
+use crate::narrow::{MARGIN, Manifold, Point, Solid, face_contact};
 
 /// A point of the Minkowski difference a - b, and the points of each it
 /// came from.

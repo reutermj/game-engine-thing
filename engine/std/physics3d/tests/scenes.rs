@@ -1,10 +1,38 @@
 //! The scenes, as plain data: statics, the bodies present at step 0, the
 //! bodies each later step adds, and the phases a run is timed in. Built from
-//! a seeded RNG so every engine gets the identical scene.
+//! a seeded RNG so every engine gets the identical scene. Shared by the
+//! comparison (//bench/physics3d, which builds them in each engine) and the
+//! scene mod `pile3d` (which builds them in ours, in the engine, from this
+//! same code).
 
 use std::ops::Range;
 
-use crate::{Shape, Spec};
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    Sphere(f32),
+    /// Half-extents, along the body's own axes.
+    Box([f32; 3]),
+}
+
+impl Shape {
+    /// The radius of a sphere around the shape: what the harness's pair grid
+    /// is sized by.
+    pub fn bounding_radius(&self) -> f32 {
+        match *self {
+            Shape::Sphere(r) => r,
+            Shape::Box([x, y, z]) => (x * x + y * y + z * z).sqrt(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Spec {
+    pub shape: Shape,
+    pub pos: [f32; 3],
+    /// Ignored for a fixed body.
+    pub vel: [f32; 3],
+    pub fixed: bool,
+}
 
 /// splitmix64: enough randomness for jitter, and no crate to pin.
 pub struct Rng(u64);

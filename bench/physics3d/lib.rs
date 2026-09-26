@@ -15,34 +15,11 @@ pub mod jolt;
 pub mod measure;
 pub mod ours;
 pub mod rapier;
+// The scene mod builds the same scenes in the engine, from this file.
+#[path = "../../engine/std/physics3d/tests/scenes.rs"]
 pub mod scenes;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Shape {
-    Sphere(f32),
-    /// Half-extents, along the body's own axes.
-    Box([f32; 3]),
-}
-
-impl Shape {
-    /// The radius of a sphere around the shape: what the harness's pair grid
-    /// is sized by.
-    pub fn bounding_radius(&self) -> f32 {
-        match *self {
-            Shape::Sphere(r) => r,
-            Shape::Box([x, y, z]) => (x * x + y * y + z * z).sqrt(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Spec {
-    pub shape: Shape,
-    pub pos: [f32; 3],
-    /// Ignored for a fixed body.
-    pub vel: [f32; 3],
-    pub fixed: bool,
-}
+pub use scenes::{Shape, Spec};
 
 pub const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 pub const DT: f32 = 1.0 / 60.0;
@@ -72,6 +49,9 @@ pub struct Config {
     pub max_bodies: u32,
     /// Bodies turn; off, every engine locks their rotation.
     pub rotate: bool,
+    /// A variant of ours (`physics3d::Tuning::parse`), or "" for the
+    /// defaults.
+    pub tune: &'static str,
 }
 
 /// A dynamic body as the harness reads it back.
@@ -87,6 +67,11 @@ pub struct State {
 /// One engine behind the harness.
 pub trait Backend {
     fn name(&self) -> String;
+    /// Builds the scene itself, if it can, and says so: then the harness
+    /// adds nothing. Ours does, since a game spawns its own bodies.
+    fn builds(&mut self, _: &scenes::Scene) -> bool {
+        false
+    }
     /// The solver settings in effect, for the report.
     fn solver(&self) -> String;
     /// Adds bodies, callable at any point in a run; returns one handle per
