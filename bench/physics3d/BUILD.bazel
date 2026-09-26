@@ -1,0 +1,84 @@
+# A comparison harness for 3D rigid-body physics: the same scenes and the same
+# quality measures over Rapier 3D, Jolt and Box3D, all single-threaded with
+# rotations locked. See lib.rs's module docs; main.rs for the command line.
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load(":copts.bzl", "BOX3D_COPTS", "JOLT_COPTS")
+
+exports_files([
+    "jolt.BUILD",
+    "box3d.BUILD",
+])
+
+config_setting(
+    name = "opt",
+    values = {"compilation_mode": "opt"},
+)
+
+# --define=jolt_simd=sse2 builds Jolt for baseline x86-64, as rustc builds
+# the Rust engines; the default is Jolt's own CMake default, AVX2.
+config_setting(
+    name = "jolt_simd_sse2",
+    define_values = {"jolt_simd": "sse2"},
+)
+
+cc_library(
+    name = "jolt_shim",
+    srcs = ["jolt_shim.cpp"],
+    hdrs = ["shim.h"],
+    copts = JOLT_COPTS,
+    deps = ["@jolt"],
+)
+
+cc_library(
+    name = "box3d_shim",
+    srcs = ["box3d_shim.c"],
+    hdrs = ["shim.h"],
+    copts = BOX3D_COPTS,
+    deps = ["@box3d"],
+)
+
+# The licences of everything the bench binary links, shipped in its runfiles.
+filegroup(
+    name = "licenses",
+    srcs = [
+        "@box3d//:LICENSE",
+        "@jolt//:LICENSE",
+        "@rapier_license//file",
+    ],
+)
+
+rust_library(
+    name = "physics3d",
+    srcs = [
+        "box3d.rs",
+        "ffi.rs",
+        "jolt.rs",
+        "lib.rs",
+        "measure.rs",
+        "rapier.rs",
+        "scenes.rs",
+    ],
+    crate_name = "physics3d_bench",
+    data = [":licenses"],
+    deps = [
+        ":box3d_shim",
+        ":jolt_shim",
+        "@crates//:rapier3d",
+    ],
+)
+
+rust_binary(
+    name = "bench",
+    srcs = ["main.rs"],
+    data = [":licenses"],
+    deps = [":physics3d"],
+)
+
+rust_test(
+    name = "smoke_test",
+    srcs = ["smoke_test.rs"],
+    deps = [":physics3d"],
+)

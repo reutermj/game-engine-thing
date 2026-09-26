@@ -38,3 +38,36 @@ crate.from_cargo(
     platform_triples = ["x86_64-unknown-linux-gnu"],
 )
 use_repo(crate, "crates")
+
+# --- physics3d spike: engines for //bench/physics3d (begin) ---
+# Jolt and Box3D are built from source with the hermetic llvm toolchain; the
+# BUILD files are ours, since both ship only CMake. Rapier comes from
+# crates.io (bench/physics3d/Cargo.toml), but its crate carries no LICENSE,
+# so the Apache-2.0 text is fetched from the matching tag.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_archive(
+    name = "jolt",
+    build_file = "//bench/physics3d:jolt.BUILD",
+    sha256 = "6e069ee0172478cc78182047aac87e5310ba14a67a53348ae14cc37801fd3f8e",
+    strip_prefix = "JoltPhysics-5.6.0",
+    urls = ["https://github.com/jrouwe/JoltPhysics/archive/refs/tags/v5.6.0.tar.gz"],
+)
+
+http_archive(
+    name = "box3d",
+    build_file = "//bench/physics3d:box3d.BUILD",
+    sha256 = "df232c7618c0d0d3927b798044559ee56eabadeb9d8ff9dc526d4b384d7b415d",
+    strip_prefix = "box3d-0.1.0",
+    urls = ["https://github.com/erincatto/box3d/archive/refs/tags/v0.1.0.tar.gz"],
+)
+
+http_file(
+    name = "rapier_license",
+    downloaded_file_path = "LICENSE",
+    sha256 = "ceacfa4d7fa67df64ab09a56fe248c50a3bfc9bc00374d69bd74ad763b14b89c",
+    urls = ["https://raw.githubusercontent.com/dimforge/rapier/v0.36.0/LICENSE"],
+)
+# --- physics3d spike: engines for //bench/physics3d (end) ---
