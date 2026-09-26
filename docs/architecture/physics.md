@@ -359,7 +359,9 @@ built, gets slower in the ECS where it gets faster on arrays, for reasons
 mostly unbuilt, [Parallelism](#parallelism)); contact churn (the contacts'
 re-sort, below); scenes unlike a pile (mixed sizes, bodies carrying many
 game components); and tuned engines (the
-baseline is our own array code, not Box2D). Further optimization waits for
+baseline is our own array code, not Box2D; since measured: level on one
+thread, [Against other engines](#against-other-engines)). Further
+optimization waits for
 a game that needs it.
 
 The 10 000 "pile" in the table below is easier than a pile: dropped 331 a
@@ -1101,6 +1103,240 @@ batches built straight from the world, and anything smarter across CCDs
 The prototype stayed in the bench: in the mod it would need threads the
 mod can't own, and would change the simulation, where the single-threaded
 default must stay bit for bit what it is.
+
+## Against other engines
+
+**Status: measured** (2026-09-25). `./bazel run -c opt
+//engine/std/physics/compare` runs the same scenes in the physics mod, in
+the same step on plain arrays (`tests/arrays.rs`, bit for bit the mod's,
+checked on every scene without rain), in **Box2D v3.1.1** and in **Rapier
+2D 0.36.0**, one thread each, and prints time per step by stage and how
+well each settled. How to run it: [runbook
+005](../runbooks/005-compare-physics-with-other-engines.md). Credits and
+licenses: [CREDITS.md](../CREDITS.md). The goal is to see the gaps, not to
+win: parallel comparisons wait for our physics to run in parallel.
+
+**Verdict: on one thread we are level on time, and ahead where the
+problem is easier for us.** At 10 000 bodies the three engines are within
+15% of each other on piles and pyramids; we are 20–30% faster in rain,
+and nearly twice as fast falling, where our broadphase shines and theirs
+re-pair everything that moved. Our time is spent differently: about
+750 µs of 3400 on storage upkeep that arrays don't pay, a broadphase that
+re-finds every pair even when nothing moved (Box2D pays nothing there),
+and a scalar solver in pair order. What they do better is **settle**:
+both are at rest in 400 steps where we creep for thousands (and so can't
+sleep), and the creep is our split impulse's. What we do better is
+**overlap**: at rest ours is the slop, 0.005, where their soft contacts
+leave 0.02–0.06 under load, and no setting of theirs changes that.
+
+### How the scenes are matched
+
+`scene.rs` builds every scene for every engine, and the bench checks what
+it can:
+
+- Every dynamic body has mass 1 whatever its shape, rotation locked
+  (Box2D `fixedRotation`, Rapier `lock_rotations`; the bench asserts no
+  body turned, which caught Box2D turning them: see
+  [lore](../lore/box2d-set-mass-data-unlocks-a-fixed-rotation.md)), and
+  friction and restitution as ours has them, mixed as ours mixes them (the
+  least friction, the greatest restitution; Box2D takes the square root of
+  the product and Rapier the average by default, so both are given the
+  rule). Gravity 20, a step of 1/60, sleeping off everywhere unless
+  `SLEEP=1`.
+- Each engine at its defaults otherwise: ours 8 iterations and a split
+  impulse; Box2D 4 substeps of its soft step (contact hertz 30, damping
+  ratio 10, push-out at most 3 a second, SSE2, continuous collision on);
+  Rapier 4 solver iterations of its soft solver (block solver, contact
+  recycling).
+- **Scenes:** a real pile (1000 bodies 41 wide, 10 000 401 wide, circles
+  and boxes, every other row shifted half a body, so it is a pile in every
+  engine: 1.44–1.57 contacts a body, 1–9 islands); `:tax`'s pile as it
+  is (the "columns" case, below); a pyramid of unit boxes (base 20, 210
+  boxes; base 100, 5050); rain, circles falling onto the heap 2 or 20 a
+  step and removed 480 steps later, 1000 alive 81 wide or 10 000 801 wide.
+  Rain is circles because locked boxes land flush on boxes and tower out
+  of the box. In the engine, rain is a system spawning through a `Spawner`
+  and despawning through rows, as a game would.
+- **Timing** is the wall clock around the steps; stages are each engine's
+  own counters (ours: the mod's timings; Box2D: `b2Profile`; Rapier:
+  `counters`, with its `profiler` feature). Broadphase is Box2D's `pairs`
+  plus `refit`, and Rapier's pair update plus its end-of-step tree update
+  ([lore](../lore/rapier-times-its-broadphase-at-the-end-of-the-step.md));
+  narrowphase is Box2D's `collide`; solver is Box2D's constraint stages
+  and Rapier's `solver_time`. "Rest" is the step less those three.
+- **Quality** is measured by the bench, the same code for every engine,
+  from positions and velocities: overlaps by exact shape, contacts a body
+  and islands (touching within 0.01), speeds and kinetic energy, and how
+  far bodies moved (per second over the 60 steps timed; for the pyramid,
+  from where they started).
+
+### Time
+
+µs per step, the median of 3 runs of 60 steps, `-c opt`, one thread;
+runs agreed within 2% except Rapier's 10 000 settled (3565–4062). Each
+cell is the step, then broadphase, narrowphase, solver and rest:
+
+| scene | ours (ECS) | ours (arrays) | Box2D | Rapier |
+|---|---|---|---|---|
+| pile 1000, falling | 142: 20, 7, 57, 58 | 135: 62, 9, 57, 7 | 209: 79, 45, 63, 22 | 232: 62, 29, 98, 44 |
+| pile 1000, settled (step 400) | 270: 25, 15, 163, 67 | 242: 47, 24, 161, 10 | 296: 0, 79, 202, 16 | 319: 4, 24, 263, 28 |
+| pile 1000, at rest (step 4000) | 227: 24, 14, 154, 35 | 219: 35, 22, 153, 8 | 289: 0, 78, 196, 15 | 311: 4, 24, 257, 26 |
+| pile 10 000, falling | 1361: 189, 59, 594, 519 | 1265: 521, 85, 593, 66 | 2518: 1110, 562, 628, 217 | 2374: 655, 295, 1022, 401 |
+| pile 10 000, settled | 3370: 450, 245, 1802, 873 | 3315: 1144, 281, 1766, 125 | 3307: 0, 1139, 2017, 151 | 3861: 123, 480, 2967, 292 |
+| pile 10 000, at rest | 2718: 437, 232, 1690, 358 | 3252: 1163, 280, 1687, 121 | 3376: 0, 1166, 2059, 152 | 3501: 62, 328, 2819, 293 |
+| pyramid 210 | 90: 6, 5, 64, 16 | 80: 8, 7, 63, 3 | 110: 0, 34, 72, 4 | 105: 1, 6, 92, 5 |
+| pyramid 5050 | 2814: 181, 116, 2251, 265 | 3174: 682, 167, 2258, 68 | 2846: 0, 1020, 1742, 84 | 2753: 21, 162, 2452, 119 |
+| rain 1000 | 342: 41, 27, 157, 117 | 281 + 5: 87, 27, 151, 16 | 386 + 1: 105, 85, 174, 22 | 418 + 1: 101, 59, 196, 61 |
+| rain 10 000 | 3601: 500, 283, 1608, 1209 | 2953 + 51: 995, 255, 1555, 148 | 4481 + 16: 1406, 1135, 1726, 214 | 5060 + 7: 1163, 884, 2130, 882 |
+
+"+" is adding the step's raindrops and removing the oldest, outside the
+step; the engine's is inside it, at the rain system's apply node.
+Contacts solved at 10 000 settled: ours 14 159 pressed (15 864 held),
+Box2D 16 230 touching (21 221 held; two points for a box pair), Rapier
+16 294.
+
+With each engine's default sleeping (`SLEEP=1`, one run), the 10 000 pile
+at step 400: Box2D and Rapier asleep, under 1 µs; ours 3682, since it
+still creeps. At step 4000 ours is asleep too, 27 µs (the look for what
+games changed). Rain never sleeps (4069 / 4703 / 5214).
+
+### Quality
+
+At the end of the steps timed: deepest overlap / mean overlap, mean
+speed, kinetic energy a body, and for the pyramids how far the boxes are
+from where they started, mean / most:
+
+| scene | ours | Box2D | Rapier |
+|---|---|---|---|
+| pile 10 000, settled | 0.016 / 0.006, 0.023, 7.7e-3 | 0.057 / 0.008, 0.0000, 1.9e-10 | 0.054 / 0.008, 0.0005, 1.6e-7 |
+| pile 10 000, at rest | 0.005 / 0.005, 0.0000, 1.3e-10 | 0.057 / 0.008, 0.0000, 1.5e-10 | 0.054 / 0.008, 0.0001, 1.9e-8 |
+| pyramid 5050, 10 s | 0.013 / 0.008, 0.19, 2.7e-2; 0.27 / 0.74 | 0.019 / 0.009, 0, 4e-11; 0.40 / 0.83 | as Box2D |
+| pyramid 5050, 60 s | 0.005 / 0.005, 0, 5e-12; 0.17 / 0.50 | unchanged | unchanged |
+| rain 10 000 | 0.38 / 0.009 | 0.66 / 0.018 | 0.54 / 0.016 |
+| columns 1000 (`:tax`'s pile), contacts a body, islands | 1.29, 2 | 1.01, 30 | 1.01, 29 |
+
+- **We converge slowly and creep.** At step 400 our 10 000 pile still has
+  bodies at up to 8.6 a second and a mean drift of 0.02 a second; theirs
+  are still. Our 5050 pyramid is still sinking at 10 s (0.19 a second on
+  average), and at rest by 60 s. All three pyramids stand.
+- **The creep is the split impulse.** The same step on arrays with its
+  pseudo velocities thrown away (`VARIANTS=arrays:nosplit`) settles the
+  1000 pile to a fastest body of 0.03 a second against 2.4 (energy 1.0e-4
+  against 1.1e-2), and keeps `:tax`'s pile standing in columns as Box2D
+  and Rapier do, where with the split impulse it falls into a pile:
+  pushing bodies apart along tilted normals moves them sideways, where
+  friction doesn't act
+  ([lore](../lore/a-pile-41-wide-stands-in-columns-until-it-is-tall.md)).
+  Without it nothing corrects overlap (0.24 deep), so dropping it isn't
+  the fix.
+- **Soft contacts sink under load, and substeps don't help.** Box2D and
+  Rapier give the same overlaps to four digits on the pyramid (Rapier's
+  solver is the same soft step), 0.019 at its base and 0.057 under a
+  pile, with the pyramid's top 0.83 lower. Box2D at 8 substeps is as deep
+  (0.060); at 2 it is 0.17 on the pile and 0.075 on the pyramid (its top
+  3.3 lower), still at rest.
+- **Rain:** we overlap about half as deep on impact (0.38 against 0.66
+  and 0.54). Nothing escapes the box in any engine.
+
+**Matched quality.** Neither side is simply cheaper-and-worse, so there is
+no single matched point: theirs are at rest and deeper, ours tighter and
+restless. The nearest: Box2D at 2 substeps costs 2786 µs on the 10 000
+pile (ours 3370) and 1992 on the pyramid (ours 2814), still at rest, at 10
+and 6 times our overlap. Rapier at 2 iterations isn't at rest (the pyramid
+comes apart), and at 8 costs 5382 for nothing its 4 lack.
+(`VARIANTS=box2d:1,box2d:2,box2d:8,rapier:1,rapier:2,rapier:8`, one run.)
+
+### Where the time goes, and what they do differently
+
+- **Broadphase.** Ours finds every pair from the spatial pages every step:
+  about 450 µs at 10 000 whether the pile creeps or rests (189 falling,
+  where the pages hold fewer pairs). Box2D keeps fat boxes (0.1 of margin)
+  in dynamic trees and queries only proxies that left theirs: 0 at rest,
+  1110 falling, when every proxy moves. Rapier refits a BVH at the end of
+  the step and pairs what moved: 62–123 at rest, 655 falling. The arrays'
+  sweep and prune is the worst of all on a pile (1144).
+- **Narrowphase.** Ours is the cheapest a pair (a normal and a depth, no
+  points: 245 µs for 15 864 pairs). Box2D computes a full manifold for
+  every pair whose fat boxes overlap, two clipped points for boxes, with
+  rotation math even when rotation is locked (1139 for 21 221). Rapier
+  reuses the manifolds of pairs that moved less than 0.05 (480).
+- **Solver.** Ours: 8 sequential passes over the contacts in pair order,
+  then 8 split-impulse passes over those sunk past the slop, scalar: about
+  7 ns a contact a pass. Box2D: contacts graph-colored and solved 4 at a
+  time (SSE2) within a color, one solving and one relaxing pass a
+  substep, soft contacts, from bodies kept in the solver's layout between
+  steps; about our speed on a pile (2017 against 1802) and faster on the
+  pyramid (1742 against 2251), where our pair order walks each chain of
+  contacts one dependent write after another. That order is our loss: on
+  one thread the same solver colored is 1.28× faster and colored and wide
+  1.4× ([Parallel solving](#parallel-solving)). Rapier's solver is the
+  slowest here (2967).
+- **Storage upkeep** is ours alone: the ECS's "rest" is 873 µs at 10 000
+  settled against the arrays' 125. Of it, outside the systems 549, most
+  of it re-sorting the contacts table as contacts begin and end
+  (get-emj.31) and the spatial re-sort of creeping bodies; copying bodies
+  and contacts into the solver and back about 250 (the arrays 80). At
+  rest, when nothing changes, it is 358, and the ECS beats the arrays,
+  whose sweep suffers. Box2D's whole "rest" is 151 (finalizing transforms
+  and boxes), Rapier's 292 (moving bodies to their final poses).
+- **Structural changes** through a `Spawner` and rows cost little we could
+  see: rain at 10 000 is 3601 µs with them in the step, where it was 3644
+  with them coming through `WorldMut` from a message each step, which cost
+  another 418 µs for 20 spawns and 20 despawns (about 10 µs each; Box2D
+  0.4, Rapier 0.2). One entity at a time from outside a frame is slow:
+  not what a game does, but tools and tests do.
+
+### What would close the gaps, ranked
+
+Estimated from the numbers above, at 10 000 bodies:
+
+1. **Settle as they do (algorithm).** The split impulse keeps a pile
+   moving for thousands of steps, which costs quality (drift, bodies
+   thrown at 8 a second) and, with sleeping on, nearly all the time:
+   Box2D is asleep at step 400 and we pay 3682 µs a step until the creep
+   stops. Candidates, each a different simulation for the bench to judge:
+   friction solved on the pseudo velocities too, so the correction can't
+   slide bodies; a smaller correction once a contact persists; Box2D's
+   soft step with a relax pass, which settles but sinks under load.
+2. **Ordered tables that splice (ECS, get-emj.31).** Most of the 549 µs
+   outside the systems when contacts churn (841 in rain): 10–20% of the
+   step.
+3. **An incremental broadphase (algorithm, in storage).** Keep last step's
+   pairs for pages whose bodies stayed inside grown boxes, as Box2D's fat
+   boxes do: up to about 400 µs (12%) on a pile that creeps or rests, and
+   nothing when everything falls, where ours already leads.
+4. **Colored, wide solving on one thread (algorithm).** 1.28–1.4× the
+   solver, about 400–500 µs at 10 000 and more on the pyramid; another
+   computation, deterministic, and the start of the parallel solve.
+5. **Solver arrays kept between steps (ECS).** Most of the 170 µs the
+   copies cost over the arrays; the transpose itself is cheap ([What the
+   ECS costs](#what-the-ecs-costs)).
+6. **Cheaper structural changes from `WorldMut` (ECS).** 10 µs an entity
+   at 10 000, for tools and messages; systems don't pay it.
+
+Nothing here says the ECS is the wrong home: the arrays, with no storage
+upkeep at all, are within 2% of the ECS at 10 000 settled and slower at
+rest. The gaps that matter are algorithms (1, 3, 4) and one storage cost
+already known (2).
+
+### Bringing them in
+
+- **Box2D**, C: an `http_archive` pinned by checksum in `MODULE.bazel`,
+  and a `cc_library` over its sources (`box2d.BUILD.bazel`) with the flags
+  its CMake build uses on Linux in release (C17, `-O3`,
+  `-ffp-contract=off`, SSE2, no validation), built by the hermetic llvm
+  toolchain with no trouble. The Rust side calls a C shim
+  (`box2d_shim.c`) of scalar functions rather than mirroring Box2D's
+  definition structs, so the FFI (`box2d.rs`, the only unsafe code in the
+  comparison, and in the bench only) is 9 extern functions over numbers
+  and float buffers.
+- **Rapier**, Rust: a workspace member `Cargo.toml` pinning
+  `rapier2d = "=0.36.0"` with `profiler`, and `Cargo.lock` regenerated
+  ([runbook 001](../runbooks/001-regenerate-cargo-lock.md)); `rules_rs`
+  built its 60-odd crates unpatched.
+- Both are visible to `//engine/std/physics/compare` alone. Box2D is
+  pinned to its latest release; Rapier to the version current on the day,
+  so a rerun compares the same code.
 
 ## What changes elsewhere
 

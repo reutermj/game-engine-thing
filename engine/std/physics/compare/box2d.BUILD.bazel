@@ -1,0 +1,27 @@
+# Box2D v3 as its CMake build makes it on Linux x86_64 in release, with the
+# default options: SIMD on as SSE2 (BOX2D_AVX2 is off by default),
+# validation off (BOX2D_VALIDATE is on only for Box2D's own top-level
+# build), and -ffp-contract=off, which Box2D's CMake adds everywhere for
+# its cross-platform determinism.
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# MIT: the notice goes with the binary that links it (docs/CREDITS.md).
+exports_files(["LICENSE"])
+
+cc_library(
+    name = "box2d",
+    srcs = glob([
+        "src/*.c",
+        "src/*.h",
+    ]),
+    hdrs = glob(["include/box2d/*.h"]),
+    copts = [
+        "-std=gnu17",
+        "-ffp-contract=off",
+        "-O3",
+        "-DNDEBUG",
+        "-w",
+    ],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)

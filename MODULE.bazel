@@ -38,3 +38,17 @@ crate.from_cargo(
     platform_triples = ["x86_64-unknown-linux-gnu"],
 )
 use_repo(crate, "crates")
+
+# Box2D v3, the reference C engine, for //engine/std/physics/compare only:
+# the latest release (3.1.1, 2025-06-04), pinned by checksum so a comparison
+# is of the same code on every run. Built as a cc_library with the hermetic
+# llvm toolchain; see engine/std/physics/compare/box2d.BUILD.bazel.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "box2d",
+    build_file = "//engine/std/physics/compare:box2d.BUILD.bazel",
+    sha256 = "fb6ef914b50f4312d7d921a600eabc12318bb3c55a0b8c0b90608fa4488ef2e4",
+    strip_prefix = "box2d-3.1.1",
+    urls = ["https://github.com/erincatto/box2d/archive/refs/tags/v3.1.1.tar.gz"],
+)

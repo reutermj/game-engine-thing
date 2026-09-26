@@ -5,7 +5,8 @@
 //! Pairs within `MARGIN` of touching count, with a negative depth: a
 //! speculative contact, which lets the solver stop a body at the surface
 //! instead of after it has sunk in, and keeps resting contacts from
-//! flickering in and out between steps.
+//! flickering in and out between steps. Speculative contacts are as Box2D
+//! has them, Erin Catto's (docs/CREDITS.md).
 
 use physics::{Placed, Shape, Vec2};
 

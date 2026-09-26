@@ -235,3 +235,14 @@ sanitized_tests(
     skip = ["threads::threads_that_ran_a_builds_tasks_do_not_keep_it_mapped"],
     tests = [":physics_test"],
 )
+
+# The step on plain arrays and the code it shares with the mod, for the
+# comparison with other engines in ./compare, which runs them beside the mod.
+exports_files(
+    [
+        "narrow.rs",
+        "solver.rs",
+        "tests/arrays.rs",
+    ],
+    visibility = ["//engine/std/physics/compare:__pkg__"],
+)

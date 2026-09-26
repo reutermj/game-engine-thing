@@ -1,0 +1,70 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("//engine:defs.bzl", "engine_game", "engine_mod")
+
+# //engine/std/physics against Box2D v3 and Rapier 2D, on the same scenes,
+# one thread each: time per step by stage, and how well each settles. The
+# two libraries are for this package alone; nothing else may depend on them.
+# See docs/architecture/physics.md, "Against other engines", and
+# docs/runbooks/005-compare-physics-with-other-engines.md.
+#
+#   ./bazel run -c opt //engine/std/physics/compare
+
+package(default_visibility = ["//visibility:private"])
+
+# The scenes, built in the engine by a mod from the same code the other
+# engines build them from.
+engine_mod(
+    name = "scene",
+    srcs = [
+        "scene.rs",
+        "scene_mod.rs",
+    ],
+    crate_root = "scene_mod.rs",
+    mod_deps = ["//engine/std/physics"],
+)
+
+engine_game(
+    name = "scene_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":scene"],
+)
+
+cc_library(
+    name = "box2d_shim",
+    srcs = ["box2d_shim.c"],
+    copts = ["-O3"],
+    deps = ["@box2d"],
+)
+
+rust_binary(
+    name = "compare",
+    srcs = [
+        "box2d.rs",
+        "compare.rs",
+        "ecs.rs",
+        "quality.rs",
+        "rapier.rs",
+        "scene.rs",
+        "//engine/std/physics:narrow.rs",
+        "//engine/std/physics:solver.rs",
+        "//engine/std/physics:tests/arrays.rs",
+    ],
+    crate_root = "compare.rs",
+    # The two libraries' licenses travel with the binary that contains
+    # them: see docs/CREDITS.md.
+    data = [
+        ":scene_game",
+        "licenses/rapier-LICENSE",
+        "@box2d//:LICENSE",
+    ],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = [
+        ":box2d_shim",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+        "//engine/std/physics:physics_interface",
+        "@crates//:rapier2d",
+    ],
+)

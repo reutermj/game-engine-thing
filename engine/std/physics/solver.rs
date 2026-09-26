@@ -1,11 +1,14 @@
 //! Sequential impulses over arrays: the step's bodies and contacts, gathered
 //! from the world by the mod and written back after. No rotation, so a
-//! body is a velocity and an inverse mass.
+//! body is a velocity and an inverse mass. Sequential impulses, with
+//! accumulated impulses clamped and warm started from the last step, and
+//! the restitution threshold, are Erin Catto's, as Box2D has them.
 //!
 //! Penetration is corrected with a split impulse: a second, pseudo velocity
 //! that moves positions but is thrown away after the step, so pushing
 //! bodies apart never adds speed (Baumgarte bias on the real velocity makes
-//! stacks jitter and bounce).
+//! stacks jitter and bounce). The split impulse is Bullet's (Erwin
+//! Coumans's push velocities). See docs/CREDITS.md.
 
 use physics::Vec2;
 

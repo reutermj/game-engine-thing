@@ -136,6 +136,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   both publish); `sequential`, the default scheduler; and `physics`, 2D
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
+  `physics/compare` runs it beside Box2D and Rapier, fetched for that
+  package alone (runbook 005, [docs/CREDITS.md](docs/CREDITS.md)).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's

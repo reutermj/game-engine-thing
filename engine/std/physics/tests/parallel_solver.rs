@@ -374,7 +374,10 @@ unsafe fn relax_pseudo(b: Ptr<SolverBody>, c: &Constraint, pj: &mut f32, dt: f32
 /// Box2D v3's counts (`B2_GRAPH_COLOR_COUNT`, `B2_DYNAMIC_COLOR_COUNT`):
 /// contacts between two moving bodies take the first 20 colors, contacts
 /// with one that doesn't move colors 1 to 23, and a contact with no color
-/// free goes to the overflow, solved by one thread after the colors.
+/// free goes to the overflow, solved by one thread after the colors. Those
+/// are Box2D's main branch (2026); v3.1.1, the release the comparison with
+/// Box2D builds, has 12 colors, the last the overflow, and no colors kept
+/// for moving pairs. The coloring is Box2D's (docs/CREDITS.md).
 const COLORS: usize = 24;
 const DYNAMIC_COLORS: usize = 20;
 const OVERFLOW: u8 = COLORS as u8;

@@ -1,0 +1,18 @@
+[package]
+name = "physics-compare"
+version = "0.0.0"
+edition = "2024"
+# Keep in step with the toolchain version in MODULE.bazel (see
+# engine/loader/Cargo.toml).
+rust-version = "1.98"
+publish = false
+
+[[bin]]
+name = "compare"
+path = "compare.rs"
+
+[dependencies]
+# The reference Rust engine, for //engine/std/physics/compare only: its
+# defaults (2D, f32, std, the block solver) and `profiler`, which makes its
+# `counters` time the stages. Not `parallel`: the comparison is one thread.
+rapier2d = { version = "=0.36.0", features = ["profiler"] }

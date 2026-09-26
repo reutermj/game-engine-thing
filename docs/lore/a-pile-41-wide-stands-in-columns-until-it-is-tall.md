@@ -24,3 +24,19 @@ tests use 1000 at 41, and assert the contacts per body, so a scene that
 quietly went back to columns fails rather than passing on the easy case.
 Count contacts per body (or islands) before trusting a scene: the
 retrospective's advice, which this is one more case of.
+
+**In other engines it doesn't fall at all** (2026-09-25,
+`//engine/std/physics/compare`, the "columns 1000" case: this pile body
+for body, 400 steps in). Box2D v3.1.1 and Rapier 0.36 with rotation
+locked keep the 1000 standing in columns: 1.01 contacts a body and 30 and
+29 islands, against our 1.29 and 2. Friction holds a circle on a circle at
+the jitter's angles (at most 13° off vertical, where a friction of 0.4
+holds to 22°), so
+the columns are what the physics predicts, and their falling is our
+solver's: the split impulse, which pushes bodies apart along tilted
+normals where friction doesn't act. Measured: the same step on arrays
+with the split impulse's pseudo velocities thrown away
+(`VARIANTS=arrays:nosplit`) keeps the columns standing too, 1.00 contacts
+a body and 32 islands. A scene meant to be a real pile in
+every engine staggers every other row by half a body (`scene.rs`,
+`Scene::Pile { stagger: true }`), so each body lands between two.
