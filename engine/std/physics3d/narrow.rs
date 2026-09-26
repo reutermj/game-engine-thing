@@ -578,6 +578,35 @@ mod tests {
     }
 
     #[test]
+    fn edges_make_a_minkowski_face_only_where_their_arcs_cross() {
+        let r = 0.5f32.sqrt();
+        // The top edge of a box turned 45 degrees about x, and the bottom
+        // edge of one turned about z above it: crossed.
+        let (a1, a2) = (Vec3::new(0.0, r, r), Vec3::new(0.0, r, -r));
+        assert!(builds_face(a1, a2, Vec3::new(-r, -r, 0.0), Vec3::new(r, -r, 0.0)));
+        // The same edge against the top edge of that box: they face the
+        // same way and can't touch.
+        assert!(!builds_face(a1, a2, Vec3::new(-r, r, 0.0), Vec3::new(r, r, 0.0)));
+    }
+
+    #[test]
+    fn eight_points_reduce_to_the_four_that_keep_the_most_area() {
+        // A box turned 45 degrees about y on another: an octagon of eight.
+        let a = cube(Vec3::ZERO, Quat::IDENTITY);
+        let b = cube(Vec3::new(0.0, 0.99, 0.0), Quat::axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_4));
+        let m = hit(&a, &b, BoxBox::Sat);
+        assert_eq!(m.count, 4);
+        // The quad's area, its points taken round the centroid.
+        let c = m.points().iter().fold(Vec3::ZERO, |s, p| s + p.at) * 0.25;
+        let mut pts: Vec<Vec3> = m.points().iter().map(|p| p.at - c).collect();
+        pts.sort_by(|p, q| p.z.atan2(p.x).total_cmp(&q.z.atan2(q.x)));
+        let area: f32 = (0..4).map(|k| pts[k].cross(pts[(k + 1) % 4]).y.abs() * 0.5).sum();
+        // The octagon is 0.828 square; the best four of its corners make
+        // 0.586 (a square on alternate corners); two sides' worth, 0.414.
+        assert!(area > 0.55, "kept {area} of the area: {m:?}");
+    }
+
+    #[test]
     fn ids_stay_put_while_the_same_features_touch() {
         let a = cube(Vec3::ZERO, Quat::IDENTITY);
         let ids = |x: f32| {

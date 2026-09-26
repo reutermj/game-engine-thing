@@ -672,3 +672,35 @@ pub fn step(world: &World) -> Schedule {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solid_bodies_have_the_inertia_of_their_shape() {
+        // A unit cube of mass 2: I = m (1² + 1²) / 12 = 1/3 about each axis.
+        let b = Body::solid(0.5, &Collider::cuboid(Vec3::splat(0.5)));
+        assert!((b.inv_inertia() - Vec3::splat(3.0)).len() < 1e-5, "{b:?}");
+        // A plank 2 x 0.5 x 1 of mass 1: I_x = (0.25 + 1) / 12.
+        let b = Body::solid(1.0, &Collider::cuboid(Vec3::new(1.0, 0.25, 0.5)));
+        let i = Vec3::new((0.25 + 1.0) / 12.0, (4.0 + 1.0) / 12.0, (4.0 + 0.25) / 12.0);
+        assert!((b.inv_inertia() - Vec3::new(1.0 / i.x, 1.0 / i.y, 1.0 / i.z)).len() < 1e-3, "{b:?}");
+        // A sphere of radius 0.5 and mass 1: I = 2/5 m r² = 0.1.
+        let b = Body::solid(1.0, &Collider::sphere(0.5));
+        assert!((b.inv_inertia() - Vec3::splat(10.0)).len() < 1e-4, "{b:?}");
+        assert!(!Body::new(1.0).turns());
+    }
+
+    #[test]
+    fn a_turned_boxs_reach_is_the_box_around_it() {
+        let c = Collider::cuboid(Vec3::new(1.0, 0.25, 0.5));
+        let q = Quat::axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2);
+        let r = Reach::of(&c, q, true, BoundsOf::Turned);
+        assert!((Vec3::new(r.x, r.y, r.z) - Vec3::new(0.25, 1.0, 0.5)).len() < 1e-5, "{r:?}");
+        let s = Reach::of(&c, q, true, BoundsOf::Sphere);
+        assert!((s.x - c.reach()).abs() < 1e-6 && s.x == s.y && s.y == s.z);
+        let fixed = Reach::of(&c, Quat::IDENTITY, false, BoundsOf::Sphere);
+        assert_eq!((fixed.x, fixed.y, fixed.z), (1.0, 0.25, 0.5), "a body that can't turn keeps its box");
+    }
+}

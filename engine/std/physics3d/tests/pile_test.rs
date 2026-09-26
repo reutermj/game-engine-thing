@@ -4,7 +4,7 @@
 //! spatial order intact.
 
 use engine_ecs::{Build, World};
-use physics3d::{Body, Collider, ContactPair, Manifold, Position, Quat, Vec3, Velocity, dynamic, fixed, step};
+use physics3d::{Body, BoundsOf, Collider, ContactPair, Manifold, Position, Quat, Reach, Rotation, Vec3, Velocity, dynamic, fixed, step};
 
 /// Half the floor's inner width.
 const HALF: f32 = 3.0;
@@ -69,6 +69,14 @@ fn a_pile_settles_in_the_world() {
     let per_body = 2.0 * touching as f32 / n as f32;
     assert!(per_body > 3.0, "{touching} touching contacts for {n} bodies: {per_body} a body");
     assert_eq!(w.values::<ContactPair>().unwrap().len(), manifolds.len());
+    // The bounds are of the boxes as they came to rest, turned.
+    let reach: std::collections::HashMap<_, _> = w.values::<Reach>().unwrap().into_iter().collect();
+    let rot: std::collections::HashMap<_, _> = w.values::<Rotation>().unwrap().into_iter().collect();
+    assert!(rot.values().filter(|q| q.quat().v.len() > 1e-3).count() > n / 2, "the boxes turned");
+    for (e, c) in w.values::<Collider>().unwrap() {
+        let r = Reach::of(&c, rot[&e].quat(), moving.contains(&e), BoundsOf::Turned);
+        assert_eq!(reach[&e], r, "{e:?}");
+    }
     for t in w.tables() {
         let Some(spatial) = &t.spatial else { continue };
         let order = spatial.pages.read().unwrap();

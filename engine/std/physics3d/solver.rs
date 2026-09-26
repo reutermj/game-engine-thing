@@ -626,6 +626,34 @@ mod tests {
     }
 
     #[test]
+    fn the_world_inverse_inertia_is_the_bodys_own_turned() {
+        let q = Quat::axis_angle(Vec3::new(1.0, 2.0, 0.5), 0.8);
+        let mut bodies = [SolverBody::default(), SolverBody::new(Vec3::ZERO, Vec3::ZERO, 1.0, Vec3::new(1.0, 4.0, 9.0), q, Vec3::ZERO)];
+        solve1(&mut bodies, &mut []);
+        let v = Vec3::new(0.3, -1.0, 0.2);
+        let expect = q.rotate(Vec3::new(1.0, 4.0, 9.0).times(q.conj().rotate(v)));
+        assert!((bodies[1].inv_i.apply(v) - expect).len() < 1e-4, "{:?}", bodies[1].inv_i);
+    }
+
+    #[test]
+    fn a_spinning_body_stays_a_rotation() {
+        let mut bodies = [cube(Vec3::ZERO, Vec3::new(3.0, 20.0, -7.0))];
+        for _ in 0..200 {
+            bodies[0].q = bodies[0].rotation();
+            solve1(&mut bodies, &mut []);
+            let t = bodies[0].turned;
+            assert!((t.v.dot(t.v) + t.w * t.w - 1.0).abs() < 1e-4, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_turns_at_most_a_quarter_turn_a_step() {
+        let mut bodies = [cube(Vec3::ZERO, Vec3::new(0.0, 100.0, 0.0))];
+        solve1(&mut bodies, &mut []);
+        assert!((bodies[0].w.y - MAX_ROTATION / DT).abs() < 1e-3, "{:?}", bodies[0].w);
+    }
+
+    #[test]
     fn twist_friction_holds_up_to_the_lever_times_the_load() {
         // Pressed down at 1 over four corners 0.707 from the centroid: twist
         // can take up to 0.5 * 0.707 of angular impulse, 6 times that of spin.
