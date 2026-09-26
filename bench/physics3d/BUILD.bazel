@@ -58,6 +58,7 @@ rust_library(
         "jolt.rs",
         "lib.rs",
         "measure.rs",
+        "ours.rs",
         "rapier.rs",
         "scenes.rs",
     ],
@@ -66,6 +67,8 @@ rust_library(
     deps = [
         ":box3d_shim",
         ":jolt_shim",
+        "//engine/ecs",
+        "//engine/std/physics3d",
         "@crates//:rapier3d",
     ],
 )

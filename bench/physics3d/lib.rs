@@ -13,6 +13,7 @@ pub mod box3d;
 mod ffi;
 pub mod jolt;
 pub mod measure;
+pub mod ours;
 pub mod rapier;
 pub mod scenes;
 
@@ -90,10 +91,11 @@ pub trait Backend {
     fn stages(&self) -> Vec<(&'static str, f64)>;
 }
 
-pub const BACKENDS: &[&str] = &["rapier", "jolt", "box3d"];
+pub const BACKENDS: &[&str] = &["ours", "rapier", "jolt", "box3d"];
 
 pub fn make_backend(name: &str, config: &Config) -> Option<Box<dyn Backend>> {
     Some(match name {
+        "ours" => Box::new(ours::Ours::new(config)),
         "rapier" => Box::new(rapier::Rapier::new(config)),
         "jolt" => Box::new(jolt::Jolt::new(config)),
         "box3d" => Box::new(box3d::Box3d::new(config)),

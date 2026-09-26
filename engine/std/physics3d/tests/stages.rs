@@ -48,7 +48,9 @@ fn main() {
         }
     }
     println!("{n} {}, {side} wide: µs per step by stage (ECS, one thread)", if boxes { "boxes" } else { "spheres" });
-    println!("| steps | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | pairs | contacts |");
+    println!(
+        "| steps | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | pairs | contacts |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut done = 0;
     for (from, to) in [(0, 60), (60, 300), (300, 400), (400, 900), (900, 1000)] {
