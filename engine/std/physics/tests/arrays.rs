@@ -235,8 +235,11 @@ impl Arrays {
         let mut bodies: Vec<SolverBody> = Vec::with_capacity(self.moving.len() + 1);
         for (s, &i) in self.moving.iter().enumerate() {
             let b = &self.body[i as usize];
-            let inv_mass = if b.kind == DYNAMIC { b.inv_mass } else { 0.0 };
-            bodies.push(SolverBody { v: self.vel[i as usize], inv_mass, pseudo: Vec2::ZERO });
+            // The gravity just added, the solver's to spread over its
+            // substeps, computed as it was added.
+            let (inv_mass, g) = if b.kind == DYNAMIC { (b.inv_mass, self.gravity) } else { (0.0, Vec2::ZERO) };
+            let gravity = Vec2::new(g.x * b.gravity_scale * DT, g.y * b.gravity_scale * DT);
+            bodies.push(SolverBody::new(self.vel[i as usize], inv_mass, gravity));
             slot[i as usize] = s as u32;
         }
         let still = bodies.len() as u32;
@@ -267,8 +270,8 @@ impl Arrays {
                 continue;
             }
             self.vel[i as usize] = b.v;
-            let step = if body.kind == KINEMATIC { b.v } else { b.v + b.pseudo };
-            self.pos[i as usize] = Vec2::new(self.pos[i as usize].x + step.x * DT, self.pos[i as usize].y + step.y * DT);
+            let step = if body.kind == KINEMATIC { b.v * DT } else { b.displacement(DT) };
+            self.pos[i as usize] = Vec2::new(self.pos[i as usize].x + step.x, self.pos[i as usize].y + step.y);
         }
         for (c, k) in self.contacts.iter_mut().zip(&constraints) {
             (c.jn, c.jt) = (k.jn, k.jt);

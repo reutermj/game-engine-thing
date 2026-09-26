@@ -64,6 +64,25 @@ fn meeting_the_serve_returns_it() {
     assert!((ball(&e, "vy") - 5.6).abs() > 0.05, "no spin:\n{}", state(&e));
 }
 
+/// The returned serve bounces off the bottom wall and the AI's paddle at
+/// full speed. A contact found a step early (speculative) used to stop the
+/// ball at the surface and bounce it from what speed was left, so at the
+/// AI's paddle (frame 200) it stopped dead and crawled along it (get-az6,
+/// get-emj.19). Restitution now comes from the speed the ball came in at.
+#[test]
+fn the_ai_returns_the_ball_at_full_speed() {
+    let e = game("ai_returns");
+    play(&e, "down", 24);
+    play(&e, "stay", 46);
+    play(&e, "up", 25);
+    // Off the bottom wall, about frame 105: coming down at 5.72, it leaves
+    // going up at 5.72.
+    play(&e, "stay", 15);
+    assert!((ball(&e, "vy") + 5.72).abs() < 0.01, "{}", state(&e));
+    play(&e, "stay", 100);
+    assert!(ball(&e, "vx") < -16.0, "the AI's return:\n{}", state(&e));
+}
+
 #[test]
 fn the_same_inputs_replay_the_same_game() {
     let script = [("down", 24), ("stay", 46), ("up", 25), ("stay", 400), ("down", 13)];

@@ -103,7 +103,7 @@ impl Pile {
         ];
     }
 
-    fn drop_bodies(&mut self, world: &mut WorldMut, n: u32) {
+    fn drop_bodies(&mut self, world: &mut WorldMut, n: u32, staggered: bool) {
         // Rows from the floor up, a little apart so each falls a little, and
         // jittered so the pile doesn't stand in perfect columns. The jitter
         // is a function of the index, so a drop is the same on every run.
@@ -113,7 +113,8 @@ impl Pile {
         for k in self.dropped..self.dropped + n {
             let (col, row) = (k % per_row, k / per_row);
             let jitter = ((k * 7919) % 100) as f32 / 100.0 * 0.2 - 0.1;
-            let at = Position { x: 1.5 + col as f32 * 1.2 + jitter, y: HEIGHT - 1.0 - row as f32 * 1.2 };
+            let shift = if staggered && row % 2 == 1 { 0.6 } else { 0.0 };
+            let at = Position { x: 1.5 + col as f32 * 1.2 + jitter + shift, y: HEIGHT - 1.0 - row as f32 * 1.2 };
             let collider = if k % 2 == 0 { Collider::circle(RADIUS) } else { Collider::rect(RADIUS, RADIUS) };
             let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
             world.spawn((at, Velocity::default(), body, collider));
@@ -186,8 +187,12 @@ impl Mod for Pile {
                 Ok(format!("{} wide", self.width))
             }
             Some(("drop", n)) => {
-                let n = n.trim().parse().map_err(|e| format!("{n:?}: {e}"))?;
-                self.drop_bodies(&mut world, n);
+                // `drop <n> staggered`: every other row shifted half a body,
+                // so each lands between two, a real pile in any engine (the
+                // comparison's; physics.md, "Against other engines").
+                let (n, staggered) = n.trim().split_once(' ').map_or((n.trim(), false), |(n, how)| (n, how == "staggered"));
+                let n = n.parse().map_err(|e| format!("{n:?}: {e}"))?;
+                self.drop_bodies(&mut world, n, staggered);
                 Ok(format!("dropped {n}"))
             }
             Some(("sleep", "off")) => {

@@ -17,9 +17,11 @@
 //! comma-separated words), `SLEEP=1` (each engine's default sleeping
 //! instead of none, the arrays left out), `LONG=1` (the piles also 4000
 //! steps in, at rest), `VARIANTS` (more settings, comma-separated:
-//! `box2d:<substeps>`, `rapier:<iterations>`, and `arrays:nosplit`, our
-//! step without the split impulse's position correction). What it found:
-//! docs/architecture/physics.md, "Against other engines".
+//! `box2d:<substeps>`, `rapier:<iterations>`, and `arrays:<solver>`, our
+//! step with another solver from `variants.rs`), `SETTLE=<steps>` (how
+//! soon each comes to rest instead of the timings; `TRACE=1` names what
+//! moves again). What it found: docs/architecture/physics.md, "Against
+//! other engines" and "Settling".
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
@@ -33,6 +35,10 @@ mod rapier;
 mod scene;
 #[path = "../solver.rs"]
 mod solver;
+#[allow(dead_code)] // The constants and tests only the experiments use.
+#[path = "../tests/split_impulse.rs"]
+mod split_impulse;
+mod variants;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -179,17 +185,18 @@ fn main() {
     // By name, which `ENGINES` picks from before any is built.
     let mut engines: Vec<(String, Make)> = vec![("ours (ECS)".into(), Box::new(|s| Box::new(ecs::Ecs::new(&manifest, s, sleep))))];
     if !sleep {
-        engines.push(("ours (arrays)".into(), Box::new(|s| Box::new(ecs::Flat::new(s, solver::solve, "ours (arrays)")))));
+        engines.push(("ours (arrays)".into(), Box::new(|s| Box::new(ecs::Flat::new(s, Box::new(solver::solve), "ours (arrays)")))));
     }
     engines.push(("Box2D".into(), Box::new(move |s| Box::new(box2d::Box2d::new(s, 4, sleep)))));
     engines.push(("Rapier".into(), Box::new(move |s| Box::new(rapier::Rapier::new(s, 4, sleep)))));
     for v in env("VARIANTS").iter().flat_map(|v| v.split(",")) {
-        if v == "arrays:nosplit" {
-            let label = "ours (arrays), no split impulse";
-            engines.push((label.into(), Box::new(move |s| Box::new(ecs::Flat::new(s, ecs::without_split, label)))));
+        if let Some(spec) = v.strip_prefix("arrays:") {
+            let label = format!("ours (arrays) {spec}");
+            let spec = spec.to_string();
+            engines.push((label.clone(), Box::new(move |s| Box::new(ecs::Flat::new(s, variants::parse(&spec), &label)))));
             continue;
         }
-        let (which, n) = v.split_once(":").expect("VARIANTS: box2d:<substeps>, rapier:<iterations> or arrays:nosplit");
+        let (which, n) = v.split_once(":").expect("VARIANTS: box2d:<substeps>, rapier:<iterations> or arrays:<solver>");
         let n: usize = n.parse().expect("a number");
         match which {
             "box2d" => engines.push((format!("Box2D {n}"), Box::new(move |s| Box::new(box2d::Box2d::new(s, n as i32, sleep))))),
@@ -228,6 +235,10 @@ fn main() {
     if let Some(only) = env("ONLY") {
         cases.retain(|c| c.name.contains(&only));
     }
+    if let Some(max) = env("SETTLE") {
+        settle(&cases, &engines, max.parse().expect("SETTLE: steps"));
+        return;
+    }
 
     let sleeping = if sleep { "at each engine default" } else { "off everywhere" };
     println!("µs per step, -c opt, one thread, {reps} runs a case: median [min–max] of the runs. Sleeping {sleeping}.\n");
@@ -242,6 +253,87 @@ fn main() {
             }
         }
         report(case, &runs);
+    }
+}
+
+/// Below this every body counts as at rest: the sleep threshold of ours
+/// and of Box2D.
+const REST: f32 = 0.05;
+
+/// How soon each engine comes to rest on each case's scene (rain left
+/// out): stepped `max` steps, looked at every 10.
+fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
+    let mut seen = Vec::new();
+    for case in cases {
+        if matches!(case.scene, Scene::Rain { .. }) || seen.contains(&case.scene) {
+            continue;
+        }
+        seen.push(case.scene);
+        println!("### settling: {}, {max} steps\n", case.scene.text());
+        println!(
+            "| engine | first at rest / at rest from step | fastest at 100 / 200 / 400 | energy at 400 | deepest at 400 (over 0.01) | deepest / mean at end (over 0.01) | energy at end | top moved | µs a step |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|");
+        let start: Vec<Dyn> = case
+            .scene
+            .build()
+            .iter()
+            .filter(|s| s.dynamic)
+            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0 })
+            .collect();
+        for (_, make) in engines {
+            let mut sim = make(&case.scene);
+            let (mut rest_from, mut first_rest, mut fastest) = (None, None, Vec::new());
+            let mut q400 = None;
+            let mut wall = 0.0;
+            let mut step = 0;
+            while step < max {
+                let t = Instant::now();
+                sim.step(10);
+                wall += t.elapsed().as_secs_f64();
+                step += 10;
+                let bodies = sim.bodies();
+                let top = bodies.iter().map(|b| (b.vx * b.vx + b.vy * b.vy).sqrt()).fold(0.0, f32::max);
+                if top < REST {
+                    rest_from.get_or_insert(step);
+                    first_rest.get_or_insert(step);
+                } else {
+                    if rest_from.is_some() && std::env::var_os("TRACE").is_some() {
+                        let (i, b) =
+                            bodies.iter().enumerate().max_by(|a, b| a.1.vx.hypot(a.1.vy).total_cmp(&b.1.vx.hypot(b.1.vy))).unwrap();
+                        eprintln!("{}: moving again at {step}: body {i} at {:.2}, {:.2} at {top:.3}", sim.label(), b.x, b.y);
+                    }
+                    rest_from = None;
+                }
+                if [100, 200, 400].contains(&step) {
+                    fastest.push(top);
+                }
+                if step == 400 {
+                    q400 = Some(quality::measure(&case.scene, &bodies));
+                }
+            }
+            let bodies = sim.bodies();
+            let q = quality::measure(&case.scene, &bodies);
+            let q400 = q400.unwrap_or_default();
+            let top = match case.scene {
+                Scene::Pyramid { .. } => format!("{:.3}", bodies.last().unwrap().y - start.last().unwrap().y),
+                _ => "–".into(),
+            };
+            let at = |s: Option<u32>| s.map_or("never".to_string(), |s| s.to_string());
+            let rest = format!("{} / {}", at(first_rest), at(rest_from));
+            let fast: Vec<String> = fastest.iter().map(|f| format!("{f:.3}")).collect();
+            print!("| {} | {rest} | {} | {:.1e} | {:.4} ({}) ", sim.label(), fast.join(" / "), q400.energy, q400.max_depth, q400.deep);
+            println!(
+                "| {:.4} / {:.4} ({}) | {:.1e} | {top} | {:.0} |",
+                q.max_depth,
+                q.mean_depth,
+                q.deep,
+                q.energy,
+                wall * 1e6 / step as f64
+            );
+            eprintln!("settle {}: {} rest from {rest}", case.scene.text(), sim.label());
+        }
+        println!();
     }
 }
 

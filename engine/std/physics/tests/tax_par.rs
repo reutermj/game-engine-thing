@@ -222,8 +222,8 @@ impl Arrays {
         let mut bodies: Vec<SolverBody> = fill(w, this.moving.len(), 512, |r, out| {
             out.extend(this.moving[r].iter().map(|&i| {
                 let b = &this.body[i as usize];
-                let inv_mass = if b.kind == DYNAMIC { b.inv_mass } else { 0.0 };
-                SolverBody { v: this.vel[i as usize], inv_mass, pseudo: Vec2::ZERO }
+                let (inv_mass, g) = if b.kind == DYNAMIC { (b.inv_mass, this.gravity) } else { (0.0, Vec2::ZERO) };
+                SolverBody::new(this.vel[i as usize], inv_mass, Vec2::new(g.x * b.gravity_scale * DT, g.y * b.gravity_scale * DT))
             }))
         });
         let still = bodies.len() as u32;
@@ -259,9 +259,9 @@ impl Arrays {
                         continue;
                     }
                     vel[i - base] = b.v;
-                    let step = if body[i].kind == KINEMATIC { b.v } else { b.v + b.pseudo };
+                    let step = if body[i].kind == KINEMATIC { b.v * DT } else { b.displacement(DT) };
                     let p = &mut pos[i - base];
-                    *p = Vec2::new(p.x + step.x * DT, p.y + step.y * DT);
+                    *p = Vec2::new(p.x + step.x, p.y + step.y);
                 }
             });
             let ranges = even(self.contacts.len(), w.chunks(self.contacts.len(), 512));

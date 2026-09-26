@@ -192,8 +192,8 @@ rust_binary(
 rust_binary(
     name = "solver_layout",
     srcs = [
-        "solver.rs",
         "tests/solver_layout.rs",
+        "tests/split_impulse.rs",
     ],
     crate_root = "tests/solver_layout.rs",
     data = [":pile_game"],
@@ -215,9 +215,9 @@ rust_binary(
     name = "parallel_solver",
     srcs = [
         "narrow.rs",
-        "solver.rs",
         "tests/arrays.rs",
         "tests/parallel_solver.rs",
+        "tests/split_impulse.rs",
     ],
     crate_root = "tests/parallel_solver.rs",
     data = [":pile_game"],
@@ -243,6 +243,7 @@ exports_files(
         "narrow.rs",
         "solver.rs",
         "tests/arrays.rs",
+        "tests/split_impulse.rs",
     ],
     visibility = ["//engine/std/physics/compare:__pkg__"],
 )

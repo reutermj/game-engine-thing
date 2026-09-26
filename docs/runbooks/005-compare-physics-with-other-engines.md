@@ -28,7 +28,23 @@ mod bit for bit (they must, but for rain). Narrower runs:
 ONLY="pile 10000" REPS=5 ./bazel run -c opt //engine/std/physics/compare
 ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run -c opt //engine/std/physics/compare
 SLEEP=1 ./bazel run -c opt //engine/std/physics/compare   # each engine's default sleeping
+SETTLE=1500 ./bazel run -c opt //engine/std/physics/compare  # how soon each comes to rest
+VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run -c opt //engine/std/physics/compare
 ```
+
+`SETTLE=<steps>` replaces the timing with a settling table per scene (not
+rain): each engine stepped that far and looked at every 10 steps, the
+step it was first at rest (every body under 0.05, the sleep threshold)
+and the step it stayed at rest from, fastest body at 100, 200 and 400,
+energy and deepest overlap at 400 and at the end, and for pyramids how far
+the top box moved. `TRACE=1` with it names the body that moved again. The
+`arrays:` variants are other solvers on the arrays, listed in
+`engine/std/physics/compare/variants.rs`: the split-impulse solver the
+soft step replaced (`split`, with friction on its pseudo velocities or a
+decaying correction), Jolt-style position iterations (`ngs`), and the
+soft step with any constant changed (`soft/<key>=<value>/...`, e.g.
+`soft/hz=30/relax=1` for Rapier's settings). What they measured:
+physics.md, "Settling".
 
 Check before trusting a run:
 

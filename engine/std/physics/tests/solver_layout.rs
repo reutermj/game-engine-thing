@@ -20,7 +20,9 @@
 //! lookup itself. What it found: docs/architecture/physics.md, "What the
 //! ECS costs".
 
-#[path = "../solver.rs"]
+// The split-impulse solver this measured, kept as it was: its findings
+// are about that computation (physics.md, "What the ECS costs").
+#[path = "split_impulse.rs"]
 mod solver;
 
 use std::collections::HashMap;

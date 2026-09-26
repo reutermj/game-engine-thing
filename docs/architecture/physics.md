@@ -171,12 +171,14 @@ contacts in `late`:
    pairs and the stored contacts are both in pair order, so it's one pass,
    updating contacts that persist in place (their impulses carried), and
    despawning and spawning the rest.
-3. **`solve`**: sequential impulses over the contacts, eight iterations,
-   warm-started from the last step's impulses, with Coulomb friction and
-   restitution above a small speed threshold. Positional error is
-   corrected by a split impulse, so correction doesn't add energy. It also
-   moves the bodies (the split impulse's pseudo velocities exist only
-   here), stores each contact's impulses and whether it's pressed, updates
+3. **`solve`**: a soft step, as Box2D v3's: five substeps of sequential
+   impulses over the contacts, each a pass of soft contacts that push
+   penetration out through the velocity, then positions, then two rigid
+   passes that take the push's speed back out; warm-started from the
+   last step's impulses, with Coulomb friction and restitution (once,
+   after the substeps) above a small speed threshold
+   ([Settling](#settling)). It also moves the bodies (positions change
+   within the substeps, so only the solver knows where they end), stores each contact's impulses and whether it's pressed, updates
    `Touching`, and sends `Contact` for pairs that weren't pressing last
    step. Contacts whose `Response` is disabled aren't solved. Writing
    positions makes its apply node re-sort
@@ -1106,7 +1108,8 @@ default must stay bit for bit what it is.
 
 ## Against other engines
 
-**Status: measured** (2026-09-25). `./bazel run -c opt
+**Status: measured** (2026-09-25; the solver since replaced, and the
+settling gap closed: [Settling](#settling), 2026-09-26). `./bazel run -c opt
 //engine/std/physics/compare` runs the same scenes in the physics mod, in
 the same step on plain arrays (`tests/arrays.rs`, bit for bit the mod's,
 checked on every scene without rain), in **Box2D v3.1.1** and in **Rapier
@@ -1290,7 +1293,8 @@ comes apart), and at 8 costs 5382 for nothing its 4 lack.
 
 Estimated from the numbers above, at 10 000 bodies:
 
-1. **Settle as they do (algorithm).** The split impulse keeps a pile
+1. **Settle as they do (algorithm).** Done, 2026-09-26:
+   [Settling](#settling). The split impulse kept a pile
    moving for thousands of steps, which costs quality (drift, bodies
    thrown at 8 a second) and, with sleeping on, nearly all the time:
    Box2D is asleep at step 400 and we pay 3682 µs a step until the creep
@@ -1337,6 +1341,190 @@ already known (2).
 - Both are visible to `//engine/std/physics/compare` alone. Box2D is
   pinned to its latest release; Rapier to the version current on the day,
   so a rerun compares the same code.
+
+## Settling
+
+**Status: built** (2026-09-26, get-emj.35). The 2D solver is a soft step
+(`solver.rs`), Box2D v3's with our own stiffness and relax count, in
+place of the split impulse it had until then.[^split] Piles and pyramids
+now come to rest as soon as Box2D's and Rapier's do, sink a quarter as
+deep, and fall asleep: the 10 000 pile with sleeping on costs 24 µs a
+step at step 400, where it cost 3682.
+
+### What the other engines do (read in their fetched source)
+
+- **Box2D v3.1.1** (`solver.c`, `contact_solver.c`): a soft step. 4
+  substeps; each applies gravity, warm starts, solves once with soft
+  contacts (`b2MakeSoft`: 30 Hz, damping ratio 10, twice as stiff against
+  a static body; push-out capped at 3 u/s), integrates positions, updates
+  each contact's separation from how far its bodies moved, and relaxes
+  once (rigid, no push). Restitution once after the substeps, from the
+  closing speed before them, for contacts that pushed. Friction in both
+  passes.
+- **Rapier 0.36** (`integration_parameters.rs`,
+  `staged_island_solver/worker.rs`): the same soft step. Its
+  `num_solver_iterations` (4) are substeps, each with forces (gravity) as
+  a per-substep velocity increment, `num_internal_pgs_iterations` (1)
+  biased passes, positions, `num_internal_stabilization_iterations` (1)
+  unbiased ones; contacts 30 Hz and ζ 10, 60 Hz against a fixed body,
+  corrective velocity capped at 3, no slop in the bias, restitution after
+  all substeps. One difference from Box2D: friction only in the unbiased
+  pass (`friction_in_bias_pass: false`, "load-bearing for tall stacks").
+- **Box3D 0.1** (`solver.c`, `types.c`): Box2D's soft step in 3D, 1
+  iteration and 1 relax a substep, 30 Hz, ζ 10.
+- **Jolt 5.6** (`PhysicsSettings.h`, `ContactConstraintManager.cpp`): no
+  soft contacts. 10 velocity iterations of sequential impulses, then 2
+  position iterations (non-linear Gauss-Seidel) that move bodies apart
+  directly by Baumgarte 0.2 of the penetration past a slop of 0.02, at
+  most 0.2 a step, from positions recomputed each iteration. Box2D v2.4 did
+  the same (3 position iterations, slop 0.005); not fetched here, so from
+  memory.
+
+### The options, measured
+
+`SETTLE=1500` on the comparison (runbook 005): each scene stepped 1500
+steps and looked at every 10. "At rest" is every body under 0.05 (the
+sleep threshold of ours and Box2D's): the first step it was, and the step
+it stayed so from, when they differ. Deepest at step 400. µs is the mean
+over the 1500 steps on arrays. Every variant is in `compare/variants.rs`.
+
+| solver | pile 10 000: at rest | fastest at 400 | deepest | µs | pile 1000: at rest | pyramid 5050: at rest | deepest | top moved |
+|---|---|---|---|---|---|---|---|---|
+| split impulse (before) | 990 / never | 2.77 | 0.019 | 3636 | 560 / 1070 | 500 / 1210 | 0.024 | 0.57 |
+| (1) + friction on the pseudo velocities (`split/pf=2`) | never | 5.27 | 0.037 | 5103 | never | 500 / 1210 | 0.024 | 0.57 |
+| (2) + correction decaying with contact age (`split/decay=0.1`) | 570 / 1360 | 0.26 | 0.066 | 4183 | 430 / 580 | 500 / 1210 | 0.041 | 0.99 |
+| (3) velocity iterations, then Jolt's position iterations (`ngs`) | never | 0.96 | 0.051 | 3841 | 370 / 1490 | 500 / 1210 | 0.024 | 0.99 |
+| (4) soft, Rapier's settings (`soft/hz=30/relax=1/sub=4`) | 250 / 570 | 0.013 | 0.096 | 3129 | 250 | 90 / 170 | 0.038 | 1.67 |
+| (4') soft, Box2D's settings (the same, `bf=1`) | 210 | 0.001 | 0.092 | 3400 | 280 | 90 / 170 | 0.038 | 1.67 |
+| (5) soft, 4 substeps at 60 Hz, 1 relax | 560 / 590 | 0.12 | 0.024 | 3097 | 420 / 470 | 340 / 1110 | 0.009 | 0.42 |
+| (5) soft, 4 substeps at 60 Hz, 2 relax | 220 | 0.003 | 0.022 | 3605 | 250 | 120 / 180 | 0.009 | 0.42 |
+| **(5) soft, 5 substeps at 75 Hz, 2 relax (chosen)** | **230** | **0.001** | **0.013** | **4037** | **230** | **130 / 150** | **0.006** | **0.27** |
+| Box2D | 190 | 0.000 | 0.057 | 3387 | 260 | 40 / 70 | 0.019 | 0.83 |
+| Rapier | 200 | 0.005 | 0.054 | 3521 | 160 | 230 / 280 | 0.019 | 0.83 |
+
+Also tried, not in the table: friction on the pseudo velocities limited
+by the pseudo impulse alone (`pf=1`: the 10 000 pile never rests); a
+correction a quarter as strong for contacts pressed last step
+(`persist=0.05`: never rests, 0.056 deep); four position iterations
+(never rests); stiffer contacts at 4 substeps (90 and 120 Hz: jitter,
+energy 0.2-0.5 a body, never at rest); the soft step with the step's
+gravity all in its first substep (never rests: docs/lore); and relaxing
+only the impulse added since the warm start, so load isn't soft (never
+rests).
+
+What it shows:
+- **The creep isn't only the split impulse's.** On the pyramid every
+  variant of the split impulse is the same to three digits (fastest 0.70
+  at step 400): what creeps there is the velocity solve, 8 iterations of
+  Gauss-Seidel over 100 rows of boxes with a step's gravity at once.
+  Fixes to the correction (1, 2, 3) can't touch it. Substeps do: each
+  holds a substep's gravity, and the stack converges in a fraction of the
+  steps.
+- **Every fix to the correction fails.** Friction on the pseudo velocities
+  (1) needs a load to limit it, and the push's own impulse is too small to
+  hold while the real one lets bodies stick and slip. Weaker correction
+  (2) settles sooner, but only by sinking 3-4 times deeper. Position
+  iterations (3) are the same push, done in positions, and creep the same
+  way.
+- **Soft steps settle; stiffness decides the depth.** A soft contact sinks
+  by load / (mass ω²) (docs/lore, measured), so Box2D's and Rapier's 30
+  Hz piles sink 0.05-0.1 and no setting of theirs changes it. The
+  stiffest that holds is a quarter of the substep rate, so depth is
+  bought with substeps: 0.022 at 4, 0.013 at 5.
+- **Two relax passes, not one.** At 60 or 75 Hz one relax pass leaves the
+  pile sliding for hundreds of steps (590 on the pile, 1110 on the
+  pyramid): the stiffer push leaves more velocity to take out.
+- **Friction only in the relax passes** (Rapier's rule) is no worse and
+  cheaper: on the 10 000 pile at 60 Hz it rested at 230 either way, and
+  it saves a friction row in every pushing pass.
+
+**Why this one.** It's the only family that reaches rest as fast as the
+references on every scene, and at 5 substeps it is shallower than the
+split impulse was on the pyramid even at rest (0.006 against 0.007 at
+step 1500), and on the piles at step 400 (0.013 against 0.019), though
+not than its 0.005 once at rest, which a soft contact under a pile's
+weight can't reach. 5 substeps rather than Box2D's 4 is the price of that
+depth. The pyramid stands better than in either reference (its top 0.27
+below where it began, theirs 0.83).
+
+**Time.** One thread, `-c opt`, median of 3, the ECS mod (full tables:
+"Against other engines", which still shows the split impulse):
+
+| scene | split impulse | soft step (5 substeps) | Box2D | Rapier |
+|---|---|---|---|---|
+| pile 10 000, falling | 1361 | 1543 | 2519 | 2373 |
+| pile 10 000, settled (step 400) | 3370 (creeping) | 3409 (at rest) | 3392 | 3537 |
+| pyramid 5050 | 2814 | 2662 | 2789 | 2749 |
+| rain 10 000 | 3601 | 4534 | 4480 | 4970 |
+| pile 10 000 at step 400, sleeping on | 3682 | 24 | 0 | 1 |
+
+A pass over the contacts costs about what it did, but there are more
+passes: 5 substeps of 3 (15, and 5 warm starts) where there were 8 and up
+to 8 more over the sunk contacts. The solver is 18% slower on the pile at
+step 400 (2376 µs against 2018 on arrays) and 32% in rain, where contacts
+churn and every one is solved; it is faster on the pyramid, and the
+settled pile presses fewer contacts (12 690 against 14 159), so the step
+is level there. Rain overlaps deeper on impact (0.55 against 0.38; Box2D
+0.66, Rapier 0.54), since a deep overlap is pushed out at 3 u/s at most;
+its mean overlap is less (0.006 against 0.008).
+
+**What else changed.**
+- **Free fall is a little shorter a step.** Gravity is spread over the
+  substeps (a fifth of the step's in each, as Box2D and Rapier do), so a
+  body falls g h² (1 + 2 + 3 + 4 + 5) a step, not g dt²: 0.0033 less at
+  gravity 20. `integrate_velocities` still adds the step's gravity before
+  contacts are found (so they're found, and bounce, at the speed they
+  meet with); the solver takes it back out and spreads it
+  (`SolverBody::gravity`). Without that, a soft step never settles
+  (docs/lore).
+- **Restitution is kept on speculative contacts** (get-emj.19): a body
+  met by a speculative contact bounces at the speed it came in with, not
+  what the gap left of it (3 from 10, before). That was pong's stalled
+  ball (get-az6): at the AI's paddle, frame 200 of the rally route, it
+  now leaves at -17.6 where it stopped dead and crawled along the paddle,
+  and off the bottom wall at 5.72 where it left at 1.96
+  (`pong_test`'s `the_ai_returns_the_ball_at_full_speed`).
+- **Resting contacts touch** rather than sit at the slop: the soft step
+  has none, like Box2D's, and a box on the floor sinks 3e-5.
+- **Bit for bit** the mod and the arrays still agree on every scene
+  without rain (`:tax`, and the comparison).
+- **The games' routes**: `platformer_test` and `pong_test` pass
+  unchanged. The platformer's reload replay stands still in the corner 2
+  frames longer before its jump (33 frames, from 31), since its player
+  lands from the drop 0.35 deep and is pushed out at 3 u/s; the jump
+  still stomps the walker. The physics tests' 41-wide pile now stands in
+  columns, as it does in Box2D and Rapier, so the ones that want a pile
+  drop it staggered; a floor that falls jammed between the walls falls
+  0.99 in 30 steps where it fell 1.0 free (friction now acts on the push
+  that holds it between them).
+- `:parallel_solver` and `:solver_layout` measured the split impulse,
+  and still do, from a copy of it (`tests/split_impulse.rs`): their
+  findings are about that computation. Porting them is work for when the
+  soft step is parallelized.
+
+### How it extends to rotation
+
+The soft step is what Box2D v3, Box3D and Rapier all run with rotation,
+so the path is known: a contact gains points (anchors on each body, up to
+two in 2D, four in 3D), each substep integrates a rotation beside the
+position, and a point's separation is updated from both bodies' moves and
+turns (Box2D's `b2SolveContact`: the base separation plus the relative
+displacement of the rotated anchors, along the normal), with angular
+terms in the effective mass and the impulse. Nothing in the passes, the
+softness, the relax or the restitution depends on bodies not turning;
+they become per point. The split impulse and the position iterations
+would extend too (Bullet and Box2D v2.4 turn bodies), but carry their
+creep with them, and the position iterations need contact points
+recomputed every iteration.
+
+[^split]: 2026-09-26: until then, sequential impulses with a split
+    impulse (Bullet's push velocities): eight velocity iterations, then
+    eight passes of pseudo velocities pushing apart contacts sunk past a
+    slop of 0.005 by 0.2 of the rest a step. It rested at the slop, 0.005
+    deep, but crept for thousands of steps: its pushes along tilted
+    normals slid bodies where no friction acted, and its velocity solve,
+    with a step's gravity at once, didn't converge on tall stacks. Kept,
+    unchanged, as `tests/split_impulse.rs`.
 
 ## What changes elsewhere
 

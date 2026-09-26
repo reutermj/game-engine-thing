@@ -40,3 +40,10 @@ with the split impulse's pseudo velocities thrown away
 a body and 32 islands. A scene meant to be a real pile in
 every engine staggers every other row by half a body (`scene.rs`,
 `Scene::Pile { stagger: true }`), so each body lands between two.
+
+**Since the soft step (2026-09-26) ours doesn't fall either**: the
+"columns 1000" case is 1.02 contacts a body and 32 islands, as Box2D's and
+Rapier's. So the tests that want a real pile at 41 wide now drop it
+staggered (`drop <n> staggered` in `tests/pile.rs`), and a test that
+dropped it unstaggered and asserted a pile's contacts failed, as this
+entry says it should.

@@ -33,7 +33,9 @@
 mod arrays;
 #[path = "../narrow.rs"]
 mod narrow;
-#[path = "../solver.rs"]
+// The split-impulse solver this measured, kept as it was: its findings
+// are about that computation (physics.md, "Parallel solving").
+#[path = "split_impulse.rs"]
 mod solver;
 
 use std::cell::UnsafeCell;

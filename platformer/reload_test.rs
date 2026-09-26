@@ -25,10 +25,12 @@ fn route(script: &[&'static str]) -> Vec<Input<'static>> {
 
 /// Over the pit, collecting the coin, up the platforms to the goal; into the
 /// corner, standing still long enough to fall asleep; and a jump onto the
-/// walker there, stomping it.
+/// walker there, stomping it. (History, 2026-09-26: 31 frames in the
+/// corner until the soft step, whose player lands from the drop 0.35 deep
+/// and is pushed out at `MAX_PUSH`, still and asleep 2 frames later.)
 const STOMP: &[&str] = &[
     "step 5", "right", "step 29", "jump", "step 41", "stop", "step 2", "right", "step 23", "jump", "step 41", "stop", "step 2", "right",
-    "step 45", "jump", "step 66", "stop", "step 1", "right", "step 60", "stop", "step 1", "step 31", "jump", "step 60",
+    "step 45", "jump", "step 66", "stop", "step 1", "right", "step 60", "stop", "step 1", "step 33", "jump", "step 60",
 ];
 
 /// Standing at the start until asleep (about frame 40), then a jump from asleep.

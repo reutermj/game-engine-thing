@@ -42,6 +42,19 @@ one would have to ship those files with it.
     (`engine/std/physics/solver.rs`);
   - speculative contacts, pairs found and solved a margin before they
     touch (`narrow.rs`; Box2D's `B2_SPECULATIVE_DISTANCE`);
+  - the soft step, since 2026-09-26 the 2D solver (`solver.rs`): the step
+    in substeps, each gravity, warm starting, one pass of soft contacts
+    (`b2MakeSoft`'s constants, a push-out speed capped as
+    `maxContactPushSpeed` caps it, contacts with a static body twice as
+    stiff), positions integrated and separations updated from how far the
+    bodies moved, then rigid relaxing passes; and restitution applied once
+    after the substeps, from the closing speed before them, to contacts
+    that pushed (`b2ApplyRestitution`). Read in v3.1.1's `solver.c` and
+    `contact_solver.c`, and described in Erin Catto's "Solver2D" (2024,
+    <https://box2d.org/posts/2024/02/solver2d/>). Our stiffness (a quarter
+    of the substep rate, 60 Hz where Box2D has 30) and our two relaxing
+    passes (Box2D's one) are our own measurements (physics.md,
+    "Settling");
   - a restitution threshold, the closing speed below which nothing
     bounces, at Box2D's default of 1 (`solver.rs`, `BOUNCE_THRESHOLD`;
     Box2D's `b2WorldDef::restitutionThreshold`);
@@ -76,8 +89,13 @@ one would have to ship those files with it.
   (`v0.36.0`) is kept at `engine/std/physics/compare/licenses/rapier-LICENSE`
   and put in the comparison binary's runfiles. Rapier has no `NOTICE`
   file. We modify none of it.
-- **Ideas our physics takes from it:** none yet. What it does differently
-  is in physics.md, "Against other engines".
+- **Ideas our physics takes from it:** friction solved only in the
+  relaxing passes of the soft step, not in the pass that pushes contacts
+  apart (`solver.rs`; Rapier's `IntegrationParameters::friction_in_bias_pass`,
+  off by default, whose doc explains that friction reacting to the push
+  pumps stacks until they topple). Read in the fetched 0.36.0 source.
+  What else it does differently is in physics.md, "Against other engines"
+  and "Settling".
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
   `bench/physics3d/Cargo.toml`, the comparison engine in `//bench/physics3d`
   (single-threaded, rotations locked). Its license text is fetched pinned by
@@ -98,6 +116,12 @@ one would have to ship those files with it.
   source (`bench/physics3d/jolt.BUILD`) behind a small C shim and runs the
   same scenes on `JobSystemSingleThreaded` with translation-only bodies.
 - **Ideas our 3D code adopts:** none; it is the yardstick.
+- **Measured, not adopted, in 2D:** its position iterations (non-linear
+  Gauss-Seidel: `ContactConstraintManager::sSolvePositionConstraint` and
+  `AxisConstraintPart::SolvePositionConstraint`, Baumgarte 0.2, a slop and
+  a 0.2 cap on the correction), tried as the comparison's
+  `VARIANTS=arrays:ngs` (`engine/std/physics/compare/variants.rs`); see
+  physics.md, "Settling".
 
 ## Box3D
 
@@ -121,6 +145,8 @@ one would have to ship those files with it.
 - **What for:** not built or fetched; an idea source only.
 - **Ideas our physics takes from it:** the split impulse, correcting
   penetration with a second "push" velocity that moves positions and is
-  then thrown away, so correction adds no energy (`solver.rs`; Bullet's
+  then thrown away, so correction adds no energy. It was the 2D solver
+  until 2026-09-26, and is kept as it was for the experiments that
+  measured it (`engine/std/physics/tests/split_impulse.rs`; Bullet's
   `btContactSolverInfo::m_splitImpulse` and its push velocities in
   `btSequentialImpulseConstraintSolver`).

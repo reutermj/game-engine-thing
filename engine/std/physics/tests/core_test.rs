@@ -27,7 +27,8 @@ mod stack {
         let mut deepest = 0.0f32;
         for _ in 0..steps {
             for b in &mut bodies[1..] {
-                b.v.y += g * DT;
+                b.gravity = Vec2::new(0.0, g * DT);
+                b.v += b.gravity;
             }
             let mut contacts = Vec::new();
             for i in 0..placed.len() {
@@ -49,12 +50,9 @@ mod stack {
                     }
                 }
             }
-            for b in &mut bodies {
-                b.pseudo = Vec2::ZERO;
-            }
             solve(&mut bodies, &mut contacts, DT);
             for (p, b) in placed.iter_mut().zip(&bodies).skip(1) {
-                p.at += (b.v + b.pseudo) * DT;
+                p.at += b.displacement(DT);
             }
             deepest = contacts.iter().map(|c| c.depth).fold(0.0, f32::max);
             cache = contacts;

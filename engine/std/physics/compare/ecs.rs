@@ -12,7 +12,6 @@ use physics::{Body, Collider, DYNAMIC, Manifold, Position, Vec2, Velocity};
 
 use crate::arrays::{Arrays, Stages};
 use crate::scene::{GRAVITY, Scene, Spec};
-use crate::solver::{self, Constraint, SolverBody};
 use crate::{Dyn, Sim};
 
 /// The number after `key` in `text`.
@@ -137,19 +136,9 @@ impl Sim for Ecs {
     }
 }
 
-/// A solver for the arrays: `solver::solve`, or a variant of it.
-pub type Solve = fn(&mut [SolverBody], &mut [Constraint], f32);
-
-/// `solver::solve` with its split impulse thrown away: no position
-/// correction at all, to see what the split impulse does to a scene.
-pub fn without_split(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32) {
-    solver::solve(bodies, contacts, dt);
-    bodies.iter_mut().for_each(|b| b.pseudo = Vec2::ZERO);
-}
-
 pub struct Flat {
     arrays: Arrays,
-    solve: Solve,
+    solve: crate::variants::Boxed,
     label: String,
     t: Stages,
     wall: f64,
@@ -166,7 +155,7 @@ fn body(s: &Spec) -> Body {
 }
 
 impl Flat {
-    pub fn new(scene: &Scene, solve: Solve, label: &str) -> Flat {
+    pub fn new(scene: &Scene, solve: crate::variants::Boxed, label: &str) -> Flat {
         let specs = scene.build();
         let statics = specs.iter().take_while(|s| !s.dynamic).count();
         assert!(specs[statics..].iter().all(|s| s.dynamic), "statics first");
@@ -192,7 +181,7 @@ impl Sim for Flat {
     fn step(&mut self, n: u32) {
         let start = Instant::now();
         for _ in 0..n {
-            self.arrays.step(&mut self.t, self.solve);
+            self.arrays.step(&mut self.t, &*self.solve);
         }
         self.wall += start.elapsed().as_secs_f64() * 1e6;
     }

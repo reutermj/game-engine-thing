@@ -637,7 +637,7 @@ impl Physics {
         sleep: &mut Sleepers,
         _: &mut Cx,
         (dt, workers): (Dt, Workers),
-        mut config: Query<&Sleep>,
+        (mut config, mut gravity): (Query<&Sleep>, Query<&Gravity>),
         // Awake bodies only: a sleeping one is immovable, and in tables of
         // its own, so walks over bodies skip it by what they match.
         mut moving: Query<(&Body, &mut Velocity, &mut Position), Without<Asleep>, Adds<Asleep>>,
@@ -654,9 +654,13 @@ impl Physics {
         let mut entities = Vec::with_capacity(moving.len());
         // Per body: whether it moves (isn't static), and its kind.
         let mut kinds: Vec<(bool, u8)> = Vec::with_capacity(moving.len() + 1);
+        let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
         let solver_body = |body: &Body, v: &Velocity| {
-            let inv_mass = if body.kind == DYNAMIC { body.inv_mass } else { 0.0 };
-            SolverBody { v: Vec2::new(v.x, v.y), inv_mass, pseudo: Vec2::ZERO }
+            // The gravity `integrate_velocities` added, computed as `fall`
+            // computed it, for the solver to spread over its substeps.
+            let (inv_mass, g) = if body.kind == DYNAMIC { (body.inv_mass, g) } else { (0.0, Vec2::ZERO) };
+            let gravity = Vec2::new(g.x * body.gravity_scale * dt, g.y * body.gravity_scale * dt);
+            SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity)
         };
         if par {
             // Lists made here, as in `find_contacts`'s gathering.
@@ -733,13 +737,13 @@ impl Physics {
         // written.
         let write = |body: &Body, b: &SolverBody, mut v: engine_api::Mut<'_, Velocity>, mut p: engine_api::Mut<'_, Position>| {
             (v.x, v.y) = (b.v.x, b.v.y);
-            // A kinematic body gets no pseudo velocity: nothing pushes it.
-            let step = if body.kind == KINEMATIC { b.v } else { b.v + b.pseudo };
+            // A kinematic body goes where it's told: nothing pushes it.
+            let step = if body.kind == KINEMATIC { b.v * dt } else { b.displacement(dt) };
             // Written only when it moves: a write marks the row for the
             // spatial re-sort to re-bound, and a pile at rest comes to rest
             // bit for bit (the pile's 10 000 do by step 3000), when the
             // re-sort then has nothing to do.
-            let to = (p.x + step.x * dt, p.y + step.y * dt);
+            let to = (p.x + step.x, p.y + step.y);
             if (to.0.to_bits(), to.1.to_bits()) != (p.x.to_bits(), p.y.to_bits()) {
                 (p.x, p.y) = to;
             }

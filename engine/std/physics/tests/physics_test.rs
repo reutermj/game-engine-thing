@@ -60,10 +60,32 @@ mod pile {
         for (width, n) in SCENES {
             let e = game("PILE", &format!("settle_{width}"));
             send(&e, "pile", &format!("widen {width}"));
-            send(&e, "pile", &format!("drop {n}"));
+            send(&e, "pile", &drop(width, n));
             step(&e, 1200);
             settled(&e);
         }
+    }
+
+    /// A real pile (every other row shifted half a body, so each lands
+    /// between two) at rest as soon as Box2D's and Rapier's are, and no
+    /// deeper than the split impulse it replaced was then. On the same pile
+    /// (the comparison's `pile 1000`), Box2D and Rapier have every body
+    /// slower than sleeping's 0.05 by step 260 and 160, 0.047 and 0.049
+    /// deep; the split impulse still has bodies at 2.2 at step 400, 0.019
+    /// deep, and rests at 1070; this solver rests by 220, 0.012 deep, and
+    /// at 4 substeps would be 0.021 (physics.md, "Settling").
+    #[test]
+    fn a_real_pile_comes_to_rest_as_soon_as_box2d_and_rapier_do() {
+        let e = game("PILE", "real_pile");
+        send(&e, "pile", "widen 41");
+        send(&e, "pile", "drop 1000 staggered");
+        step(&e, 400);
+        let stats = send(&e, "pile", "stats");
+        assert!(field(&stats, "fastest") < 0.05, "{stats}");
+        assert!(field(&stats, "deepest") < 0.016, "{stats}");
+        // Resting, it sleeps half a second later.
+        send(&e, "pile", "sleep default");
+        until_asleep(&e, 1000.0, 60);
     }
 
     /// Physics gathers colliders with a body and a velocity, with one and
@@ -155,11 +177,20 @@ mod pile {
     /// The piles sleeping is tested on: how wide the box, and how many
     /// bodies. At 40 wide a row holds an odd count, so the pile stands in
     /// columns of alternating circles and boxes that don't touch: a contact
-    /// per body, and an island per column. At 41 the columns are all circles
-    /// or all boxes, which fall into a real pile, bodies resting on two
-    /// below, but only once they're tall enough to: 200 or 300 still stand
-    /// in columns, 500 have 1.1 contacts a body, 1000 have 1.5 (2026-09-25; docs/lore).
+    /// per body, and an island per column. At 41, with every other row
+    /// shifted half a body (`drop`), each body lands between two: a real
+    /// pile, about 1.5 contacts a body.[^unshifted]
+    ///
+    /// [^unshifted]: 2026-09-26: the 41-wide pile was dropped unshifted,
+    ///     and the split-impulse solver's creep toppled its columns into a
+    ///     pile once it was tall enough. The soft step, like Box2D and
+    ///     Rapier, leaves most of them standing (docs/lore).
     const SCENES: [(f32, u32); 2] = [(40.0, 200), (41.0, 1000)];
+
+    /// The pile's message dropping `n` bodies as `SCENES` has them.
+    fn drop(width: f32, n: u32) -> String {
+        if width == 41.0 { format!("drop {n} staggered") } else { format!("drop {n}") }
+    }
 
     /// Physics sleeps by default; the pile, the benchmarks' scene, turns
     /// it off (`Sleep::OFF`) unless asked.
@@ -229,7 +260,7 @@ mod pile {
     fn asleep_pile_with(var: &str, test: &str, (width, n): (f32, u32), then: &[&str]) -> Box<Engine> {
         let e = game(var, &format!("{test}_{width}"));
         send(&e, "pile", &format!("widen {width}"));
-        send(&e, "pile", &format!("drop {n}"));
+        send(&e, "pile", &drop(width, n));
         for message in then {
             send(&e, "pile", message);
         }
@@ -253,9 +284,11 @@ mod pile {
             assert_eq!(deepest(&e), at, "{width} wide: asleep, as deep as it fell asleep");
             let awake = game("PILE", &format!("deep_awake_{width}"));
             send(&awake, "pile", &format!("widen {width}"));
-            send(&awake, "pile", &format!("drop {n}"));
+            send(&awake, "pile", &drop(width, n));
             step(&awake, steps + 300);
             let (awake, asleep) = (deepest(&awake), deepest(&e));
+            // A soft contact sinks under the pile's weight: 0.012 deep in the
+            // real pile (`a_real_pile_comes_to_rest_as_soon_as_box2d_and_rapier_do`).
             assert!(asleep <= awake + 0.005 && asleep < 0.02, "{width} wide: {asleep} deep asleep, {awake} awake");
         }
     }
@@ -309,7 +342,7 @@ mod pile {
             // would be.
             let e = game("PILE", &format!("kick_newest_{width}"));
             send(&e, "pile", &format!("widen {width}"));
-            send(&e, "pile", &format!("drop {n}"));
+            send(&e, "pile", &drop(width, n));
             send(&e, "pile", "sleep 0.05 0.5");
             let mut steps = 0;
             while asleep(&e) < all {
@@ -403,7 +436,7 @@ mod pile {
             };
             let awake = game("PILE", &format!("floor_off_awake_{width}"));
             send(&awake, "pile", &format!("widen {width}"));
-            send(&awake, "pile", &format!("drop {n}"));
+            send(&awake, "pile", &drop(width, n));
             step(&awake, field(&send(&e, "physics", "stats"), "steps") as u32 - 1);
             let awake_at = lowest(&awake);
             send(&awake, "pile", "floor off");
@@ -450,7 +483,13 @@ mod pile {
                 once(&e);
             }
             step(&e, 27);
-            assert!(lowest(&e) > at + 1.0, "{width} wide: fell with the floor: {} from {at}", lowest(&e));
+            // The floor is wider than the box, sunk 0.5 into both side walls,
+            // so it falls jammed between them, held back by their friction on
+            // how hard they push it out: about 1.0 in 30 steps, then slower.
+            // (History, 2026-09-26: 1.0 was the bound until the soft step,
+            // whose push-out friction acts on; the split impulse's didn't,
+            // and the floor fell free.)
+            assert!(lowest(&e) > at + 0.5, "{width} wide: fell with the floor: {} from {at}", lowest(&e));
         }
     }
 
@@ -708,7 +747,7 @@ mod pile {
             // Physics steps, as frames at `fps`.
             let steps = |e: &Engine, n: u32| send(e, "lockstep", &format!("step {} at {fps}", n * fps / 60));
             send(&e, "pile", "widen 41");
-            send(&e, "pile", "drop 1000");
+            send(&e, "pile", "drop 1000 staggered");
             send(&e, "pile", "sleep 0.05 0.5");
             let mut seen = Vec::new();
             let mut look = |e: &Engine| {
@@ -719,9 +758,13 @@ mod pile {
             };
             steps(&e, 300);
             for then in ["drop 20", "kick 3 -3", "block 20 26", "floor 1", "despawn", "unsleep"] {
-                steps(&e, 300);
+                steps(&e, 280);
                 look(&e);
                 send(&e, "pile", then);
+                // And soon after, while what it woke is still awake: by 300
+                // steps on it's all asleep again.
+                steps(&e, 20);
+                look(&e);
             }
             steps(&e, 300);
             look(&e);
@@ -971,7 +1014,7 @@ mod threads {
             let e = game("PILE", test);
             e.world().set_executor(executor);
             send(&e, "pile", "widen 41");
-            send(&e, "pile", "drop 600");
+            send(&e, "pile", "drop 600 staggered");
             send(&e, "pile", "sensing");
             send(&e, "pile", "touching");
             step(&e, 200);
