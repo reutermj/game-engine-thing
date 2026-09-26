@@ -175,7 +175,7 @@ spatial key with any extent, and physics is one user. What it assumes:
   gives way: ranges of it there are scanned.
 - **One extent per key**: no compound shapes, which ties into several
   colliders per body (the physics retrospective's first flaw).
-- **2D, boxes, two size classes** (ordered and big, at a threshold the
+- **2D or 3D ([In 3D](#in-3d)), boxes, two size classes** (ordered and big, at a threshold the
   key sets), and global page and run sizes (16 and 16).
 - **A query's `near_pairs` returns every pair**, statics' included;
   `near_pairs(active, passive, grow)` leaves out pairs of two passive
@@ -473,6 +473,75 @@ is the next step there); and gathering, the solver's gathering and writing
 back, 117 over the arrays, unchanged ([physics.md](physics.md#what-the-ecs-costs)).
 The broadphase (89 under the arrays') and narrowphase (23 under) pay for
 most of it.
+
+## In 3D
+
+**Status: a spike** (2026-09-25, branch `spike/physics3d`), for what 3D
+physics asks of the storage core before more is built on 2D alone. The
+storage is generic over the dimensions; a translation-only 3D step
+(`//engine/std/physics3d`, spheres and axis-aligned boxes) runs on it, and
+`//bench/physics3d` compares it with Rapier 3D, Jolt and Box3D
+([physics.md](physics.md#3d-translation-only-spike)).
+
+**What changed in `engine_ecs`.** Everything that knows the axes takes a
+const `D` (2 or 3), defaulting to 2 so 2D code names `Bounds` and
+`SpatialKey` alone and didn't change: `Bounds<D>`, `Lanes<D>` (a lane
+per axis for the rows' mins and maxes), `SpatialPages<D>`, the re-sort and
+re-bounding, `in_region` and the broadphase's sweep and masks. A key says
+`impl SpatialKey<3>`; its glue is `BoundsGlue::Space`, and the world makes
+the key's tables' orders a `SpatialOrder::Space`. The world picks the
+dimensions once per operation (a re-sort, a region query, a
+`near_pairs` call), never per row, so each is its own monomorphized loop.
+A const generic can't pick an enum variant by itself, and arrays sized by a
+trait's associated constant need an unstable feature, so the pick is a pair
+of impls, one per dimension (`Axes<D>: Dims<D>`, `GlueOf<T, D>: MakeGlue`).
+The 3D key is three 21-bit cells interleaved (a million cells either side
+of zero, as in 2D); splits at blocks of the order, merging, change
+detection, the two-sided broadphase and upkeep are unchanged: none of
+them looks at an axis. A key's dimensions are fixed like its storage
+(changing them takes a restart); a broadphase over tables of two
+dimensions is refused. `BoundsFn` and `SpatialDesc` changed, so
+`API_VERSION` did (25). The unsafe glue (`__bounds`) is the same code
+made generic over `D`, no new unsafe.
+
+**What 2D pays for being generic: nothing measured.** `:tax`, the same
+binary before and after, alternated three times each, medians: every
+scene's frame within 2% and no stage slower (10 000 in columns settled, 1342
+against 1321 µs; the real pile settled 2891 against 2885), and still bit for
+bit the arrays'. The alternative, one 3D storage with 2D at z = 0, costs
+2D 13 to 16% in `near_pairs` on the dense layout (`spatial3d_bench`: 360
+against 409 µs at 10 000, 27 against 31 at 1000; regions the same) and a
+fifth more memory in lanes (704 bytes a page against 576).
+
+`./bazel run -c opt //engine/ecs:spatial3d_bench`, µs, one thread, touching
+bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
+3%:
+
+| | 2D, 1000 | 3D, 1000 | 2D, 10 000 | 3D, 10 000 |
+|---|---|---|---|---|
+| pairs a row | 3.8 | 10.5 | 3.9 | 11.8 |
+| `near_pairs`, 16 rows a page | 27 | 74 | 361 | 1590 |
+| `near_pairs`, 32 rows a page | 34 | 83 | 319 | 1330 |
+| re-sort, creeping (16 / 32) | 7 / 6 | 9 / 8 | 67 / 63 | 84 / 76 |
+| re-sort, falling (16 / 32) | 15 / 12 | 16 / 14 | 131 / 120 | 193 / 156 |
+| page extent, 16 rows | 3.9 x 2.4 | 2.3 x 2.1 x 1.8 | | |
+
+- **Pairs cost more, and there are more of them.** Per pair found, 3D's
+  `near_pairs` is about 1.5 times 2D's (13.5 against 9 ns at 10 000): a
+  mask test is six compares, not four, and a page of 16 in 3D is 2.5 bodies
+  a side, so most of its rows are on its surface and it meets about 26
+  neighbours, where a 2D page meets about 8.
+- **3D wants bigger pages.** At 32 rows (the most a `u32` mask holds) 3D's
+  `near_pairs` is 16% faster and its falling re-sort 19%; 2D's broadphase is
+  11% faster at 10 000 and 25% slower at 1000. Page size per table (or per
+  dimension), the open question in [storage.md](storage.md#other-open-questions),
+  now has a second reason; 64 rows would need `u64` masks.
+- **Upkeep grows less than the broadphase**: creeping, the re-sort is a
+  quarter more in 3D (a key and cell per row, a lane more to re-box);
+  falling, half again, since rows cross more page faces.
+- **What the spike doesn't cover:** a hierarchy over pages (runs are 16
+  pages whatever the dimension), mixed sizes in 3D, and big bodies in 3D
+  beyond a floor and walls.
 
 [^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
     its tests and `//engine/ecs:spatial_bench` had superseded it; it is in
