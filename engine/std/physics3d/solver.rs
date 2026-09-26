@@ -25,6 +25,7 @@
 //! starting needs no tangent basis that stays put from step to step: the
 //! last step's is projected onto this step's plane.
 
+use crate::narrow::MAX_POINTS;
 use crate::{Mat3, Quat, Vec3};
 
 pub const SUBSTEPS: usize = 5;
@@ -159,7 +160,7 @@ pub struct Constraint {
     pub friction: f32,
     pub restitution: f32,
     pub count: usize,
-    pub points: [ContactPoint; 4],
+    pub points: [ContactPoint; MAX_POINTS],
     /// Accumulated friction and twist impulses over the step, in and out
     /// as the points' normal ones. `jt` is in the tangent plane.
     pub jt: Vec3,
@@ -350,7 +351,7 @@ fn row(bodies: &[SolverBody], c: &mut Constraint, points: &mut Vec<PointRow>, sh
     let t1 = n.perp();
     let t = [t1, n.cross(t1)];
     let m = a.inv_mass + b.inv_mass;
-    let count = c.count.min(4);
+    let count = c.count.min(MAX_POINTS);
     let start = points.len();
     let mut centroid = Vec3::ZERO;
     for cp in c.points[..count].iter_mut() {
@@ -521,4 +522,116 @@ fn push(hot: &mut [Hot], a: usize, b: usize, linear: Vec3, wa: Vec3, wb: Vec3) {
     hot[a].w -= wa;
     hot[b].v += linear * mb;
     hot[b].w += wb;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    /// A unit cube of mass 1 (inverse inertia 6 about each axis) moving at
+    /// `v`, turning at `w`, with no gravity this step.
+    fn cube(v: Vec3, w: Vec3) -> SolverBody {
+        SolverBody::new(v, w, 1.0, Vec3::splat(6.0), Quat::IDENTITY, Vec3::ZERO)
+    }
+
+    /// Body 1 on the ground (body 0) at its four bottom corners, `depth`
+    /// deep: the normal from 1 to 0 points down.
+    fn on_ground(depth: f32, restitution: f32) -> Constraint {
+        let mut c = Constraint { a: 1, b: 0, normal: -Vec3::Y, friction: 0.5, restitution, count: 4, ..Default::default() };
+        for (p, (x, z)) in c.points.iter_mut().zip([(0.5, 0.5), (-0.5, 0.5), (-0.5, -0.5), (0.5, -0.5)]) {
+            p.ra = Vec3::new(x, -0.5, z);
+            p.depth = depth;
+        }
+        c
+    }
+
+    /// One point straight under its center: where an impulse turns nothing,
+    /// so what a step does is exact. Four corners, solved one after
+    /// another, turn the box a little until the passes converge, which
+    /// takes more than a step (the tests in tests/rotation_test.rs).
+    fn under(depth: f32, restitution: f32) -> Constraint {
+        let mut c = on_ground(depth, restitution);
+        c.count = 1;
+        c.points[0].ra = Vec3::new(0.0, -0.5, 0.0);
+        c
+    }
+
+    fn solve1(bodies: &mut [SolverBody], c: &mut [Constraint]) {
+        solve(bodies, c, DT, &Tuning::default());
+    }
+
+    #[test]
+    fn a_landing_box_stops() {
+        let mut bodies = [SolverBody::default(), cube(Vec3::new(0.0, -10.0, 0.0), Vec3::ZERO)];
+        solve1(&mut bodies, &mut [under(0.0, 0.0)]);
+        assert!(bodies[1].v.len() < 1e-3 && bodies[1].w.len() < 1e-3, "{:?}", bodies[1]);
+    }
+
+    #[test]
+    fn a_box_landing_on_a_corner_tips() {
+        // One corner, at +x: the box turns about z, its other side falling.
+        let mut c = on_ground(0.0, 0.0);
+        c.count = 1;
+        let mut bodies = [SolverBody::default(), cube(Vec3::new(0.0, -2.0, 0.0), Vec3::ZERO)];
+        solve1(&mut bodies, &mut [c]);
+        let b = bodies[1];
+        // Pushed up at (0.5, -0.5, 0.5): about (-1, 0, 1), the far side
+        // falling.
+        let axis = Vec3::new(-1.0, 0.0, 1.0).normalize();
+        assert!(b.w.dot(axis) > 1.0 && (b.w - axis * b.w.dot(axis)).len() < 1e-3, "{b:?}");
+        // The corner itself has all but stopped: v + w x r along the normal
+        // (friction there leaves a little).
+        let r = c.points[0].ra;
+        assert!((b.v + b.w.cross(r)).y.abs() < 0.2, "{b:?}");
+        assert!(b.turned.v.dot(axis) > 0.0, "turned as it spins: {b:?}");
+    }
+
+    #[test]
+    fn friction_is_a_disc_not_a_box() {
+        // Sliding diagonally at 10 while pressed down at 1: friction can take
+        // 0.5 of the speed, along the slide, not 0.5 on each axis.
+        let d = 10.0 / 2f32.sqrt();
+        let mut bodies = [SolverBody::default(), cube(Vec3::new(d, -1.0, d), Vec3::ZERO)];
+        solve1(&mut bodies, &mut [under(0.0, 0.0)]);
+        let v = bodies[1].v;
+        assert!(((v.x * v.x + v.z * v.z).sqrt() - 9.5).abs() < 1e-2, "{v:?}");
+        assert!((v.x - v.z).abs() < 1e-4);
+    }
+
+    #[test]
+    fn warm_starting_projects_last_steps_friction_onto_this_plane() {
+        let mut bodies = [SolverBody::default(), cube(Vec3::ZERO, Vec3::ZERO)];
+        let mut c = [Constraint { jt: Vec3::new(0.0, 3.0, 0.0), ..on_ground(0.0, 0.0) }];
+        solve1(&mut bodies, &mut c);
+        // Along the normal, the last step's friction is no friction.
+        assert!(c[0].jt.len() < 1e-6, "{:?}", c[0]);
+    }
+
+    #[test]
+    fn penetration_is_pushed_out_at_most_max_push_and_leaves_no_speed() {
+        let mut bodies = [SolverBody::default(), cube(Vec3::ZERO, Vec3::ZERO)];
+        solve1(&mut bodies, &mut [under(0.2, 0.0)]);
+        assert!(bodies[1].v.len() < 1e-3 && bodies[1].w.len() < 1e-3, "{:?}", bodies[1]);
+        let moved = bodies[1].moved.y;
+        assert!(moved > 0.9 * MAX_PUSH * DT && moved <= MAX_PUSH * DT + 1e-6, "moved {moved}");
+    }
+
+    #[test]
+    fn a_bouncy_box_bounces_back_at_its_restitution() {
+        let mut bodies = [SolverBody::default(), cube(Vec3::new(0.0, -10.0, 0.0), Vec3::ZERO)];
+        solve1(&mut bodies, &mut [under(0.0, 0.5)]);
+        assert!((bodies[1].v.y - 5.0).abs() < 1e-2 && bodies[1].w.len() < 1e-3, "{:?}", bodies[1]);
+    }
+
+    #[test]
+    fn twist_friction_holds_up_to_the_lever_times_the_load() {
+        // Pressed down at 1 over four corners 0.707 from the centroid: twist
+        // can take up to 0.5 * 0.707 of angular impulse, 6 times that of spin.
+        let mut bodies = [SolverBody::default(), cube(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 20.0, 0.0))];
+        solve1(&mut bodies, &mut [on_ground(0.0, 0.0)]);
+        let expect = 20.0 - 6.0 * 0.5 * 0.5f32.sqrt();
+        assert!((bodies[1].w.y - expect).abs() < 0.05, "{:?} not {expect}", bodies[1].w);
+    }
 }

@@ -394,7 +394,7 @@ pub(crate) fn face_contact(
     }
     let mut m = Manifold { normal: n, count: count.min(MAX_POINTS), ..Default::default() };
     if count > MAX_POINTS {
-        m.points = reduce_to_four(&all[..count], n, reduce);
+        m.points[..4].copy_from_slice(&reduce_to_four(&all[..count], n, reduce));
     } else {
         m.points[..count].copy_from_slice(&all[..count]);
     }
@@ -404,7 +404,7 @@ pub(crate) fn face_contact(
 /// Whether the edges of `a` between faces with normals `a1`, `a2` and of
 /// `b` between `b1`, `b2` cross on the Gauss map: whether they make a face
 /// of the Minkowski difference, so that their axis is one the boxes can
-/// touch along. Box3D's test (convex_manifold.c, Dirk Gregorius's). Every
+/// touch along: Box3D's `b3IsMinkowskiFace` (convex_manifold.c). Every
 /// axis still separates or not, but an edge pair that fails this isn't
 /// where the boxes meet: a box tipped on a wide floor has edge axes with
 /// the floor's far rims that separate more than its faces do.
@@ -463,7 +463,7 @@ fn edge_contact(p: &Pair, axis: u32, sep: f32, n: Vec3) -> Option<Manifold> {
 
 /// Four of more than four points, keeping the deepest and as much of the
 /// area as four can.
-pub fn reduce_to_four(all: &[Point], n: Vec3, how: Reduce) -> [Point; MAX_POINTS] {
+pub fn reduce_to_four(all: &[Point], n: Vec3, how: Reduce) -> [Point; 4] {
     let planar = |a: Vec3, b: Vec3| {
         let d = b - a;
         let d = d - n * d.dot(n);

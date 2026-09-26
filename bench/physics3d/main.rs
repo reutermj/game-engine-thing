@@ -1,7 +1,7 @@
 //! ./bazel run -c opt //bench/physics3d:bench -- [scenes] [sizes] [backends] [flags]
 //!
 //! Each positional argument is a comma-separated list or "all" (the default):
-//! scenes are spheres, boxes and rain; sizes are body counts (default
+//! scenes are spheres, boxes, planks and rain; sizes are body counts (default
 //! 1000,10000); backends are those in physics3d_bench::BACKENDS. Flags:
 //! --iters8 sets every engine's iteration knob to 8, --rotate lets bodies
 //! turn (locked by default), --sleep lets bodies
@@ -37,7 +37,7 @@ fn main() {
             f => panic!("unknown flag {f}"),
         }
     }
-    let scenes = list(positional.first().copied(), &["spheres", "boxes", "rain"]);
+    let scenes = list(positional.first().copied(), &["spheres", "boxes", "planks", "rain"]);
     let sizes: Vec<usize> = list(positional.get(1).copied(), &["1000", "10000"]).iter().map(|s| s.parse().expect("size")).collect();
     let backends = list(positional.get(2).copied(), BACKENDS);
 

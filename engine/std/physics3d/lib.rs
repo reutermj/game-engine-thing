@@ -183,8 +183,8 @@ component! {
         pub ox: f32, pub oy: f32, pub oz: f32,
         pub friction: f32, pub restitution: f32,
         pub count: u32,
-        pub points: [f32; 16],
-        pub ids: [u32; 4],
+        pub points: [f32; 4 * narrow::MAX_POINTS],
+        pub ids: [u32; narrow::MAX_POINTS],
         pub axis: u32, pub axis_sep: f32,
     }
 }
@@ -214,7 +214,7 @@ component! {
     /// each point, and friction's for the whole contact, as a vector in the
     /// tangent plane and a twist about the normal (see the solver).
     #[derive(Debug, Default, PartialEq, Copy)]
-    pub struct Impulse: "physics3d::Impulse" { pub normal: [f32; 4], pub tx: f32, pub ty: f32, pub tz: f32, pub twist: f32 }
+    pub struct Impulse: "physics3d::Impulse" { pub normal: [f32; narrow::MAX_POINTS], pub tx: f32, pub ty: f32, pub tz: f32, pub twist: f32 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -440,8 +440,8 @@ type Statics<'w, 'a> = Query<'w, (&'a Position, &'a Rotation, &'a Collider, &'a 
 
 /// This step's manifold as stored: anchors on `a`, from its center.
 fn stored(m: &narrow::Manifold, a: &Item, b: &Item) -> Manifold {
-    let mut points = [0.0; 16];
-    let mut ids = [0; 4];
+    let mut points = [0.0; 4 * narrow::MAX_POINTS];
+    let mut ids = [0; narrow::MAX_POINTS];
     for (k, p) in m.points().iter().enumerate() {
         let r = p.at - a.solid.at;
         points[4 * k..4 * k + 4].copy_from_slice(&[r.x, r.y, r.z, p.depth]);
@@ -596,7 +596,7 @@ fn solve(
     let index = |e: Entity| slots.get(e).unwrap_or(still);
     let mut constraints = Vec::with_capacity(contacts.len());
     contacts.for_each_ordered(|_, (pair, m, j)| {
-        let mut points = [ContactPoint::default(); 4];
+        let mut points = [ContactPoint::default(); narrow::MAX_POINTS];
         for (k, p) in points[..m.count as usize].iter_mut().enumerate() {
             let (ra, depth) = m.point(k);
             *p = ContactPoint { ra, depth, jn: j.normal[k], speed: 0.0 };
@@ -622,7 +622,7 @@ fn solve(
         let j = j.write_all();
         for i in page.rows() {
             let c = &constraints[k];
-            let mut normal = [0.0; 4];
+            let mut normal = [0.0; narrow::MAX_POINTS];
             for (n, p) in normal.iter_mut().zip(&c.points[..c.count]) {
                 *n = p.jn;
             }

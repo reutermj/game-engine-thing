@@ -33,6 +33,10 @@ impl Rng {
 pub enum Kind {
     SpherePile,
     BoxPile,
+    /// Boxes a unit long but thin: what turning does to bodies whose
+    /// inertia isn't the same about every axis, and whose bounds a sphere
+    /// fits badly.
+    PlankPile,
     Rain,
 }
 
@@ -41,12 +45,13 @@ impl Kind {
         match self {
             Kind::SpherePile => "spheres",
             Kind::BoxPile => "boxes",
+            Kind::PlankPile => "planks",
             Kind::Rain => "rain",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        [Kind::SpherePile, Kind::BoxPile, Kind::Rain].into_iter().find(|k| k.name() == s)
+        [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain].into_iter().find(|k| k.name() == s)
     }
 }
 
@@ -66,11 +71,13 @@ pub struct Scene {
 
 pub const RADIUS: f32 = 0.5;
 pub const HALF: f32 = 0.5;
+pub const PLANK: [f32; 3] = [0.5, 0.125, 0.25];
 
 pub fn build(kind: Kind, n: usize) -> Scene {
     match kind {
         Kind::SpherePile => pile(kind, n, |_| Shape::Sphere(RADIUS)),
         Kind::BoxPile => pile(kind, n, |_| Shape::Box([HALF; 3])),
+        Kind::PlankPile => pile(kind, n, |_| Shape::Box(PLANK)),
         Kind::Rain => rain(n),
     }
 }
