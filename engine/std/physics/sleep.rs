@@ -9,7 +9,9 @@
 //! state at a reload (`Physics::unload`): so a reload forgets nothing,
 //! not even how long awake bodies have been still. A build that starts
 //! without one (the first, or one whose state was reset) rebuilds it from
-//! the world, which knows who's asleep but not for how long.
+//! the world, which knows who's asleep but not for how long. Why it isn't
+//! components on the bodies: docs/architecture/physics.md, "Why the copy
+//! is per-entity data outside the world".
 
 use engine_api::{Entity, field_struct};
 

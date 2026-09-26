@@ -716,6 +716,38 @@ mod pile {
         }
     }
 
+    /// What a game changes between frames (a message) is seen by the next
+    /// step as a game's, with a reload in between as without: a sleeping
+    /// body despawned or woken, whose island wakes, which the new build
+    /// knows only from the copy of who's asleep it's handed (the world no
+    /// longer has them); and one put to sleep, or asleep before it's a body,
+    /// which stays asleep. The first two woke nothing rebuilt from the
+    /// world, and the last two woke when adopted from it.
+    #[test]
+    fn a_reload_between_a_games_change_and_the_next_step_does_not_show() {
+        let cases: [(&str, &[&str]); 4] = [("despawn", &[]), ("unsleep", &[]), ("despawn nap", &[]), ("nap later", &["nap body"])];
+        for (width, n) in SCENES {
+            for (before, after) in cases {
+                let run = |reload: bool| {
+                    let e = asleep_pile(&format!("between_{}_{reload}", before.replace(' ', "_")), (width, n), &[]);
+                    send(&e, "pile", before);
+                    if reload {
+                        assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
+                    }
+                    step(&e, 1);
+                    for m in after {
+                        send(&e, "pile", m);
+                    }
+                    step(&e, 5);
+                    (asleep(&e), positions(&e))
+                };
+                let (without, with) = (run(false), run(true));
+                assert_eq!(with.0, without.0, "{width} wide, {before:?}: asleep with a reload and without");
+                assert!(with.1 == without.1, "{width} wide, {before:?}: bodies elsewhere with a reload");
+            }
+        }
+    }
+
     /// How long each awake body has been still goes to the new build too,
     /// so a pile due to fall asleep does so the same step with a reload in
     /// between as without. Rebuilt from the world, the time restarted, and

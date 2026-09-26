@@ -10,7 +10,7 @@
 //! different computations. Then each stage is timed on both.
 //!
 //! With `-- parallel`, the same at 1 to 16 threads instead: see `tax_par.rs`.
-//! With `-- sleeping`, only the sleeping table at the end.
+//! With `-- sleeping`, only the sleeping tables at the end.
 
 #[path = "arrays.rs"]
 mod arrays;
@@ -236,7 +236,7 @@ fn before_asleep(manifest: &engine_control::Manifest, frames: u32) {
     println!("| bodies | box | from step | asleep then / after | frame | write back | of it, sleeping |");
     println!("|---|---|---|---|---|---|---|");
     for (n, width) in [(1000, 41.0), (10000, 401.0)] {
-        for warmup in [1u32, 150, 300] {
+        for warmup in [1u32, 60, 120] {
             let run = |on: bool| {
                 let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{width}-before-{warmup}-{on}", std::process::id()));
                 let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
