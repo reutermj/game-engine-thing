@@ -498,7 +498,7 @@ impl World {
             sparse: OnceLock::new(),
         };
         if let Some(s) = desc.spatial {
-            self.extents.lock().unwrap().push(s.extent.to_string());
+            self.extents.lock().unwrap().extend(s.extents.iter().flatten().map(|(name, _)| name.to_string()));
         }
         let id = ComponentId(self.components.push(info) as u32);
         by_name.insert(desc.name.into(), id);
@@ -1212,15 +1212,17 @@ impl Drop for Structural<'_> {
             let spatial = t.table.spatial.as_ref().expect("a spatial table");
             let desc = world.spatial_desc(spatial.key).expect("an installed spatial key");
             let key = t.table.column_index(spatial.key).expect("the key's own table");
-            // The extent is read only as the layout the glue was built for.
-            let extent =
-                world.id(desc.extent).filter(|&x| world.installed_as(x, desc.extent_fingerprint)).and_then(|x| t.table.column_index(x));
+            // Each extent is read only as the layout the glue was built for.
+            let extents = desc.extents.map(|e| {
+                let (name, fingerprint) = e?;
+                world.id(name).filter(|&x| world.installed_as(x, fingerprint)).and_then(|x| t.table.column_index(x))
+            });
             pages.resort(ResortParts {
                 table: t.table.id,
                 rows: &mut t.rows,
                 columns: t.columns.iter_mut().map(|c| &mut **c).collect(),
                 key,
-                extent,
+                extents,
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),

@@ -116,6 +116,15 @@ rust_binary(
     deps = [":ecs"],
 )
 
+# How rotation reaches spatial storage, five ways on the same rows (see the
+# source):
+#   ./bazel run -c opt //engine/ecs:spatial_turn_bench
+rust_binary(
+    name = "spatial_turn_bench",
+    srcs = ["tests/spatial_turn_bench.rs"],
+    deps = [":ecs"],
+)
+
 #   ./bazel run -c opt //engine/ecs:spatial_bench
 rust_binary(
     name = "spatial_bench",

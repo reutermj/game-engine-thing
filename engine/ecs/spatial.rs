@@ -74,12 +74,15 @@ impl<const D: usize> Bounds<D> {
 /// A component whose tables are kept in spatial order: declared with
 /// `order = spatial` in `component!`. `bounds` is the box around an entity
 /// with this key, and its `Extent` if it has one (a position's collider);
-/// a key with no extent of its own names itself as its extent. Mark
-/// `bounds` `#[inline]`: the glue calls it per row from another crate
+/// a key with no extent of its own names itself as its extent. An extent
+/// may be a pair of components, each of which a row may or may not have,
+/// when the box depends on both (a collider and a rotation): see
+/// `Extents`. Mark `bounds` `#[inline]`: the glue calls it per row from
+/// another crate
 /// (docs/lore/a-trait-impl-the-glue-calls-is-not-inlined-across-crates.md).
 /// `D`, the dimensions, is 2 unless the key implements `SpatialKey<3>`.
 pub trait SpatialKey<const D: usize = 2>: Component {
-    type Extent: Component;
+    type Extent: Extents;
     /// Cells of the Z-order: about the size of the smallest things, so
     /// neighbors in the order are neighbors in space.
     const CELL: f32 = 1.0;
@@ -87,7 +90,59 @@ pub trait SpatialKey<const D: usize = 2>: Component {
     /// order in pages of its own: a floor across the level would otherwise
     /// stretch its page's box over everything.
     const BIG: f32 = 2.0;
-    fn bounds(&self, extent: Option<&Self::Extent>) -> Bounds<D>;
+    fn bounds(&self, extent: <Self::Extent as Extents>::Refs<'_>) -> Bounds<D>;
+}
+
+/// The most components a key's box may depend on besides the key.
+pub const MAX_EXTENTS: usize = 2;
+
+/// What a spatial key's box depends on besides the key: one component
+/// (`Option<&C>` to `bounds`, `None` on a row without it), or a pair
+/// (`(Option<&A>, Option<&B>)`). Writing any of them re-bounds the row, as
+/// writing the key does. A pair, rather than a key holding everything the
+/// box needs, so a row without one (a body that doesn't turn, so has no
+/// rotation) carries nothing for it and bounds as cheaply as before
+/// (spatial-storage.md, "Bounds from several components").
+pub trait Extents: 'static {
+    type Refs<'a>;
+    /// Each extent's name and the fingerprint of the layout the glue reads.
+    const NAMES: [Option<(&'static str, u64)>; MAX_EXTENTS];
+    /// Row `r`'s extents, from each extent's column (null where the page
+    /// hasn't that extent, or has another layout of it).
+    ///
+    /// # Safety
+    /// Each non-null pointer is a column of that extent's installed layout,
+    /// the one this build compiled, with more than `r` values.
+    #[doc(hidden)]
+    unsafe fn refs<'a>(columns: [*const u8; MAX_EXTENTS], r: usize) -> Self::Refs<'a>;
+}
+
+/// Row `r` of a column of `C`, if there is a column.
+///
+/// # Safety
+/// As `Extents::refs`, for this one column.
+unsafe fn extent_at<'a, C: Component>(column: *const u8, r: usize) -> Option<&'a C> {
+    // SAFETY: the caller's: a non-null column holds more than `r` values of
+    // `C` as this build lays it out.
+    (!column.is_null()).then(|| unsafe { &*(column as *const C).add(r) })
+}
+
+impl<C: Component> Extents for C {
+    type Refs<'a> = Option<&'a C>;
+    const NAMES: [Option<(&'static str, u64)>; MAX_EXTENTS] = [Some((C::NAME, C::FINGERPRINT)), None];
+    unsafe fn refs<'a>(columns: [*const u8; MAX_EXTENTS], r: usize) -> Option<&'a C> {
+        // SAFETY: the caller's, for the first column.
+        unsafe { extent_at(columns[0], r) }
+    }
+}
+
+impl<A: Component, B: Component> Extents for (A, B) {
+    type Refs<'a> = (Option<&'a A>, Option<&'a B>);
+    const NAMES: [Option<(&'static str, u64)>; MAX_EXTENTS] = [Some((A::NAME, A::FINGERPRINT)), Some((B::NAME, B::FINGERPRINT))];
+    unsafe fn refs<'a>(columns: [*const u8; MAX_EXTENTS], r: usize) -> (Option<&'a A>, Option<&'a B>) {
+        // SAFETY: the caller's, for both columns.
+        unsafe { (extent_at(columns[0], r), extent_at(columns[1], r)) }
+    }
 }
 
 /// The bounds glue: reads one page's keys and, if the rows have them,
@@ -95,7 +150,9 @@ pub trait SpatialKey<const D: usize = 2>: Component {
 /// each row in `rows` to `out` (parallel to the page). A page at a time, not
 /// a row: the call can't be inlined, and one per row, with the caller's
 /// state saved around each, measured a third of a re-sort (2026-09-24).
-pub type BoundsFn<const D: usize = 2> = unsafe fn(keys: *const u8, extents: *const u8, rows: &[u32], out: &mut [Bounds<D>]);
+/// `extents` is a column per extent the key declares, null where the page
+/// hasn't it.
+pub type BoundsFn<const D: usize = 2> = unsafe fn(keys: *const u8, extents: [*const u8; MAX_EXTENTS], rows: &[u32], out: &mut [Bounds<D>]);
 
 /// A key's bounds glue, by its dimensions: each spatial table's order is
 /// in its key's dimensions, chosen when the table is made.
@@ -166,10 +223,9 @@ impl<T: SpatialKey<3>> MakeGlue for GlueOf<T, 3> {
 /// What a spatial key declares, carried in its `ComponentDesc`.
 #[derive(Clone, Copy)]
 pub struct SpatialDesc {
-    pub extent: &'static str,
-    /// The extent's layout this glue reads: a row whose extent is installed
-    /// with another is bounded without it.
-    pub extent_fingerprint: u64,
+    /// Each extent's name, and the layout this glue reads: a row whose
+    /// extent is installed with another is bounded without it.
+    pub extents: [Option<(&'static str, u64)>; MAX_EXTENTS],
     pub bounds: BoundsGlue,
     pub cell: f32,
     pub big: f32,
@@ -181,8 +237,7 @@ impl SpatialDesc {
         GlueOf<T, D>: MakeGlue,
     {
         SpatialDesc {
-            extent: <<T as SpatialKey<D>>::Extent as Component>::NAME,
-            extent_fingerprint: <<T as SpatialKey<D>>::Extent as Component>::FINGERPRINT,
+            extents: <<T as SpatialKey<D>>::Extent as Extents>::NAMES,
             bounds: <GlueOf<T, D> as MakeGlue>::GLUE,
             cell: <T as SpatialKey<D>>::CELL,
             big: <T as SpatialKey<D>>::BIG,
@@ -195,17 +250,22 @@ impl SpatialDesc {
 }
 
 #[doc(hidden)]
-pub unsafe fn __bounds<T: SpatialKey<D>, const D: usize>(keys: *const u8, extents: *const u8, rows: &[u32], out: &mut [Bounds<D>]) {
+pub unsafe fn __bounds<T: SpatialKey<D>, const D: usize>(
+    keys: *const u8,
+    extents: [*const u8; MAX_EXTENTS],
+    rows: &[u32],
+    out: &mut [Bounds<D>],
+) {
     for &r in rows {
         let r = r as usize;
         // Indexed first, so a row past the page panics before it's read.
         let slot = &mut out[r];
         // SAFETY: the caller passes `out.len()` values of the installed
         // layout of `T`, the key, which is this build's (the glue is
-        // installed with the layout), and as many extents only if they're
-        // installed with the layout this build read; `r` is within them.
+        // installed with the layout), and as many of each extent only if
+        // it's installed with the layout this build read; `r` is within them.
         let key = unsafe { &*(keys as *const T).add(r) };
-        let extent = (!extents.is_null()).then(|| unsafe { &*(extents as *const <T as SpatialKey<D>>::Extent).add(r) });
+        let extent = unsafe { <<T as SpatialKey<D>>::Extent as Extents>::refs(extents, r) };
         *slot = key.bounds(extent);
     }
 }
@@ -751,7 +811,7 @@ pub(crate) struct ResortParts<'a> {
     pub rows: &'a mut Vec<Vec<Entity>>,
     pub columns: Vec<&'a mut Vec<ErasedColumn>>,
     pub key: usize,
-    pub extent: Option<usize>,
+    pub extents: [Option<usize>; MAX_EXTENTS],
     pub desc: SpatialDesc,
     pub entities: &'a Entities,
     pub now: u32,
@@ -762,11 +822,11 @@ fn resort_in<const D: usize>(pages: &mut SpatialPages<D>, parts: ResortParts<'_>
 where
     Axes<D>: Dims<D>,
 {
-    let ResortParts { table, rows, columns, key, extent, desc, entities, now, workers } = parts;
+    let ResortParts { table, rows, columns, key, extents, desc, entities, now, workers } = parts;
     // A key installed with glue of other dimensions than its tables' order
     // is refused at install (a restart changes it), so this always finds one.
     let glue = <Axes<D> as Dims<D>>::glue(desc.bounds).expect("a key keeps its dimensions");
-    Resort { table, rows, columns, pages, key, extent, desc, glue, entities, now, workers }.run()
+    Resort { table, rows, columns, pages, key, extents, desc, glue, entities, now, workers }.run()
 }
 
 /// A spatial table's pages, locked for re-sorting: its rows and columns,
@@ -777,9 +837,9 @@ pub(crate) struct Resort<'a, const D: usize> {
     pub columns: Vec<&'a mut Vec<ErasedColumn>>,
     pub pages: &'a mut SpatialPages<D>,
     pub key: usize,
-    /// The extent's column, if the table has it and it's installed with the
+    /// Each extent's column, if the table has it and it's installed with the
     /// layout the glue reads.
-    pub extent: Option<usize>,
+    pub extents: [Option<usize>; MAX_EXTENTS],
     pub desc: SpatialDesc,
     /// The glue, as `desc` has it for this table's dimensions.
     pub glue: BoundsFn<D>,
@@ -815,7 +875,7 @@ impl<const D: usize> Rebound<'_, D> {
         &self,
         p: usize,
         key: &ErasedColumn,
-        extent: Option<&ErasedColumn>,
+        extents: [Option<&ErasedColumn>; MAX_EXTENTS],
         scratch: &mut [Bounds<D>; SPATIAL_PAGE_ROWS],
         (lanes, misplaced_at, bounds, stale): (&mut Lanes<D>, &mut u32, &mut Bounds<D>, &mut bool),
     ) -> usize {
@@ -824,7 +884,7 @@ impl<const D: usize> Rebound<'_, D> {
         if n == 0 {
             return 0;
         }
-        assert!(key.len() == n && extent.is_none_or(|c| c.len() == n), "a page's order is its rows'");
+        assert!(key.len() == n && extents.iter().flatten().all(|c| c.len() == n), "a page's order is its rows'");
         // Only rows new to the table (a placeholder key) or whose key or
         // extent was written since the last sort: the rest keep their
         // boxes and keys. As a mask with no branch per row, and the
@@ -833,7 +893,7 @@ impl<const D: usize> Rebound<'_, D> {
         for (r, (&k, &t)) in lanes.keys().iter().zip(&key.ticks()[..n]).enumerate() {
             mask |= (((k == u64::MAX) | (t > since)) as u32) << r;
         }
-        if let Some(x) = extent {
+        for x in extents.iter().flatten() {
             for (r, &t) in x.ticks()[..n].iter().enumerate() {
                 mask |= ((t > since) as u32) << r;
             }
@@ -854,7 +914,8 @@ impl<const D: usize> Rebound<'_, D> {
         // build the glue came from, and its extents only when installed
         // with the layout the glue reads, as many as `row_bounds` holds
         // (checked), which `written` indexes.
-        unsafe { (self.glue)(key.value_ptr(0), extent.map_or(std::ptr::null(), |c| c.value_ptr(0)), written, row_bounds) };
+        let columns = extents.map(|x| x.map_or(std::ptr::null(), |c| c.value_ptr(0)));
+        unsafe { (self.glue)(key.value_ptr(0), columns, written, row_bounds) };
         let (kind, lo, hi) = (self.kind[p], self.lo[p], self.hi[p]);
         let mut misplaced = 0u32;
         for &r in written {
@@ -900,7 +961,7 @@ impl<const D: usize> Resort<'_, D> {
         self.pages.rebuild_hi();
         self.pages.misplaced.clear();
         self.pages.misplaced.resize(self.rows.len(), 0);
-        let (key_column, extent_column) = (&*self.columns[self.key], self.extent.map(|x| &*self.columns[x]));
+        let (key_column, extent_columns) = (&*self.columns[self.key], self.extents.map(|x| x.map(|x| &*self.columns[x])));
         let pages = &mut *self.pages;
         let order = Rebound { desc: &self.desc, glue: self.glue, since, kind: &pages.kind, lo: &pages.lo, hi: &pages.hi };
         let n = self.rows.len();
@@ -923,7 +984,7 @@ impl<const D: usize> Resort<'_, D> {
                 let mut count = 0;
                 for (i, p) in range.enumerate() {
                     let at = (&mut lanes[i], &mut misplaced[i], &mut bounds[i], &mut stale[i]);
-                    count += order.page(p, &key_column[p], extent_column.map(|c| &c[p]), &mut scratch, at);
+                    count += order.page(p, &key_column[p], extent_columns.map(|c| c.map(|c| &c[p])), &mut scratch, at);
                 }
                 count
             });
@@ -931,7 +992,7 @@ impl<const D: usize> Resort<'_, D> {
         } else {
             for p in 0..n {
                 let at = (&mut pages.lanes[p], &mut pages.misplaced[p], &mut pages.bounds[p], &mut pages.stale[p]);
-                rebounded += order.page(p, &key_column[p], extent_column.map(|c| &c[p]), &mut pages.written_bounds, at);
+                rebounded += order.page(p, &key_column[p], extent_columns.map(|c| c.map(|c| &c[p])), &mut pages.written_bounds, at);
             }
         }
         // Nothing to move or merge: a table at rest costs only the scan of

@@ -34,5 +34,5 @@ pub use query::{
     Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Data, Declare, Despawns, Dt, Filter, FilterDecl, FrameCx, Log, Mut, NearSide,
     Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs, near_pairs_with,
 };
-pub use spatial::{Bounds, SpatialKey};
+pub use spatial::{Bounds, Extents, SpatialKey};
 pub use world::{Build, ComponentId, Keepalive, Structural, TableId, World};

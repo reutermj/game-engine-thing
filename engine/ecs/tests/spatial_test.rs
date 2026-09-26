@@ -328,6 +328,110 @@ fn writing_an_extent_re_sorts_too() {
     agrees(&w, &mut seed);
 }
 
+component! {
+    /// A key whose box depends on two extents: a size and a scale.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Twice: "test::Twice", order = spatial { pub x: f32, pub y: f32 }
+}
+
+component! {
+    /// `Twice`'s second extent: scales its size.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Scale: "test::Scale" { pub k: f32 }
+}
+
+impl SpatialKey for Twice {
+    type Extent = (Size, Scale);
+    fn bounds(&self, (size, scale): (Option<&Size>, Option<&Scale>)) -> Bounds {
+        let (hx, hy) = size.map_or((POINT, POINT), |s| (s.hx, s.hy));
+        let k = scale.map_or(1.0, |s| s.k);
+        Bounds::around([self.x, self.y], [hx * k, hy * k])
+    }
+}
+
+/// Every entity with a `Twice`, and its box, by brute force.
+fn twice_boxes(w: &World) -> Vec<(Entity, Bounds)> {
+    let sizes: std::collections::HashMap<Entity, Size> = w.values::<Size>().unwrap_or_default().into_iter().collect();
+    let scales: std::collections::HashMap<Entity, Scale> = w.values::<Scale>().unwrap_or_default().into_iter().collect();
+    let mut out: Vec<(Entity, Bounds)> =
+        w.values::<Twice>().unwrap_or_default().into_iter().map(|(e, t)| (e, t.bounds((sizes.get(&e), scales.get(&e))))).collect();
+    out.sort_by_key(|(e, _)| *e);
+    out
+}
+
+/// Each spatial table's stored boxes are what brute force says.
+fn check_twice(w: &World) {
+    let now: std::collections::HashMap<Entity, Bounds> = twice_boxes(w).into_iter().collect();
+    for t in w.tables() {
+        let Some(spatial) = &t.spatial else { continue };
+        let rows = t.rows.read().unwrap();
+        let pages = spatial.pages.read().unwrap();
+        pages.check(&rows, BIG, 1.0).unwrap_or_else(|e| panic!("table {:?}: {e}", t.id));
+        for (p, page) in rows.iter().enumerate() {
+            for (r, e) in page.iter().enumerate() {
+                assert_eq!(pages.plane().unwrap().row_bounds(p, r), now[e], "{e:?}'s stored box");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_box_from_two_extents_re_sorts_when_either_is_written() {
+    let _s = serial();
+    let w = World::new();
+    let mut seed = 11;
+    let (scaled, plain, bare) = {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        let mut spawned = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..300 {
+            let at = Twice { x: lcg(&mut seed) * 40.0, y: lcg(&mut seed) * 40.0 };
+            let size = Size { hx: 0.2 + lcg(&mut seed) * 0.3, hy: 0.2 + lcg(&mut seed) * 0.3 };
+            match i % 3 {
+                0 => spawned.0.push(m.spawn((at, size, Scale { k: 1.5 }))),
+                1 => spawned.1.push(m.spawn((at, size))),
+                _ => spawned.2.push(m.spawn((at, Scale { k: 2.0 }))),
+            }
+        }
+        spawned
+    };
+    check_twice(&w);
+    // Only the second extent written: the rows must be re-bounded, and
+    // those without it are left as they were.
+    fn grow(_: &mut Cx, mut q: Query<&mut Scale>) {
+        q.for_each(|_, mut s| s.k *= 1.25);
+    }
+    Schedule { systems: vec![grow.system(&w, "grow")] }.run_sequential(&w);
+    check_twice(&w);
+    // The fourth spawned, which keeps its scale below.
+    let big = scaled[1];
+    assert_eq!(big.index, 3);
+    fn huge(_: &mut Cx, mut q: Query<(&Size, &mut Scale)>) {
+        q.for_each(|row, (_, mut s)| {
+            if row.entity().index == 3 {
+                s.k = 20.0;
+            }
+        });
+    }
+    Schedule { systems: vec![huge.system(&w, "huge")] }.run_sequential(&w);
+    check_twice(&w);
+    // The first extent written, then the second taken off: bounded by what
+    // the row has now.
+    fn shrink(_: &mut Cx, mut q: Query<&mut Size, With<Twice>>) {
+        q.for_each(|_, mut s| s.hx *= 0.5);
+    }
+    Schedule { systems: vec![shrink.system(&w, "shrink")] }.run_sequential(&w);
+    check_twice(&w);
+    {
+        let mut m = w.between_frames(Build::default()).unwrap();
+        for &e in scaled.iter().step_by(2) {
+            m.remove::<Scale>(e);
+        }
+    }
+    check_twice(&w);
+    assert_eq!((scaled.len(), plain.len(), bare.len()), (100, 100, 100));
+    assert!(twice_boxes(&w).iter().any(|(e, b)| *e == big && b.max[0] - b.min[0] > 5.0), "the big one is big");
+}
+
 /// The frame's nodes, by name, that `name` waits for at the start.
 fn blockers(w: &World, s: &Schedule, name: &str) -> Vec<String> {
     let fs = s.frame();
