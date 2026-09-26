@@ -6,6 +6,10 @@
 //!              rain scene then rains every step, from `rain`, a system
 //!   sleep default  leave sleeping to physics's default, which is on; the
 //!              scenes have it off, as the other engines do unless asked
+//!   turn       every dynamic body turns (a `Rotation` and a `Spin`), and
+//!              every raindrop from then on
+//!   orient     every dynamic body has a `Rotation` and no `Spin`: faces a
+//!              way, and doesn't turn
 //!
 //! Rain is a system rather than a message the bench sends each step, since
 //! that is how a game spawns and despawns: through a `Spawner` and a
@@ -18,7 +22,7 @@
 mod scene;
 
 use engine_api::{Cx, Despawns, Entity, Mod, Query, Spawner, Systems, WorldMut, export_mod};
-use physics::{Body, Collider, Gravity, Position, Sleep, Velocity};
+use physics::{Body, Collider, Gravity, Position, Rotation, Sleep, Spin, Velocity};
 use scene::{GRAVITY, Scene, Spec};
 
 engine_api::mod_state! {
@@ -30,10 +34,13 @@ engine_api::mod_state! {
         /// Raindrops alive, oldest first from `head`, a ring once full.
         drops: Vec<Entity>,
         head: u32,
+        /// Whether bodies turn, and so what rains does.
+        turning: bool,
     }
 }
 
 type Dynamic = (Position, Velocity, Body, Collider);
+type Turning = (Position, Velocity, Body, Collider, Rotation, Spin);
 
 fn collider(s: &Spec) -> Collider {
     if s.circle { Collider::circle(s.hx) } else { Collider::rect(s.hx, s.hy) }
@@ -57,11 +64,22 @@ fn spawn(world: &mut WorldMut, s: &Spec) -> Entity {
 impl Scenes {
     /// The next step's arrivals, and the oldest removed once more than the
     /// scene's n are alive.
-    fn rain(&mut self, _: &mut (), _: &mut Cx, spawner: Spawner<Dynamic>, mut drops: Query<&Body, (), Despawns>) {
+    fn rain(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        (spawner, turners): (Spawner<Dynamic>, Spawner<Turning>),
+        mut drops: Query<&Body, (), Despawns>,
+    ) {
         let &[n, width] = self.rain.as_slice() else { return };
         let scene = Scene::Rain { n: n as u32, width };
         for s in scene.rain(self.tick) {
-            let e = spawner.spawn(dynamic(&s));
+            let e = if self.turning {
+                let (p, v, b, c) = dynamic(&s);
+                turners.spawn((p, v, b, c, Rotation::default(), Spin::default()))
+            } else {
+                spawner.spawn(dynamic(&s))
+            };
             if self.drops.len() < n as usize {
                 self.drops.push(e);
             } else {
@@ -111,7 +129,23 @@ impl Mod for Scenes {
                 Ok("sleeping by default".into())
             }
             None if message.trim() == "drops" => Ok(format!("drops {} tick {}", self.drops.len(), self.tick)),
-            _ => Err("commands: build <scene> | sleep default | drops".into()),
+            None if message.trim() == "orient" => {
+                let mut bodies = Vec::new();
+                world.for_each::<&Body>(|e, _| bodies.push(e));
+                bodies.iter().for_each(|&e| world.insert(e, Rotation::default()));
+                Ok(format!("{} bodies face a way", bodies.len()))
+            }
+            None if message.trim() == "turn" => {
+                self.turning = true;
+                let mut bodies = Vec::new();
+                world.for_each::<&Body>(|e, _| bodies.push(e));
+                for &e in &bodies {
+                    world.insert(e, Rotation::default());
+                    world.insert(e, Spin::default());
+                }
+                Ok(format!("{} bodies turn", bodies.len()))
+            }
+            _ => Err("commands: build <scene> | sleep default | turn | drops".into()),
         }
     }
 }

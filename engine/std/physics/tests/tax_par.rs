@@ -183,6 +183,8 @@ impl Arrays {
                     jt: 0.0,
                     pressed: false,
                     was_pressed: false,
+                    // The pile this runs doesn't turn: no points.
+                    points: 0,
                 });
             }
         });
@@ -241,6 +243,8 @@ impl Arrays {
                 jn: c.jn,
                 jt: c.jt,
                 speed: 0.0,
+                // The pile this runs doesn't turn: no points.
+                ..Constraint::default()
             }))
         });
         let solve_gather = Instant::now();

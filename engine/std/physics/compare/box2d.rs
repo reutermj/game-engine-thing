@@ -15,7 +15,18 @@ struct World {
 unsafe extern "C" {
     fn bx_new(gx: f32, gy: f32, sleep: i32, continuous: i32) -> *mut World;
     fn bx_free(w: *mut World);
-    fn bx_add(w: *mut World, dynamic: i32, circle: i32, x: f32, y: f32, hx: f32, hy: f32, friction: f32, restitution: f32) -> i32;
+    fn bx_add(
+        w: *mut World,
+        dynamic: i32,
+        circle: i32,
+        x: f32,
+        y: f32,
+        hx: f32,
+        hy: f32,
+        friction: f32,
+        restitution: f32,
+        turning: i32,
+    ) -> i32;
     fn bx_set_velocity(w: *mut World, handle: i32, vx: f32, vy: f32);
     fn bx_remove(w: *mut World, handle: i32);
     fn bx_step(w: *mut World, dt: f32, substeps: i32);
@@ -61,6 +72,7 @@ pub struct Box2d {
     /// Handles of the dynamic bodies, in the order they were added.
     dynamic: VecDeque<(i32, Spec)>,
     alive: usize,
+    turning: bool,
     /// Per `PROFILE` field, milliseconds summed since `reset`.
     profile: [f64; 22],
 }
@@ -68,14 +80,14 @@ pub struct Box2d {
 impl Box2d {
     /// `substeps` is Box2D's own: 4 by default, as its samples and
     /// benchmarks step.
-    pub fn new(scene: &Scene, substeps: i32, sleep: bool) -> Box2d {
+    pub fn new(scene: &Scene, substeps: i32, sleep: bool, turning: bool) -> Box2d {
         // Continuous collision is left on, Box2D's default: it only acts for
         // bodies moving fast against statics, which nothing here does after
         // the first frames of rain.
         // SAFETY: plain values in, a world the shim allocated out, freed in Drop.
         let world = unsafe { bx_new(0.0, GRAVITY, sleep as i32, 1) };
         let label = if substeps == 4 { "Box2D".to_string() } else { format!("Box2D, {substeps} substeps") };
-        let mut b = Box2d { world, label, substeps, dynamic: VecDeque::new(), alive: 0, profile: [0.0; 22] };
+        let mut b = Box2d { world, label, substeps, dynamic: VecDeque::new(), alive: 0, turning, profile: [0.0; 22] };
         let mut n = [0f32; 22];
         // SAFETY: `n` is 22 floats long and the shim writes at most `len`.
         let have = unsafe { bx_profile(world, n.as_mut_ptr(), 22) };
@@ -95,7 +107,9 @@ impl Box2d {
 
     fn add(&mut self, s: &Spec) {
         // SAFETY: the world is live; the rest are plain values.
-        let h = unsafe { bx_add(self.world, s.dynamic as i32, s.circle as i32, s.x, s.y, s.hx, s.hy, s.friction, s.restitution) };
+        let h = unsafe {
+            bx_add(self.world, s.dynamic as i32, s.circle as i32, s.x, s.y, s.hx, s.hy, s.friction, s.restitution, self.turning as i32)
+        };
         if s.dynamic {
             // SAFETY: `h` is the handle just returned.
             unsafe { bx_set_velocity(self.world, h, s.vx, s.vy) };
@@ -155,13 +169,13 @@ impl Sim for Box2d {
     }
 
     fn bodies(&self) -> Vec<Dyn> {
-        let mut out = [0f32; 5];
+        let mut out = [0f32; 6];
         self.dynamic
             .iter()
             .map(|(h, s)| {
-                // SAFETY: a live handle; `out` is 5 floats.
+                // SAFETY: a live handle; `out` is 6 floats.
                 unsafe { bx_state(self.world, *h, out.as_mut_ptr()) };
-                Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: out[0], y: out[1], vx: out[2], vy: out[3], angle: out[4] }
+                Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: out[0], y: out[1], vx: out[2], vy: out[3], angle: out[4], w: out[5] }
             })
             .collect()
     }

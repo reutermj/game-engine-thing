@@ -34,15 +34,76 @@ component! {
     }
 }
 
-/// A position's box is its collider's, or a point without one.
+/// A position's box is its collider's, turned by its rotation if it has one,
+/// or a point without a collider. The rotation is an extent, not part of
+/// the key, so a body that doesn't turn carries none and is bounded as it
+/// was before rotation (physics.md, "Rotation", and spatial-storage.md,
+/// "Bounds from several components").
 impl SpatialKey for Position {
-    type Extent = Collider;
+    type Extent = (Collider, Rotation);
     // Inline, as `SpatialKey` says: the glue calls it for every row it
     // re-bounds.
     #[inline]
-    fn bounds(&self, collider: Option<&Collider>) -> Bounds {
-        let half = collider.map_or([0.0, 0.0], |c| if c.shape == BOX { [c.hx, c.hy] } else { [c.hx, c.hx] });
+    fn bounds(&self, (collider, rotation): (Option<&Collider>, Option<&Rotation>)) -> Bounds {
+        let half = match (collider, rotation) {
+            (Some(c), Some(q)) if c.shape == BOX => {
+                let h = turned_half(Vec2::new(c.hx, c.hy), q.rot());
+                [h.x, h.y]
+            }
+            _ => collider.map_or([0.0, 0.0], |c| if c.shape == BOX { [c.hx, c.hy] } else { [c.hx, c.hx] }),
+        };
         Bounds::around([self.x, self.y], half)
+    }
+}
+
+component! {
+    /// Which way a body faces, as the cosine and sine of its angle (`Rot`):
+    /// its collider turned about its position. A collider without one is
+    /// axis-aligned. Part of the body's box in spatial storage, so writing
+    /// it re-bounds the row, as moving it does.
+    #[derive(Debug, PartialEq, Copy)]
+    pub struct Rotation: "physics::Rotation" {
+        pub c: f32,
+        pub s: f32,
+    }
+}
+
+impl Default for Rotation {
+    fn default() -> Rotation {
+        Rotation { c: 1.0, s: 0.0 }
+    }
+}
+
+impl Rotation {
+    pub fn from_angle(a: f32) -> Rotation {
+        Rotation::of(Rot::from_angle(a))
+    }
+
+    pub fn of(q: Rot) -> Rotation {
+        Rotation { c: q.c, s: q.s }
+    }
+
+    pub fn rot(&self) -> Rot {
+        Rot { c: self.c, s: self.s }
+    }
+
+    /// Radians, positive from +x toward +y (clockwise on a y-down screen).
+    pub fn angle(&self) -> f32 {
+        self.rot().angle()
+    }
+}
+
+component! {
+    /// How fast a body turns, in radians a second, positive from +x toward
+    /// +y. A dynamic body with a `Rotation` and a `Spin` turns: contacts
+    /// push it round, with the inertia of its shape and mass (a box's
+    /// `m (w² + h²) / 12`, a disc's `m r² / 2`). Without a `Spin` a body
+    /// keeps the rotation it has: that is the rotation lock, for a
+    /// platformer's player, its walkers, and anything a game wants upright.
+    /// A kinematic body with one turns at it; nothing turns it.
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Spin: "physics::Spin" {
+        pub w: f32,
     }
 }
 
@@ -135,6 +196,18 @@ impl Collider {
     pub fn sensing(self, layers: u32) -> Collider {
         Collider { senses: layers, ..self }
     }
+
+    /// The inverse inertia of a body of this shape per unit of inverse
+    /// mass: a box's inertia is `m (w² + h²) / 12`, a disc's `m r² / 2`.
+    pub fn inertia_per_mass(&self) -> f32 {
+        if self.shape == BOX { 3.0 / (self.hx * self.hx + self.hy * self.hy) } else { 2.0 / (self.hx * self.hx) }
+    }
+
+    /// How far its edge reaches from its center: how fast the edge of a
+    /// body turning at `w` moves is `w` times this.
+    pub fn reach(&self) -> f32 {
+        if self.shape == BOX { self.hx.hypot(self.hy) } else { self.hx }
+    }
 }
 
 component! {
@@ -179,6 +252,7 @@ component! {
     pub struct Manifold: "physics::Manifold" {
         pub nx: f32,
         pub ny: f32,
+        /// With points, the deepest point's.
         pub depth: f32,
         /// Pressing on each other at the end of the step: the solver pushed,
         /// or they overlap. A speculative contact is held before it touches,
@@ -186,6 +260,59 @@ component! {
         pub pressed: bool,
         /// Pressed the step before.
         pub was_pressed: bool,
+        /// How many of its `ContactPoints` are this step's: 0 unless either
+        /// end is turned.
+        pub points: u8,
+        /// How many points its last solve solved at, whose impulses are in
+        /// its `ContactPoints`: 0 if it was solved at its normal, neither end
+        /// turning. Here rather than there, so a contact without points
+        /// never reads its `ContactPoints`.
+        pub solved: u8,
+    }
+}
+
+component! {
+    /// A contact's points, when either end is turned: up to two, each with
+    /// its arms from both bodies' centers, its separation and its feature
+    /// id; and the impulses its last solve left at each, by feature, which
+    /// the next starts from. Two bodies that don't turn need no points (an
+    /// impulse through any point moves them the same), and most contacts
+    /// have none: so points are a component of their own, on every contact
+    /// (contacts stay one table) but written only where they're used, rather
+    /// than inline in `Manifold`, which cost a world where nothing turns 7%
+    /// of its step (physics.md, "Contact points").
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct ContactPoints: "physics::ContactPoints" {
+        /// Each point's arm from `a`'s center and from `b`'s, on the world's
+        /// axes: `[ax, ay, bx, by]` for the first point, then the second.
+        pub anchors: [f32; 8],
+        /// Each point's separation along the normal (negative: overlap).
+        pub separations: [f32; 2],
+        /// Each point's feature id: the edges or corners of the two shapes it
+        /// came from, as Box2D numbers them, which is what warm starting
+        /// matches from one step to the next.
+        pub ids: [u16; 2],
+        /// The last solve's impulses at its points (`Manifold::solved` of
+        /// them), along the normal and the tangent, by their features.
+        pub normals: [f32; 2],
+        pub tangents: [f32; 2],
+        pub solved_ids: [u16; 2],
+    }
+}
+
+impl ContactPoints {
+    /// Point `i`'s arms from `a` and from `b`.
+    pub fn anchors(&self, i: usize) -> (Vec2, Vec2) {
+        let a = &self.anchors[4 * i..4 * i + 4];
+        (Vec2::new(a[0], a[1]), Vec2::new(a[2], a[3]))
+    }
+
+    /// The last solve's impulses at the point with feature `id`, if it
+    /// solved one (of `solved`): Box2D's matching (`b2UpdateContact`). A
+    /// point new this step starts from nothing.
+    pub fn last(&self, solved: u8, id: u16) -> (f32, f32) {
+        let at = self.solved_ids[..solved as usize].iter().position(|&s| s == id);
+        at.map_or((0.0, 0.0), |k| (self.normals[k], self.tangents[k]))
     }
 }
 
@@ -203,7 +330,8 @@ component! {
 }
 
 component! {
-    /// A contact's impulses from its last solve, which the next starts from.
+    /// A contact's impulses from its last solve, which the next starts from
+    /// (with points, their sums; each point's is in `ContactPoints`).
     #[derive(Debug, Default, PartialEq, Copy)]
     pub struct Impulse: "physics::Impulse" {
         pub normal: f32,

@@ -6,29 +6,34 @@ use engine_api::engine_ecs::{Changes, Data, Declare, Filter, FrameCx, Param, Par
 use engine_api::{Bounds, Entity, Query, Row};
 
 use crate::shapes::{Aabb, Hit, Placed, Ray, Shape, Vec2, overlaps, raycast};
-use crate::{Collider, Position};
+use crate::{Collider, Position, Rotation};
 
 /// A query over what's somewhere: `Data`, `Filter` and `Changes` as for
 /// [`Query`], with entities found by where their colliders are. Shapes are
 /// as of the last re-sort, after whoever last moved them; the items are
 /// current. `Data` can't write `Position` or `Collider`, which the shapes
-/// are read from: move things with a query of your own, and its apply node
-/// puts them where a later `Spatial` finds them.
+/// are read from (and `Rotation`, for turned ones): move things with a
+/// query of your own, and its apply node puts them where a later `Spatial`
+/// finds them.
 pub struct Spatial<'w, D: Data, F = (), C = ()> {
     query: Query<'w, D, F, C>,
     shapes: Query<'w, (&'static Position, &'static Collider)>,
+    /// Looked up per shape found, and only if anything is turned.
+    turned: Query<'w, &'static Rotation>,
 }
+
+type Shapes = (Query<'static, (&'static Position, &'static Collider)>, Query<'static, &'static Rotation>);
 
 impl<D: Data + 'static, F: Filter, C: Changes> Param for Spatial<'static, D, F, C> {
     type Item<'w> = Spatial<'w, D, F, C>;
 
     fn declare(d: &mut Declare<'_>) -> ParamDecl {
-        <(Query<'static, D, F, C>, Query<'static, (&'static Position, &'static Collider)>)>::declare(d)
+        <(Query<'static, D, F, C>, Shapes)>::declare(d)
     }
 
     fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Spatial<'w, D, F, C> {
-        let (query, shapes) = <(Query<'static, D, F, C>, Query<'static, (&'static Position, &'static Collider)>)>::fetch(cx, decl);
-        Spatial { query, shapes }
+        let (query, (shapes, turned)) = <(Query<'static, D, F, C>, Shapes)>::fetch(cx, decl);
+        Spatial { query, shapes, turned }
     }
 }
 
@@ -37,7 +42,7 @@ fn bounds(a: &Aabb) -> Bounds {
 }
 
 fn placed(p: &Position, c: &Collider) -> Placed {
-    Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }
+    Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y), rot: None }
 }
 
 impl<D: Data, F, C> Spatial<'_, D, F, C> {
@@ -45,8 +50,13 @@ impl<D: Data, F, C> Spatial<'_, D, F, C> {
     /// copied out so the shapes' guards aren't held while the caller runs.
     fn search(&mut self, aabb: Aabb, mut keep: impl FnMut(&Placed) -> bool) -> Vec<(Entity, Placed)> {
         let mut out = Vec::new();
+        let turned = &mut self.turned;
+        let any_turned = !turned.is_empty();
         self.shapes.in_region(bounds(&aabb), |row, (p, c)| {
-            let shape = placed(p, c);
+            let mut shape = placed(p, c);
+            if any_turned {
+                shape.rot = turned.with(row.entity(), |_, q| q.rot());
+            }
             if keep(&shape) {
                 out.push((row.entity(), shape));
             }
@@ -67,7 +77,7 @@ impl<D: Data, F, C> Spatial<'_, D, F, C> {
     /// Whether any entity the query matches has a collider at `point`.
     pub fn any_at(&mut self, point: Vec2) -> bool {
         let mut any = false;
-        self.overlapping(Placed { shape: Shape::Box(Vec2::ZERO), at: point }, |_, _| any = true);
+        self.overlapping(Placed { shape: Shape::Box(Vec2::ZERO), at: point, rot: None }, |_, _| any = true);
         any
     }
 

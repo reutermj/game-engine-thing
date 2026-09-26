@@ -41,6 +41,11 @@ use physics::Position;
 /// a solver is up against (2026-09-24, found by the parallel solver's
 /// work).
 const PILES: [(u32, f32); 4] = [(1000, 40.0), (1000, 41.0), (10000, 400.0), (10000, 401.0)];
+/// Piles of bodies that turn (a `Rotation` and a `Spin` each), dropped
+/// staggered so they pile in any engine: the same computation on arrays,
+/// bit for bit, with contact points and angular terms; and what turning
+/// costs over the piles above.
+const TURNING: [(u32, f32); 2] = [(1000, 41.0), (10000, 401.0)];
 
 /// The number after `key` in `text`.
 fn field(text: &str, key: &str) -> f64 {
@@ -65,22 +70,29 @@ fn main() {
         "| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |"
     );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (n, width) in PILES {
+    // `ONLY=<text>`: only the cases whose "bodies box scene" contain it.
+    let only = std::env::var("ONLY").unwrap_or_default();
+    let piles = PILES.iter().map(|&(n, w)| (n, w, false)).chain(TURNING.iter().map(|&(n, w)| (n, w, true)));
+    for (n, width, turning) in piles {
         // Settled is still creeping (every body 1e-4 to 1e-2 a step); at rest
         // is still bit for bit, which the 10 000 are by about step 3000.
         for (scene, warmup) in [("falling", 1u32), ("settled", 400), ("at rest", 4000)] {
+            let scene = if turning { format!("{scene}, turning") } else { scene.to_string() };
+            if !format!("{n} {width} {scene}").contains(&only) {
+                continue;
+            }
             let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{}", std::process::id(), scene.replace(' ', "-")));
             let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
             e.load_batch(&manifest.mods).expect("loading the pile");
             e.send("pile", &format!("widen {width}")).unwrap();
-            e.send("pile", &format!("drop {n}")).unwrap();
+            e.send("pile", &format!("drop {n}{}", if turning { " staggered turning" } else { "" })).unwrap();
             e.send("lockstep", &format!("step {warmup}")).unwrap();
 
             let mut arrays = Arrays::snapshot(e.world());
             let mut t = Stages::default();
             let start = Instant::now();
             for _ in 0..FRAMES {
-                arrays.step(&mut t, solver::solve);
+                arrays.step(&mut t, arrays::WithPoints(solver::solve_points));
             }
             let array_frame = (start.elapsed().as_secs_f64() * 1e6 - t.fresh_sweep) / FRAMES as f64;
 
@@ -99,6 +111,15 @@ fn main() {
                 .filter(|(e, p)| ecs[e].x.to_bits() != p.x.to_bits() || ecs[e].y.to_bits() != p.y.to_bits())
                 .count();
             assert_eq!(differ, 0, "{n} {scene}: {differ} bodies ended elsewhere than the arrays put them");
+            let turned: HashMap<Entity, physics::Rotation> =
+                e.world().values::<physics::Rotation>().unwrap_or_default().into_iter().collect();
+            let differ = arrays
+                .entity
+                .iter()
+                .zip(&arrays.rot)
+                .filter(|(e, q)| turned.get(e).map(|t| (t.c.to_bits(), t.s.to_bits())) != q.map(|q| (q.c.to_bits(), q.s.to_bits())))
+                .count();
+            assert_eq!(differ, 0, "{n} {scene}: {differ} bodies turned otherwise than the arrays turned them");
             assert_eq!(field(&stats, "contacts") as usize, arrays.contacts.len(), "{n} {scene}: contacts");
 
             let f = FRAMES as f64;
@@ -106,6 +127,9 @@ fn main() {
             let systems = field(per_step, "gravity") + field(per_step, "contacts") + field(per_step, "solve");
             let pair = |ecs: f64, arr: f64| format!("{ecs:.0} / {arr:.0}");
             println!("  (the arrays' sweep, sorting afresh each step: {:.0} µs)", t.fresh_sweep / f);
+            if std::env::var_os("STAGES").is_some() {
+                println!("  (stages: {stages})");
+            }
             println!(
                 "| {n} | {width} | {scene} | {} | {} | {} | {} / – | {} | {} | {} | {} | {} | {} | {:.0} |",
                 arrays.contacts.len(),

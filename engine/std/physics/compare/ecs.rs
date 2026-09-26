@@ -8,11 +8,19 @@ use std::time::Instant;
 
 use engine_ecs::Entity;
 use engine_loader::engine::Engine;
-use physics::{Body, Collider, DYNAMIC, Manifold, Position, Vec2, Velocity};
+use physics::{Body, Collider, DYNAMIC, Manifold, Position, Rot, Rotation, Spin, Vec2, Velocity};
 
 use crate::arrays::{Arrays, Stages};
 use crate::scene::{GRAVITY, Scene, Spec};
 use crate::{Dyn, Sim};
+
+/// `TURN=2`: where rotation is locked, ours still gives every dynamic body a
+/// `Rotation` (and no `Spin`), as a lock by a flag or by infinite inertia
+/// would leave every body carrying one: what that costs a world where
+/// nothing turns (physics.md, "The rotation lock").
+fn oriented() -> bool {
+    std::env::var("TURN").is_ok_and(|t| t == "2")
+}
 
 /// The number after `key` in `text`.
 fn field(text: &str, key: &str) -> f64 {
@@ -33,7 +41,7 @@ pub struct Ecs {
 }
 
 impl Ecs {
-    pub fn new(manifest: &engine_control::Manifest, scene: &Scene, sleep: bool) -> Ecs {
+    pub fn new(manifest: &engine_control::Manifest, scene: &Scene, sleep: bool, turning: bool) -> Ecs {
         static RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let run = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("physics-compare-{}-{run}", std::process::id()));
@@ -43,6 +51,12 @@ impl Ecs {
         assert_eq!(Scene::parse(&scene.text()), Some(*scene));
         engine.send("scene", &format!("build {}", scene.text())).unwrap();
         let mut label = "ours (ECS)".to_string();
+        if turning {
+            engine.send("scene", "turn").unwrap();
+        } else if oriented() {
+            engine.send("scene", "orient").unwrap();
+            label += ", oriented";
+        }
         if sleep {
             engine.send("scene", "sleep default").unwrap();
             label += ", sleeping";
@@ -85,13 +99,17 @@ impl Sim for Ecs {
         let pos: HashMap<Entity, Position> = w.values::<Position>().unwrap().into_iter().collect();
         let vel: HashMap<Entity, Velocity> = w.values::<Velocity>().unwrap().into_iter().collect();
         let colliders: HashMap<Entity, Collider> = w.values::<Collider>().unwrap().into_iter().collect();
+        let rotations: HashMap<Entity, Rotation> = w.values::<Rotation>().unwrap_or_default().into_iter().collect();
+        let spins: HashMap<Entity, Spin> = w.values::<Spin>().unwrap_or_default().into_iter().collect();
         let mut bodies: Vec<(Entity, Body)> = w.values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).collect();
         bodies.sort_by_key(|(e, _)| *e);
         bodies
             .iter()
             .map(|(e, _)| {
                 let (p, v, c) = (pos[e], vel[e], colliders[e]);
-                Dyn { circle: c.shape == physics::CIRCLE, hx: c.hx, hy: c.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle: 0.0 }
+                let angle = rotations.get(e).map_or(0.0, |q| q.angle());
+                let w = spins.get(e).map_or(0.0, |s| s.w);
+                Dyn { circle: c.shape == physics::CIRCLE, hx: c.hx, hy: c.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle, w }
             })
             .collect()
     }
@@ -144,6 +162,8 @@ pub struct Flat {
     wall: f64,
     /// Where the dynamic bodies start: statics come first.
     statics: usize,
+    /// Whether the bodies turn, and so rain's drops do.
+    turning: bool,
 }
 
 fn collider(s: &Spec) -> Collider {
@@ -155,7 +175,16 @@ fn body(s: &Spec) -> Body {
 }
 
 impl Flat {
-    pub fn new(scene: &Scene, solve: crate::variants::Boxed, label: &str) -> Flat {
+    /// One of the variants of `variants.rs` (`arrays:<spec>`): a solver, and
+    /// how its points are warm-started.
+    pub fn variant(scene: &Scene, turning: bool, spec: &str, label: &str) -> Flat {
+        let v = crate::variants::parse(spec);
+        let mut flat = Flat::new(scene, turning, v.solve, label);
+        (flat.arrays.warm, flat.arrays.deepest) = (v.warm, v.deepest);
+        flat
+    }
+
+    pub fn new(scene: &Scene, turning: bool, solve: crate::variants::Boxed, label: &str) -> Flat {
         let specs = scene.build();
         let statics = specs.iter().take_while(|s| !s.dynamic).count();
         assert!(specs[statics..].iter().all(|s| s.dynamic), "statics first");
@@ -169,7 +198,18 @@ impl Flat {
         for (v, s) in arrays.vel.iter_mut().zip(&specs) {
             *v = Vec2::new(s.vx, s.vy);
         }
-        Flat { arrays, solve, label: label.to_string(), t: Stages::default(), wall: 0.0, statics }
+        let mut label = label.to_string();
+        if turning {
+            arrays = arrays.turning();
+        } else if oriented() {
+            for (q, b) in arrays.rot.iter_mut().zip(&arrays.body) {
+                if b.kind == DYNAMIC {
+                    *q = Some(Rot::IDENTITY);
+                }
+            }
+            label += ", oriented";
+        }
+        Flat { arrays, solve, label, t: Stages::default(), wall: 0.0, statics, turning }
     }
 }
 
@@ -181,7 +221,7 @@ impl Sim for Flat {
     fn step(&mut self, n: u32) {
         let start = Instant::now();
         for _ in 0..n {
-            self.arrays.step(&mut self.t, &*self.solve);
+            self.arrays.step(&mut self.t, crate::arrays::WithPoints(&*self.solve));
         }
         self.wall += start.elapsed().as_secs_f64() * 1e6;
     }
@@ -200,6 +240,8 @@ impl Sim for Flat {
             a.body.push(body(s));
             a.moving.push(i);
             a.by_x.push(i);
+            a.rot.push((self.turning || oriented()).then_some(Rot::IDENTITY));
+            a.spin.push(self.turning.then_some(0.0));
         }
         let gone = a.moving.len().saturating_sub(alive);
         if gone == 0 {
@@ -213,6 +255,8 @@ impl Sim for Flat {
         a.pos.drain(range.clone());
         a.vel.drain(range.clone());
         a.collider.drain(range.clone());
+        a.rot.drain(range.clone());
+        a.spin.drain(range.clone());
         a.body.drain(range);
         a.moving = a.moving.iter().copied().filter(|&i| keep(i)).map(moved).collect();
         a.by_x = a.by_x.iter().copied().filter(|&i| keep(i)).map(moved).collect();
@@ -228,7 +272,8 @@ impl Sim for Flat {
             .iter()
             .map(|&i| {
                 let (c, p, v) = (&a.collider[i as usize], a.pos[i as usize], a.vel[i as usize]);
-                Dyn { circle: c.shape == physics::CIRCLE, hx: c.hx, hy: c.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle: 0.0 }
+                let (angle, w) = (a.rot[i as usize].map_or(0.0, |q| q.angle()), a.spin[i as usize].unwrap_or(0.0));
+                Dyn { circle: c.shape == physics::CIRCLE, hx: c.hx, hy: c.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle, w }
             })
             .collect()
     }

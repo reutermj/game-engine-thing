@@ -185,6 +185,19 @@ rust_binary(
     ],
 )
 
+# The turned-box narrowphase by SAT and clipping (as it is) against GJK and
+# EPA, on the same pairs (see the source):
+#   ./bazel run -c opt //engine/std/physics:narrow_bench
+rust_binary(
+    name = "narrow_bench",
+    srcs = [
+        "narrow.rs",
+        "tests/narrow_bench.rs",
+    ],
+    crate_root = "tests/narrow_bench.rs",
+    deps = [":physics_interface"],
+)
+
 # Why `solve` copies bodies out of the world: the same solve over the same
 # pile's contacts with bodies kept each way (layout, pages, derived inverse
 # mass, order, in the world's own pages), each checked bit for bit:

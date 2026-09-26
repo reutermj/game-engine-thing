@@ -123,6 +123,29 @@ fn a_move_between_frames_is_where_the_next_query_looks() {
 }
 
 #[test]
+fn a_turned_collider_is_found_where_it_reaches_and_not_where_it_would_unturned() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let w = World::new();
+    // A 4 by 0.2 plank turned a quarter: it stands up, 0.2 wide and 4 tall.
+    let quarter = physics::Rotation::from_angle(std::f32::consts::FRAC_PI_2);
+    w.between_frames(Default::default()).unwrap().spawn((Position { x: 10.0, y: 10.0 }, Collider::rect(2.0, 0.1), quarter));
+    fn probe(_: &mut Cx, mut all: Spatial<&Position>) {
+        let mut found = |p: Vec2| {
+            let mut n = 0;
+            all.overlapping(rect(p, Vec2::new(0.05, 0.05)), |_, _| n += 1);
+            n
+        };
+        let (above, beside) = (found(Vec2::new(10.0, 8.3)), found(Vec2::new(11.7, 10.0)));
+        let hit = all.cast(Ray::new(Vec2::new(0.0, 8.5), Vec2::new(1.0, 0.0), 20.0), |hit, _, p| Some((hit.t, p.x)));
+        say(format!("{above} {beside} {:?}", hit.map(|(t, x)| format!("{t:.3} at {x}"))));
+    }
+    run(&w, probe, "probe");
+    // Up its length, found; where its unturned length would have been, not;
+    // a ray along x meets its narrow face.
+    assert_eq!(seen(), ["1 0 Some(\"9.900 at 10\")"]);
+}
+
+#[test]
 #[should_panic(expected = "two queries access physics::Position and one writes it")]
 fn a_spatial_query_conflicts_like_the_query_it_is() {
     let (w, _) = world();

@@ -61,6 +61,54 @@ pub struct Constraint {
     pub speed: f32,
 }
 
+/// What `tests/arrays.rs` asks of `solver.rs` for rotation, which this
+/// solver doesn't have: nothing turns, and a contact with points is refused.
+#[allow(dead_code)]
+pub use physics::Rot;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContactPoint {
+    pub ra: Vec2,
+    pub rb: Vec2,
+    pub separation: f32,
+    pub jn: f32,
+    pub jt: f32,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Points {
+    pub count: u8,
+    pub point: [ContactPoint; 2],
+    pub solved: bool,
+}
+
+#[allow(dead_code)]
+impl Constraint {
+    pub fn with_points(self, _: usize) -> Constraint {
+        panic!("the split impulse has no rotation")
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spinning {
+    pub body: u32,
+    pub w: f32,
+}
+
+#[allow(dead_code)]
+impl Spinning {
+    pub fn new(_: u32, _: f32, _: f32) -> Spinning {
+        panic!("the split impulse has no rotation")
+    }
+
+    pub fn turned_from(&self, _: Rot, _: f32) -> Option<Rot> {
+        None
+    }
+}
+
 pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32) {
     // What each contact's normal velocity must reach: stopped at the
     // surface for a speculative contact, bounced for a fast one. From the

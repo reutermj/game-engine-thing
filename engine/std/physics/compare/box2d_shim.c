@@ -4,8 +4,9 @@
 // Rust and kept in step with the pinned version by hand.
 //
 // Every body is set up the way the comparison needs (see compare.rs):
-// mass 1 whatever its shape, rotation locked, friction mixed by the least
-// and restitution by the greatest of the two, as //engine/std/physics does.
+// mass 1 whatever its shape, rotation locked or its inertia that of its
+// shape at mass 1, friction mixed by the least and restitution by the
+// greatest of the two, as //engine/std/physics does.
 
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,7 @@ static float greatest( float a, int ma, float b, int mb )
 
 bx_world* bx_new( float gx, float gy, int sleep, int continuous );
 void bx_free( bx_world* w );
-int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution );
+int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning );
 void bx_set_velocity( bx_world* w, int handle, float vx, float vy );
 void bx_remove( bx_world* w, int handle );
 void bx_step( bx_world* w, float dt, int substeps );
@@ -65,12 +66,12 @@ void bx_free( bx_world* w )
 	free( w );
 }
 
-int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution )
+int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning )
 {
 	b2BodyDef bd = b2DefaultBodyDef();
 	bd.type = dynamic ? b2_dynamicBody : b2_staticBody;
 	bd.position = (b2Vec2){ x, y };
-	bd.fixedRotation = true;
+	bd.fixedRotation = turning == 0;
 	b2BodyId body = b2CreateBody( w->id, &bd );
 
 	b2ShapeDef sd = b2DefaultShapeDef();
@@ -89,11 +90,14 @@ int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, fl
 	if ( dynamic )
 	{
 		// Mass 1 for every body, as the engine's Body::default() has it,
-		// rather than by density and area. Inertia 0, not any value: this
-		// call sets the inverse inertia from it without looking at
+		// rather than by density and area. Locked, inertia 0, not any value:
+		// this call sets the inverse inertia from it without looking at
 		// fixedRotation, so a body given 1 rotates after all (see
 		// docs/lore/box2d-set-mass-data-unlocks-a-fixed-rotation.md).
-		b2MassData m = { 1.0f, { 0.0f, 0.0f }, 0.0f };
+		// Turning, the inertia of the shape at mass 1 about its center, as
+		// the engine's `Collider::inertia_per_mass` has it.
+		float inertia = circle ? 0.5f * hx * hx : ( hx * hx + hy * hy ) / 3.0f;
+		b2MassData m = { 1.0f, { 0.0f, 0.0f }, turning ? inertia : 0.0f };
 		b2Body_SetMassData( body, m );
 	}
 
@@ -122,7 +126,8 @@ void bx_step( bx_world* w, float dt, int substeps )
 	b2World_Step( w->id, dt, substeps );
 }
 
-// Position, velocity and angle: x, y, vx, vy, radians.
+// Position, velocity, angle and angular velocity: x, y, vx, vy, radians,
+// radians a second.
 void bx_state( const bx_world* w, int handle, float* out )
 {
 	b2Vec2 p = b2Body_GetPosition( w->bodies[handle] );
@@ -132,6 +137,7 @@ void bx_state( const bx_world* w, int handle, float* out )
 	out[2] = v.x;
 	out[3] = v.y;
 	out[4] = b2Rot_GetAngle( b2Body_GetRotation( w->bodies[handle] ) );
+	out[5] = b2Body_GetAngularVelocity( w->bodies[handle] );
 }
 
 // The last step's b2Profile, all floats in milliseconds, in declaration

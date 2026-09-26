@@ -88,6 +88,54 @@ mod pile {
         until_asleep(&e, 1000.0, 60);
     }
 
+    /// A real pile of bodies that turn, at rest as soon as Box2D's and
+    /// Rapier's: on the comparison's `pile 1000, turning`, all three have
+    /// every body (and its edge) slower than sleeping's 0.05 by step 400,
+    /// ours 0.020 deep and theirs 0.12 and 0.10 (physics.md, "Rotation").
+    /// Then it falls asleep, and a game setting one spinning wakes it.
+    #[test]
+    fn a_real_pile_that_turns_comes_to_rest_as_soon_as_box2d_and_rapier_do() {
+        let e = game("PILE", "turning_pile");
+        send(&e, "pile", "widen 41");
+        send(&e, "pile", "drop 1000 staggered turning");
+        step(&e, 400);
+        let stats = send(&e, "pile", "stats");
+        assert!(field(&stats, "fastest") < 0.05, "{stats}");
+        assert!(field(&stats, "deepest") < 0.03, "{stats}");
+        assert_eq!(field(&stats, "escaped"), 0.0, "{stats}");
+        send(&e, "pile", "sleep default");
+        until_asleep(&e, 1000.0, 60);
+        // Stopped as they fell asleep, turning too, as their velocities are.
+        let spinning = e.world().values::<physics::Spin>().unwrap().iter().filter(|(_, s)| s.w != 0.0).count();
+        assert_eq!(spinning, 0, "asleep and still spinning");
+        send(&e, "pile", "spin 5");
+        step(&e, 1);
+        assert!(asleep(&e) < 1000.0, "a spun body wakes its island");
+    }
+
+    /// A box dropped on a turned static plank lands flat on it and slides
+    /// down: a static's rotation is in its box in storage, in its contacts'
+    /// geometry, and in what turns the box to meet it.
+    #[test]
+    fn a_box_dropped_on_a_turned_plank_lands_flat_and_slides_down_it() {
+        let e = game("PILE", "ramp");
+        send(&e, "pile", "ramp 20 20 30");
+        // The box: the one thing with a rotation and a velocity.
+        let b = |e: &Engine| {
+            let w = e.world();
+            let (box_, _) = w.values::<physics::Velocity>().unwrap()[0];
+            let q = w.values::<physics::Rotation>().unwrap().into_iter().find(|(e, _)| *e == box_).unwrap().1;
+            let p = w.values::<physics::Position>().unwrap().into_iter().find(|(e, _)| *e == box_).unwrap().1;
+            (p.x, p.y, q.angle())
+        };
+        step(&e, 40);
+        let (x, y, angle) = b(&e);
+        assert!((angle.to_degrees() - 30.0).abs() < 2.0, "lies along the plank: {angle}");
+        step(&e, 30);
+        let (x2, y2, _) = b(&e);
+        assert!(x2 > x + 0.1 && y2 > y, "slides down to the right: {x} {y} to {x2} {y2}");
+    }
+
     /// Physics gathers colliders with a body and a velocity, with one and
     /// not the other, and with neither, apart: a shelf of either odd kind
     /// has to hold what falls on it.

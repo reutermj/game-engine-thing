@@ -1,7 +1,10 @@
 //! The stress demo: a walled box that bodies are dropped into.
 //!
 //!   widen <w>  rebuild the box's walls w wide, for piles bigger than ~1100
-//!   drop <n>   drop n bodies, circles and boxes in turn, in rows from the floor up
+//!   drop <n> [staggered] [turning]  drop n bodies, circles and boxes in
+//!              turn, in rows from the floor up; every other row shifted
+//!              half a body over; each with a `Rotation` and a `Spin`, so
+//!              it turns
 //!   sleep <speed> <time>  turn on sleeping (see `physics::Sleep`), which
 //!              the pile has off, for the benchmarks
 //!   sleep off  turn it off again
@@ -9,6 +12,10 @@
 //!   kick <vx> <vy> [newest | naps]  set the velocity of the first body
 //!              dropped (or one of the island last to fall asleep, or the
 //!              bodies `nap` spawned), as a game would a sleeping body's
+//!   spin <w>   set the first body's `Spin`, as a game would a sleeping
+//!              body's
+//!   ramp <x> <y> <degrees>  a static plank 6 long, turned, centered at x,
+//!              y, and a box that turns a unit above its middle
 //!   despawn    despawn the first body dropped, at the bottom
 //!   despawn nap  that, and spawn a body asleep (with `Asleep`) above the box
 //!   nap later  spawn an entity asleep above the box that isn't a body yet
@@ -35,7 +42,7 @@
 //!   lift <vy>  give the shelf that has no velocity one, up at vy
 
 use engine_api::{Cx, Entity, Mod, WorldMut, export_mod};
-use physics::{Asleep, Body, Collider, Gravity, Placed, Position, Shape, Sleep, Touching, Vec2, Velocity};
+use physics::{Asleep, Body, Collider, Gravity, Placed, Position, Rotation, Shape, Sleep, Spin, Touching, Vec2, Velocity, separation};
 
 pub const WIDTH: f32 = 40.0;
 pub const HEIGHT: f32 = 30.0;
@@ -103,7 +110,7 @@ impl Pile {
         ];
     }
 
-    fn drop_bodies(&mut self, world: &mut WorldMut, n: u32, staggered: bool) {
+    fn drop_bodies(&mut self, world: &mut WorldMut, n: u32, staggered: bool, turning: bool) {
         // Rows from the floor up, a little apart so each falls a little, and
         // jittered so the pile doesn't stand in perfect columns. The jitter
         // is a function of the index, so a drop is the same on every run.
@@ -117,16 +124,31 @@ impl Pile {
             let at = Position { x: 1.5 + col as f32 * 1.2 + jitter + shift, y: HEIGHT - 1.0 - row as f32 * 1.2 };
             let collider = if k % 2 == 0 { Collider::circle(RADIUS) } else { Collider::rect(RADIUS, RADIUS) };
             let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
-            world.spawn((at, Velocity::default(), body, collider));
+            let e = world.spawn((at, Velocity::default(), body, collider));
+            if turning {
+                world.insert(e, Rotation::default());
+                world.insert(e, Spin::default());
+            }
         }
         self.dropped += n;
     }
 }
 
 fn stats(world: &mut WorldMut, width: f32) -> String {
+    let mut rotations = std::collections::HashMap::new();
+    world.for_each::<&Rotation>(|e, q| {
+        rotations.insert(e, q.rot());
+    });
+    // How fast its edge moves, too, for a body that turns.
+    let mut spins = std::collections::HashMap::new();
+    world.for_each::<(&Spin, &Collider)>(|e, (s, c)| {
+        spins.insert(e, s.w.abs() * c.reach());
+    });
     let mut bodies: Vec<(Placed, f32)> = Vec::new();
-    world.for_each::<(&Position, &Velocity, &Collider)>(|_, (p, v, c)| {
-        bodies.push((Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y) }, Vec2::new(v.x, v.y).len()));
+    world.for_each::<(&Position, &Velocity, &Collider)>(|e, (p, v, c)| {
+        let rot = rotations.get(&e).copied();
+        let speed = Vec2::new(v.x, v.y).len().max(spins.get(&e).copied().unwrap_or(0.0));
+        bodies.push((Placed { shape: Shape::of(c), at: Vec2::new(p.x, p.y), rot }, speed));
     });
     let resting = bodies.iter().filter(|(_, speed)| *speed < REST).count();
     let escaped = bodies.iter().filter(|(b, _)| b.at.x < 0.0 || b.at.x > width || b.at.y < -HEIGHT / 2.0 || b.at.y > HEIGHT).count();
@@ -144,6 +166,9 @@ fn stats(world: &mut WorldMut, width: f32) -> String {
 
 /// How far two of the pile's shapes overlap, or 0.
 fn depth(a: &Placed, b: &Placed) -> f32 {
+    if a.rot.is_some() || b.rot.is_some() {
+        return (-separation(a, b)).max(0.0);
+    }
     let d = b.at - a.at;
     let (ha, hb) = (a.shape.half_extents(), b.shape.half_extents());
     match (a.shape, b.shape) {
@@ -190,9 +215,11 @@ impl Mod for Pile {
                 // `drop <n> staggered`: every other row shifted half a body,
                 // so each lands between two, a real pile in any engine (the
                 // comparison's; physics.md, "Against other engines").
-                let (n, staggered) = n.trim().split_once(' ').map_or((n.trim(), false), |(n, how)| (n, how == "staggered"));
+                let mut words = n.split_whitespace();
+                let n = words.next().unwrap_or("");
+                let how: Vec<&str> = words.collect();
                 let n = n.parse().map_err(|e| format!("{n:?}: {e}"))?;
-                self.drop_bodies(&mut world, n, staggered);
+                self.drop_bodies(&mut world, n, how.contains(&"staggered"), how.contains(&"turning"));
                 Ok(format!("dropped {n}"))
             }
             Some(("sleep", "off")) => {
@@ -209,6 +236,21 @@ impl Mod for Pile {
                 world.for_each::<(&Velocity, &Body)>(|e, _| first = Some(first.map_or(e, |f: Entity| f.min(e))));
                 world.with_mut::<Collider, _>(first.ok_or("nothing to grow")?, |c| (c.hx, c.hy) = (h, h));
                 Ok("grown".into())
+            }
+            Some(("spin", w)) => {
+                let w: f32 = w.trim().parse().map_err(|e| format!("{w:?}: {e}"))?;
+                let first = first_body(&mut world).ok_or("nothing to spin")?;
+                world.with_mut::<Spin, _>(first, |s| s.w = w).ok_or("the first body doesn't turn")?;
+                Ok(format!("spun {first:?}"))
+            }
+            Some(("ramp", args)) => {
+                let v: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let &[x, y, degrees] = v.as_slice() else { return Err("ramp <x> <y> <degrees>".into()) };
+                world.spawn((Position { x, y }, Collider::rect(3.0, 0.25), Rotation::from_angle(degrees.to_radians())));
+                let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
+                let at = Position { x, y: y - 1.0 };
+                let e = world.spawn((at, Velocity::default(), body, Collider::rect(RADIUS, RADIUS), Rotation::default(), Spin::default()));
+                Ok(format!("a ramp, and {e:?} on it"))
             }
             Some(("kick", args)) => {
                 let mut args = args.split_whitespace().map(|a| a.parse::<f32>().map_err(|e| format!("{a:?}: {e}")));

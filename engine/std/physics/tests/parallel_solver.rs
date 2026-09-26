@@ -1133,7 +1133,7 @@ struct Input {
 /// Takes one more step, keeping what its solver was given.
 fn capture(a: &mut Arrays) -> Input {
     let mut input = None;
-    a.step(&mut Stages::default(), |b, c, dt| {
+    a.step(&mut Stages::default(), |b: &mut [SolverBody], c: &mut [Constraint], dt| {
         input = Some(Input { bodies: b.to_vec(), contacts: c.to_vec() });
         solver::solve(b, c, dt);
     });
@@ -1685,6 +1685,11 @@ fn clone_arrays(a: &Arrays) -> Arrays {
         contacts: a.contacts.clone(),
         by_x: a.by_x.clone(),
         time_fresh_sweep: false,
+        rot: a.rot.clone(),
+        spin: a.spin.clone(),
+        warm: a.warm,
+        deepest: a.deepest,
+        points: a.points.clone(),
     }
 }
 

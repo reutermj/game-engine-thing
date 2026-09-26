@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use physics::{Placed, Rot, Shape, Vec2};
+
 use crate::Dyn;
 use crate::scene::{Scene, Spec};
 
@@ -28,11 +30,22 @@ pub struct Quality {
     /// Kinetic energy per body (mass 1).
     pub energy: f64,
     pub escaped: usize,
+    /// The most a box is turned from resting on a face, in degrees (0 to
+    /// 45): how far a pyramid or a stack of boxes has toppled.
+    pub tilt: f32,
 }
 
-/// Signed distance between two shapes, negative when they overlap:
-/// axis-aligned boxes and circles, since rotation is locked everywhere.
+/// Signed distance between two shapes, negative when they overlap: turned
+/// ones by their faces' separating axes (`physics::separation`), the rest
+/// axis-aligned as before rotation.
 fn gap(a: &Dyn, b: &Dyn) -> f32 {
+    if a.angle != 0.0 || b.angle != 0.0 {
+        let placed = |d: &Dyn| {
+            let shape = if d.circle { Shape::Circle(d.hx) } else { Shape::Box(Vec2::new(d.hx, d.hy)) };
+            Placed { shape, at: Vec2::new(d.x, d.y), rot: Some(Rot::from_angle(d.angle)) }
+        };
+        return physics::separation(&placed(a), &placed(b));
+    }
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     match (a.circle, b.circle) {
         (true, true) => (dx * dx + dy * dy).sqrt() - a.hx - b.hx,
@@ -51,7 +64,7 @@ fn gap(a: &Dyn, b: &Dyn) -> f32 {
 }
 
 fn as_dyn(s: &Spec) -> Dyn {
-    Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0 }
+    Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 }
 }
 
 fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -62,10 +75,11 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
-pub fn measure(scene: &Scene, bodies: &[Dyn]) -> Quality {
-    // Every measure here takes shapes to be axis-aligned.
+/// `turning`: the bodies may turn; if not, each must still face as it
+/// started, or an engine turned what should have been locked.
+pub fn measure(scene: &Scene, bodies: &[Dyn], turning: bool) -> Quality {
     let turned = bodies.iter().filter(|b| b.angle.abs() > 1e-6).count();
-    assert_eq!(turned, 0, "{turned} bodies turned: rotation is not locked");
+    assert!(turning || turned == 0, "{turned} bodies turned: rotation is not locked");
     let statics: Vec<Dyn> = scene.build().iter().filter(|s| !s.dynamic).map(as_dyn).collect();
     // A grid of unit cells: no body is wider than one, so a pair within
     // `TOUCH` is in neighboring cells.
@@ -111,8 +125,19 @@ pub fn measure(scene: &Scene, bodies: &[Dyn]) -> Quality {
         }
     }
     let islands = (0..bodies.len()).filter(|&i| find(&mut parent, i) == i).count();
-    let speeds: Vec<f32> = bodies.iter().map(|b| (b.vx * b.vx + b.vy * b.vy).sqrt()).collect();
+    let speeds: Vec<f32> = bodies.iter().map(Dyn::speed).collect();
     let n = bodies.len().max(1) as f64;
+    // Kinetic energy, with mass 1: the turning part by each shape's inertia.
+    let energy = |b: &Dyn| {
+        let inertia = if b.circle { b.hx * b.hx / 2.0 } else { (b.hx * b.hx + b.hy * b.hy) / 3.0 };
+        0.5 * ((b.vx * b.vx + b.vy * b.vy) as f64 + (inertia * b.w * b.w) as f64)
+    };
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let tilt = bodies
+        .iter()
+        .filter(|b| !b.circle)
+        .map(|b| (b.angle - (b.angle / quarter).round() * quarter).abs().to_degrees())
+        .fold(0.0, f32::max);
     Quality {
         bodies: bodies.len(),
         contacts_per_body: touching as f64 / n,
@@ -122,8 +147,9 @@ pub fn measure(scene: &Scene, bodies: &[Dyn]) -> Quality {
         deep,
         mean_speed: speeds.iter().map(|&s| s as f64).sum::<f64>() / n,
         max_speed: speeds.iter().copied().fold(0.0, f32::max),
-        energy: speeds.iter().map(|&s| 0.5 * (s as f64) * (s as f64)).sum::<f64>() / n,
+        energy: bodies.iter().map(energy).sum::<f64>() / n,
         escaped: bodies.iter().filter(|b| scene.escaped(b.x, b.y)).count(),
+        tilt,
     }
 }
 

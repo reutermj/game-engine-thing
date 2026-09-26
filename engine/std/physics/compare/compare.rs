@@ -56,8 +56,20 @@ pub struct Dyn {
     pub y: f32,
     pub vx: f32,
     pub vy: f32,
-    /// Radians: 0 always, or a body turned that should have been locked.
+    /// Radians: 0 always where rotation is locked, or a body turned that
+    /// should have been locked.
     pub angle: f32,
+    /// Radians a second.
+    pub w: f32,
+}
+
+impl Dyn {
+    /// How fast it moves: its center, or its edge if that's faster, as
+    /// sleeping goes by in ours and Box2D.
+    pub fn speed(&self) -> f32 {
+        let reach = if self.circle { self.hx } else { self.hx.hypot(self.hy) };
+        (self.vx * self.vx + self.vy * self.vy).sqrt().max(self.w.abs() * reach)
+    }
 }
 
 /// One engine running one scene.
@@ -82,6 +94,8 @@ pub trait Sim {
 struct Case {
     name: String,
     scene: Scene,
+    /// Whether bodies turn, or have their rotation locked.
+    turning: bool,
     /// Steps before the ones timed, and how many are timed.
     warmup: u32,
     steps: u32,
@@ -148,7 +162,7 @@ fn run(case: &Case, sim: &mut dyn Sim) -> Run {
             .build()
             .iter()
             .filter(|s| s.dynamic)
-            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0 })
+            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 })
             .collect();
         quality::moved(&start, &bodies)
     } else {
@@ -162,7 +176,7 @@ fn run(case: &Case, sim: &mut dyn Sim) -> Run {
         stages: sim.stages().into_iter().map(|(k, us)| (k, us / steps)).collect(),
         contacts: sim.contacts(),
         native: sim.native(),
-        quality: quality::measure(&case.scene, &bodies),
+        quality: quality::measure(&case.scene, &bodies, case.turning),
         drift,
         from_start,
         bodies,
@@ -174,7 +188,8 @@ fn median(v: &mut [f64]) -> f64 {
     v[v.len() / 2]
 }
 
-type Make<'a> = Box<dyn Fn(&Scene) -> Box<dyn Sim> + 'a>;
+/// An engine on a scene, whose bodies turn or not.
+type Make<'a> = Box<dyn Fn(&Scene, bool) -> Box<dyn Sim> + 'a>;
 
 fn main() {
     let manifest = engine_control::read_manifest(&std::env::var("SCENE_GAME").unwrap()).unwrap();
@@ -183,24 +198,27 @@ fn main() {
     let sleep = env("SLEEP").is_some();
 
     // By name, which `ENGINES` picks from before any is built.
-    let mut engines: Vec<(String, Make)> = vec![("ours (ECS)".into(), Box::new(|s| Box::new(ecs::Ecs::new(&manifest, s, sleep))))];
+    let mut engines: Vec<(String, Make)> = vec![("ours (ECS)".into(), Box::new(|s, t| Box::new(ecs::Ecs::new(&manifest, s, sleep, t))))];
     if !sleep {
-        engines.push(("ours (arrays)".into(), Box::new(|s| Box::new(ecs::Flat::new(s, Box::new(solver::solve), "ours (arrays)")))));
+        engines.push((
+            "ours (arrays)".into(),
+            Box::new(|s, t| Box::new(ecs::Flat::new(s, t, Box::new(solver::solve_points), "ours (arrays)"))),
+        ));
     }
-    engines.push(("Box2D".into(), Box::new(move |s| Box::new(box2d::Box2d::new(s, 4, sleep)))));
-    engines.push(("Rapier".into(), Box::new(move |s| Box::new(rapier::Rapier::new(s, 4, sleep)))));
+    engines.push(("Box2D".into(), Box::new(move |s, t| Box::new(box2d::Box2d::new(s, 4, sleep, t)))));
+    engines.push(("Rapier".into(), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, 4, sleep, t)))));
     for v in env("VARIANTS").iter().flat_map(|v| v.split(",")) {
         if let Some(spec) = v.strip_prefix("arrays:") {
             let label = format!("ours (arrays) {spec}");
             let spec = spec.to_string();
-            engines.push((label.clone(), Box::new(move |s| Box::new(ecs::Flat::new(s, variants::parse(&spec), &label)))));
+            engines.push((label.clone(), Box::new(move |s, t| Box::new(ecs::Flat::variant(s, t, &spec, &label)))));
             continue;
         }
         let (which, n) = v.split_once(":").expect("VARIANTS: box2d:<substeps>, rapier:<iterations> or arrays:<solver>");
         let n: usize = n.parse().expect("a number");
         match which {
-            "box2d" => engines.push((format!("Box2D {n}"), Box::new(move |s| Box::new(box2d::Box2d::new(s, n as i32, sleep))))),
-            "rapier" => engines.push((format!("Rapier {n}"), Box::new(move |s| Box::new(rapier::Rapier::new(s, n, sleep))))),
+            "box2d" => engines.push((format!("Box2D {n}"), Box::new(move |s, t| Box::new(box2d::Box2d::new(s, n as i32, sleep, t))))),
+            "rapier" => engines.push((format!("Rapier {n}"), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, n, sleep, t))))),
             other => panic!("no engine {other}"),
         }
     }
@@ -209,28 +227,53 @@ fn main() {
         engines.retain(|(name, _)| wanted.iter().any(|w| name.to_lowercase().contains(w.as_str())));
     }
 
-    let mut cases = Vec::new();
+    let mut cases: Vec<Case> = Vec::new();
     // The pile as :tax runs it, whose columns stand in the other engines:
     // for how each settles, not for time.
-    cases.push(Case { name: "columns 1000".into(), scene: Scene::Pile { n: 1000, width: 41.0, stagger: false }, warmup: 400, steps: 60 });
+    cases.push(Case {
+        turning: false,
+        name: "columns 1000".into(),
+        scene: Scene::Pile { n: 1000, width: 41.0, stagger: false },
+        warmup: 400,
+        steps: 60,
+    });
     for (n, width) in [(1000, 41.0), (10000, 401.0)] {
         let scene = Scene::Pile { n, width, stagger: true };
-        cases.push(Case { name: format!("pile {n}, falling"), scene, warmup: 1, steps: 60 });
-        cases.push(Case { name: format!("pile {n}, settled"), scene, warmup: 400, steps: 60 });
+        cases.push(Case { turning: false, name: format!("pile {n}, falling"), scene, warmup: 1, steps: 60 });
+        cases.push(Case { turning: false, name: format!("pile {n}, settled"), scene, warmup: 400, steps: 60 });
         if env("LONG").is_some() {
-            cases.push(Case { name: format!("pile {n}, at rest"), scene, warmup: 4000, steps: 60 });
+            cases.push(Case { turning: false, name: format!("pile {n}, at rest"), scene, warmup: 4000, steps: 60 });
         }
     }
     for base in [20, 100] {
         let boxes = base * (base + 1) / 2;
-        cases.push(Case { name: format!("pyramid {boxes}"), scene: Scene::Pyramid { base }, warmup: 600, steps: 60 });
+        cases.push(Case { turning: false, name: format!("pyramid {boxes}"), scene: Scene::Pyramid { base }, warmup: 600, steps: 60 });
     }
     // Whether the big one still stands after a minute.
-    cases.push(Case { name: "pyramid 5050, a minute on".into(), scene: Scene::Pyramid { base: 100 }, warmup: 3600, steps: 60 });
+    cases.push(Case {
+        turning: false,
+        name: "pyramid 5050, a minute on".into(),
+        scene: Scene::Pyramid { base: 100 },
+        warmup: 3600,
+        steps: 60,
+    });
     for (n, width) in [(1000, 81.0), (10000, 801.0)] {
         // Timed once it is full and the first drops have been removed a
         // while: the churn of a steady state.
-        cases.push(Case { name: format!("rain {n}"), scene: Scene::Rain { n, width }, warmup: RAIN_LIFE + 240, steps: 60 });
+        cases.push(Case { turning: false, name: format!("rain {n}"), scene: Scene::Rain { n, width }, warmup: RAIN_LIFE + 240, steps: 60 });
+    }
+    // `TURN=0`: rotation locked everywhere, as the comparison was until
+    // rotation (the default is both); `TURN=1`: only bodies that turn;
+    // `TURN=2`: locked, ours with a `Rotation` on every body (see `ecs.rs`).
+    let turn = env("TURN").unwrap_or_default();
+    let turning: Vec<Case> = cases
+        .iter()
+        .map(|c| Case { turning: true, name: format!("{}, turning", c.name), scene: c.scene, warmup: c.warmup, steps: c.steps })
+        .collect();
+    match turn.as_str() {
+        "0" | "2" => {}
+        "1" => cases = turning,
+        _ => cases.extend(turning),
     }
     if let Some(only) = env("ONLY") {
         cases.retain(|c| c.name.contains(&only));
@@ -246,7 +289,7 @@ fn main() {
         let mut runs: BTreeMap<usize, Vec<Run>> = BTreeMap::new();
         for rep in 0..reps {
             for (k, (_, make)) in engines.iter().enumerate() {
-                let mut sim = make(&case.scene);
+                let mut sim = make(&case.scene, case.turning);
                 let r = run(case, sim.as_mut());
                 eprintln!("{} {rep}: {} {:.0} µs", case.name, r.label, r.frame);
                 runs.entry(k).or_default().push(r);
@@ -265,11 +308,12 @@ const REST: f32 = 0.05;
 fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
     let mut seen = Vec::new();
     for case in cases {
-        if matches!(case.scene, Scene::Rain { .. }) || seen.contains(&case.scene) {
+        if matches!(case.scene, Scene::Rain { .. }) || seen.contains(&(case.scene, case.turning)) {
             continue;
         }
-        seen.push(case.scene);
-        println!("### settling: {}, {max} steps\n", case.scene.text());
+        seen.push((case.scene, case.turning));
+        let turning = if case.turning { ", turning" } else { "" };
+        println!("### settling: {}{turning}, {max} steps\n", case.scene.text());
         println!(
             "| engine | first at rest / at rest from step | fastest at 100 / 200 / 400 | energy at 400 | deepest at 400 (over 0.01) | deepest / mean at end (over 0.01) | energy at end | top moved | µs a step |"
         );
@@ -279,10 +323,10 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
             .build()
             .iter()
             .filter(|s| s.dynamic)
-            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0 })
+            .map(|s| Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 })
             .collect();
         for (_, make) in engines {
-            let mut sim = make(&case.scene);
+            let mut sim = make(&case.scene, case.turning);
             let (mut rest_from, mut first_rest, mut fastest) = (None, None, Vec::new());
             let mut q400 = None;
             let mut wall = 0.0;
@@ -293,14 +337,13 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
                 wall += t.elapsed().as_secs_f64();
                 step += 10;
                 let bodies = sim.bodies();
-                let top = bodies.iter().map(|b| (b.vx * b.vx + b.vy * b.vy).sqrt()).fold(0.0, f32::max);
+                let top = bodies.iter().map(Dyn::speed).fold(0.0, f32::max);
                 if top < REST {
                     rest_from.get_or_insert(step);
                     first_rest.get_or_insert(step);
                 } else {
                     if rest_from.is_some() && std::env::var_os("TRACE").is_some() {
-                        let (i, b) =
-                            bodies.iter().enumerate().max_by(|a, b| a.1.vx.hypot(a.1.vy).total_cmp(&b.1.vx.hypot(b.1.vy))).unwrap();
+                        let (i, b) = bodies.iter().enumerate().max_by(|a, b| a.1.speed().total_cmp(&b.1.speed())).unwrap();
                         eprintln!("{}: moving again at {step}: body {i} at {:.2}, {:.2} at {top:.3}", sim.label(), b.x, b.y);
                     }
                     rest_from = None;
@@ -309,11 +352,11 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
                     fastest.push(top);
                 }
                 if step == 400 {
-                    q400 = Some(quality::measure(&case.scene, &bodies));
+                    q400 = Some(quality::measure(&case.scene, &bodies, case.turning));
                 }
             }
             let bodies = sim.bodies();
-            let q = quality::measure(&case.scene, &bodies);
+            let q = quality::measure(&case.scene, &bodies, case.turning);
             let q400 = q400.unwrap_or_default();
             let top = match case.scene {
                 Scene::Pyramid { .. } => format!("{:.3}", bodies.last().unwrap().y - start.last().unwrap().y),
@@ -361,14 +404,14 @@ fn report(case: &Case, runs: &BTreeMap<usize, Vec<Run>>) {
     }
     println!();
     print!("| engine | bodies | contacts a body | islands | deepest | mean overlap | over 0.01 | mean speed | fastest | energy a body ");
-    println!("| drift a second, mean / most | from start, mean / most | escaped |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| drift a second, mean / most | from start, mean / most | escaped | most tilted (°) |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for rs in runs.values() {
         let (r, q) = (&rs[0], &rs[0].quality);
         let pair = |(mean, max): (f64, f32)| if mean.is_nan() { "–".to_string() } else { format!("{mean:.4} / {max:.3}") };
         print!("| {} | {} | {:.2} | {} ", r.label, q.bodies, q.contacts_per_body, q.islands);
         print!("| {:.4} | {:.4} | {} | {:.4} | {:.3} | {:.2e} ", q.max_depth, q.mean_depth, q.deep, q.mean_speed, q.max_speed, q.energy);
-        println!("| {} | {} | {} |", pair(r.drift), pair(r.from_start), q.escaped);
+        println!("| {} | {} | {} | {:.1} |", pair(r.drift), pair(r.from_start), q.escaped, q.tilt);
     }
     println!();
     for rs in runs.values() {

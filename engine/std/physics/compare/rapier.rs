@@ -12,6 +12,7 @@ pub struct Rapier {
     world: PhysicsWorld,
     label: String,
     sleep: bool,
+    turning: bool,
     dynamic: VecDeque<(RigidBodyHandle, Spec)>,
     /// Per stage, milliseconds summed since `reset`.
     time: Vec<(String, f64)>,
@@ -19,7 +20,7 @@ pub struct Rapier {
 
 impl Rapier {
     /// `iterations` is `num_solver_iterations`, 4 by default.
-    pub fn new(scene: &Scene, iterations: usize, sleep: bool) -> Rapier {
+    pub fn new(scene: &Scene, iterations: usize, sleep: bool, turning: bool) -> Rapier {
         let mut world = PhysicsWorld::new();
         world.gravity = Vector::new(0.0, GRAVITY);
         let defaults = world.integration_parameters.num_solver_iterations;
@@ -29,7 +30,7 @@ impl Rapier {
         if sleep {
             label += ", sleeping";
         }
-        let mut r = Rapier { world, label, sleep, dynamic: VecDeque::new(), time: Vec::new() };
+        let mut r = Rapier { world, label, sleep, turning, dynamic: VecDeque::new(), time: Vec::new() };
         for s in scene.build() {
             r.add(&s);
         }
@@ -50,8 +51,10 @@ impl Rapier {
             self.world.insert(RigidBodyBuilder::fixed().translation(at), collider);
             return;
         }
-        let body = RigidBodyBuilder::dynamic().translation(at).linvel(Vector::new(s.vx, s.vy)).lock_rotations().can_sleep(self.sleep);
-        // Mass 1 whatever the shape, as in the engine.
+        let body = RigidBodyBuilder::dynamic().translation(at).linvel(Vector::new(s.vx, s.vy)).can_sleep(self.sleep);
+        let body = if self.turning { body } else { body.lock_rotations() };
+        // Mass 1 whatever the shape, as in the engine; turning, the inertia
+        // follows from the shape at that mass, as the engine's does.
         let (h, _) = self.world.insert(body, collider.mass(1.0));
         self.dynamic.push_back((h, *s));
     }
@@ -112,7 +115,7 @@ impl Sim for Rapier {
             .map(|(h, s)| {
                 let b = &self.world.bodies[*h];
                 let (p, v) = (b.translation(), b.linvel());
-                Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle: b.rotation().angle() }
+                Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: p.x, y: p.y, vx: v.x, vy: v.y, angle: b.rotation().angle(), w: b.angvel() }
             })
             .collect()
     }

@@ -19,18 +19,53 @@
 //!   static contact's `static` times as stiff), `zeta`, `push`, `slop` (a
 //!   depth left unpushed), `bf=1` friction in the pushing pass too, `g=0`
 //!   gravity all in the first substep instead of a share in each.
+//! - `rot/<key>=<value>/...`: `solver::solve_points` with rotation's
+//!   choices changed (physics.md, "Rotation"): `sep` how a point's
+//!   separation follows its bodies turning (0 its arms turned, as Box2D; 1
+//!   to first order; 2 not at all), `int` how rotation is carried through
+//!   the substeps (0 as a rotation, as Box2D; 1 as an angle), `relax`,
+//!   `sub`, `warm` how points are warm-started (0 not at all; 1 by feature
+//!   id, as Box2D; 2 by the nearest last point, as parry can; 3 by feature
+//!   id, and a new feature's by the nearest), `deepest=1`
+//!   a contact's deepest point alone.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use physics::Vec2;
 
-use crate::solver::{BOUNCE_THRESHOLD, Constraint, SolverBody};
+use crate::arrays::Warm;
+use crate::solver::{BOUNCE_THRESHOLD, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, solve_with};
 use crate::split_impulse as old;
 
-pub type Boxed = Box<dyn Fn(&mut [SolverBody], &mut [Constraint], f32)>;
+/// A solver for the arrays: over bodies some of which may turn and
+/// contacts some of which may have points, which only
+/// `solver::solve_points` and its `rot` variants solve.
+pub type Boxed = Box<dyn Fn(&mut [SolverBody], &mut [Spinning], &mut [Constraint], &mut [Points], f32)>;
 
-pub fn parse(spec: &str) -> Boxed {
+/// A solver without rotation, refusing a scene where something turns.
+fn without_points(f: impl Fn(&mut [SolverBody], &mut [Constraint], f32) + 'static) -> Boxed {
+    Box::new(move |b, s, c, p, dt| {
+        assert!(p.is_empty() && s.is_empty(), "this variant has no rotation");
+        f(b, c, dt)
+    })
+}
+
+/// A variant: its solver, and how the arrays feed it: how contact points
+/// are warm-started, and whether a contact keeps only its deepest point.
+pub struct Variant {
+    pub solve: Boxed,
+    pub warm: Warm,
+    pub deepest: bool,
+}
+
+impl Variant {
+    fn of(solve: Boxed) -> Variant {
+        Variant { solve, warm: Warm::Ids, deepest: false }
+    }
+}
+
+pub fn parse(spec: &str) -> Variant {
     let mut parts = spec.split("/");
     let name = parts.next().unwrap();
     let kvs: Vec<(String, f32)> = parts
@@ -51,7 +86,7 @@ pub fn parse(spec: &str) -> Boxed {
             }
         }
         let ages = RefCell::new(HashMap::new());
-        return Box::new(move |b, c, dt| split(&s, &mut ages.borrow_mut(), b, c, dt));
+        return Variant::of(without_points(move |b, c, dt| split(&s, &mut ages.borrow_mut(), b, c, dt)));
     }
     if name == "ngs" {
         let mut s = Ngs { iterations: 2, beta: 0.2, slop: old::SLOP, max: 0.2 };
@@ -64,7 +99,24 @@ pub fn parse(spec: &str) -> Boxed {
                 _ => panic!("ngs: {k}"),
             }
         }
-        return Box::new(move |b, c, dt| ngs(&s, b, c, dt));
+        return Variant::of(without_points(move |b, c, dt| ngs(&s, b, c, dt)));
+    }
+    if name == "rot" {
+        let mut params = PARAMS;
+        let mut v = Variant::of(Box::new(|_, _, _, _, _| {}));
+        for (k, x) in kvs {
+            match k.as_str() {
+                "sep" => params.separation = [Separation::Turned, Separation::Linear, Separation::Fixed][x as usize],
+                "int" => params.integrate = [Integrate::Rotation, Integrate::Angle][x as usize],
+                "relax" => params.relax = x as usize,
+                "sub" => params.substeps = x as usize,
+                "warm" => v.warm = [Warm::None, Warm::Ids, Warm::Nearest, Warm::Either][x as usize],
+                "deepest" => v.deepest = x != 0.0,
+                _ => panic!("rot: {k}"),
+            }
+        }
+        v.solve = Box::new(move |b, s, c, p, dt| solve_with(&params, (b, s), c, p, dt));
+        return v;
     }
     assert_eq!(name, "soft", "no variant {name}");
     let mut s = Soft::default();
@@ -83,7 +135,7 @@ pub fn parse(spec: &str) -> Boxed {
             _ => panic!("soft: {k}"),
         }
     }
-    Box::new(move |b, c, dt| soft(&s, b, c, dt))
+    Variant::of(without_points(move |b, c, dt| soft(&s, b, c, dt)))
 }
 
 // ---- The split impulse, as it was, and with friction on its pseudo velocities ----
