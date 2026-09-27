@@ -409,8 +409,8 @@ frame.
 
 ## Sparse changes are runs, not closures
 
-**Status: spike** (2026-09-26, get-znt.18, branch `spike/sparse-changes`;
-the user decides whether it lands). A sparse component's insert or remove
+**Status: built** (2026-09-26, get-znt.18; landed by the user's decision,
+no new unsafe code). A sparse component's insert or remove
 moves no row, but it went through the general structural-change path:
 a boxed closure per insert, a hash lookup of the set per change at the
 apply, and a walk of the whole set at every apply that took it, purging
