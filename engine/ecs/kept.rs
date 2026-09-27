@@ -260,7 +260,7 @@ where
                 // are by entity index, at random to the page, and out of
                 // cache after the rest of a step; loads that don't wait on
                 // each other overlap, where the walk's branches keep them
-                // apart (2026-09-27: 19 ns a row to N in 3D, 10 000 settled).
+                // apart (2026-09-27: 19 ns a row to 16 in 3D, 10 000 settled).
                 let touch = page.iter().fold(0u32, |t, e| t ^ rows[e.index as usize].generation);
                 std::hint::black_box(touch);
                 let mut mask = 0u32;

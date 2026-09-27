@@ -183,6 +183,10 @@ spatial key with any extent, and physics is one user. What it assumes:
   `near_pairs(active, passive, grow)` leaves out pairs of two passive
   rows ([Two sides](#two-sides)), which is how physics skips statics
   against statics and sleeping bodies against both.
+- **Kept pairs are a key's** ([Keeping pairs](#keeping-pairs)): one set
+  a spatial key, for the sides and grow of its last call; a system that
+  asks with others starts it over, so two broadphases over one key would
+  want a set each.
 
 ## The broadphase, reworked
 
@@ -610,6 +614,249 @@ So the pair: it costs a world where nothing turns nothing, which is every
 game today, and pays a pose key's price only where bodies turn. The same
 reasoning gave 3D its `(Collider, Rotation)` pair: every 3D body turns or
 is static, so there the pair splits no tables.
+
+## Keeping pairs
+
+**Status: built** (2026-09-27, get-emj.36): `engine_ecs::Kept<K>`
+(`kept.rs`), which physics and physics3d find their pairs through. The
+[retrospective](../retrospectives/2026-09-26-physics-against-other-engines.md)
+found `near_pairs` finding every pair afresh: that won when everything
+fell and lost when little moved (a resting 2D pile 400 µs a step against
+Box2D's nothing; 3D 3 to 10 times Rapier's). Now a pile at rest costs a
+look per page, a settled pile a test per kept pair, and falling what it
+did.
+
+**What it does.** `Kept<K>` is a system parameter: the pairs spatial key
+`K`'s broadphase keeps, and `kept.near_pairs(active, passive, grow, margin)`
+answers what `near_pairs(active, passive, grow)` would, bit for bit.
+
+- **Fat boxes.** Each row keeps a fat box, its box (grown by `grow`) grown
+  by `margin` when last found, as long as its box stays inside it and it
+  stays inside the box grown by twice the margin. The second bound, which
+  Box2D's and Rapier's fat boxes don't have, is what lets new pairs be
+  looked for among the order's boxes (below): a fat box is never more than
+  `2 * margin` past its row's box, however the box shrank.
+- **Candidates.** Pairs whose fat boxes meet and one of which is active,
+  sorted by entity index, the order `near_pairs` answers in. Each call
+  tests every candidate's boxes with the operations `near_pairs` uses, so
+  the answer is the same bits.
+- **What changed.** A call walks only the pages whose lanes changed since
+  the last (`SpatialPages::changed`, a tick by page the re-sort stamps, and
+  a row leaving stamps, since a despawn marks no table for a re-sort). A
+  row whose box left its fat box, or that arrived (spawned, or moved into
+  a covered table, or from one side to the other), is looked for again: its
+  new candidates are among pairs whose boxes, grown by `grow + 2 * margin`
+  (and a few ulps of the coordinates for rounding), meet, found by
+  `near_pairs`' own sweep and passive walk with only those rows on the
+  swept side. A row that left every covered table is seen gone from the
+  page it was on.
+- **Few changed.** When nothing moved and fewer rows changed than a 64th of
+  the candidates, only their candidates are retested, found by searching
+  the candidates from either end (the lesser end's are a run of them; the
+  greater's a run of an index made when first needed), and the pairs are
+  made again only if one came to meet or stopped.
+- **Too much moving.** More than a tenth of the active rows moving
+  (`MOST`), the call is `near_pairs` afresh, and the next few calls are too
+  without walking (one, then two, up to sixteen), so falling doesn't pay a
+  walk to find out every step.
+- **Nothing changed**: the last answer, borrowed.
+
+**Where it lives.** The world's, in the key's `ComponentInfo`, like the
+order it's found in: plain data, so a reload keeps it; taken by a system as
+a parameter, for writing (`ParamDecl::Kept`), so two systems that take one
+key's pairs are ordered like two writers of a component, a system reading
+the key isn't held up, and a system can't take one key's twice
+(`kept_pairs_are_a_footprint_the_scheduler_sees`). Its entries are by
+entity index, not by page: the re-sort moves rows between pages every step
+(5% of a settled pile, 18% falling), and pairs by entity don't notice.
+
+**Tested** (`//engine/ecs:kept_test`) against `near_pairs` and brute force,
+in 2D and 3D, every frame of a script: at rest, creeping, a few rows
+nudged back and forth (the few-changed path, which is seen to make and end
+pairs), everything wobbled once, 2% flying, extents written, everything
+falling and shaken (afresh, then waiting), rows spawned, despawned (their
+indices reused, and not), moved between tables, between the sides and out
+of the spatial tables, and despawns with nothing else re-sorting. After
+every call `Kept::check` compares everything kept with the tables by
+brute force: each row's side, box and fat box, nothing kept of rows gone,
+the candidates exactly the pairs whose fat boxes meet, and whether each
+meets. How each frame was answered is asserted (at rest the last answer,
+nudged the few-changed path, falling afresh, then waiting). 24 mutations
+of `kept.rs`, the new footprint rules in `graph.rs` and `query.rs`, and
+the stamps in `spatial.rs` are caught, most by the check. One isn't: the
+slack for rounding in the search, which takes coordinates of about 1e5 to
+matter. The stamp on a pushed row was taken out rather than tested: the
+re-sort that always follows a push stamps its page.
+
+**What the others do** (read in their fetched source, 2026-09-27):
+
+- **Box2D v3.1.1** grows each shape's box by `B2_SPECULATIVE_DISTANCE`
+  (0.02 m), keeps a fat box `B2_AABB_MARGIN` (0.05 m) past it for moving
+  shapes, and re-inserts a shape in its dynamic tree only when its box
+  leaves the fat box (`b2UpdateShapeAABBs`, `b2FinalizeBodies`); those go
+  in a move buffer, and only they query the trees for new pairs
+  (`b2UpdateBroadPhasePairs`, a pair set against duplicates). A pair is a
+  contact until its fat boxes stop meeting, tested for every contact in
+  `b2Collide`, which its profile counts as the narrowphase: its broadphase
+  is 0 µs at rest because that test is elsewhere.
+- **Box3D v0.1.0** is the same, with a shape's margin an eighth of its
+  size up to 0.05 (`B3_AABB_MARGIN_FRACTION`, `B3_MAX_AABB_MARGIN`).
+- **Rapier 0.36** keeps a BVH of loosened boxes (a skin of 0.04 or an
+  eighth of the shape, capped), its pairs in a map with an adjacency list
+  per collider, and re-examines only pairs beside colliders whose leaves
+  changed (`broad_phase_bvh/update.rs`: "a pair can only stop overlapping
+  if one side changed"). It hands the narrowphase pair events, added and
+  removed.
+- **Jolt 5.6** finds its active bodies' pairs afresh every step
+  (`BroadPhaseQuadTree::FindCollidingPairs`), as `near_pairs` did, and
+  keeps contact manifolds between steps instead (its body pair cache).
+
+What we take (docs/CREDITS.md): fat boxes and pairs kept until their fat
+boxes part, looked for again only for what left its fat box (Box2D, Box3D);
+looking only at the pairs of what changed (Rapier's adjacency, here a
+search from either end). What we don't: a tree (the spatial pages are the
+index, and `near_pairs`' sweep finds the new pairs), and handing out fat
+pairs for the narrowphase to test (the answer has to be `near_pairs`',
+exactly, and our narrowphase costs more per pair than a box test).
+
+**Decisions, each measured** (µs a step, one thread, `-c opt`, 10 000
+bodies unless said; 2D the real pile of `//engine/std/physics/compare`,
+3D `//bench/physics3d`'s boxes turning; `kept_bench` the lattice without
+physics):
+
+1. **The margin.** A settled pile creeps less than any margin tried, so
+   the smallest was cheapest: fewer candidates to test, and none moving.
+   Box2D's 0.05 costs 6% more in 2D and 23% more in 3D, where candidates
+   grow with a margin's volume. The case for a larger one is motion
+   between the two, which the benches' settling windows barely have
+   (rain moves too much for any: afresh at every margin, as before).
+
+   | margin | 2D settled | 2D turning, settled | 2D candidates | 3D settling | 3D settled | 3D candidates | 3D falling |
+   |---|---|---|---|---|---|---|---|
+   | **0.02** | **131** | **200** | **19 314** | **314** | **314** | **31 022** | **876** |
+   | 0.05 | 139 | 213 | 21 859 | 362 | 387 | 41 245 | 879 |
+   | 0.1 | 143 | 260 | 23 893 | 435 | 453 | 65 162 | 965 |
+   | 0.2 | 162 | 303 | 29 527 | 473 | 493 | 99 080 | 1088 |
+
+   (physics's broadphase stage: the kept pairs, then turning them into
+   the gathered colliders' slots; about 0 rows moving a step settled at
+   every margin, 1.3 in 3D's settling window at 0.02.)
+2. **Where the fat boxes live.** In the kept record by entity (built),
+   beside each row's grown box and side: the walk reads and writes one
+   record per changed row. Kept in the spatial pages as lanes, the re-sort
+   could test containment while it has each box in registers, but the
+   exact test still needs every candidate's box by entity, the pages
+   would carry 256 bytes more (384 in 3D) and every storage user would
+   pay for re-fattening, falling included; not built. Computed rather
+   than kept (a box snapped outward to a grid of the margin) needs no
+   memory, but a creeping row crosses a grid line with each step's
+   motion over the margin, where a kept fat box lets it drift a whole
+   margin first; not built either.
+3. **Where the pairs live.** The world's, per key, taken as a parameter
+   (built). In the mod's own state (how it was first built) it ran the same, but
+   the scheduler couldn't see it, two systems couldn't share it, and a
+   reload lost it. As entities (the contact table, or a table of pairs),
+   each begun or ended candidate is a structural change (about 100 ns
+   each: 331 new contacts and their events cost 35 µs,
+   [Pages as blocks](#pages-as-blocks-of-the-order)), thousands a step
+   while a pile lands, and each candidate's boxes are two lookups
+   through entity locations into lanes, four to six cache lines a box
+   where a record is one. As caches in the spatial pages, readers of the
+   tables would have to write the order, which serializes every region
+   query, and a pair across two tables (a body and a static, a body and a
+   sleeper) has no one page to live in.
+4. **What says what changed.** A tick by page (built), which any number
+   of readers can compare against their own last call. A move buffer as
+   Box2D's needs the fat boxes in storage (2) and one reader. Rebuilding
+   the pairs of pages whose rows changed is `near_pairs` afresh on a
+   settled pile, whose rows on changed pages are 45% of them (2D) to all
+   (3D) every step: 406 and 1195 µs.
+5. **The API.** A new parameter whose `near_pairs` returns the pairs
+   borrowed (built). Keeping `near_pairs` and caching inside it would copy
+   the answer out every call, 9 µs in 2D and 28 in 3D at 10 000 on the
+   lattice (`kept_bench`), where the pairs at rest cost 0.8; and a cache
+   inside a read-only call is one the scheduler can't see. Pairs begun
+   and ended, as Rapier's events, suit a narrowphase that keeps its own
+   pairs; ours tests every pair every step, so it would keep the whole
+   list anyway.
+6. **When to go afresh.** Looking for a moving row's pairs costs about
+   0.4 µs in 2D and 1 in 3D (`kept_bench`); past about a tenth of the rows
+   moving, `near_pairs` afresh is cheaper. Kept against afresh, 10 000:
+
+   | rows moving a call | 1% | 5% | 20% |
+   |---|---|---|---|
+   | 2D | 157 / 432 | 368 / 499 | 949 / 478 |
+   | 3D | 596 / 1927 | 1057 / 1886 | 1949 / 1501 |
+
+   Walking every step to find out cost falling 70% more (`:tax`, 121 µs to
+   203 at 10 000), so a call that goes afresh waits before walking again,
+   twice as long each time up to 16 calls (64 measured the same).
+7. **Few changed.** A pile at rest in which one page's rows still
+   changed retested all 22 000 candidates: 60 µs of the step's
+   broadphase. Retesting only the changed rows' candidates took it to 2.
+
+**Before and after** (2026-09-27; before is edfea31, after this work; the
+same binaries alternated, no build running beside them).
+`//engine/std/physics/compare`, the real pile, µs a step, the step and its
+broadphase (physics's stage: the pairs, then their colliders' slots; in
+brackets the pairs alone), median of 3; Box2D's and Rapier's from the same
+run:
+
+| | before | after | Box2D | Rapier |
+|---|---|---|---|---|
+| 1000, falling | 170: 20 (19) | 171: 21 (20) | 204: 77 | 221: 60 |
+| 1000, settled | 322: 24 (22) | 311: 11 (9) | 295: 0 | 319: 4 |
+| 1000, at rest | 317: 24 (22) | 297: 3 (0) | 297: 0 | 319: 4 |
+| 10 000, falling | 1655: 197 (189) | 1663: 206 (197) | 2550: 1121 | 2375: 658 |
+| 10 000, settled | 3621: 406 (383) | 3331: 132 (107) | 3354: 0 | 3531: 64 |
+| 10 000, at rest | 3544: 395 (368) | 3147: 26 (2) | 3367: 0 | 3518: 61 |
+
+At 10 000 settled the step is now level with Box2D's, and at rest 7% under
+it; what's left of the stage at rest is turning 17 000 pairs into slots, the
+physics mod's own. `:tax` (ECS / arrays, bit for bit as before):
+
+| | 10 000 settled | 10 000 at rest | 10 000 settled, turning | 10 000 at rest, turning | 10 000 falling |
+|---|---|---|---|---|---|
+| broadphase, before | 153 / 421 | 152 / 420 | 512 / 1710 | 514 / 1711 | 120-126 / 352-393 |
+| broadphase, after | 15 / 428 | 15 / 433 | 196 / 1726 | 163 / 1694 | 128-134 / 349-391 |
+| frame, before | 1558 / 1666 | 1559 / 1664 | 10530 / 12325 | 10562 / 12557 | 871-883 / 837-862 |
+| frame, after | 1437 / 1692 | 1450 / 1706 | 10408 / 13091 | 10164 / 11277 | 870-889 / 831-863 |
+
+In 3D (`//bench/physics3d`, boxes turning, broadphase µs by phase: falling
+1-61, settling 300-400, settled; 10 000 one run, 1000 the median of 3):
+
+| | ours before | ours after | Rapier | Box3D |
+|---|---|---|---|---|
+| 1000 falling | 54-58 | 59 | 58 | 149 |
+| 1000 settling | 43-50 | 16 | 0 | 0 |
+| 1000 settled | 44-51 | 21 | 0 | 0 |
+| 10 000 falling | 876-904 | 918 | 915 | 2591 |
+| 10 000 settling | 1163-1204 | 321 | 154 | 102 |
+| 10 000 settled | 1163-1195 | 298 | 0 | 0 |
+
+(before: the two runs of edfea31.) The 3D step at 10 000 settled is 30.6
+ms against 31.5-32.3, most of it the solver; Rapier's 13.4 and Box3D's
+11.2.
+
+**What's left.**
+
+- **Settled isn't free.** Every candidate is tested each step a pile
+  creeps: about 20 000 in 2D and 31 000 in 3D at 10 000, each two records
+  read at random by entity, out of cache after the rest of a step (lore:
+  [a broadphase bench alone flatters lookups by entity](../lore/a-broadphase-bench-alone-flatters-lookups-by-entity-three-times.md)).
+  Box2D and Rapier show 0 there because their narrowphase does the same
+  test on every fat pair (Box2D's `b2Collide`), and ours needs exact pairs
+  for its cheaper narrowphase. The walk and the tests split by range would
+  go across threads as `near_pairs_with` does; not done.
+- **Falling pays a little.** In `:tax` at 10 000 falling (three
+  alternated runs of each, both piles) the broadphase is 128-134 µs against
+  120-126 before, and the frame the same (870-889 against 871-883). It
+  isn't the walks that find out: waiting up to 64 calls between them
+  instead of 16 measured the same (125-133). Not found; the fixed cost of
+  a call afresh (three passes over the sides' tables, the sides sorted,
+  the answer moved in) is the suspect.
+- **One set a key.** A second broadphase over the same key's tables with
+  other sides or grow would start the kept pairs over each call.
 
 [^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
     its tests and `//engine/ecs:spatial_bench` had superseded it; it is in

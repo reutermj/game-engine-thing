@@ -98,6 +98,16 @@ one would have to ship those files with it.
     contacts, and mixing friction and restitution per contact
     (`engine/std/physics3d/solver.rs`, `lib.rs`). What it takes for
     rotation is Box3D's (below).
+  - the broadphase that keeps its pairs (2026-09-27,
+    `engine/ecs/kept.rs`): each shape's fat box, its box grown by a
+    margin (`B2_AABB_MARGIN`, 0.05 m, the margin we measured best too),
+    kept until the box leaves it, and pairs whose fat boxes meet kept
+    until they don't, looked for again only for shapes that left theirs
+    (`b2UpdateShapeAABBs`, `b2FinalizeBodies`, the move buffer of
+    `broad_phase.c`, and `b2Collide`'s fat-box test on each contact).
+    Read in v3.1.1's source. Ours also lets a fat box go when it is more
+    than twice the margin past its box, and finds new pairs among the
+    spatial pages rather than a tree (spatial-storage.md, "Keeping pairs").
 
 ## Rapier
 
@@ -127,6 +137,12 @@ one would have to ship those files with it.
   pumps stacks until they topple). Read in the fetched 0.36.0 source.
   What else it does differently is in physics.md, "Against other engines"
   and "Settling".
+- **The broadphase that keeps its pairs** (2026-09-27,
+  `engine/ecs/kept.rs`) takes from 0.36.0's `broad_phase_bvh` that a pair
+  can only change if one of its ends changed, so only pairs beside
+  changed colliders are looked at (`pair_adjacency`): ours finds a
+  changed row's pairs by searching its kept pairs from either end, when
+  few rows changed.
 - **Measured against, not taken** (physics.md, "Rotation"): parry2d
   0.31's other ways with contact points, read in its fetched source:
   matching last step's points to this step's by position
@@ -165,7 +181,10 @@ one would have to ship those files with it.
 - **What we use it for:** comparison only. `//bench/physics3d` builds it from
   source (`bench/physics3d/jolt.BUILD`) behind a small C shim and runs the
   same scenes on `JobSystemSingleThreaded` with translation-only bodies.
-- **Ideas our 3D code adopts:** none; it is the yardstick.
+- **Ideas our 3D code adopts:** none; it is the yardstick. (Read for the
+  kept broadphase, 2026-09-27: Jolt finds its active bodies' pairs afresh
+  each step, `BroadPhaseQuadTree::FindCollidingPairs`, as `near_pairs`
+  does, and keeps manifolds instead, in its body pair cache.)
 - **Measured, not adopted, in 3D** (read in the fetched 5.6.0 source):
   box against box by GJK and EPA, then the supporting faces clipped, the
   penetration axis kept as the normal (`ConvexShape::sCollideConvexVsConvex`,
@@ -219,7 +238,11 @@ one would have to ship those files with it.
     (`narrow.rs`, `lib.rs`);
   - bounds of a turned box, center plus or minus |R| h (`b3AABB_Transform`),
     re-bounded by storage as it turns (`components.rs`,
-    `Collider::turned_half`, the spatial key's `bounds`).
+    `Collider::turned_half`, the spatial key's `bounds`);
+  - fat boxes kept between steps, as Box2D's (above), with the margin
+    Box3D caps shapes at (`B3_MAX_AABB_MARGIN`, 0.05; its margin is an
+    eighth of a shape's size below that, ours one for all)
+    (`engine/ecs/kept.rs`, physics3d's `FAT`).
   Our stiffness (a fifth of the substep rate, where Box3D has 30 Hz at 4
   substeps) and our two relaxing passes are our own measurements
   (physics.md, "Rotation in 3D").

@@ -236,7 +236,11 @@ keeps every table of positions in spatial order
 ([spatial-storage.md](spatial-storage.md)). The broadphase is
 `near_pairs` over a query of positions and colliders: pairs whose boxes,
 grown by the speculative margin, meet, found page by page. There is no
-index to rebuild, and static bodies' pages never change.[^grid]
+index to rebuild, and static bodies' pages never change.[^grid] Since
+2026-09-27 it is found through `Kept<Position>`, the pairs the world keeps
+for `Position` between steps: the same pairs, found from what moved, with
+fat boxes `FAT` (0.02) past each box (spatial-storage.md, "Keeping
+pairs").
 
 ## Spatial queries
 
@@ -1473,7 +1477,8 @@ Estimated from the numbers above, at 10 000 bodies:
 3. **An incremental broadphase (algorithm, in storage).** Keep last step's
    pairs for pages whose bodies stayed inside grown boxes, as Box2D's fat
    boxes do: up to about 400 µs (12%) on a pile that creeps or rests, and
-   nothing when everything falls, where ours already leads.
+   nothing when everything falls, where ours already leads. Done
+   2026-09-27 (`Kept`; spatial-storage.md, "Keeping pairs").
 4. **Colored, wide solving on one thread (algorithm).** 1.28–1.4× the
    solver, about 400–500 µs at 10 000 and more on the pyramid; another
    computation, deterministic, and the start of the parallel solve.
@@ -2573,10 +2578,12 @@ storage takes two extents, and physics3d uses them (choice 5).
    cost 4 to 6 times the pairs (above), ten times the broadphase once
    statics get them too. Whatever the storage offers, statics and bodies
    that can't turn must keep exact boxes.
-4. **Fat bounds, or kept pairs.** A turning body is re-bounded every step
-   it moves, where Box3D re-inserts a body in its tree only when it leaves
-   a box grown by up to 0.05 (`aabbMargin`). The broadphase that keeps its
-   pairs, second on the retrospective's list, would cover both.
+4. **Fat bounds, or kept pairs** (done, 2026-09-27: `Kept`,
+   spatial-storage.md, "Keeping pairs"). A turning body is re-bounded
+   every step it moves, where Box3D re-inserts a body in its tree only when
+   it leaves a box grown by up to 0.05 (`aabbMargin`). The re-bounding
+   stays (the order needs exact boxes); the pairs are now kept over fat
+   boxes, as Box3D's are.
 5. **Wider tuples.** Without `Reach`, a turning body is six components and
    the solve's query five, against limits of eight (bundles, query data)
    and four (a parameter group): the mod hit none of them. Layers,
