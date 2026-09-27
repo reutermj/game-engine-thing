@@ -285,8 +285,9 @@ build they sent.
 
 They found the event queue's cursors pointing into the build that made
 them (the fuzzer found it the same day), physics restarting how long awake
-bodies had been still on every reload (its sleep bookkeeping is handed over
-in its state now; see [physics.md](physics.md)), and, once in poison mode,
+bodies had been still on every reload (that bookkeeping is in the world
+now, which a reload doesn't touch; see [physics.md](physics.md#sleeping)),
+and, once in poison mode,
 the loader's pointer scan reading a state's padding (above, in "Who owns
 state").
 

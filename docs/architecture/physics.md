@@ -759,11 +759,13 @@ stealing, which this pool doesn't do.
 **Status: on by default, at `Sleep::DEFAULT` (slower than 0.05 a second
 for 0.5 s), which a `Sleep` entity changes and `Sleep::OFF` (no speed)
 turns off; sleeping is storage, and a wake is seen by the world's change
-detection** (2026-09-24, `sleep.rs`, get-emj.27; its gaps closed, and on
-by default, 2026-09-25).[^sleep-default] An island, dynamic bodies joined
+detection, and all it keeps is in the world** (2026-09-24, `sleep.rs`,
+get-emj.27; its gaps closed, and on by default, 2026-09-25; kept in the
+world, 2026-09-26, get-emj.40).[^sleep-default] An island, dynamic bodies joined
 by pressed contacts, whose bodies have all been slower than `Sleep::speed`
 for `Sleep::time` falls asleep: its velocities are zeroed and each body
-gets `Asleep { island }`, which moves it to a table of its own, and each
+gets `Asleep { island }`, which moves it to a table of its own (with
+`Slept`, physics's record of it: "Where it's kept", below), and each
 contact neither end of which moves, one of them asleep, gets `Resting`
 the same way. The step's queries exclude both (`Without<Asleep>`,
 `Without<Resting>`), so a sleeping body is skipped by the table it's in,
@@ -778,7 +780,7 @@ when the solver does), which is why the pile, the benchmarks' scene,
 turns it off unless asked, and why `:tax` measures it apart, the ECS
 alone, with no arrays to agree with (`:tax -- sleeping` runs only its
 tables: this one, and the real piles before they're asleep, sleeping on
-and off, under "Why the copy is per-entity data" below). From ten steps after the whole pile is asleep,
+and off, under "Where it's kept" below). From ten steps after the whole pile is asleep,
 against the same pile awake at the same step (speed 0.05, 0.5 s), µs per
 step, medians of three runs, on the columns (40 and 400 wide) and on real
 piles (41 and 401; see [the scenes](#the-scenes)):
@@ -801,7 +803,10 @@ for what games changed (a look at each sleeping page's ticks and each
 table's), and the frame's fixed cost outside the systems. Counting
 instead, as this did before 2026-09-25, cost the same frame, 25 and 26 µs
 at 10 000, with 8 µs in the look for changes against 6 now: the count of
-sleeping bodies was a walk of their pages too.[^sleep-counts]
+sleeping bodies was a walk of their pages too.[^sleep-counts] With
+physics's record of who's asleep in the world (`Slept`, 2026-09-26), the
+asleep frame at 10 000 is 26 µs against the copy's 23, measured together
+(see "Where it's kept", below): a look at `Slept`'s tables, and its column.
 
 **The broadphase** is `near_pairs(active, passive, grow)`
 ([spatial-storage.md](spatial-storage.md#two-sides)): awake colliders that
@@ -827,10 +832,14 @@ it's seen:
     written since (`for_each_written`). The bodies the last solve put to
     sleep were written by it, after that look; theirs count only if
     they're newer than the solve;
-  - a body despawned, its `Asleep` removed, or no longer a body: a row
-    left the sleeping tables (`Query::left_since`, a tick per table), and
-    a walk of them finds which. A spawn reusing a sleeping body's index
-    in the step it went wakes its island too (`Sleepers::slot`);
+  - a body a game woke (removing its `Asleep`) or made something else
+    (removing its body): its `Slept` stays, so there are more `Slept`
+    than sleeping bodies (two lengths), and a walk of them finds which,
+    each with the island it wakes;
+  - a body a game despawned: fewer `Slept` than physics has given and
+    not taken off (a count in its state), and a walk of the resting
+    contacts finds the ends gone, whose other ends' islands wake. A
+    spawn reusing the index is another entity, so it's no end of theirs;
   - `Sleep` despawned, or `physics` sent `wake`: everything.
 - in `find_contacts`:
   - a static written or spawned (a spawn writes its values) into or out
@@ -847,9 +856,11 @@ it's seen:
   still for `Sleep::time`, so a body just woken counts as moving), or a
   kinematic body moving into one.
 
-None of these is a count, so none is fooled by one thing gone and another
-come in the same step (a static despawned and another spawned, a sleeping
-body despawned as a game puts another to sleep).
+One of these is a count, of `Slept`, which only physics gives: a game
+putting a body to sleep as another is despawned doesn't make up for the
+one gone, since the new one has `Asleep` and not yet `Slept`. The rest
+aren't counts, so nothing is fooled by one thing gone and another come in
+the same step (a static despawned and another spawned).
 
 **A wake takes effect in the step that saw it**, if it's seen before the
 solve: the bodies leave their sleeping tables at the apply node of the
@@ -862,7 +873,8 @@ next, as it must.
 
 **A game can put bodies to sleep** by giving them `Asleep` (inserting it,
 spawning a body with it, or making a body of an entity that has it), in
-an island it numbers. Physics takes them as they are, before it wakes
+an island it numbers. Physics finds them as sleeping bodies without
+`Slept`, and takes them as they are (giving each one), before it wakes
 anything that step: an island woken there has rows that aren't asleep to
 physics either, and taking them for new was a bug the count had (a game
 waking one body by removing its `Asleep` put its island back to
@@ -870,93 +882,116 @@ sleep).[^sleep-counts] Physics numbers its islands after the greatest it
 has seen, so a game's numbers don't collide with ones already made, but
 may with later ones.
 
-**A reload doesn't show.** `Sleepers`, the mod's copy of who's asleep by
-entity index, with how long each awake body has been still, is the
-transient part the step borrows, and the old build hands it to the new
-one through the mod's state (`unload`, then `load`). The ticks it looks
-from (after `find_contacts`, and after the solve) are in the state too,
-so the new build doesn't take the old one's writes for a game's. A build
-that starts without it (the first, or one whose state was reset) rebuilds
-it from `Asleep` in the world: what's asleep stays asleep, and only how
-long awake bodies have been still is lost.[^sleep-reload] A build handed
-one takes nothing from the world: what the world has asleep that the copy
-doesn't, a game put to sleep since the last step, and the next step takes
-it as the game's.[^sleep-adopt] The games' reload replays
-(//engine/tests:replay.rs) hold physics to this: a run reloaded every
-frame is the run without reloads, bit for bit; and
-`a_reload_between_a_games_change_and_the_next_step_does_not_show` holds
-it to what a game changes between frames (a message), reloaded before
-the next step.
+**A reload doesn't show, and nothing is handed over.** All sleeping
+keeps is in the world ("Where it's kept", below) or in the mod's
+state, which a reload carries as it is: the ticks it looks from (after
+`find_contacts`, and after the solve, so the new build doesn't take the
+old one's writes for a game's), the step count `Still::since` is in, the
+last island made, and how many `Slept` it has given. `Sleepers`, the
+transient part, is only a system's list of what it woke, empty between
+systems, and `enough`'s cached answer (the steps `Sleep::time` takes). A
+build whose state starts empty (the first, or one reset) counts the
+`Slept` in the world and its greatest island, and starts its step count
+from the latest `Still::since`; no test makes a reset state, since no
+build of physics has another state layout. The games' reload replays (//engine/tests:replay.rs) hold physics
+to this: a run reloaded every frame is the run without reloads, bit for
+bit; `a_reload_between_a_games_change_and_the_next_step_does_not_show`
+holds it to what a game changes between frames (a message), reloaded
+before the next step; and
+`a_reload_keeps_how_long_awake_bodies_have_been_still` to a pile due to
+fall asleep.[^sleep-reload][^sleep-adopt]
 
-**Why the copy is per-entity data outside the world** (2026-09-26,
-get-emj.40): it holds two things a step carries, and neither moves into
-the world for free.
+**Where it's kept** (2026-09-26, get-emj.40): in the world, as
+components, the way the other engines keep it on each body (Box2D's
+`sleepTime` on `b2Body`, Rapier's `time_since_can_sleep` on each body's
+activation). Besides `Asleep` and `Resting`, a step carries two things:
 
-- *Who's asleep, as physics last saw it*, is the baseline a game's
-  changes are found against. The world has who's asleep now; a body a
-  game despawned, or woke by removing its `Asleep`, isn't in it, and its
-  island wakes only because the copy remembers it. Rebuilt from the world
-  at a reload that followed such a change, the island stayed asleep (999
-  of the real pile's 1000, against 1 without the reload). So the handoff
-  stays whatever happens to the times below.
-- *How long each awake body has been still* would be a component, as
-  Box2D keeps `sleepTime` on each body (`b2Body`) and Rapier
-  `time_since_can_sleep` on each body's activation, and it would survive
-  a reset state too. Awake islands aren't kept (they're found afresh each
-  step), so there's no island to keep it on.
+- *How long each awake body has been still*: `Still { since }`, the step
+  it went slower than `Sleep::speed`, on awake dynamic bodies that are
+  slower, put on as one slows and taken off as it goes faster or falls
+  asleep (and all of them when sleeping is turned off, so turned on
+  again it starts from moving). Awake islands aren't kept (they're found
+  afresh each step), so there's no island to keep it on. Sparse, since a
+  settling pile's bodies cross the threshold all the time (at 10 000 in
+  a real pile, about 400 a step while it falls and 1000 while it
+  settles), and dense each crossing would move a row between tables; a
+  step and not seconds, so it's written only as a body crosses. An
+  island falls asleep when its body still for the least time has been
+  for as many steps as `Sleep::time` took counted in seconds
+  (`Sleepers::enough`: the same step as before, where `time / dt` can be
+  one early).
+- *Who physics has asleep*: `Slept { island }`, dense, put on beside
+  `Asleep` and taken off as physics wakes the body, with a count in the
+  state of how many physics has given. `Asleep` is who's asleep now,
+  which a game writes; `Slept` is who physics last had asleep, the
+  baseline a game's changes are found against (see "What wakes an
+  island", above): a body a game woke keeps its `Slept`, and its island
+  wakes; one a game put to sleep has `Asleep` and not `Slept`, and is
+  taken as the game's. Both are found by the tables a query matches
+  (`Asleep` without `Slept`, and more `Slept` than `Asleep`), so at rest
+  each is a look per table.
 
-But a settling pile's bodies cross `Sleep::speed` all the time: at 10 000
-in a real pile (401 wide), about 400 a step while it falls and 1000 while
-it settles. Each shape was built as a prototype written only when a body
-crosses (the copy still holding the times, so this is the least each
-costs): `Still { since }`, the step it went slower, sparse and only on
-bodies slower than the threshold (an insert or a remove a crossing), or on
-every awake dynamic body (a column in each body's table, written a
-crossing). `:tax -- sleeping`, µs a step, sleeping on / off, medians of
-three runs on a quiet machine, 60 steps from the step given:
+The record of who physics has asleep had three shapes, each with `Still`
+as above. µs a step at 10 000 in a real pile (401 wide), sleeping on,
+against main (a copy of both in the mod), medians of nine runs
+interleaved, 60 steps from the step given (`:tax -- sleeping`):
 
-| 10 000, 401 wide | the copy (now) | sparse `Still` | `Still` on every body |
+| the asleep record | falling (from 1) | settling (from 60) | falling asleep (from 120) | asleep, ten steps after all of it |
+|---|---|---|---|---|
+| main: a copy of both, handed over | 980 | 1786 | 1836 | 23 |
+| B1: a copy in the mod, handed over | 992 (+1.2%) | 1822 (+2.0%) | 1920 (+4.6%) | 23 |
+| B2: `Slept` in the world | 977 (-0.3%) | 1811 (+1.4%) | 1935 (+5.4%) | 26 |
+| B3: none, change detection alone | not built: see below | | | |
+
+B2 as it's kept, against main, medians of 13 runs interleaved (the
+spread between runs of one build is about 1%; sleeping off, the two are
+within it):
+
+| 10 000, 401 wide | main | now | of it, the `sleeping` stage (main / now) |
 |---|---|---|---|
-| falling (from step 1) | 985 / 872 | 1033 / 886 | 1071 / 887 |
-| settling (from step 60) | 1796 / 1658 | 1895 / 1673 | 1904 / 1666 |
-| falling asleep (from step 120) | 1848 / 1614 | 1940 / 1644 | 1947 / 1643 |
-| of it, the `sleeping` stage (settling, on) | 130 | 166 | 149 |
-| asleep, ten steps after all of it (on) | 23 | 23 | 36 |
+| falling (from step 1) | 993 | 980 (-1.3%) | 104 / 99 |
+| settling (from step 60) | 1810 | 1812 (+0.1%) | 132 / 146 |
+| falling asleep (from step 120) | 1862 | 1943 (+4.4%) | 143 / 196 |
+| asleep, ten steps after all of it | 23 | 26 | 0 / 0 |
+| 1000, 41 wide, settling | 182 | 184 (+1.1%) | 14 / 16 |
+| 1000, 41 wide, falling asleep | 180 | 184 (+2.2%) | 14 / 19 |
 
-Against sleeping off at the same step, the sparse component costs 3 to 5%
-of a step more than the copy, two thirds of it outside the systems,
-where the apply node makes the inserts and removes (a boxed change each),
-and the dense one 3.5 to 7%, and half again the
-asleep pile's step (its bodies' tables are wider). Written every step
-(seconds, not the step it went slower), either costs at least that. At
-1000 (41 wide) settling it's 181, 191 and 187 µs. So the times stay in
-the copy: what components would buy (the times kept through a reset
-state, and seen by games) isn't worth 3 to 5% of every step before a
-pile is asleep.
+The cost is where bodies fall asleep: each island that does takes
+`Slept` and gives up its `Still`s, and the stage walks the `Still` set
+to find how long each body has been; a pile falling asleep does that for
+most of its bodies within a second, and then costs 3 µs a step more
+while it sleeps.
 
-**With sparse changes as runs** (2026-09-26, get-znt.18, a spike:
-storage.md, ["Sparse changes are runs, not
-closures"](storage.md#sparse-changes-are-runs-not-closures)), the sparse
-`Still` again, the same prototype, against the copy on the same ECS;
-µs a step, sleeping on / off, medians of seven runs interleaved, 60 steps
-from the step given:
+B1 keeps a handoff at every reload, which is what the move was to be rid
+of. B2 has none, and costs `Slept`'s insert and remove beside `Asleep`'s
+(a dense column, so no extra move) and 3 µs asleep: a look at its tables,
+and its column in the sleeping tables. B3 would find a game's changes from
+ticks alone, as main did for most of them, and doesn't work, for two
+reasons the world can't be asked about:
 
-| 10 000, 401 wide | the copy (ECS as it was / spike) | sparse `Still`, as it was | sparse `Still`, runs |
-|---|---|---|---|
-| falling (from step 1) | 965 / 852, 965 / 854 | 995 / 853 | 980 / 854 |
-| settling (from step 60) | 1759 / 1607, 1758 / 1609 | 1833 / 1611 | 1792 / 1609 |
-| falling asleep (from step 120) | 1807 / 1592, 1816 / 1590 | 1864 / 1581 | 1845 / 1589 |
-| of it, the `sleeping` stage (settling, on) | 128, 129 | 162 | 151 |
-| asleep, ten steps after all of it (on) | 23, 22 | 23 | 23 |
+- *Which rows arrived.* A table keeps the tick a row last arrived in it,
+  not which row. A body asleep before it's a body, then made one (its
+  `Body` inserted), and a sleeping body a game wrote (its `Body` or
+  velocity), are both a sleeping row written since the last step whose
+  `Asleep` isn't, and one must be taken as the other: the first woken, or
+  the second left asleep.
+- *The island of a body a game woke.* Removing `Asleep` takes its island
+  with it. The body's resting contacts name its neighbors, whose islands
+  are its own, which covers physics's islands (they're joined by pressed
+  contacts, all resting once asleep), but not a game's, whose bodies need
+  not touch: the rest of such an island stays asleep.
 
-Over the copy that is 3.5 to 4.6% of a step as it was (this run's
-measure of the 3 to 5% above), and 1.8 to 2.1% with runs; at 1000 (41
-wide) settling, 4.3% and 1.9%. Its extra cost outside the `sleeping` stage,
-mostly the apply, went from about 40 µs a step to 12; what's left is in
-that stage, where each crossing is noticed, looked up (`Query::get`) and
-logged. So the copy
-stays while the spike is undecided, and the component is now on the 2%
-bar rather than over it.
+Emulated in B2 (a game's sleeping body taken only if its `Asleep` was
+written since the solve, and a woken body's island found only through its
+resting contacts), every test passes but two, one for each:
+`a_body_put_to_sleep_by_a_game_as_another_is_despawned`, at the body made
+one while asleep, and `a_games_island_wakes_as_one`, whose pair apart
+stays half asleep. B3 wasn't built further, so it has no measurement; its
+looks at rest are main's, which puts it near B1 and 23 µs asleep.
+
+A per-row arrival tick in the ECS would answer the first, at a tick
+written on every move between tables; the second needs the island kept
+somewhere, which is a record. So B2 it is.
 
 **`Touching`** on a sleeping body is as it fell asleep: its query excludes
 sleeping bodies, so it isn't reset. A side touched by something that
@@ -983,6 +1018,15 @@ What it doesn't do:
   when a contact begins touching, in its collide phase; the same in
   `find_contacts` (a found contact that touches, with an awake end moving
   faster than `Sleep::speed`) is the likely next step.
+- **A body a game puts to sleep while it presses on something wakes in
+  that step**: its pressed contact isn't found again (a sleeping body
+  isn't paired with a static or another sleeping body), and a pressed
+  contact ending wakes its ends; only physics marks a contact `Resting`.
+  So what a game keeps asleep is what it puts to sleep touching nothing
+  (in the air, or before it's a body), as the tests do;
+  `a_body_woken_starts_its_time_still_afresh` shows one on the floor
+  woken so. Marking the game's pressed contacts resting as it's taken
+  would fix it.
 - **No body can opt out, and a free body slower than `Sleep::speed`
   stops**: a body drifting at 0.04 a second with nothing touching it
   falls asleep in half a second, and stays where it stopped. Box2D has
@@ -1027,6 +1071,33 @@ asleep). The list is in that commit. Of the first version's 24, three survived a
 only slower (statics on the active side, resting pairs sent to the
 narrowphase), and one whose setup the tests don't make (a body woken in
 the step taken as still when marking resting contacts).[^prototype]
+
+Moving the bookkeeping into the world (2026-09-26, get-emj.40) added
+`core_test`'s `sleeping::` (how many steps is enough, and islands) and,
+in `physics_test`, a body's time still starting afresh when it goes
+faster, falls asleep or is put to sleep by a game (asleep exactly 30
+steps after it's still at 60 a second), physics numbering its islands
+after a game's, a game's island apart waking as one, a despawn in the
+step after a game put a body to sleep and in the step after the last
+island fell asleep, no contact left with an end gone, a game's wake
+taking effect before the solve, and turning sleeping off forgetting
+`Still` and `Slept`. Of 37 mutations to the new bookkeeping, 23 are
+caught (12 of them only by those tests). Of the 14 left, six change
+only what a step costs (a walk that finds nothing, a count too high, a
+resolve later in the same system) or heal in the next step (the `wake`
+message, or the gate, leaving a `Slept` behind); one, what the
+`sleeping` message reports between a game's change and the next step
+(it counts `Asleep` with `Slept`); three are covered by
+another path in every scene the tests make (the merge waking the ends of
+a pressed contact that ended; the other order of a kinematic link; a
+game's body dropping `Still` as it's taken, which gravity makes moving
+anyway as it wakes); and four need a setup no test makes: a state reset
+(`load`'s count from the world, since no build of physics has another
+state layout), a game putting a body to sleep from a system after the
+solve (a message writes at the solve's tick), a contact found between
+an old sleeper and a collider that doesn't move, and the known gap above
+of a body woken in the step taken as still when marking resting
+contacts. The mutations are in the commit's message.
 
 ### The scenes
 
@@ -2866,6 +2937,86 @@ frame 508.
     own to the next step, which found its values written since and woke
     it: only if a reload came between. Found while measuring whether the
     copy could move into the world (get-emj.40).
+
+[^sleep-copy]: *(History, 2026-09-24 to 2026-09-26.)* Until get-emj.40,
+    sleeping's bookkeeping was `Sleepers`, the mod's copy of who's asleep
+    by entity index, with how long each awake body had been still (in
+    seconds), the transient part the step borrowed; the old build handed
+    it to the new one through the mod's state (`unload`, then `load`),
+    and a build without one rebuilt it from `Asleep` in the world, losing
+    the times still. Removed because both halves went into the world
+    (`Still`, `Slept`) at about the cost measured below with runs; the
+    measurements that had kept it a copy follow, as they were written.
+
+    **Why the copy is per-entity data outside the world** (2026-09-26,
+    get-emj.40): it holds two things a step carries, and neither moves into
+    the world for free.
+
+    - *Who's asleep, as physics last saw it*, is the baseline a game's
+      changes are found against. The world has who's asleep now; a body a
+      game despawned, or woke by removing its `Asleep`, isn't in it, and its
+      island wakes only because the copy remembers it. Rebuilt from the world
+      at a reload that followed such a change, the island stayed asleep (999
+      of the real pile's 1000, against 1 without the reload). So the handoff
+      stays whatever happens to the times below.
+    - *How long each awake body has been still* would be a component, as
+      Box2D keeps `sleepTime` on each body (`b2Body`) and Rapier
+      `time_since_can_sleep` on each body's activation, and it would survive
+      a reset state too. Awake islands aren't kept (they're found afresh each
+      step), so there's no island to keep it on.
+
+    But a settling pile's bodies cross `Sleep::speed` all the time: at 10 000
+    in a real pile (401 wide), about 400 a step while it falls and 1000 while
+    it settles. Each shape was built as a prototype written only when a body
+    crosses (the copy still holding the times, so this is the least each
+    costs): `Still { since }`, the step it went slower, sparse and only on
+    bodies slower than the threshold (an insert or a remove a crossing), or on
+    every awake dynamic body (a column in each body's table, written a
+    crossing). `:tax -- sleeping`, µs a step, sleeping on / off, medians of
+    three runs on a quiet machine, 60 steps from the step given:
+
+    | 10 000, 401 wide | the copy (now) | sparse `Still` | `Still` on every body |
+    |---|---|---|---|
+    | falling (from step 1) | 985 / 872 | 1033 / 886 | 1071 / 887 |
+    | settling (from step 60) | 1796 / 1658 | 1895 / 1673 | 1904 / 1666 |
+    | falling asleep (from step 120) | 1848 / 1614 | 1940 / 1644 | 1947 / 1643 |
+    | of it, the `sleeping` stage (settling, on) | 130 | 166 | 149 |
+    | asleep, ten steps after all of it (on) | 23 | 23 | 36 |
+
+    Against sleeping off at the same step, the sparse component costs 3 to 5%
+    of a step more than the copy, two thirds of it outside the systems,
+    where the apply node makes the inserts and removes (a boxed change each),
+    and the dense one 3.5 to 7%, and half again the
+    asleep pile's step (its bodies' tables are wider). Written every step
+    (seconds, not the step it went slower), either costs at least that. At
+    1000 (41 wide) settling it's 181, 191 and 187 µs. So the times stay in
+    the copy: what components would buy (the times kept through a reset
+    state, and seen by games) isn't worth 3 to 5% of every step before a
+    pile is asleep.
+
+    **With sparse changes as runs** (2026-09-26, get-znt.18, a spike:
+    storage.md, ["Sparse changes are runs, not
+    closures"](storage.md#sparse-changes-are-runs-not-closures)), the sparse
+    `Still` again, the same prototype, against the copy on the same ECS;
+    µs a step, sleeping on / off, medians of seven runs interleaved, 60 steps
+    from the step given:
+
+    | 10 000, 401 wide | the copy (ECS as it was / spike) | sparse `Still`, as it was | sparse `Still`, runs |
+    |---|---|---|---|
+    | falling (from step 1) | 965 / 852, 965 / 854 | 995 / 853 | 980 / 854 |
+    | settling (from step 60) | 1759 / 1607, 1758 / 1609 | 1833 / 1611 | 1792 / 1609 |
+    | falling asleep (from step 120) | 1807 / 1592, 1816 / 1590 | 1864 / 1581 | 1845 / 1589 |
+    | of it, the `sleeping` stage (settling, on) | 128, 129 | 162 | 151 |
+    | asleep, ten steps after all of it (on) | 23, 22 | 23 | 23 |
+
+    Over the copy that is 3.5 to 4.6% of a step as it was (this run's
+    measure of the 3 to 5% above), and 1.8 to 2.1% with runs; at 1000 (41
+    wide) settling, 4.3% and 1.9%. Its extra cost outside the `sleeping` stage,
+    mostly the apply, went from about 40 µs a step to 12; what's left is in
+    that stage, where each crossing is noticed, looked up (`Query::get`) and
+    logged. So the copy
+    stays while the spike is undecided, and the component is now on the 2%
+    bar rather than over it.
 
 [^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
     in the mod's transient state, by entity, and every walk looked each
