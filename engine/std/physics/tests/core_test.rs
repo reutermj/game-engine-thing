@@ -3,6 +3,10 @@
 
 #[path = "../narrow.rs"]
 mod narrow;
+// The mod reads `Sleepers`'s lists; the arithmetic is what is tested.
+#[allow(dead_code)]
+#[path = "../sleep.rs"]
+mod sleep;
 #[path = "../solver.rs"]
 mod solver;
 
@@ -181,5 +185,54 @@ mod stack {
         let top = placed.last().unwrap().at.y;
         assert!((top - (-0.45 - 5.0 * 0.9)).abs() < 0.05, "stands 6 high: top at {top}");
         assert!(deepest < 0.02, "sunk {deepest}");
+    }
+}
+
+/// Sleeping's arithmetic: how long still is long enough, and islands.
+#[cfg(test)]
+mod sleeping {
+    use engine_api::Entity;
+
+    use crate::sleep::{Sleepers, islands};
+
+    fn body(index: u32) -> Entity {
+        Entity { index, generation: 0 }
+    }
+
+    /// As many steps as a body counting seconds in `f32` took to reach the
+    /// time, and so falling asleep in the step it did then, where the
+    /// quotient is a step early at 120 a second.
+    #[test]
+    fn enough_steps_are_as_many_as_seconds_summed_took() {
+        let mut s = Sleepers::default();
+        for (hz, steps) in [(60.0, 30), (30.0, 15), (120.0, 61), (64.0, 32)] {
+            let dt = 1.0 / hz;
+            let (mut sum, mut n) = (0.0f32, 0);
+            while sum < 0.5 {
+                (sum, n) = (sum + dt, n + 1);
+            }
+            assert_eq!((s.enough(dt, 0.5), n), (steps, steps), "{hz} a second");
+        }
+        assert_eq!(s.enough(1e-9, 1.0), u64::MAX, "a sum that stops growing never gets there");
+    }
+
+    /// Three bodies pressed together are one island, which falls asleep
+    /// when the least still of them has been for `enough` steps, numbered
+    /// after the last; a moving body against a sleeping island wakes it, a
+    /// still one waits to fall asleep in its own.
+    #[test]
+    fn an_island_falls_asleep_as_one_and_a_moving_body_wakes_what_it_presses() {
+        let between = [(body(1), body(2)), (body(2), body(3))];
+        let mut last = 7;
+        let (wake, fell) = islands(30, &[(body(1), 30), (body(2), 29), (body(3), 40)], &between, &[], &mut last);
+        assert_eq!((wake, fell, last), (vec![], vec![], 7), "one of them still for too short a time");
+        let (wake, fell) = islands(30, &[(body(1), 30), (body(2), 31), (body(3), 40), (body(9), 30)], &between, &[], &mut last);
+        assert!(wake.is_empty());
+        assert_eq!(fell, [(body(1), 8), (body(2), 8), (body(3), 8), (body(9), 9)], "two islands, numbered in turn");
+        let against = [(body(4), 3), (body(5), 5)];
+        let (wake, fell) = islands(30, &[(body(4), 0), (body(5), 12)], &[], &against, &mut last);
+        assert_eq!((wake, fell), (vec![3, 5], vec![]), "moving, or not still for long enough, wakes what it presses on");
+        let (wake, _) = islands(30, &[(body(5), 30)], &[], &against, &mut last);
+        assert!(wake.is_empty(), "still: it falls asleep on its own");
     }
 }

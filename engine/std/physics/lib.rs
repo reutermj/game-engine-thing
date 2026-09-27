@@ -22,7 +22,7 @@ use engine_api::{
 };
 use physics::{
     Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, Resting, Rotation, STATIC, Shape, Sleep, Spin, Touching, Trigger, Vec2, Velocity,
+    Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Vec2, Velocity,
 };
 use sleep::Sleepers;
 use solver::{Constraint, ContactPoint, Points, SolverBody, Spinning};
@@ -65,6 +65,9 @@ engine_api::mod_state! {
     #[derive(Default)]
     struct Physics {
         steps: u64,
+        /// Steps run, never reset (`steps` is, with the timings): what
+        /// `Still::since` counts in.
+        clock: u64,
         /// The world's tick when `find_contacts` last looked for what games
         /// changed under sleeping bodies: what's written after it (by a
         /// game, a pre-solve hook, or a message) wakes them.
@@ -75,11 +78,12 @@ engine_api::mod_state! {
         /// step's writes for a game's.
         slept: u32,
         time: Timings,
-        /// The sleep bookkeeping, while no build has it: see `unload`.
-        sleep: Sleepers,
-        /// `sleep` is a build's, handed over: false in a first build's state,
-        /// or one reset.
-        handed: bool,
+        /// The last island made: ids must stay unique, since a sleeping
+        /// body's is in the world.
+        islands: u32,
+        /// How many `Slept` physics has given and not taken off, after its
+        /// last system: see `wake_by_games`.
+        sleepers: u64,
     }
 }
 
@@ -170,6 +174,20 @@ type RestingHere<'w, 'a> = Query<'w, &'a ContactPair, With<Resting>, (Removes<Re
 type SleepingVelocities<'w, 'a> = Query<'w, (&'a Body, &'a mut Velocity), With<Asleep>>;
 /// Sleeping colliders, as the broadphase's passive side has them.
 type AsleepColliders<'w, 'a> = Query<'w, (&'a Position, &'a Collider, &'a Body), With<Asleep>, Removes<Asleep>>;
+/// Awake bodies, which the solve moves, and which fall asleep or go slower
+/// (`Still`) at its apply node.
+type Moving<'w, 'a> =
+    Query<'w, (&'a Body, &'a mut Velocity, &'a mut Position), Without<Asleep>, (Adds<(Asleep, Slept, Still)>, Removes<Still>)>;
+/// Physics's record of every body it has asleep, by the island each
+/// wakes with: what waking an island walks, and a body's island is looked
+/// up in.
+type Records<'w, 'a> = Query<'w, &'a Slept, (), Removes<Slept>>;
+/// Sleeping bodies physics hasn't taken as asleep yet: a game put them to
+/// sleep. By table, so at rest it's a look at none.
+type Fresh<'w, 'a> = Query<'w, &'a Asleep, (With<(Velocity, Position, Collider, Body)>, Without<Slept>), (Adds<Slept>, Removes<Still>)>;
+/// How long each body slower than `Sleep::speed` has been, taken off as it
+/// goes faster.
+type Stills<'w, 'a> = Query<'w, &'a Still, (), Removes<Still>>;
 /// Colliders' rotations: the turned ones among those gathered, looked up
 /// by entity after the walks, since queries have no optional terms and a
 /// walk per case would double them. Where nothing is turned it's empty,
@@ -195,21 +213,25 @@ impl Physics {
             SleepMarks<'_, '_>,
             RestingContacts<'_, '_>,
         ),
+        (mut fresh, mut records, mut colliders): (Fresh<'_, '_>, Records<'_, '_>, Query<(), With<Collider>>),
     ) {
         let start = Instant::now();
         let dt = *dt;
         self.steps += 1;
+        self.clock += 1;
         let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        if sleep.asleep > 0 || !marks.is_empty() {
-            Self::wake_by_games(sleep, sleeping_by(&mut config).is_some(), (self.since, self.slept), &mut sleeping, &mut marks);
+        if self.sleepers > 0 || !marks.is_empty() {
+            let on = sleeping_by(&mut config).is_some();
+            self.wake_by_games(sleep, on, (&mut sleeping, &mut marks, &mut resting), (&mut fresh, &mut records, &mut colliders));
             // A game that turned a sleeping body, or set it spinning, since
             // the last solve (whose own writes stop what falls asleep).
-            spun.for_each_written(self.slept, |row, _| sleep.wake(row.entity()));
+            spun.for_each_written(self.slept, |row, _| wake(sleep, &mut records, row.entity()));
+            resolve(sleep, &mut records);
             // As `fall_woken`, through the query that has their velocities.
             for &e in &sleep.woken {
                 sleeping.with(e, |_, (v, _, _, body)| fall(g, dt, body, v));
             }
-            Self::move_woken(sleep, &mut sleeping, &mut resting);
+            self.move_woken(sleep, &mut sleeping, &mut records, &mut resting);
         }
         if workers.threads() > 1 {
             bodies.par_for_each(&workers, |_| (), |_, _, (body, v)| fall(g, dt, body, v));
@@ -220,73 +242,87 @@ impl Physics {
     }
 
     /// Wakes what games changed under sleeping bodies since the last step
-    /// (after tick `since`), all of it seen by the world's change detection,
-    /// which at rest costs a look per page or table:
+    /// (after tick `since`), and takes what they put to sleep, all of it
+    /// found in the world, and at rest in a look per table or page:
     /// - everything, if sleeping was turned off;
-    /// - a body a game despawned, woke (removing its `Asleep`) or made
-    ///   something else (removing its body): a row left the sleeping
-    ///   tables (`left_since`), and a walk of them finds which;
+    /// - a body a game put to sleep (inserting `Asleep`, spawning it with
+    ///   one, or making an entity with one a body): `Asleep` without
+    ///   `Slept` (`Fresh`), taken as it is, in the island it names;
+    /// - a body a game woke (removing its `Asleep`) or made something else
+    ///   (removing its body): more `Slept` than sleeping bodies with it,
+    ///   and a walk finds which, whose islands wake;
+    /// - a body a game despawned: fewer `Slept` than physics gave, and a
+    ///   walk of the resting contacts finds the ends gone, whose other
+    ///   ends' islands wake;
     /// - a body a game wrote (its velocity, position, collider or body),
     ///   and its island (`for_each_written`).
-    ///
-    /// A body a game put to sleep (inserting `Asleep`, spawning it with one,
-    /// or making an entity with one a body) is taken as it is, in the island
-    /// it names.
     fn wake_by_games(
+        &mut self,
         sleep: &mut Sleepers,
         on: bool,
-        (since, slept): (u32, u32),
-        sleeping: &mut SleepingBodies<'_, '_>,
-        marks: &mut SleepMarks<'_, '_>,
+        (sleeping, marks, resting): (&mut SleepingBodies<'_, '_>, &mut SleepMarks<'_, '_>, &mut RestingContacts<'_, '_>),
+        (fresh, records, colliders): (&mut Fresh<'_, '_>, &mut Records<'_, '_>, &mut Query<(), With<Collider>>),
     ) {
+        let recorded = records.len() as u64;
+        // Only physics gives `Slept`, and it counts what it gives and takes
+        // off (`sleepers`), so fewer can only be a game's despawn: a count
+        // no game can make up for with a `Slept` of its own.
+        let despawned = self.sleepers > recorded;
+        self.sleepers = recorded;
         if !on {
-            sleep.wake_all();
             sleeping.for_each(|row, _| sleep.woken.push(row.entity()));
+            records.for_each(|row, _| sleep.woken.push(row.entity()));
             return;
         }
-        // What a game put to sleep is taken before anything wakes: a row of
-        // an island woken here isn't asleep to physics either, and would be
-        // taken for new. New rows were given `Asleep` (not a term of
-        // `sleeping`, so walked for only when rows arrived; physics's own
-        // are asleep to it already), or are new to `sleeping` with their
-        // values written: spawned asleep, or asleep before they were bodies.
+        // Taken before anything wakes, as physics's own are: one in an
+        // island woken here would be taken for new again next step.
         let mut new = Vec::new();
-        if marks.arrived_since(since) {
-            marks.for_each_written(since, |row, a| {
-                if !sleep.is_asleep(row.entity()) {
-                    sleep.adopt(row.entity(), a.island);
-                    new.push(row.entity());
-                }
-            });
-        }
+        let islands = &mut self.islands;
+        fresh.for_each(|row, a| {
+            row.insert(Slept { island: a.island });
+            row.remove::<Still>();
+            *islands = (*islands).max(a.island);
+            new.push(row.entity());
+        });
+        self.sleepers += new.len() as u64;
+        let proper = sleeping.len() - new.len();
         let new = Slots::of(new.into_iter());
+        let (since, slept) = (self.since, self.slept);
         let mut written = Vec::new();
         sleeping.for_each_written(since, |row, _| written.push(row.entity()));
         written.retain(|&e| {
             if new.get(e).is_some() {
                 return false;
             }
-            if sleep.is_asleep(e) {
-                // Put to sleep by the last solve, which wrote it after
-                // `since`: only what's written after the solve is a game's.
-                let fell = marks.written(e).is_some_and(|t| t > since);
-                return !fell || sleeping.written(e).is_some_and(|t| t > slept);
-            }
-            if let Some(island) = marks.with(e, |_, a| a.island) {
-                sleep.adopt(e, island);
-            }
-            false
+            // Put to sleep by the last solve, which wrote it after
+            // `since`: only what's written after the solve is a game's.
+            let fell = marks.written(e).is_some_and(|t| t > since);
+            !fell || sleeping.written(e).is_some_and(|t| t > slept)
         });
-        // Physics's own wakes leave these tables too, so this also walks
-        // them in the step after each: as rare as waking.
-        if sleeping.left_since(since) {
-            let mut alive = Vec::with_capacity(sleeping.len());
-            sleeping.for_each(|row, _| alive.push(row.entity()));
-            let slots = Slots::of(alive.into_iter());
-            sleep.wake_missing(|e| slots.get(e).is_some());
+        if recorded as usize > proper {
+            records.for_each(|row, s| {
+                if sleeping.get(row.entity()).is_none() {
+                    sleep.waking.push(s.island);
+                    sleep.woken.push(row.entity());
+                }
+            });
+        }
+        // Gone, a body left its resting contacts: what rested on it, or
+        // under it, may no longer be where it was. The one gone is woken
+        // too, so its contacts stop resting (and are despawned by the merge,
+        // not being found).
+        if despawned {
+            resting.for_each(|_, pair| {
+                for (end, other) in [(pair.a, pair.b), (pair.b, pair.a)] {
+                    if colliders.get(end).is_none() {
+                        wake(sleep, records, other);
+                        sleep.woken.push(end);
+                    }
+                }
+            });
         }
         for e in written {
-            sleep.wake(e);
+            wake(sleep, records, e);
         }
     }
 
@@ -294,9 +330,12 @@ impl Physics {
     /// tables, and the resting contacts they're an end of back into the
     /// step. Rare, so walking every resting contact is fine. Generic over
     /// the queries, since each system that wakes bodies declares its own.
+    /// `woken` is as `resolve` leaves it: once each.
     fn move_woken<D: engine_api::engine_ecs::Data, F, C, G, H>(
+        &mut self,
         sleep: &mut Sleepers,
         sleeping: &mut Query<'_, D, F, C>,
+        records: &mut Records<'_, '_>,
         resting: &mut Query<'_, &ContactPair, G, H>,
     ) {
         if sleep.woken.is_empty() {
@@ -306,6 +345,10 @@ impl Physics {
         for e in sleep.woken.drain(..) {
             if let Some(row) = sleeping.get(e) {
                 row.remove::<Asleep>();
+            }
+            if let Some(row) = records.get(e) {
+                row.remove::<Slept>();
+                self.sleepers -= 1;
             }
         }
         resting.for_each(|row, pair| {
@@ -345,13 +388,13 @@ impl Physics {
         (mut overlaps, new_overlaps): (Query<&Overlap, (), Despawns>, Spawner<(Overlap,)>),
         (triggers, mut turned): (EventWriter<Trigger>, Turned<'_, '_>),
         // Gravity, for bodies woken here: see `fall_woken`.
-        (dt, mut gravity, mut falling): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>),
+        (dt, mut gravity, mut falling, mut records): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>, Records<'_, '_>),
         workers: Workers,
     ) {
         let start = Instant::now();
         // Split across threads only while nothing sleeps: waking looks
         // sleeping bodies up as their pairs are found, one at a time.
-        let par = workers.threads() > 1 && sleep.asleep == 0 && asleep.is_empty();
+        let par = workers.threads() > 1 && asleep.is_empty();
         let mut items = Vec::with_capacity(moving.len() + held.len() + drifting.len() + statics.len());
         let v = |v: &Velocity| Vec2::new(v.x, v.y);
         if par {
@@ -394,8 +437,9 @@ impl Physics {
                 }
             });
         }
-        if sleep.asleep > 0 {
-            self.wake_on_statics(sleep, &mut statics, &mut asleep, &mut resting, &slots);
+        if !asleep.is_empty() {
+            self.wake_on_statics((sleep, &mut records), &mut statics, &mut asleep, &mut resting, &slots);
+            resolve(sleep, &mut records);
         }
         // The storage's own order is the broadphase: pairs whose boxes, grown
         // by the speculative margin, meet, and one of which is awake and can
@@ -447,7 +491,8 @@ impl Physics {
         let mut points: Vec<ContactPoints> = Vec::new();
         // Each overlap, and whether it's a sensor's, which triggers.
         let mut overlapping: Vec<(Overlap, bool)> = Vec::new();
-        let any_asleep = sleep.asleep > 0;
+        // Unless what woke above was all of it.
+        let any_asleep = asleep.len() > sleep.woken.len();
         let pair = |&(i, j): &(u32, u32)| (&items[i as usize], &items[j as usize]);
         // Split on whether anything sleeps, so a step with nothing asleep
         // tests nothing for it: the always-false tests cost about 7 µs of
@@ -493,8 +538,8 @@ impl Physics {
                     kept
                 };
                 if collide && !sensor && !rest && (a.body.asleep || b.body.asleep) && woke() {
-                    sleep.wake(a.entity);
-                    sleep.wake(b.entity);
+                    wake(sleep, &mut records, a.entity);
+                    wake(sleep, &mut records, b.entity);
                 } else if collide && !sensor && !rest {
                     found.push(f);
                 }
@@ -583,7 +628,7 @@ impl Physics {
                             next += 1;
                         }
                         _ => {
-                            if sleep.asleep > 0 && m[i].pressed {
+                            if any_asleep && m[i].pressed {
                                 ended.push(pair[i]);
                             }
                             page.row(i).despawn();
@@ -594,9 +639,10 @@ impl Physics {
             found[next..].iter().copied().for_each(spawn);
         }
         for pair in ended {
-            sleep.wake(pair.a);
-            sleep.wake(pair.b);
+            wake(sleep, &mut records, pair.a);
+            wake(sleep, &mut records, pair.b);
         }
+        resolve(sleep, &mut records);
         // What woke here moves at this system's apply node, so this step's
         // solve has it: movable, falling, and its resting contacts solved
         // again.
@@ -604,7 +650,7 @@ impl Physics {
             let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
             fall_woken(sleep, g, *dt, &mut falling);
         }
-        Self::move_woken(sleep, &mut asleep, &mut resting);
+        self.move_woken(sleep, &mut asleep, &mut records, &mut resting);
         // Physics has looked at everything a game may have changed under
         // sleeping bodies; what's written after is for the next step's
         // looks, a pre-solve hook's (between here and the solve) included.
@@ -629,7 +675,7 @@ impl Physics {
             }
             if overlapping.get(next).is_some_and(|f| f.0 == *o) {
                 next += 1;
-            } else if !(sleep.asleep > 0 && passive(o.a) && passive(o.b)) {
+            } else if !(any_asleep && passive(o.a) && passive(o.b)) {
                 row.despawn();
             }
         });
@@ -651,7 +697,7 @@ impl Physics {
     /// them again. `alive` is every awake collider and static.
     fn wake_on_statics(
         &mut self,
-        sleep: &mut Sleepers,
+        (sleep, records): (&mut Sleepers, &mut Records<'_, '_>),
         statics: &mut Query<(&Position, &Collider), Without<(Body, Velocity)>>,
         asleep: &mut AsleepColliders<'_, '_>,
         resting: &mut RestingHere<'_, '_>,
@@ -666,18 +712,18 @@ impl Physics {
             return;
         }
         for &(_, around) in &moved {
-            asleep.in_region(around, |row, _| sleep.wake(row.entity()));
+            asleep.in_region(around, |row, _| wake(sleep, records, row.entity()));
         }
         let moved = Slots::of(moved.iter().map(|(e, _)| *e));
         resting.for_each(|row, pair| {
             for (end, other) in [(pair.a, pair.b), (pair.b, pair.a)] {
                 if moved.get(end).is_some() {
-                    sleep.wake(other);
+                    wake(sleep, records, other);
                 } else if left && alive.get(end).is_none() && asleep.with(end, |_, _| ()).is_none() {
                     // Rested on something gone: despawned, where leaving
                     // `Resting` would have this step's solve push on it as
                     // on a static.
-                    sleep.wake(other);
+                    wake(sleep, records, other);
                     row.despawn();
                     return;
                 }
@@ -694,11 +740,11 @@ impl Physics {
         (mut config, mut gravity): (Query<&Sleep>, Query<&Gravity>),
         // Awake bodies only: a sleeping one is immovable, and in tables of
         // its own, so walks over bodies skip it by what they match.
-        mut moving: Query<(&Body, &mut Velocity, &mut Position), Without<Asleep>, Adds<Asleep>>,
+        (mut moving, mut stills): (Moving<'_, '_>, Stills<'_, '_>),
         // A sleeping body's is left as it fell asleep.
         (mut touching, mut turning): (Query<&mut Touching, Without<Asleep>>, Turning<'_, '_>),
         mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse, &mut ContactPoints), Without<Resting>, Adds<Resting>>,
-        (mut sleeping, mut resting): (SleepingBodies<'_, '_>, RestingContacts<'_, '_>),
+        (mut sleeping, mut resting, mut records): (SleepingBodies<'_, '_>, RestingContacts<'_, '_>, Records<'_, '_>),
         began: EventWriter<Contact>,
     ) {
         let start = Instant::now();
@@ -988,17 +1034,25 @@ impl Physics {
         if let Some(c) = config {
             let t_sleeping = Instant::now();
             self.fall_asleep(
-                sleep,
+                (sleep, &mut records),
                 &c,
                 dt,
                 (&entities, &bodies, &kinds),
                 (&spinning, &reach),
                 &links,
-                (&mut moving, &mut turning),
+                (&mut moving, &mut stills, &mut turning),
                 &mut contacts,
             );
-            Self::move_woken(sleep, &mut sleeping, &mut resting);
+            self.move_woken(sleep, &mut sleeping, &mut records, &mut resting);
             self.time.sleeping += nanos(t_sleeping);
+        } else {
+            // Turned off, sleeping forgets how long bodies were still: turned
+            // on again, they start from moving. (Kept, `since` would count
+            // the steps it was off.) A walk of the sparse set, so of nothing
+            // once they're gone; not behind `is_empty`, which counts the
+            // query's table rows, and a query of a sparse component alone
+            // has none (see docs/lore).
+            stills.for_each(|row, _| row.remove::<Still>());
         }
         // After every write of the step's, the stopping of bodies that fell
         // asleep included.
@@ -1012,65 +1066,110 @@ impl Physics {
 }
 
 impl Physics {
-    /// Sleeping's bookkeeping after a step: see `Sleepers::update`. Links
+    /// Sleeping's bookkeeping after a step: see `sleep::islands`. Links
     /// between dynamic bodies make islands; a kinematic body moving into a
     /// sleeping one wakes it. The bodies that fall asleep stop and move to
     /// their sleeping tables, and so do the contacts that then rest.
     #[allow(clippy::too_many_arguments)]
     fn fall_asleep(
         &mut self,
-        sleep: &mut Sleepers,
+        (sleep, records): (&mut Sleepers, &mut Records<'_, '_>),
         c: &Sleep,
         dt: f32,
         (entities, bodies, kinds): (&[Entity], &[SolverBody], &[(bool, u8)]),
         (spinning, reach): (&[Spinning], &[f32]),
         links: &[(Entity, Entity)],
-        (moving, turning): (&mut Query<(&Body, &mut Velocity, &mut Position), Without<Asleep>, Adds<Asleep>>, &mut Turning<'_, '_>),
+        (moving, stills, turning): (&mut Moving<'_, '_>, &mut Stills<'_, '_>, &mut Turning<'_, '_>),
         contacts: &mut Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse, &mut ContactPoints), Without<Resting>, Adds<Resting>>,
     ) {
         let slots = Slots::of(entities.iter().copied());
-        // Sleeping bodies aren't among the step's, but are all dynamic.
-        let kind =
-            |e: Entity| slots.get(e).map_or(if sleep.is_asleep(e) { (false, DYNAMIC) } else { (false, STATIC) }, |k| kinds[k as usize]);
         let mut speed: Vec<f32> = bodies.iter().map(|b| b.v.x.hypot(b.v.y)).collect();
         // A turning body is as fast as its edge, as Box2D has it
         // (`maxExtent` in `b2FinalizeBodies`).
         for (s, r) in spinning.iter().zip(reach) {
             speed[s.body as usize] = speed[s.body as usize].max(s.w.abs() * r);
         }
-        let awake: Vec<(Entity, f32)> =
-            (0..entities.len()).filter(|&k| kinds[k] == (true, DYNAMIC)).map(|k| (entities[k], speed[k])).collect();
-        let mut between = Vec::with_capacity(links.len());
-        let mut kinematic = Vec::new();
+        // How long each awake body has been still, from its `Still`, which
+        // is taken off one going faster here and put on one going slower
+        // below. Still is slower, so a speed that isn't a number is moving,
+        // as it was when this counted seconds.
+        let still = |s: f32| s < c.speed;
+        let mut since: Vec<Option<u64>> = vec![None; entities.len()];
+        stills.for_each(|row, s| match slots.get(row.entity()) {
+            Some(k) if !still(speed[k as usize]) => row.remove::<Still>(),
+            Some(k) => since[k as usize] = Some(s.since),
+            None => {}
+        });
+        let clock = self.clock;
+        let awake: Vec<(Entity, u64)> = (0..entities.len())
+            .filter(|&k| kinds[k] == (true, DYNAMIC))
+            .map(|k| (entities[k], if still(speed[k]) { clock - since[k].unwrap_or(clock) + 1 } else { 0 }))
+            .collect();
+        // Each end of a link as the step has it (whether it moves, and its
+        // kind), and, for one not among the step's bodies (a sleeping body
+        // or a static), its island if physics has it asleep: sleeping bodies
+        // are all dynamic.
+        let mut link_end = |e: Entity| match slots.get(e) {
+            Some(k) => (kinds[k as usize], None),
+            None => match records.with(e, |_, s| s.island) {
+                Some(island) => ((false, DYNAMIC), Some(island)),
+                None => ((false, STATIC), None),
+            },
+        };
+        let pushes =
+            |e: Entity, (moves, kind): (bool, u8)| kind == KINEMATIC && moves && bodies[slots.get(e).unwrap() as usize].v != Vec2::ZERO;
+        let (mut between, mut against) = (Vec::with_capacity(links.len()), Vec::new());
         for &(a, b) in links {
-            match (kind(a).1, kind(b).1) {
-                (DYNAMIC, DYNAMIC) => between.push((a, b)),
-                (KINEMATIC, _) if kind(a).0 && bodies[slots.get(a).unwrap() as usize].v != Vec2::ZERO => kinematic.push(b),
-                (_, KINEMATIC) if kind(b).0 && bodies[slots.get(b).unwrap() as usize].v != Vec2::ZERO => kinematic.push(a),
+            let ((ka, ia), (kb, ib)) = (link_end(a), link_end(b));
+            match (ka.1, kb.1) {
+                (DYNAMIC, DYNAMIC) => match (ia, ib) {
+                    (None, None) => between.push((a, b)),
+                    (None, Some(i)) => against.push((a, i)),
+                    (Some(i), None) => against.push((b, i)),
+                    (Some(_), Some(_)) => {}
+                },
+                (KINEMATIC, _) if pushes(a, ka) => sleep.waking.extend(ib),
+                (_, KINEMATIC) if pushes(b, kb) => sleep.waking.extend(ia),
                 _ => {}
             }
         }
-        for e in kinematic {
-            sleep.wake(e);
+        let enough = sleep.enough(dt, c.time);
+        let (wake, fell) = sleep::islands(enough, &awake, &between, &against, &mut self.islands);
+        sleep.waking.extend(wake);
+        for &(e, _) in awake.iter().filter(|&&(_, steps)| steps == 1) {
+            if let Some(row) = moving.get(e) {
+                row.insert(Still { since: clock });
+            }
         }
-        let fell = sleep.update(dt, c.speed, c.time, &awake, &between);
+        // What woke is known before contacts are marked resting, below.
+        resolve(sleep, records);
         if fell.is_empty() {
             return;
         }
+        // Asleep, a body doesn't keep its `Still`: woken, it starts from
+        // moving, and the walk above is of awake bodies alone.
         for &(e, island) in &fell {
             turning.with(e, |_, (_, _, _, mut s)| *s = Spin::default());
             moving.with(e, |row, (_, mut v, _)| {
                 *v = Velocity::default();
                 row.insert(Asleep { island });
+                row.insert(Slept { island });
+                row.remove::<Still>();
             });
         }
-        // A contact rests once neither end moves and one sleeps. A body
-        // woken this step moves from the next, though it was still in this
-        // one.
-        let woken = Slots::of(sleep.woken.iter().copied());
-        let moves = |e: Entity| !sleep.is_asleep(e) && (woken.get(e).is_some() || slots.get(e).is_some_and(|k| kinds[k as usize].0));
+        self.sleepers += fell.len() as u64;
+        // A contact rests once neither end moves and one sleeps, as the
+        // world will have them after this system's apply node. A body woken
+        // this step moves from the next, though it was still in this one.
+        let (fell, woken) = (Slots::of(fell.iter().map(|&(e, _)| e)), Slots::of(sleep.woken.iter().copied()));
+        let mut end = |e: Entity| {
+            let asleep = fell.get(e).is_some() || (slots.get(e).is_none() && woken.get(e).is_none() && records.get(e).is_some());
+            let moves = !asleep && (woken.get(e).is_some() || slots.get(e).is_some_and(|k| kinds[k as usize].0));
+            (asleep, moves)
+        };
         contacts.for_each(|row, (pair, _, _, _, _)| {
-            if (sleep.is_asleep(pair.a) || sleep.is_asleep(pair.b)) && !moves(pair.a) && !moves(pair.b) {
+            let ((a, a_moves), (b, b_moves)) = (end(pair.a), end(pair.b));
+            if (a || b) && !a_moves && !b_moves {
                 row.insert(Resting {});
             }
         });
@@ -1124,6 +1223,34 @@ fn fall(g: Vec2, dt: f32, body: &Body, mut v: engine_api::Mut<'_, Velocity>) {
 /// Gravity on the bodies woken since `integrate_velocities` gave the awake
 /// ones theirs, still in their sleeping tables: so a body woken in a step
 /// moves in it as one that was awake would, from rest.
+/// Wakes `e`'s island, if physics has it asleep: a kinematic body moving
+/// into it, a game writing it, or its support gone. As islands, which
+/// `resolve` makes bodies of.
+fn wake(sleep: &mut Sleepers, records: &mut Records<'_, '_>, e: Entity) {
+    if let Some(island) = records.with(e, |_, s| s.island) {
+        sleep.waking.push(island);
+    }
+}
+
+/// The bodies of the islands woken since this last ran, into `woken`,
+/// which is left in entity order and once each: gravity on them and their
+/// move out of the sleeping tables would count one twice. A walk of every
+/// sleeping body, and as rare as waking.
+fn resolve(sleep: &mut Sleepers, records: &mut Records<'_, '_>) {
+    if !sleep.waking.is_empty() {
+        let mut islands = std::mem::take(&mut sleep.waking);
+        islands.sort_unstable();
+        islands.dedup();
+        records.for_each(|row, s| {
+            if islands.binary_search(&s.island).is_ok() {
+                sleep.woken.push(row.entity());
+            }
+        });
+    }
+    sleep.woken.sort_unstable();
+    sleep.woken.dedup();
+}
+
 fn fall_woken(sleep: &Sleepers, g: Vec2, dt: f32, falling: &mut SleepingVelocities<'_, '_>) {
     for &e in &sleep.woken {
         falling.with(e, |_, (body, v)| fall(g, dt, body, v));
@@ -1238,32 +1365,26 @@ fn mark(t: &mut Touching, n: Vec2) {
 impl Mod for Physics {
     type Transient = Sleepers;
 
-    /// The bookkeeping the last build left in the state, or, with none (a
-    /// first build, or one whose state was reset), who's asleep in the
-    /// world. Not both: what the world has asleep that the copy doesn't, a
-    /// game put to sleep since the last step, and the next step's
-    /// `wake_by_games` takes it as the game's; taken here as physics's own,
-    /// its values written since would wake it. (History, 2026-09-26: both
-    /// were taken, so a body a game put to sleep between frames woke if a
-    /// reload came between.)
-    fn load(&mut self, sleep: &mut Sleepers, cx: &mut Cx) {
-        if std::mem::take(&mut self.handed) {
-            *sleep = std::mem::take(&mut self.sleep);
-        } else {
-            cx.world().for_each::<&Asleep>(|e, a| sleep.adopt(e, a.island));
+    /// Nothing to take over: all sleeping keeps is in the world, or in the
+    /// state, which a reload carries. A state that starts empty (a first
+    /// build's, or one reset) counts from the world: the `Slept` there (so
+    /// a sleeping body despawned since the last step wakes nothing, the one
+    /// change a reset state can't see), the greatest island, and the last
+    /// step a `Still` began at, which its clock mustn't be behind.
+    /// (History, 2026-09-26: the mod kept a copy of who was asleep and how
+    /// long each awake body had been still, handed to the next build in
+    /// `unload`; see docs/architecture/physics.md, [^sleep-copy].)
+    fn load(&mut self, _: &mut Sleepers, cx: &mut Cx) {
+        if self.clock > 0 {
+            return;
         }
-    }
-
-    /// Hands the bookkeeping to the next build. Rebuilt from the world
-    /// instead, each awake body's time still would restart at a reload, and
-    /// a body due to fall asleep would sleep that much later; and a sleeping
-    /// body a game despawned or woke between frames would wake nothing,
-    /// the world no longer having it asleep: a reload would show.
-    /// (History, 2026-09-25: it was rebuilt from the world, until the
-    /// games' reload replays caught the difference.)
-    fn unload(&mut self, sleep: &mut Sleepers, _: &mut Cx) {
-        self.sleep = std::mem::take(sleep);
-        self.handed = true;
+        let mut world = cx.world();
+        world.for_each::<&Slept>(|_, s| {
+            self.sleepers += 1;
+            self.islands = self.islands.max(s.island);
+        });
+        world.for_each::<&Asleep>(|_, a| self.islands = self.islands.max(a.island));
+        world.for_each::<&Still>(|_, s| self.clock = self.clock.max(s.since));
     }
 
     fn systems(s: &mut Systems<Self>) {
@@ -1277,7 +1398,7 @@ impl Mod for Physics {
     }
 
     /// `stats`: the build, steps run, contacts held, and time per system.
-    fn message(&mut self, sleep: &mut Sleepers, cx: &mut Cx, message: &str) -> Result<String, String> {
+    fn message(&mut self, _: &mut Sleepers, cx: &mut Cx, message: &str) -> Result<String, String> {
         match message.trim() {
             "stats" => {
                 let per = |ns: u64| ns as f64 / self.steps.max(1) as f64 / 1e3;
@@ -1314,12 +1435,19 @@ impl Mod for Physics {
                     per(t.sleeping)
                 ))
             }
-            "sleeping" => Ok(format!("asleep {}", sleep.asleep)),
+            "sleeping" => {
+                let mut asleep = 0;
+                cx.world().for_each::<(&Asleep, &Slept)>(|_, _| asleep += 1);
+                Ok(format!("asleep {asleep}"))
+            }
             "wake" => {
-                sleep.wake_all();
                 let mut world = cx.world();
                 let mut asleep = Vec::new();
                 world.for_each::<&Asleep>(|e, _| asleep.push(e));
+                let mut slept = Vec::new();
+                world.for_each::<&Slept>(|e, _| slept.push(e));
+                slept.into_iter().for_each(|e| world.remove::<Slept>(e));
+                self.sleepers = 0;
                 let mut resting = Vec::new();
                 world.for_each::<(&ContactPair, &Resting)>(|e, _| resting.push(e));
                 asleep.into_iter().for_each(|e| world.remove::<Asleep>(e));

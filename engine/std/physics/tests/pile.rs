@@ -20,6 +20,8 @@
 //!   despawn nap  that, and spawn a body asleep (with `Asleep`) above the box
 //!   nap later  spawn an entity asleep above the box that isn't a body yet
 //!   nap body   make those bodies
+//!   nap pair   spawn two bodies asleep above the box, apart, in one island
+//!   unsleep nap  remove the `Asleep` of the last body `nap` spawned
 //!   unsleep    remove the first body's `Asleep`, as a game waking it would
 //!   resleep    give it one again, as a game putting it to sleep would
 //!   post       spawn a static body with a velocity above the box, which the
@@ -303,6 +305,22 @@ impl Mod for Pile {
                 }
                 Ok("napping bodies".into())
             }
+            // Two bodies in one island of the game's, apart: nothing but the
+            // island joins them.
+            Some(("nap", "pair")) => {
+                let body = Body { friction: 0.4, restitution: 0.1, ..Body::default() };
+                for dx in [-6.0, 6.0] {
+                    let at = Position { x: self.width() / 2.0 + dx, y: NAP };
+                    let e = world.spawn((at, Velocity::default(), body, Collider::circle(RADIUS), Asleep { island: NAP_ISLAND + 4 }));
+                    self.naps.push(e);
+                }
+                Ok("a pair napping".into())
+            }
+            Some(("unsleep", "nap")) => {
+                let last = self.naps.last().copied().ok_or("nothing napping")?;
+                world.remove::<Asleep>(last);
+                Ok("woke the last nap".into())
+            }
             None if message.trim() == "unsleep" => {
                 let first = first_body(&mut world).ok_or("nothing to wake")?;
                 world.remove::<Asleep>(first);
@@ -403,7 +421,7 @@ impl Mod for Pile {
                 }
                 Ok("shelved".into())
             }
-            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | sleep default | kick <vx> <vy> [newest | naps] | grow <h> | despawn [nap] | nap later | nap body | unsleep | resleep [post] | post | floor off | floor falls | floor swap | floor <dy> | lift <vy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
+            _ => Err("commands: widen <w> | drop <n> | sleep <speed> <time> | sleep off | sleep default | kick <vx> <vy> [newest | naps] | grow <h> | despawn [nap] | nap later | nap body | nap pair | unsleep [nap] | resleep [post] | post | floor off | floor falls | floor swap | floor <dy> | lift <vy> | touching | sensing | block <x> <y> | pusher <x> <y> <vx> <vy> | stats | shelves [sensing]".into()),
         }
     }
 }

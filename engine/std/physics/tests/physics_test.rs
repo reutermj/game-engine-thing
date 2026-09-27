@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use engine_loader::engine::Engine;
-use physics::{Asleep, Body, ContactPair, DYNAMIC, Overlap, Position, Resting, Touching, Velocity};
+use physics::{Asleep, Body, Collider, ContactPair, DYNAMIC, Overlap, Position, Resting, Slept, Still, Touching, Velocity};
 use runfiles::Runfiles;
 
 #[path = "pool.rs"]
@@ -425,10 +425,23 @@ mod pile {
         for (width, n) in SCENES {
             let all = n as f32;
             let e = asleep_pile("unsleep", (width, n), &[]);
+            // The island of the body `unsleep` wakes (the first dropped).
+            let islands = e.world().values::<Asleep>().unwrap();
+            let first = islands.iter().map(|(b, _)| *b).min().unwrap();
+            let island = islands.iter().find(|(b, _)| *b == first).unwrap().1.island;
+            let mates: Vec<_> = islands.iter().filter(|(_, a)| a.island == island).map(|(b, _)| (b.index, b.generation)).collect();
+            let written: std::collections::HashMap<_, _> =
+                ticks(&e, "physics::Velocity").into_iter().map(|(i, g, t)| ((i, g), t)).collect();
             send(&e, "pile", "unsleep");
             step(&e, 1);
             let awake = asleep(&e);
             assert!(awake < all - 1.0, "{width} wide: its island woke too: {awake} asleep");
+            // In the step it was seen, before the solve: given gravity then,
+            // as awake bodies are (`fall_woken`), and solved; woken after,
+            // they'd stand still a step.
+            let now: std::collections::HashMap<_, _> = ticks(&e, "physics::Velocity").into_iter().map(|(i, g, t)| ((i, g), t)).collect();
+            let unmoved = mates.iter().filter(|b| now.get(b) == written.get(b)).count();
+            assert_eq!(unmoved, 0, "{width} wide: woken, and not solved in the step it woke");
             assert_eq!(in_sleeping_tables(&e).0 as f32, awake, "the world and physics agree");
             send(&e, "pile", "resleep");
             step(&e, 1);
@@ -587,6 +600,11 @@ mod pile {
             send(&e, "pile", "despawn");
             step(&e, 1);
             assert!(asleep(&e) < all - 1.0, "{width} wide: its island woke: {} asleep", asleep(&e));
+            // Its contacts with statics too, which wake nothing.
+            let w = e.world();
+            let there: std::collections::HashSet<_> = w.values::<Collider>().unwrap().into_iter().map(|(e, _)| e).collect();
+            let pairs = w.values::<ContactPair>().unwrap_or_default();
+            assert!(pairs.iter().all(|(_, p)| there.contains(&p.a) && there.contains(&p.b)), "{width} wide: a contact with an end gone");
             step(&e, 120);
             until_asleep(&e, all - 1.0, 2000);
             assert_eq!(in_sleeping_tables(&e).0, n as usize - 1);
@@ -600,6 +618,34 @@ mod pile {
                 "{width} wide: despawned between finding contacts and solving, its island woke: {} asleep",
                 asleep(&e)
             );
+
+            // In the step after a game put a body to sleep, which physics
+            // counts as it takes it: one of its own gone is seen all the same.
+            let e = asleep_pile("despawn_after_post", (width, n), &[]);
+            send(&e, "pile", "post");
+            step(&e, 1);
+            send(&e, "pile", "resleep post");
+            step(&e, 1);
+            assert_eq!(asleep(&e), all + 1.0, "{width} wide: the post put to sleep");
+            send(&e, "pile", "despawn");
+            step(&e, 1);
+            assert!(asleep(&e) < all, "{width} wide: despawned the step after, its island woke: {} asleep", asleep(&e));
+
+            // In the step after the last island fell asleep, which physics
+            // counts as it falls.
+            let e = game("PILE", &format!("despawn_just_asleep_{width}"));
+            send(&e, "pile", &format!("widen {width}"));
+            send(&e, "pile", &drop(width, n));
+            send(&e, "pile", "sleep 0.05 0.5");
+            let mut steps = 0;
+            while asleep(&e) < all {
+                assert!(steps < 3000, "{} of {n} asleep after {steps} steps", asleep(&e));
+                step(&e, 1);
+                steps += 1;
+            }
+            send(&e, "pile", "despawn");
+            step(&e, 1);
+            assert!(asleep(&e) < all - 1.0, "{width} wide: despawned just asleep, its island woke: {} asleep", asleep(&e));
         }
     }
 
@@ -648,6 +694,107 @@ mod pile {
                 "{width} wide: woken, they fell in the step they woke: {fell:?}"
             );
         }
+    }
+
+    /// How long a body has been still (`Still`) counts from when it last
+    /// went slower, while it's awake: one that goes faster, falls asleep,
+    /// or is put to sleep by a game as it slows starts afresh, and falls
+    /// asleep `Sleep::time` after it's still again, not at once, as one
+    /// still since before would.
+    #[test]
+    fn a_body_woken_starts_its_time_still_afresh() {
+        let e = game("PILE", "afresh");
+        send(&e, "pile", "drop 1");
+        send(&e, "pile", "sleep 0.05 0.5");
+        let mut steps = 0;
+        while e.world().values::<Still>().unwrap_or_default().is_empty() {
+            assert!(steps < 600, "never slower than the threshold");
+            step(&e, 1);
+            steps += 1;
+        }
+        // Faster, it isn't still any more: thrown up and landed, it's still
+        // from when it slows again, not from before it was thrown.
+        step(&e, 20);
+        // The one body, and the one velocity.
+        let body = e.world().values::<Velocity>().unwrap()[0].0;
+        let speed = |e: &Engine| e.world().values::<Velocity>().unwrap()[0].1;
+        let height = |e: &Engine| e.world().values::<Position>().unwrap().into_iter().find(|&(b, _)| b == body).unwrap().1.y;
+        let floor = height(&e);
+        send(&e, "pile", "kick 0 -6");
+        let mut steps = 0;
+        loop {
+            assert!(steps < 600, "never landed");
+            step(&e, 1);
+            steps += 1;
+            assert_eq!(asleep(&e), 0.0, "asleep {steps} steps after it was thrown, as still since before");
+            let v = speed(&e);
+            if steps > 2 && v.x.hypot(v.y) < 0.05 && height(&e) > floor - 0.05 {
+                break;
+            }
+        }
+        step(&e, 20);
+        assert_eq!(asleep(&e), 0.0, "landed, and not still for long enough");
+        // Put to sleep by a game as it slows, then by physics. On the floor,
+        // the game's is woken in the same step, as its contact there, pressed
+        // and not found again (sleeping bodies and statics aren't paired),
+        // ends; physics's, by a game writing its velocity. Either way it's
+        // asleep again `Sleep::time` after it's still, 30 steps at 60 a
+        // second.
+        for put_to_sleep_by in ["the game", "physics"] {
+            if put_to_sleep_by == "the game" {
+                send(&e, "pile", "resleep");
+            } else {
+                step(&e, 60);
+                assert_eq!(asleep(&e), 1.0, "put to sleep by physics");
+                send(&e, "pile", "kick 0 0");
+            }
+            let mut steps = 0;
+            while steps == 0 || asleep(&e) == 0.0 {
+                assert!(steps < 600, "never asleep again");
+                step(&e, 1);
+                steps += 1;
+            }
+            // The game's falls a little as it wakes, and is still from the
+            // step after.
+            let enough = if put_to_sleep_by == "physics" { 30 } else { 31 };
+            assert_eq!(steps, enough, "put to sleep by {put_to_sleep_by}, woken, and asleep again");
+        }
+    }
+
+    /// Physics numbers its islands after the greatest a game has named,
+    /// so they don't collide with it: here `resleep`'s, pile.rs's
+    /// `NAP_ISLAND + 2`, given to a body in the air, which the bodies
+    /// above land on and wake.
+    #[test]
+    fn physics_numbers_its_islands_after_a_games() {
+        const GAMES: u32 = (1 << 30) + 2;
+        let e = game("PILE", "numbered");
+        send(&e, "pile", "drop 200");
+        send(&e, "pile", "sleep 0.05 0.5");
+        send(&e, "pile", "resleep");
+        step(&e, 1);
+        until_asleep(&e, 200.0, 3000);
+        let islands: Vec<u32> = e.world().values::<Asleep>().unwrap().into_iter().map(|(_, a)| a.island).collect();
+        // The game's own, if it was never woken, and physics's after it.
+        assert!(islands.iter().all(|&i| i >= GAMES) && islands.iter().any(|&i| i > GAMES), "numbered after the game's: {islands:?}");
+    }
+
+    /// A game's island wakes as one, though its bodies need not touch:
+    /// here a pair apart, one of them woken by the game. What joins them
+    /// is only the island `Slept` keeps, the woken one's `Asleep` gone.
+    #[test]
+    fn a_games_island_wakes_as_one() {
+        let e = game("PILE", "pair");
+        send(&e, "pile", "sleep 0.05 0.5");
+        // After the first step, which finds the walls written (spawned) and
+        // wakes what sleeps near them.
+        step(&e, 1);
+        send(&e, "pile", "nap pair");
+        step(&e, 1);
+        assert_eq!(asleep(&e), 2.0, "the pair asleep");
+        send(&e, "pile", "unsleep nap");
+        step(&e, 1);
+        assert_eq!(asleep(&e), 0.0, "the pair woke together");
     }
 
     /// A shelf that starts moving under bodies asleep on it wakes them as
@@ -719,10 +866,11 @@ mod pile {
     /// What a game changes between frames (a message) is seen by the next
     /// step as a game's, with a reload in between as without: a sleeping
     /// body despawned or woken, whose island wakes, which the new build
-    /// knows only from the copy of who's asleep it's handed (the world no
-    /// longer has them); and one put to sleep, or asleep before it's a body,
-    /// which stays asleep. The first two woke nothing rebuilt from the
-    /// world, and the last two woke when adopted from it.
+    /// knows from `Slept` and its count (`Asleep` no longer has them); and
+    /// one put to sleep, or asleep before it's a body, which stays asleep.
+    /// (History, 2026-09-26: with a copy of who's asleep in the mod, the
+    /// first two woke nothing when it was rebuilt from the world, and the
+    /// last two woke when taken from it as physics's own.)
     #[test]
     fn a_reload_between_a_games_change_and_the_next_step_does_not_show() {
         let cases: [(&str, &[&str]); 4] = [("despawn", &[]), ("unsleep", &[]), ("despawn nap", &[]), ("nap later", &["nap body"])];
@@ -748,10 +896,11 @@ mod pile {
         }
     }
 
-    /// How long each awake body has been still goes to the new build too,
+    /// How long each awake body has been still (`Still`) is in the world,
     /// so a pile due to fall asleep does so the same step with a reload in
-    /// between as without. Rebuilt from the world, the time restarted, and
-    /// the pile slept `Sleep::time` late (2026-09-25).
+    /// between as without. (History, 2026-09-25: rebuilt from the world
+    /// when the mod kept it, the time restarted, and the pile slept
+    /// `Sleep::time` late.)
     #[test]
     fn a_reload_keeps_how_long_awake_bodies_have_been_still() {
         let pile = |test| {
@@ -810,11 +959,25 @@ mod pile {
     fn turning_sleeping_off_wakes_everything() {
         for (width, n) in SCENES {
             let e = asleep_pile("sleep_off", (width, n), &[]);
+            // And one a game woke in the same step, which physics still
+            // has as its own.
+            send(&e, "pile", "unsleep");
             send(&e, "pile", "sleep off");
             step(&e, 1);
             assert_eq!(asleep(&e), 0.0);
             assert_eq!(in_sleeping_tables(&e), (0, 0));
+            assert_eq!(e.world().values::<Slept>().unwrap_or_default().len(), 0, "{width} wide: nothing physics has asleep");
         }
+        // Settling, sleeping forgets how long each body has been still.
+        let e = game("PILE", "sleep_off_settling");
+        send(&e, "pile", "drop 200");
+        send(&e, "pile", "sleep 0.05 0.5");
+        while e.world().values::<Still>().unwrap_or_default().is_empty() {
+            step(&e, 1);
+        }
+        send(&e, "pile", "sleep off");
+        step(&e, 1);
+        assert_eq!(e.world().values::<Still>().unwrap_or_default().len(), 0, "turned off, nothing still");
     }
 
     /// Lockstep with sleeping on: the same commands at the same steps end

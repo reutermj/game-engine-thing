@@ -417,6 +417,36 @@ component! {
 }
 
 component! {
+    /// Physics's record of a body it has taken as asleep (its own, or one a
+    /// game gave `Asleep`), and the island it wakes with: put on beside
+    /// `Asleep`, and taken off as physics wakes it. What `Asleep` alone
+    /// can't say, since a game writes that: which sleeping bodies are new
+    /// to physics (with `Asleep` and without this), and which it had asleep
+    /// that a game woke or unmade (this without `Asleep`, or without a
+    /// body). Only physics gives it, so its count falling says a game
+    /// despawned a sleeping body. Tables of its own, so both are found by
+    /// what a query matches (docs/architecture/physics.md, "Sleeping").
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Slept: "physics::Slept" {
+        pub island: u32,
+    }
+}
+
+component! {
+    /// On an awake dynamic body slower than `Sleep::speed`, since physics's
+    /// step `since`: how long it has been still, which is what its island
+    /// falls asleep by. Physics puts it on as a body goes slower and takes
+    /// it off as it goes faster or falls asleep. Sparse, since the bodies
+    /// crossing the threshold, hundreds a step in a settling pile, would
+    /// each be a move between tables (docs/architecture/physics.md,
+    /// "Sleeping").
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Still: "physics::Still", storage = sparse {
+        pub since: u64,
+    }
+}
+
+component! {
     /// On a contact neither end of which moves, one of them asleep: kept as
     /// it is, impulses and all (the warm start for when they wake), and not
     /// looked for, merged or solved until an end wakes.
