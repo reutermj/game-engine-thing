@@ -13,6 +13,8 @@ use crate::{Dyn, Sim};
 pub const REST: f32 = 0.05;
 /// Steps between looks: rest is known to within this.
 pub const EVERY: u32 = 10;
+/// The steps at the end `Settling::energy_tail` looks over.
+pub const TAIL: u32 = 200;
 
 #[derive(Clone, Debug, Default)]
 pub struct Settling {
@@ -30,6 +32,9 @@ pub struct Settling {
     /// At step 400, and at the end.
     pub at400: Quality,
     pub end: Quality,
+    /// The most energy a body at any look in the last `TAIL` steps: where
+    /// a scene sways, the energy at the end is where in the swing it ended.
+    pub energy_tail: f64,
     /// Stacks and pyramids: how far the top box (the last body) is from
     /// where it began, at the end.
     pub top_moved: Option<f32>,
@@ -71,6 +76,9 @@ pub fn settle(sim: &mut dyn Sim, scene: &Scene, turning: bool, max: u32) -> Sett
         s.mean_during = s.mean_during.max(q.mean_depth);
         if step == 400 {
             s.at400 = q;
+        }
+        if step + TAIL > max {
+            s.energy_tail = s.energy_tail.max(q.energy);
         }
         if step >= max {
             s.end = q;

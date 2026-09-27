@@ -109,6 +109,14 @@ pub struct Params {
     pub warm: bool,
     /// Restitution passes over a contact's two points.
     pub bounce: usize,
+    /// `STIFFNESS` and `STATIC_STIFFNESS`.
+    pub stiffness: f32,
+    pub static_stiffness: f32,
+    /// A contact's two points solved together in the relax passes, as one
+    /// 2x2 problem (`block`); else one after the other, as Box2D v3 does.
+    /// Off: measured, it stood a 20-high stack sooner and set a 5050
+    /// pyramid vibrating (physics.md, "Still at rest").
+    pub block: bool,
 }
 
 pub const PARAMS: Params = Params {
@@ -118,6 +126,9 @@ pub const PARAMS: Params = Params {
     integrate: Integrate::Rotation,
     warm: true,
     bounce: BOUNCE_ITERATIONS,
+    stiffness: STIFFNESS,
+    static_stiffness: STATIC_STIFFNESS,
+    block: false,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -383,8 +394,8 @@ fn solve_all<const POINTS: bool>(
     let substeps = params.substeps;
     let h = dt / substeps as f32;
     let inv_h = 1.0 / h;
-    let moving = Softness::new(STIFFNESS * inv_h, DAMPING_RATIO, h);
-    let fixed = Softness::new(STATIC_STIFFNESS * inv_h, DAMPING_RATIO, h);
+    let moving = Softness::new(params.stiffness * inv_h, DAMPING_RATIO, h);
+    let fixed = Softness::new(params.static_stiffness * inv_h, DAMPING_RATIO, h);
     let share = 1.0 / substeps as f32;
     let warm = if params.warm { share } else { 0.0 };
     // Every body's angular state, if any turns: indexed like the bodies,
@@ -645,6 +656,10 @@ fn pass_points(params: &Params, lin: &mut [Lin], ang: &mut [Ang], r: &Row, t: &m
     let n = r.normal;
     let dp = lin[r.b()].moved - lin[r.a()].moved;
     let (qa, qb) = (ang[r.a()], ang[r.b()]);
+    if !push && params.block && t.count == 2 && block(lin, ang, r, t, inv_h, dp, params) {
+        rub_points(lin, ang, r, t);
+        return;
+    }
     for p in &mut t.p[..t.count] {
         // Box2D's: the separation found, plus how far the arms' ends moved
         // apart along the normal, the normal held fixed through the step.
@@ -666,6 +681,68 @@ fn pass_points(params: &Params, lin: &mut [Lin], ang: &mut [Ang], r: &Row, t: &m
     if push {
         return;
     }
+    rub_points(lin, ang, r, t);
+}
+
+/// A relax pass over a two-point contact's normals as one 2x2 LCP
+/// (`Params::block`): Box2D v2.4's block solver
+/// (`b2ContactSolver::SolveVelocityConstraints`), as Rapier 2D solves a
+/// manifold's pairs by default (`solve_pair`), its four cases in turn.
+/// False, and nothing applied, where the two rows are near dependent
+/// (Box2D's condition number, 1000) or no case holds: the caller then
+/// solves them one after the other. Only the relax passes: in the pushing
+/// pass too it measured worse (physics.md, "Still at rest").
+fn block(lin: &mut [Lin], ang: &mut [Ang], r: &Row, t: &mut Turning, inv_h: f32, dp: Vec2, params: &Params) -> bool {
+    let n = r.normal;
+    let (a, b) = (r.a(), r.b());
+    let (ma, mb, ia, ib) = (lin[a].inv_mass, lin[b].inv_mass, ang[a].inv_inertia, ang[b].inv_inertia);
+    let (p1, p2) = (t.p[0], t.p[1]);
+    let k11 = ma + mb + ia * p1.rna * p1.rna + ib * p1.rnb * p1.rnb;
+    let k22 = ma + mb + ia * p2.rna * p2.rna + ib * p2.rnb * p2.rnb;
+    let k12 = ma + mb + ia * p1.rna * p2.rna + ib * p1.rnb * p2.rnb;
+    let det = k11 * k22 - k12 * k12;
+    if k11 * k11 >= 1000.0 * det {
+        return false;
+    }
+    let (qa, qb) = (ang[a], ang[b]);
+    // A gap may close this substep and no more, as in `pass_points`.
+    let bias = |p: &Point| {
+        let sep = p.base + (dp + arm(params, &qb, p.rb) - arm(params, &qa, p.ra)).dot(n);
+        if sep > 0.0 { sep * inv_h } else { 0.0 }
+    };
+    let vn = |p: &Point| (lin[b].v - lin[a].v).dot(n) + ang[b].w * p.rnb - ang[a].w * p.rna;
+    // b' = vn + bias - K a, so that K x + b' is the normal speed (plus bias)
+    // once the accumulated impulses are x.
+    let (x1, x2) = (p1.jn, p2.jn);
+    let b1 = vn(&p1) + bias(&p1) - (k11 * x1 + k12 * x2);
+    let b2 = vn(&p2) + bias(&p2) - (k12 * x1 + k22 * x2);
+    let inv = 1.0 / det;
+    let both = ((k12 * b2 - k22 * b1) * inv, (k12 * b1 - k11 * b2) * inv);
+    let first = (-b1 / k11, 0.0);
+    let second = (0.0, -b2 / k22);
+    let x = if both.0 >= 0.0 && both.1 >= 0.0 {
+        both
+    } else if first.0 >= 0.0 && k12 * first.0 + b2 >= 0.0 {
+        first
+    } else if second.1 >= 0.0 && k12 * second.1 + b1 >= 0.0 {
+        second
+    } else if b1 >= 0.0 && b2 >= 0.0 {
+        (0.0, 0.0)
+    } else {
+        return false;
+    };
+    let (d1, d2) = (x.0 - x1, x.1 - x2);
+    (t.p[0].jn, t.p[1].jn) = x;
+    t.p[0].pushed |= x.0 > 0.0;
+    t.p[1].pushed |= x.1 > 0.0;
+    apply_at(lin, ang, r, n * (d1 + d2), (p1.rna * d1 + p2.rna * d2, p1.rnb * d1 + p2.rnb * d2));
+    true
+}
+
+/// Friction at each point of a turning contact, as in `pass_points`.
+#[inline(always)]
+fn rub_points(lin: &mut [Lin], ang: &mut [Ang], r: &Row, t: &mut Turning) {
+    let n = r.normal;
     let tangent = n.perp();
     for p in &mut t.p[..t.count] {
         let vt = (lin[r.b()].v - lin[r.a()].v).dot(tangent) + ang[r.b()].w * p.rtb - ang[r.a()].w * p.rta;
@@ -875,6 +952,30 @@ mod tests {
         // Once over the points, as Box2D passes: short, and turned.
         let (v, w) = land(&Params { bounce: 1, ..PARAMS });
         assert!((v.y + 4.4).abs() < 1e-2 && w.abs() > 1.0, "{v:?} {w}");
+    }
+
+    #[test]
+    fn the_block_solver_stops_both_points_of_a_box_landing_on_one_corner_first() {
+        // A box landing on its two bottom corners, the left one reaching the
+        // ground at 4 and the right at 2 (it turns at 2 a second), with one
+        // relax pass a substep: solved together, both corners stop; one after
+        // the other, the second's impulse turns the box back against the
+        // first's and it keeps turning.
+        let land = |params: &Params| {
+            let mut bodies = [ground(), falling(3.0)];
+            let inv_i = 3.0 / (0.5 * 0.5 + 0.5 * 0.5);
+            let mut spin = [Spinning::new(1, -2.0, inv_i)];
+            let point = |x: f32| ContactPoint { ra: Vec2::new(x, 0.5), rb: Vec2::new(x, -1.0), separation: 0.0, jn: 0.0, jt: 0.0 };
+            let mut c = [Constraint { points: 1, friction: 0.0, ..on_ground(0.0, 0.0) }];
+            let mut points = [Points { count: 2, point: [point(-0.5), point(0.5)], solved: false }];
+            solve_with(params, (&mut bodies, &mut spin), &mut c, &mut points, DT);
+            (bodies[1].v, spin[0].w)
+        };
+        let one = Params { relax: 1, ..PARAMS };
+        let (v, w) = land(&Params { block: true, ..one });
+        assert!(v.len() < 1e-4 && w.abs() < 1e-4, "block: {v:?} {w}");
+        let (v, w) = land(&Params { block: false, ..one });
+        assert!(w.abs() > 1e-3, "one after the other: {v:?} {w}");
     }
 
     #[test]

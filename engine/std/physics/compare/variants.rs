@@ -27,7 +27,10 @@
 //!   `sub`, `warm` how points are warm-started (0 not at all; 1 by feature
 //!   id, as Box2D; 2 by the nearest last point, as parry can; 3 by feature
 //!   id, and a new feature's by the nearest), `deepest=1`
-//!   a contact's deepest point alone.
+//!   a contact's deepest point alone, `stiff` and `static` the contacts'
+//!   stiffness as a share of the substep rate (`STIFFNESS`,
+//!   `STATIC_STIFFNESS`), `block=0` a contact's two points one after the
+//!   other in the relax passes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -110,6 +113,9 @@ pub fn parse(spec: &str) -> Variant {
                 "int" => params.integrate = [Integrate::Rotation, Integrate::Angle][x as usize],
                 "relax" => params.relax = x as usize,
                 "sub" => params.substeps = x as usize,
+                "stiff" => params.stiffness = x,
+                "static" => params.static_stiffness = x,
+                "block" => params.block = x != 0.0,
                 "warm" => v.warm = [Warm::None, Warm::Ids, Warm::Nearest, Warm::Either][x as usize],
                 "deepest" => v.deepest = x != 0.0,
                 _ => panic!("rot: {k}"),

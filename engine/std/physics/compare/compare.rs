@@ -283,7 +283,7 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
         println!("### settling: {}{turning}, {max} steps\n", case.scene.text());
         print!("| engine | first at rest / at rest from step | fastest at 100 / 200 / 400 | energy at 400 | deepest at 400 (over 0.01) ");
         println!(
-            "| deepest / mean at end (over 0.01) | energy at end | deepest / mean during | contacts a body, islands | tilt ° | escaped | top moved | µs a step |"
+            "| deepest / mean at end (over 0.01) | energy at end, most in the last 200 | deepest / mean during | contacts a body, islands | tilt ° | escaped | top moved | µs a step |"
         );
         println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (_, make) in engines {
@@ -295,7 +295,7 @@ fn settle(cases: &[Case], engines: &[(String, Make)], max: u32) {
             let fast: Vec<String> = s.fastest.iter().map(|f| format!("{f:.3}")).collect();
             let top = s.top_moved.map_or("–".to_string(), |t| format!("{t:.3}"));
             print!("| {} | {rest} | {} | {:.1e} | {:.4} ({}) ", s.label, fast.join(" / "), q400.energy, q400.max_depth, q400.deep);
-            print!("| {:.4} / {:.4} ({}) | {:.1e} ", q.max_depth, q.mean_depth, q.deep, q.energy);
+            print!("| {:.4} / {:.4} ({}) | {:.1e}, {:.1e} ", q.max_depth, q.mean_depth, q.deep, q.energy, s.energy_tail);
             print!("| {:.4} / {:.4} | {:.2}, {} ", s.deepest_during, s.mean_during, q.contacts_per_body, q.islands);
             println!("| {:.1} | {} | {top} | {:.0} |", q.tilt, q.escaped, s.us);
             eprintln!("settle {}{turning}: {} rest from {rest}", case.scene.text(), s.label);

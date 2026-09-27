@@ -204,8 +204,12 @@ struct StandBounds {
     deepest_end: f32,
     /// The most any box leans, in degrees: the smaller reference's, or 1°.
     tilt: f32,
-    /// Kinetic energy a body at the end: ten times the larger reference's.
-    energy_end: f64,
+    /// Kinetic energy a body, the most at any look over the last
+    /// `settle::TAIL` steps: ten times the larger reference's. Not at the
+    /// end alone: a tall stack sways, in Rapier as in ours, and its energy
+    /// at one step says where in the swing it was (Rapier's 20-high turning
+    /// stack has 1.5e-7 at step 700 and 2.8e-4 twenty steps before).
+    energy_tail: f64,
 }
 
 /// Energies under this are rounding, not motion: every body slower than
@@ -225,8 +229,10 @@ fn stand(cases: &[(Scene, StandBounds)], turning: bool, steps: u32) {
         broken.check(top <= b.top_moved, || format!("{name}: its top moved {top}, bound {}", b.top_moved));
         broken.check(q.max_depth <= b.deepest_end, || format!("{name}: {} deep at rest, bound {}", q.max_depth, b.deepest_end));
         broken.check(q.tilt <= b.tilt, || format!("{name}: a box leans {}°, bound {}", q.tilt, b.tilt));
-        let energy = b.energy_end.max(STILL);
-        broken.check(q.energy <= energy, || format!("{name}: energy {:e} a body at the end, bound {energy:e}", q.energy));
+        let energy = b.energy_tail.max(STILL);
+        broken.check(r.energy_tail <= energy, || {
+            format!("{name}: energy {:e} a body in the last {} steps, bound {energy:e}", r.energy_tail, settle::TAIL)
+        });
     }
     broken.assert();
 }
@@ -288,13 +294,13 @@ fn from_refs(rest: (u32, u32), top: (f32, f32), deepest: (f32, f32), tilt: (f32,
         top_moved: 0.5 * top.0.min(top.1),
         deepest_end: 0.5 * deepest.0.min(deepest.1),
         tilt: tilt.0.min(tilt.1).max(1.0),
-        energy_end: 10.0 * energy.0.max(energy.1),
+        energy_tail: 10.0 * energy.0.max(energy.1),
     }
 }
 
 /// Pyramids of unit boxes 15, 20 and 25 wide (120, 210 and 325 boxes),
-/// rotation locked. The references' values (700 steps, 2026-09-26) are the
-/// arguments; ours: at rest from 10, 10, 20, the top 0.006, 0.011, 0.017
+/// rotation locked. The references' values (700 steps, 2026-09-26; energy
+/// the most over the last 200, 2026-09-27) are the arguments; ours: at rest from 10, 10, 20, the top 0.006, 0.011, 0.017
 /// lower, 0.0009-0.0015 deep.
 #[test]
 fn pyramids_stand_as_in_box2d_and_rapier() {
@@ -315,9 +321,9 @@ fn pyramids_stand_as_in_box2d_and_rapier() {
 fn pyramids_that_turn_stand_as_in_box2d_and_rapier() {
     stand(
         &[
-            (Scene::Pyramid { base: 15 }, from_refs((20, 30), (0.034, 0.035), (0.0052, 0.0051), (0.1, 0.2), (6.2e-11, 6.1e-10))),
-            (Scene::Pyramid { base: 20 }, from_refs((30, 50), (0.060, 0.061), (0.0071, 0.0067), (0.2, 0.3), (1.1e-10, 1.5e-9))),
-            (Scene::Pyramid { base: 25 }, from_refs((40, 60), (0.094, 0.094), (0.0091, 0.0085), (0.2, 0.4), (8.8e-11, 2.8e-9))),
+            (Scene::Pyramid { base: 15 }, from_refs((20, 30), (0.034, 0.035), (0.0052, 0.0051), (0.1, 0.2), (7.0e-11, 6.1e-10))),
+            (Scene::Pyramid { base: 20 }, from_refs((30, 50), (0.060, 0.061), (0.0071, 0.0067), (0.2, 0.3), (1.4e-10, 1.5e-9))),
+            (Scene::Pyramid { base: 25 }, from_refs((40, 60), (0.094, 0.094), (0.0091, 0.0085), (0.2, 0.4), (1.3e-10, 2.8e-9))),
         ],
         true,
         STEPS,
@@ -338,21 +344,25 @@ fn stacks_stand_as_in_box2d_and_rapier() {
     );
 }
 
-/// Ten boxes high, turning: ours at rest from 20, the top 0.012 lower,
-/// leaning 0.1°.
+/// Ten boxes high, turning: ours at rest from 10, the top 0.011 lower,
+/// leaning 0.1°. The references' energy is the most over the last 200
+/// steps (5.8e-7 and 1.8e-7; at step 700, 6.5e-9 and 8.7e-9).
 #[test]
 fn a_stack_that_turns_stands_as_in_box2d_and_rapier() {
-    stand(&[(Scene::Stack { n: 10 }, from_refs((100, 50), (0.112, 0.071), (0.0129, 0.0120), (0.8, 0.3), (6.5e-9, 8.7e-9)))], true, STEPS);
+    stand(&[(Scene::Stack { n: 10 }, from_refs((100, 50), (0.112, 0.071), (0.0129, 0.0120), (0.8, 0.3), (5.8e-7, 1.8e-7)))], true, STEPS);
 }
 
-/// Twenty boxes high, turning: Box2D topples it (7 boxes out of the box),
-/// Rapier rests from 220, its top 0.27 lower, energy 1.5e-7 a body; ours
-/// rocks, first at rest at 250 and for good only from 580 (880 over 1500
-/// steps), energy 1.2e-5 at step 700, though its top is only 0.078 lower.
+/// Twenty boxes high, turning: Box2D topples it (7 boxes out of the box);
+/// Rapier rests from 220, its top 0.27 lower, and still sways, at up to
+/// 2.8e-4 a body over the last 200 steps (1.5e-7 at step 700, where its
+/// swing turned). Ours sways as much, up to 5.6e-4, its top 0.078 lower,
+/// but faster, so it rests only from 580. Six substeps (from 60) or the
+/// block solver (240) pass it, at a cost the default doesn't pay
+/// (physics.md, "Still at rest").
 #[test]
-#[ignore = "known failure, get-emj.41: a 20-high turning stack rocks for 580 steps where Rapier's rests by 220"]
+#[ignore = "known failure, get-emj.41: a 20-high turning stack sways near its buckling load and rests from 580 where Rapier's does from 220"]
 fn a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers() {
-    let b = StandBounds { rest: 2 * 220, top_moved: 0.5 * 0.266, deepest_end: 0.5 * 0.0265, tilt: 1.0, energy_end: 10.0 * 1.5e-7 };
+    let b = StandBounds { rest: 2 * 220, top_moved: 0.5 * 0.266, deepest_end: 0.5 * 0.0265, tilt: 1.0, energy_tail: 10.0 * 2.8e-4 };
     stand(&[(Scene::Stack { n: 20 }, b)], true, STEPS);
 }
 
