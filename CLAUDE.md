@@ -102,7 +102,7 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `kept.rs` — `Kept<K>`, the pairs a spatial key's broadphase keeps
     between steps (the world's, a system parameter): `near_pairs`' answer
     from what changed. See
-    [docs/architecture/spatial-storage.md](docs/architecture/spatial-storage.md#keeping-pairs).
+    [docs/architecture/kept.md](docs/architecture/kept.md).
   - `spatial.rs` — spatial tables: a key component keeps its tables'
     pages in Z-order with boxes, re-sorted when a `Structural` drops;
     what `Query::in_region` and `near_pairs` walk. See

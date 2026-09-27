@@ -618,7 +618,10 @@ is static, so there the pair splits no tables.
 ## Keeping pairs
 
 **Status: built** (2026-09-27, get-emj.36): `engine_ecs::Kept<K>`
-(`kept.rs`), which physics and physics3d find their pairs through. The
+(`kept.rs`), which physics and physics3d find their pairs through. This
+section is its measurements and choices; the design (the problem, its
+use, storage, testing, lineage and how it could grow) is
+[kept.md](kept.md). The
 [retrospective](../retrospectives/2026-09-26-physics-against-other-engines.md)
 found `near_pairs` finding every pair afresh: that won when everything
 fell and lost when little moved (a resting 2D pile 400 µs a step against
