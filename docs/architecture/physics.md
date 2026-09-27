@@ -2207,6 +2207,9 @@ before) or turning (`--rotate`).
   axis that found it; `Impulse` a normal impulse per point, and friction
   (a vector in the tangent plane) and twist for the whole contact: 31 and
   8 words. The spike measured four points inline at about 2% of a step.
+  Since recycling ([Still at rest](#still-at-rest)) a `Manifold` also
+  holds each body's rotation when its points were carried and a bound on
+  the pair's move since they were found: 40 words.
 - **The narrowphase** (`narrow.rs`): sphere against sphere or box, one
   point halfway between the surfaces; box against box, the separating
   axis test over the 15 axes, the last step's axis tried first, the face
@@ -2472,6 +2475,9 @@ locked box doesn't have. A fifth of the substep rate is the stiffest that
 stands the stack, and sinks a third as deep as Box3D's. One relax pass is
 a quarter cheaper and settles the pile about as soon, but the stack took
 two, so two stay. Friction in the pushing pass is worse here, as in 2D.
+Static contacts stayed twice as stiff (0.4) until a five-high stack was
+found circling on its corners; they are 0.25 since ([Still at
+rest](#still-at-rest)).
 
 ### Against the others, turning
 
@@ -2554,7 +2560,9 @@ has rolling resistance on (docs/lore). Nothing escapes in any run.
   at 1000 it settles by 95. The translation-only step settled it by 204.
 
 What would close the gaps, in order: manifolds kept while bodies barely
-move (the narrowphase, and fewer re-found contacts); a broadphase that
+move (the narrowphase, and fewer re-found contacts; done 2026-09-27, box
+pairs, halving the narrowphase on piles: [Still at rest](#still-at-rest));
+a broadphase that
 keeps its pairs (both comparisons now); a colored SIMD solve; stiffness
 per contact (locked pairs as stiff as 2D's, turning ones softer); rolling
 resistance; sleeping, which piles that settle would fall into.
@@ -2697,17 +2705,16 @@ far (a 25-wide turning pyramid 0.017 lower where both references' are
 **Known failures**, each an ignored test naming its bead (run them with
 `--test_arg=--include-ignored`), not a looser bound:
 
-- **A 20-high stack of turning boxes in 2D rocks** (get-emj.41): at rest
-  for good only from 580 (880 over 1500 steps), energy 1.2e-5 a body at
-  step 700, where Rapier's rests from 220 (Box2D topples it).
-- **A five-high stack of turning cubes in 3D never rests** (get-emj.42):
-  two cubes still at 0.09 at step 1000, where Rapier and Box3D rest at
-  once; 10, 15 and 20 high it rests by 2-18.
-- **Turning planks in 3D** (get-emj.43): at 200-500 they rest in time but
-  keep up to 1e4 times the references' energy (1.4e-7 a body against under
-  1e-11: some still rock at about 5e-4); at 1000 they rest at 408 against
-  278 and 262; at 10 000 six never rest where Rapier and Box3D do by 392
-  and 369.
+- **A 20-high stack of turning boxes in 2D rests late** (get-emj.41): it
+  sways near its buckling load, as Rapier's does, and passes 0.05 until
+  580 where Rapier's rests from 220 (Box2D topples it). What would fix it
+  and what each costs: [Still at rest](#still-at-rest).
+
+Until 2026-09-27 two more: a five-high stack of turning cubes in 3D never
+rested (get-emj.42), and turning planks in 3D kept up to 1e4 times the
+references' energy and never rested at 10 000 (get-emj.43). Both are
+fixed, by contact recycling and softer static contacts ([Still at
+rest](#still-at-rest)).
 
 **What the tests catch** (mutation-checked, 2026-09-26: each bug planted in
 the source, or chosen by `SOLVER`/`TUNE`, and the default suite run):
@@ -2729,6 +2736,179 @@ Contacts ignoring rotation is the weakest catch, as measured before
 default suite's sizes only a stack's energy and planks see it.
 `:quality_long_test`'s turning 10 000 piles are where it shows: one of
 the three never rests.
+
+## Still at rest
+
+**Status: 3D built, 2D open** (2026-09-27, get-emj.41-43). The three
+known failures of [Quality as a test](#quality-as-a-test) were thought one
+cause, a box rocking on its points. Instrumented (every body's motion and
+every contact's points, ids and impulses, step by step, read from the
+world), they are three:
+
+- **Planks in 3D chatter on flickering manifolds** (get-emj.43). A plank
+  at rest has contacts whose loaded points change from one step to the
+  next and back: a vertex of the incident face lying on a side plane of
+  the reference face is kept one step (its id the vertex) and clipped the
+  next (its id the side and the plane), the same point under two ids; and
+  a clipped polygon of more than four points reduces to two different
+  fours in turn, a point carrying 0.08 of load jumping 0.21 across the
+  plank every step or two, as the plank's rock moves which is deepest.
+  Warm starting found 1188-1191 of 1191 points a step, so what feeds the
+  rock is the moving support, not lost impulses: warm starting by the
+  nearest point instead of by id changed nothing. Energy bursts came
+  every 9-10 steps, a pile at 1e-7 a body where Rapier's and Box3D's are
+  under 1e-11.
+- **A short stack in 3D circles on its corners** (get-emj.42). The five
+  cubes (each set off by up to 0.04, so the load sits off centre) circle
+  as one column at 4.3 Hz, the top 3 mm round at 0.075, the floor
+  contact's unloaded corner going round with it, energy steady at 1e-3 a
+  body from step 400 to 1000. Ids and points stay put. It hangs on the
+  stiffness against the floor: at 0.4 of the substep rate (120 Hz) it
+  never stops; at 0.3 it decays (9e-8 a body at 1000); at 0.25 or 0.2 it
+  rests at once. A cube on four points rocks at 1.22 times its contacts'
+  rate (each point's stiffness is set at its own effective mass, and the
+  four sum to 1.5 times the nominal along each rocking axis), so 0.4 puts
+  the rocking at 0.49 of the substep rate, where Box2D caps static
+  contacts at 0.5 and Box3D at 0.25.
+- **A tall stack in 2D sways near its buckling load** (get-emj.41). The
+  20-high turning stack bends as a column, each contact a rotational
+  spring of m ω² d² / 2 (22 000 N m at 75 Hz), under gravity 20: its
+  weight is 92% of the load that buckles such a column (q L³ = 7.84 EI),
+  so its first mode is slow (a 12 s period) and keeps 0.6 of its energy a
+  swing. The model predicts what was measured: at 60 Hz (0.2) it topples,
+  as Box2D's does at 30 Hz; at 90 Hz (six substeps) it stands further
+  from buckling, swings every 4 s and rests from 60. Rapier's sways too:
+  up to 2.8e-4 a body over its last 200 steps against ours' 5.6e-4, and
+  the 1.5e-7 the test's energy bound was ten times was the step where its
+  swing turned. What differs is speed: ours passes 0.05 until 580,
+  Rapier's from 220.
+
+### What the others do (read in their fetched source)
+
+- **Box3D** recycles a contact whose bodies barely moved (`b3CollideTask`,
+  physics_world.c: "Keep anchors but update separation, same as
+  sub-stepping. This eliminates jitter"): the manifold isn't found again
+  until the pair may have moved 0.05 since it was (a bound on its
+  translation plus its turn at its reach), its anchors carried with the
+  bodies, its separation updated. Its reduction to four is a pecking
+  order ("very important for contact point consistency across time
+  steps"): the first point the one farthest along a fixed tangent, not the
+  deepest, and each later candidate must beat the best by 5%. Contacts
+  are at most an eighth of the substep rate, static ones twice that at
+  half the damping. It warm-starts from the last substep's impulses, as
+  Box2D and Rapier do; ours from their mean.
+- **Rapier 0.36** keeps the arms of a contact whose pair barely moved, and
+  in 2D, by default, solves a manifold's two normals together as a 2x2
+  LCP (`solve_mlcp_two_constraints`, the `block-solver` feature, off in
+  3D), as Box2D v2.4 did. It solves speculative points rigidly, noting
+  that a softened touchdown "pumps tall stacks" (ours already does).
+- **Jolt** keeps manifolds in its body pair cache while bodies barely
+  move.
+
+### The options, measured
+
+Each run over more sizes than the tests, since settling is chaotic
+(docs/lore): 3D plank piles at 14 sizes, 150-800 (and 14 more, 175-825,
+for the finalists) and 8 of 900-2000, cube piles at 14, stacks 2-25 high;
+2D turning piles at 11 sizes, 400-1400. "Chatter" is a pile over 1e-8 a
+body at the end, "late" at rest after 604 (the planks' bound). Every
+variant is behind `physics3d::Tuning` or the comparison's `arrays:rot/...`.
+
+| 3D, turning | planks 150-800: chatter, late, median rest | planks 900-2000 | cubes 150-800: median rest | stack 5 |
+|---|---|---|---|---|
+| before (every pair found every step, static 0.4) | 9, 5, 341 | 4, 5, 772 | 200 | never |
+| (1) static contacts at 0.25 (Box3D's cap) | 2 of 4 in the test | – | – | rests |
+| (2) moving contacts at 0.15, or both at Box3D's 0.125 / 0.25 | 1 of 8 at Box3D's | – | – | rests, but the 20-high topples and piles sink past their bounds |
+| (3) three relax passes | 1 of 4 in the test | – | – | rests |
+| (4) eight substeps | 2 of 4 in the test | – | – | rests |
+| (5) warm starting from the last substep (`carry=last`) | 11, 3, 340 | – | – | rests |
+| (6) relax passes alternating direction | 1 of 4 never at rest | – | – | never |
+| (7) Box3D's reduction as it is (measured, then removed) | 4 of 8 | – | – | never |
+| (8) recycling at 0.02 | 0, 0, 263 | – | 209 | never |
+| (8) + (5), at 0.02 / 0.03 / 0.05 | 1 / 0 / 0 of 28 (0.020 deep at 0.05) | at 0.03: 0, 2, 392 | at 0.03: 169 | rests |
+| **(8) at 0.03 + (1), as built** | **0, 0, 298** | **0, 0, 288** | **200** | **rests** |
+| (8) + (7) + (5) | 0 of 14, 0.022 deep | – | – | – |
+
+Also no change on the stack: anchors to first order, inertia every
+substep, the exact turn, friction in the push. Softer damping (ζ 5, and 5
+for static contacts, as Box3D has it) moved piles either way, beyond the
+noise. Stacks of 16-25 keep 1e-8 a body or more in every row, the 25
+never rests: they sway, as 2D's (below), and their bounds allow it.
+
+- **Recycling is what stills the planks**, and alone: a resting pair
+  keeps its points, so nothing flickers to rock on. The pecking-order
+  reduction halves the chatter without it and adds nothing with it;
+  warm starting by position doesn't touch it.
+- **The short stack wants softer floor contacts or a warm start from the
+  last substep.** The last substep is what the references do, and the
+  mean lags a rocking contact by two substeps; but with recycling it let
+  piles of 1000 planks rest later (392 against 288, median; 701 at 1000,
+  past its bound of 556), so it stays a variant (`Carry::Last`). Static
+  contacts at 0.25 are Box3D's cap, and leave the rocking at 0.31 of the
+  substep rate.
+- **0.03, not Box3D's 0.05**: at 0.05 a carried plank point drifts, and a
+  pile is 0.020 deep at rest (the bound is 0.015); 0.02 let one pile of 28
+  chatter. Spheres aren't recycled: one point has no features to flicker,
+  is found for less than it costs to carry, and a carried point on a
+  rolling sphere rolls away from where it touches.
+
+**Why this one.** Recycling and static contacts at 0.25 pass every 3D
+quality test, the long ones included, which the ignored ones now are:
+10 000 turning planks at rest from 335 (never before; Rapier 392, Box3D
+369), 1000 from 324 (408). It is also faster. One thread, `-c opt`, the
+bench's whole run, ours only, before and after (2026-09-27):
+
+| turning | whole run ms | narrowphase µs | solver µs | at rest from | deepest | energy a body |
+|---|---|---|---|---|---|---|
+| boxes 1000 | 2.78 → 2.57 | 343 → 178 | 2282 → 2243 | 180 → 182 | 0.0071 → 0.0073 | 3.5e-11 → 5.8e-10 |
+| boxes 10 000 | 30.3 → 27.0 | 3737 → 1763 | 24 245 → 23 365 | 374 → 468 | 0.013 → 0.013 | 9.4e-10 → 9.9e-9 |
+| planks 1000 | 3.36 → 3.03 | 596 → 307 | 2561 → 2518 | 408 → 324 | 0.010 → 0.014 | 1.0e-9 → 1.1e-12 |
+| planks 10 000 | 44.2 → 38.2 | 7130 → 3667 | 33 594 → 31 687 | never → 335 | 0.024 → 0.035 | 2.0e-6 → 6.1e-10 |
+| spheres 1000 | 1.81 → 1.95 | 96 → 93 | 1552 → 1681 | never | 0.0070 → 0.0056 | 8.5e-7 → 7.0e-6 |
+| spheres 10 000 | 21.7 → 22.0 | 1109 → 1012 | 18 212 → 18 425 | never | 0.017 → 0.016 | 1.2e-5 → 8.3e-7 |
+| rain 10 000 | 20.1 → 19.9 | 2412 → 1884 | 14 877 → 14 976 | never | 0.0022 → 0.0049 | 8.5e-3 → 8.1e-3 |
+
+Locked, boxes and planks 10 000: 29.8 → 29.1 and 21.1 → 20.3 ms (the
+narrowphase 3857 → 2021 and 2481 → 1343 µs). The narrowphase halves on
+piles, most pairs at rest carried; a contact's `Manifold` is 40 words,
+not 31 (each body's rotation when its points were carried, and the bound
+on the pair's move). Spheres, which no engine brings to rest (they roll),
+move by a run's noise. Piles sink a little deeper against the floor (the
+planks at 10 000 0.035, against Rapier's 0.076).
+
+**2D: not built.** Every option that stands the 20-high stack costs
+something the default shouldn't pay without a decision (get-emj.41):
+
+| 2D, turning | stack 20: at rest from, most energy a body in the last 200 | pyramid 5050: at rest from, most in the last 200 | piles 400-1400: median / worst rest | solver µs, pile 10 000 settled / pyramid 5050 |
+|---|---|---|---|---|
+| as built | 580, 5.6e-4 | 440, 2.3e-8 | 270 / 440 | 9312 / 7416 |
+| six substeps | 60, 1.3e-4 | 340, 9.0e-11 | 220 / 340 | 10 913 / 9157 (+17%, +23%) |
+| the block solver in the relax passes (`block=1`) | 240, 2.5e-4 | 1130, 1.2e-6 | 280 / 400 | 8343 / 7153 (−10%, −4%) |
+| the block solver in the pushing pass too | 240 | – | the 10-high stack and a pile of 1000 past their energy bounds | – |
+| warm starting from the last substep | 240, 2.9e-4 | – | 250 / 540; a locked pile of 1300 never rests | – |
+| three relax passes | 230 | 510 | – | +40% |
+| contacts at 0.2 (60 Hz) or 0.125 | topples | – | – | – |
+| Rapier | 220, 2.8e-4 | 1100, 8.2e-8 | – | – |
+
+Six substeps get better everywhere, and cost a fifth of the solver in
+every scene, locked or turning (rain 10 000 2410 → 2949 µs). The block
+solver is cheaper than solving the points one after the other, but sets
+the big pyramid vibrating for a thousand steps, whole rows at 0.3 (as
+Rapier's, whose block solver is on in 2D, rests at 1100 too). So the
+stack's test stays ignored, now failing on its rest alone, and the block
+solver stays a variant.
+
+**The tests.** A stack's or pyramid's energy is now bounded by the most at
+any look over its last 200 steps (`Settling::energy_tail`), from the
+references' same measure: at one step a swaying scene says where in its
+swing it was. Only the swaying references' values moved (the turning
+stacks). 3D keeps its energy at the end: its references are still.
+Planted, each fails what it should: recycling off (`recycle=0`), the
+planks' energy (1.5e-7) and rest; static contacts at 0.4, the five-high
+stack; a recycled point's separation grown three times too fast,
+`a_settling_box_keeps_its_contact_and_a_sliding_one_is_found_again`,
+`a_box_stack_stands` and every 3D pile; recycling that never ends, four
+physics3d tests; the block solver's coupling halved, its unit test.
 
 ## Open questions
 

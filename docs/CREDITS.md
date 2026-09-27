@@ -159,6 +159,11 @@ one would have to ship those files with it.
   that bench's runfiles. It brings parry3d, nalgebra, simba and approx
   (Apache-2.0, Dimforge), and glam, glamx, wide, arrayvec and others under
   MIT, Apache-2.0, Zlib or a choice of them, per each crate's `license`.
+- **Measured, not adopted, in 2D** (physics.md, "Still at rest"): its
+  block solver, a contact's two normal constraints solved together as a
+  2x2 LCP (`solve_mlcp_two_constraints` and `solve_pair`, the
+  `block-solver` feature, on by default in 2D), which Box2D v2.4 had too;
+  kept as the variant `arrays:rot/block=1` (`solver.rs`, `block`).
 - **Measured, not adopted, in 3D** (read in the fetched rapier3d 0.36.0 and
   parry3d 0.31.1): the full separating axis test every step with no cached
   axis (`contact_manifolds_cuboid_cuboid`, the `narrow::BoxBox::Sat`
@@ -243,9 +248,28 @@ one would have to ship those files with it.
     Box3D caps shapes at (`B3_MAX_AABB_MARGIN`, 0.05; its margin is an
     eighth of a shape's size below that, ours one for all)
     (`engine/ecs/kept.rs`, physics3d's `FAT`).
-  Our stiffness (a fifth of the substep rate, where Box3D has 30 Hz at 4
-  substeps) and our two relaxing passes are our own measurements
-  (physics.md, "Rotation in 3D").
+  - contact recycling (2026-09-27, physics.md, "Still at rest"): a pair's
+    manifold kept while its bodies barely move, each point's anchors
+    carried with both bodies and its separation updated from how far they
+    came apart along the held normal, as within substeps, until a bound on
+    the pair's move passes a distance (`b3CollideTask` in
+    `physics_world.c`, `B3_CONTACT_RECYCLE_DISTANCE`) (`lib.rs`,
+    `recycle`). Ours sums the bound over the steps since the manifold was
+    found, rather than keeping the poses it was found at; its distance is
+    0.03 to Box3D's 0.05, and it recycles box pairs only;
+  - static contacts no stiffer than a quarter of the substep rate, the
+    cap Box3D's `b3MakeSoft( 2.0f * contactHertz, ...)` with `contactHertz`
+    at most an eighth of it gives (`physics_world.c`) (physics3d's
+    `STATIC_STIFFNESS`).
+  Our stiffness between moving bodies (a fifth of the substep rate, where
+  Box3D has 30 Hz at 4 substeps) and our two relaxing passes are our own
+  measurements (physics.md, "Rotation in 3D").
+- **Measured, not adopted** (physics.md, "Still at rest"): its reduction
+  to four points as it is, the first point the one farthest along a fixed
+  tangent and each choice by a pecking order (a candidate must beat the
+  best by 5%, `b3ReduceManifoldPoints`); and warm starting from the last
+  substep's impulses (`mp->normalImpulse = cp->normalImpulse`), which
+  Box2D and Rapier do too (physics3d's `Carry::Last`).
 
 ## Bullet Physics
 
