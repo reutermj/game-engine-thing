@@ -126,6 +126,10 @@ fn report(scene: &Scene, runs: usize, results: &[(Run, Vec<f64>)]) {
         if !run.stages.is_empty() {
             let s: Vec<String> = run.stages.iter().map(|(name, us)| format!("{name} {us:.0}")).collect();
             println!("- {} stages, mean µs per step: {}", run.backend, s.join(", "));
+            for (name, range) in &scene.phases {
+                let s: Vec<String> = run.phase_stages(range).iter().map(|(name, us)| format!("{name} {us:.0}")).collect();
+                println!("  - {name}: {}", s.join(", "));
+            }
         }
     }
     println!();

@@ -225,6 +225,11 @@ pub struct ComponentInfo {
     /// still maps their code.
     sparse: OnceLock<RwLock<SparseSet>>,
     installed: RwLock<Option<Installed>>,
+    /// For a spatial key, the pairs its broadphase keeps between steps
+    /// (`kept.rs`): the world's, like the order they're found in, and taken
+    /// by a system as a parameter (`Kept`), so the scheduler sees who uses
+    /// them. Plain data, so a reload keeps them.
+    kept: RwLock<crate::kept::KeptPairs>,
 }
 
 struct Installed {
@@ -516,6 +521,7 @@ impl World {
             ordered: desc.order.is_some(),
             installed: RwLock::new(None),
             sparse: OnceLock::new(),
+            kept: RwLock::new(crate::kept::KeptPairs::default()),
         };
         if let Some(s) = desc.spatial {
             self.extents.lock().unwrap().extend(s.extents.iter().flatten().map(|(name, _)| name.to_string()));
@@ -625,6 +631,11 @@ impl World {
 
     pub fn component(&self, id: ComponentId) -> &ComponentInfo {
         self.components.get(id.0 as usize)
+    }
+
+    /// The pairs kept for spatial key `c`'s broadphase.
+    pub(crate) fn kept_pairs(&self, c: ComponentId) -> &RwLock<crate::kept::KeptPairs> {
+        &self.component(c).kept
     }
 
     pub fn components(&self) -> impl Iterator<Item = (ComponentId, &ComponentInfo)> {
@@ -1082,7 +1093,7 @@ impl<'w> Structural<'w> {
         t.table.left.store(tick, Ordering::Relaxed);
         t.rows[page].swap_remove(row);
         if let Some(pages) = &mut t.spatial {
-            pages.swap_remove(page, row);
+            pages.swap_remove(page, row, tick);
         }
         if let Some(order) = &mut t.ordered {
             order.swap_remove(page, row);

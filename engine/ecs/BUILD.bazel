@@ -13,6 +13,7 @@ rust_library(
         "events.rs",
         "graph.rs",
         "harness.rs",
+        "kept.rs",
         "lib.rs",
         "ordered.rs",
         "par.rs",
@@ -102,10 +103,24 @@ rust_test(
     deps = [":ecs"],
 )
 
+# The broadphase that keeps its pairs, against near_pairs and brute force.
+rust_test(
+    name = "kept_test",
+    srcs = ["tests/kept_test.rs"],
+    deps = [":ecs"],
+)
+
 # The same in 3D, and a 2D key and a 3D one in one world.
 rust_test(
     name = "spatial3d_test",
     srcs = ["tests/spatial3d_test.rs"],
+    deps = [":ecs"],
+)
+
+#   ./bazel run -c opt //engine/ecs:kept_bench [-- margin most]
+rust_binary(
+    name = "kept_bench",
+    srcs = ["tests/kept_bench.rs"],
     deps = [":ecs"],
 )
 

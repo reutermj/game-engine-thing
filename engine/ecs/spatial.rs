@@ -277,7 +277,7 @@ fn holds(lo: u64, hi: u64, key: u64) -> bool {
     key >= lo && (key < hi || (key == hi && hi == lo))
 }
 
-fn contains<const D: usize>(outer: &Bounds<D>, inner: &Bounds<D>) -> bool {
+pub(crate) fn contains<const D: usize>(outer: &Bounds<D>, inner: &Bounds<D>) -> bool {
     (0..D).all(|a| outer.min[a] <= inner.min[a] && outer.max[a] >= inner.max[a])
 }
 
@@ -534,6 +534,11 @@ pub struct SpatialPages<const D: usize = 2> {
     sorted_tick: u32,
     /// Rows whose box was recomputed at the last re-sort: for tests.
     pub rebounded: usize,
+    /// By page, the world tick its lanes last changed at: a row's box
+    /// re-bounded, a row arrived or left. What a broadphase that keeps its
+    /// pairs walks to see what moved since it last looked (`kept.rs`),
+    /// where a page none of whose rows changed is skipped with a look.
+    pub changed: Vec<u32>,
 }
 
 impl<const D: usize> Default for SpatialPages<D> {
@@ -554,6 +559,7 @@ impl<const D: usize> Default for SpatialPages<D> {
             dirty: false,
             sorted_tick: 0,
             rebounded: 0,
+            changed: vec![0],
         }
     }
 }
@@ -567,19 +573,24 @@ impl<const D: usize> SpatialPages<D> {
         self.lanes.push(Lanes::EMPTY);
         self.stale.push(false);
         self.misplaced.push(0);
+        self.changed.push(0);
     }
 
-    /// A row pushed onto `page`: placeholders until the re-sort.
+    /// A row pushed onto `page`: placeholders until the re-sort, which
+    /// always follows (a row pushed marks the table), and stamps `changed`.
     pub(crate) fn push_row(&mut self, page: usize, e: Entity) {
         self.lanes[page].push((Bounds::EMPTY, e.index, u64::MAX, u64::MAX));
         self.stale[page] = true;
         self.dirty = true;
     }
 
-    /// A row swap-removed from `page`, as the table's own rows are.
-    pub(crate) fn swap_remove(&mut self, page: usize, row: usize) {
+    /// A row swap-removed from `page` at `tick`, as the table's own rows are.
+    /// Stamped here: a row leaving doesn't mark the table, so no re-sort may
+    /// follow.
+    pub(crate) fn swap_remove(&mut self, page: usize, row: usize, tick: u32) {
         self.lanes[page].swap_remove(row);
         self.stale[page] = true;
+        self.changed[page] = tick;
     }
 
     fn rebuild_hi(&mut self) {
@@ -693,10 +704,11 @@ impl<const D: usize> SpatialPages<D> {
     /// Recomputes the boxes of stale pages, and, if any page's box may have
     /// changed, every run's: runs are few (a sixteenth of pages), and splits
     /// and merges reshape them.
-    fn rebound(&mut self, runs: bool) {
+    fn rebound(&mut self, runs: bool, now: u32) {
         for (p, l) in self.lanes.iter().enumerate() {
             if std::mem::take(&mut self.stale[p]) {
                 self.bounds[p] = l.bounds();
+                self.changed[p] = now;
             }
         }
         if !runs {
@@ -758,8 +770,8 @@ impl SpatialOrder {
         each!(self, p => p.push_row(page, e))
     }
 
-    pub(crate) fn swap_remove(&mut self, page: usize, row: usize) {
-        each!(self, p => p.swap_remove(page, row))
+    pub(crate) fn swap_remove(&mut self, page: usize, row: usize, tick: u32) {
+        each!(self, p => p.swap_remove(page, row, tick))
     }
 
     /// The order, if it's in 2D: for tests.
@@ -858,6 +870,8 @@ const PAR_REBOUND_ROWS: usize = 2048;
 /// What re-bounding a page reads besides the page: the glue, the tick of
 /// the last sort, and every page's range.
 struct Rebound<'a, const D: usize> {
+    /// The re-sort's tick, which a page's `changed` takes.
+    now: u32,
     desc: &'a SpatialDesc,
     glue: BoundsFn<D>,
     since: u32,
@@ -877,7 +891,7 @@ impl<const D: usize> Rebound<'_, D> {
         key: &ErasedColumn,
         extents: [Option<&ErasedColumn>; MAX_EXTENTS],
         scratch: &mut [Bounds<D>; SPATIAL_PAGE_ROWS],
-        (lanes, misplaced_at, bounds, stale): (&mut Lanes<D>, &mut u32, &mut Bounds<D>, &mut bool),
+        (lanes, misplaced_at, bounds, stale, changed): (&mut Lanes<D>, &mut u32, &mut Bounds<D>, &mut bool, &mut u32),
     ) -> usize {
         let (since, big, per_cell) = (self.since, self.desc.big, 1.0 / self.desc.cell);
         let n = lanes.len();
@@ -946,6 +960,7 @@ impl<const D: usize> Rebound<'_, D> {
         // box. A move after marks it stale again.
         *bounds = lanes.bounds();
         *stale = false;
+        *changed = self.now;
         count
     }
 }
@@ -963,7 +978,7 @@ impl<const D: usize> Resort<'_, D> {
         self.pages.misplaced.resize(self.rows.len(), 0);
         let (key_column, extent_columns) = (&*self.columns[self.key], self.extents.map(|x| x.map(|x| &*self.columns[x])));
         let pages = &mut *self.pages;
-        let order = Rebound { desc: &self.desc, glue: self.glue, since, kind: &pages.kind, lo: &pages.lo, hi: &pages.hi };
+        let order = Rebound { now: self.now, desc: &self.desc, glue: self.glue, since, kind: &pages.kind, lo: &pages.lo, hi: &pages.hi };
         let n = self.rows.len();
         if self.workers.threads() > 1 && n * SPATIAL_PAGE_ROWS / 2 >= PAR_REBOUND_ROWS {
             // Pages are re-bounded independently: in ranges, a task each,
@@ -977,13 +992,14 @@ impl<const D: usize> Resort<'_, D> {
                 .zip(crate::par::carve(&mut pages.lanes[..n], lens.clone()))
                 .zip(crate::par::carve(&mut pages.misplaced[..n], lens.clone()))
                 .zip(crate::par::carve(&mut pages.bounds[..n], lens.clone()))
-                .zip(crate::par::carve(&mut pages.stale[..n], lens))
+                .zip(crate::par::carve(&mut pages.stale[..n], lens.clone()))
+                .zip(crate::par::carve(&mut pages.changed[..n], lens))
                 .collect();
-            let counts = self.workers.map_each(tasks, |_, ((((range, lanes), misplaced), bounds), stale)| {
+            let counts = self.workers.map_each(tasks, |_, (((((range, lanes), misplaced), bounds), stale), changed)| {
                 let mut scratch = [Bounds::EMPTY; SPATIAL_PAGE_ROWS];
                 let mut count = 0;
                 for (i, p) in range.enumerate() {
-                    let at = (&mut lanes[i], &mut misplaced[i], &mut bounds[i], &mut stale[i]);
+                    let at = (&mut lanes[i], &mut misplaced[i], &mut bounds[i], &mut stale[i], &mut changed[i]);
                     count += order.page(p, &key_column[p], extent_columns.map(|c| c.map(|c| &c[p])), &mut scratch, at);
                 }
                 count
@@ -991,7 +1007,7 @@ impl<const D: usize> Resort<'_, D> {
             rebounded = counts.iter().sum();
         } else {
             for p in 0..n {
-                let at = (&mut pages.lanes[p], &mut pages.misplaced[p], &mut pages.bounds[p], &mut pages.stale[p]);
+                let at = (&mut pages.lanes[p], &mut pages.misplaced[p], &mut pages.bounds[p], &mut pages.stale[p], &mut pages.changed[p]);
                 rebounded += order.page(p, &key_column[p], extent_columns.map(|c| c.map(|c| &c[p])), &mut pages.written_bounds, at);
             }
         }
@@ -999,7 +1015,7 @@ impl<const D: usize> Resort<'_, D> {
         // its ticks above.
         let reshape = arrived_or_left || self.pages.misplaced.iter().any(|&m| m != 0);
         let moved = if reshape { self.reshape() } else { 0 };
-        self.pages.rebound(reshape || rebounded > 0);
+        self.pages.rebound(reshape || rebounded > 0, self.now);
         self.pages.dirty = false;
         self.pages.sorted_tick = self.now;
         self.pages.rebounded = rebounded;

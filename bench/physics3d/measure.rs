@@ -248,6 +248,8 @@ pub struct Run {
     pub step_us: Vec<f64>,
     /// Mean per-stage time per step over the run, in microseconds.
     pub stages: Vec<(&'static str, f64)>,
+    /// Each step's stage times, in `stages`' order: for a phase's means.
+    pub step_stages: Vec<Vec<f64>>,
     /// The first step from which the top speed stays below REST_SPEED.
     pub settled_at: Option<usize>,
     pub quality: Quality,
@@ -266,6 +268,16 @@ pub struct Run {
 pub const LOOK: usize = 10;
 
 impl Run {
+    /// Each stage's mean µs per step over `range`.
+    pub fn phase_stages(&self, range: &std::ops::Range<usize>) -> Vec<(&'static str, f64)> {
+        let r = range.start.min(self.step_stages.len())..range.end.min(self.step_stages.len());
+        let n = r.len().max(1) as f64;
+        let steps = &self.step_stages[r];
+        (self.stages.iter().enumerate())
+            .map(|(i, (name, _))| (*name, steps.iter().map(|s| s.get(i).copied().unwrap_or(0.0)).sum::<f64>() / n))
+            .collect()
+    }
+
     pub fn phase_ms(&self, range: &std::ops::Range<usize>) -> f64 {
         let r = range.start.min(self.step_us.len())..range.end.min(self.step_us.len());
         let s = &self.step_us[r.clone()];
@@ -282,6 +294,7 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
     let mut state = Vec::with_capacity(scene.n);
     let mut step_us = Vec::with_capacity(scene.steps);
     let mut stages: Vec<(&'static str, f64)> = Vec::new();
+    let mut step_stages = Vec::with_capacity(scene.steps);
     let mut last_moving = None;
     let (mut pen_max_during, mut pen_mean_during) = (0.0f32, 0.0f32);
     for step in 0..scene.steps {
@@ -296,12 +309,15 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         let t = Instant::now();
         backend.step(DT);
         step_us.push(t.elapsed().as_secs_f64() * 1e6);
+        let mut this = Vec::new();
         for (i, (name, us)) in backend.stages().into_iter().enumerate() {
             if stages.len() <= i {
                 stages.push((name, 0.0));
             }
             stages[i].1 += us;
+            this.push(us);
         }
+        step_stages.push(this);
         backend.state(&mut state);
         if state.iter().zip(&shapes).any(|(s, &shape)| speed(s, shape) >= REST_SPEED) {
             last_moving = Some(step);
@@ -324,6 +340,7 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         solver: backend.solver(),
         step_us,
         stages,
+        step_stages,
         settled_at,
         quality: quality(scene, &shapes, &state),
         native_touching: backend.touching(),

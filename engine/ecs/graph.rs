@@ -35,6 +35,17 @@ impl SystemView<'_> {
         ParamDecl::leaves(self.params).into_iter().filter_map(ParamDecl::query)
     }
 
+    /// The keys whose kept pairs it takes, each a write.
+    fn kept(&self) -> Vec<(ComponentId, bool)> {
+        ParamDecl::leaves(self.params)
+            .into_iter()
+            .filter_map(|p| match p {
+                ParamDecl::Kept { key } => Some((*key, true)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn events(&self) -> Vec<(usize, bool)> {
         ParamDecl::leaves(self.params)
             .into_iter()
@@ -164,7 +175,7 @@ pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
                 }
             }
             ParamDecl::Events { queue, write: true } => fp.add_events(*queue),
-            ParamDecl::Query(_) | ParamDecl::Events { .. } | ParamDecl::Dt => {}
+            ParamDecl::Query(_) | ParamDecl::Events { .. } | ParamDecl::Dt | ParamDecl::Kept { .. } => {}
             ParamDecl::Group(_) => unreachable!("leaves are flattened"),
         }
     }
@@ -309,7 +320,10 @@ pub fn systems_overlap(world: &World, x: SystemView<'_>, y: SystemView<'_>) -> b
     if x.owner == y.owner {
         return true;
     }
-    if sparse_conflict(&sparse_of(world, x), &sparse_of(world, y)) || sparse_conflict(&x.events(), &y.events()) {
+    if sparse_conflict(&sparse_of(world, x), &sparse_of(world, y))
+        || sparse_conflict(&x.events(), &y.events())
+        || sparse_conflict(&x.kept(), &y.kept())
+    {
         return true;
     }
     world.tables().any(|t| {

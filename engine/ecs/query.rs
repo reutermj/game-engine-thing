@@ -780,6 +780,11 @@ pub enum ParamDecl {
     Group(Vec<ParamDecl>),
     /// The run's length in time: touches nothing.
     Dt,
+    /// The pairs a spatial key's broadphase keeps (`kept::Kept`): written
+    /// by whoever takes them, so two systems that do are ordered.
+    Kept {
+        key: ComponentId,
+    },
 }
 
 impl ParamDecl {
@@ -810,7 +815,7 @@ impl ParamDecl {
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
             ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
-            ParamDecl::Dt => false,
+            ParamDecl::Dt | ParamDecl::Kept { .. } => false,
         }
     }
 }
@@ -1106,7 +1111,7 @@ fn passes(filters: &[(ComponentId, bool, SparseGuard<'_>)], e: Entity) -> bool {
 /// `Bounds::overlaps` without branches: a broadphase's box tests are
 /// about even odds in a dense pile, so branches on them mispredict.
 #[inline(always)]
-fn meets<const D: usize>(a: &Bounds<D>, b: &Bounds<D>) -> bool {
+pub(crate) fn meets<const D: usize>(a: &Bounds<D>, b: &Bounds<D>) -> bool {
     let mut hit = true;
     for i in 0..D {
         hit &= (a.min[i] <= b.max[i]) & (b.min[i] <= a.max[i]);
@@ -1734,18 +1739,23 @@ pub trait NearSide {
 /// A spatial table as a broadphase sees it.
 #[doc(hidden)]
 pub struct SideTable<'a> {
-    id: TableId,
-    rows: &'a [Vec<Entity>],
-    order: &'a SpatialOrder,
-    filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
+    pub(crate) id: TableId,
+    pub(crate) rows: &'a [Vec<Entity>],
+    pub(crate) order: &'a SpatialOrder,
+    pub(crate) filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
+    /// The tick a row last left the table at: what a kept broadphase looks
+    /// at before asking which (`kept.rs`).
+    pub(crate) left: u32,
+    /// The table's spatial key: a kept broadphase is one key's.
+    pub(crate) key: ComponentId,
 }
 
 /// A `SideTable` with its order in the broadphase's dimensions.
-struct Side<'a, const D: usize> {
-    id: TableId,
-    rows: &'a [Vec<Entity>],
-    order: &'a SpatialPages<D>,
-    filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
+pub(crate) struct Side<'a, const D: usize> {
+    pub(crate) id: TableId,
+    pub(crate) rows: &'a [Vec<Entity>],
+    pub(crate) order: &'a SpatialPages<D>,
+    pub(crate) filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
 }
 
 impl<const D: usize> Side<'_, D> {
@@ -1766,7 +1776,9 @@ impl<D: Data, F, C> NearSide for Query<'_, D, F, C> {
     fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>) {
         for (t, table) in self.rows.iter().enumerate() {
             if let Some(order) = &table.spatial {
-                out.push(SideTable { id: self.table_ids[t], rows: &table.rows, order, filters: &self.filters });
+                let left = table.table.left.load(std::sync::atomic::Ordering::Relaxed);
+                let key = table.table.spatial.as_ref().expect("a spatial table").key;
+                out.push(SideTable { id: self.table_ids[t], rows: &table.rows, order, filters: &self.filters, left, key });
             }
         }
     }
@@ -1815,11 +1827,11 @@ pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) ->
 
 /// An active page as the broadphase sweeps it: its rows, which of them
 /// pass the filters, and its box grown.
-type SweptPage<'a, const D: usize> = (&'a Lanes<D>, u32, Bounds<D>);
+pub(crate) type SweptPage<'a, const D: usize> = (&'a Lanes<D>, u32, Bounds<D>);
 
 /// Where a broadphase's pair keys go: one list, or a list per range of
 /// lesser index when the pairs are sorted in parallel, a range a task.
-trait Keys {
+pub(crate) trait Keys {
     fn push(&mut self, key: u64);
     fn len(&self) -> usize;
 }
@@ -1855,7 +1867,7 @@ impl Keys for Buckets {
 /// Active page `i` against itself and every page after it in the sweep
 /// that its box meets.
 #[inline(always)]
-fn sweep<const D: usize>(keys: &mut impl Keys, pages: &[SweptPage<'_, D>], i: usize, grow: f32) {
+pub(crate) fn sweep<const D: usize>(keys: &mut impl Keys, pages: &[SweptPage<'_, D>], i: usize, grow: f32) {
     let (a, pass_a, box_a) = pages[i];
     let mut rows = pass_a;
     while rows != 0 {
@@ -1890,14 +1902,14 @@ fn sweep<const D: usize>(keys: &mut impl Keys, pages: &[SweptPage<'_, D>], i: us
 /// A passive table's unit of the broadphase: a run of its ordered pages,
 /// or a page out of the order (a big one).
 #[derive(Clone, Copy)]
-enum Unit {
+pub(crate) enum Unit {
     Run(usize),
     Big(usize),
 }
 
 impl Unit {
     /// Every unit of `table`, runs first.
-    fn of<const D: usize>(table: &Side<'_, D>) -> impl Iterator<Item = Unit> {
+    pub(crate) fn of<const D: usize>(table: &Side<'_, D>) -> impl Iterator<Item = Unit> {
         let order = table.order;
         let big = (0..order.kind.len()).filter(move |&p| order.kind[p] != PageKind::Ordered && !table.rows[p].is_empty());
         (0..order.runs.len()).map(Unit::Run).chain(big.map(Unit::Big))
@@ -1910,7 +1922,7 @@ impl Unit {
 /// widest active page, bounds how far left of a unit one can start.
 /// `noted` gets each passive row a pair was found with.
 #[inline(always)]
-fn meet_unit<const D: usize>(
+pub(crate) fn meet_unit<const D: usize>(
     keys: &mut impl Keys,
     noted: &mut impl FnMut(Entity),
     (pages, widest, grow): (&[SweptPage<'_, D>], f32, f32),
@@ -2122,7 +2134,7 @@ where
 /// A pair as a key, the lesser index high: live entities never share an
 /// index, so indices alone order pairs.
 #[inline(always)]
-fn pair_of(a: u32, b: u32) -> u64 {
+pub(crate) fn pair_of(a: u32, b: u32) -> u64 {
     ((a.min(b) as u64) << 32) | a.max(b) as u64
 }
 
@@ -2297,6 +2309,12 @@ pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Resul
     for (i, &(q, w)) in queues.iter().enumerate() {
         if queues[i + 1..].iter().any(|&(r, v)| q == r && (w || v)) {
             return Err(format!("{name}: reads and writes one event type, or writes it twice"));
+        }
+    }
+    let kept: Vec<ComponentId> = leaves.iter().filter_map(|p| if let ParamDecl::Kept { key } = p { Some(*key) } else { None }).collect();
+    for (i, k) in kept.iter().enumerate() {
+        if kept[i + 1..].contains(k) {
+            return Err(format!("{name}: takes {}'s kept pairs twice", world.name(*k)));
         }
     }
     Ok(())
