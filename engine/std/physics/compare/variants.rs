@@ -30,7 +30,9 @@
 //!   a contact's deepest point alone, `stiff` and `static` the contacts'
 //!   stiffness as a share of the substep rate (`STIFFNESS`,
 //!   `STATIC_STIFFNESS`), `block=0` a contact's two points one after the
-//!   other in the relax passes.
+//!   other in the relax passes; `scalar=1` one contact at a time
+//!   (`Wide::Off`), `levels=<n>` by level `n` wide (the default, 4),
+//!   `colored=<n>` graph-colored `n` wide (physics.md, "The solver's speed").
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,7 +40,7 @@ use std::collections::HashMap;
 use physics::Vec2;
 
 use crate::arrays::Warm;
-use crate::solver::{BOUNCE_THRESHOLD, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, solve_with};
+use crate::solver::{BOUNCE_THRESHOLD, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, solve_with};
 use crate::split_impulse as old;
 
 /// A solver for the arrays: over bodies some of which may turn and
@@ -116,6 +118,9 @@ pub fn parse(spec: &str) -> Variant {
                 "stiff" => params.stiffness = x,
                 "static" => params.static_stiffness = x,
                 "block" => params.block = x != 0.0,
+                "scalar" if x != 0.0 => params.wide = Wide::Off,
+                "levels" => params.wide = Wide::Levels(x as usize),
+                "colored" => params.wide = Wide::Colored(x as usize),
                 "warm" => v.warm = [Warm::None, Warm::Ids, Warm::Nearest, Warm::Either][x as usize],
                 "deepest" => v.deepest = x != 0.0,
                 _ => panic!("rot: {k}"),

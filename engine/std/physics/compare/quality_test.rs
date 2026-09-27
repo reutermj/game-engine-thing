@@ -433,6 +433,33 @@ fn the_mod_is_the_arrays_bit_for_bit() {
     });
 }
 
+/// The solve as built, by level in lanes (`solver::Wide::Levels`), is the
+/// solve one contact at a time in pair order bit for bit, well into
+/// settling, on a pile and a pyramid that turn: what lets it stand on every
+/// bound here without any having moved (physics.md, "The solver's speed").
+/// Graph-colored it isn't, which shows that the comparison sees an order.
+#[test]
+fn the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit() {
+    use solver::{PARAMS, Params, Wide};
+    let with = |wide: Wide| -> variants::Boxed {
+        let p = Params { wide, ..PARAMS };
+        Box::new(move |b, s, c, pts, dt| solver::solve_with(&p, (b, s), c, pts, dt))
+    };
+    let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
+    let differ = |x: &[Dyn], y: &[Dyn]| x.iter().zip(y).filter(|(x, y)| bits(x) != bits(y)).count();
+    assert!(matches!(PARAMS.wide, Wide::Levels(_)), "the default is by level: {:?}", PARAMS.wide);
+    for scene in [Scene::Pile { n: 400, width: 41.0, stagger: true }, Scene::Pyramid { base: 20 }] {
+        let run = |wide: Wide| {
+            let mut f = ecs::Flat::new(&scene, true, with(wide), "ours");
+            f.step(150);
+            f.bodies()
+        };
+        let one = run(Wide::Off);
+        assert_eq!(differ(&one, &run(PARAMS.wide)), 0, "{}: by level isn't one at a time", scene.text());
+        assert!(differ(&one, &run(Wide::Colored(4))) > 0, "{}: colored is one at a time", scene.text());
+    }
+}
+
 /// Once a pile is at rest, sleeping takes every body within its half
 /// second (30 steps; `Sleep::DEFAULT`): by the rest bound of its kind of
 /// pile and that. A pile that crept would never sleep, which is what the

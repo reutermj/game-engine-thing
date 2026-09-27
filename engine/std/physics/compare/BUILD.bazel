@@ -121,3 +121,25 @@ rust_test(
     tags = ["manual"],
     deps = QUALITY_DEPS,
 )
+
+# The 2D solver alone, on inputs captured from the comparison's turning
+# scenes: each way of solving that was weighed, timed on the same work.
+#   ./bazel run -c opt //engine/std/physics/compare:solver_bench
+rust_binary(
+    name = "solver_bench",
+    srcs = [
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "solver_bench.rs",
+        "variants.rs",
+        "//engine/std/physics:narrow.rs",
+        "//engine/std/physics:solver.rs",
+        "//engine/std/physics:tests/split_impulse.rs",
+        "//engine/std/physics:tests/arrays.rs",
+    ],
+    crate_root = "solver_bench.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)

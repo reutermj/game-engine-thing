@@ -36,6 +36,13 @@
 //! with one row at its normal: the rotating path is taken only by contacts
 //! with points and an end that turns, so a world where nothing turns is
 //! the same computation bit for bit.
+//!
+//! Where something turns, the passes run four contacts at a time
+//! (`lanes`), grouped by level of the sweep in pair order so that the
+//! result is the sweep's bit for bit (`Wide::Levels`), about twice as
+//! fast as one contact at a time (`solve_all`, which the variants and the
+//! tests still run). Why this and not Box2D's graph coloring: physics.md,
+//! "The solver's speed".
 
 use physics::{Rot, Vec2};
 
@@ -116,6 +123,29 @@ pub struct Params {
     /// Off: measured, it stood a 20-high stack sooner and set a 5050
     /// pyramid vibrating (physics.md, "Still at rest").
     pub block: bool,
+    /// How a step where something turns orders and lays out its contacts
+    /// (`Wide`).
+    pub wide: Wide,
+}
+
+/// How a step where something turns solves its contacts (physics.md, "The
+/// solver's speed").
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wide {
+    /// One contact at a time in pair order: the solve as first built, which
+    /// the others are checked against, and the only one with `Params::block`
+    /// and a `Params::separation` other than `Turned`.
+    Off,
+    /// By level of the pair-order sweep (`lanes`), that many lanes at once
+    /// (1, 4 or 8): `Off`'s computation, bit for bit, at 4 about twice as
+    /// fast. The default, 4 wide: SSE2's width, x86-64's baseline, where 8
+    /// is two registers and gained 2% on a pile and lost on small scenes.
+    Levels(usize),
+    /// Graph-colored as Box2D v3 colors, that many lanes at once: another
+    /// order, so another computation, and the one threads could share.
+    /// Measured and not the default: it lets a turning pyramid of 5050 fall.
+    Colored(usize),
 }
 
 pub const PARAMS: Params = Params {
@@ -128,6 +158,7 @@ pub const PARAMS: Params = Params {
     stiffness: STIFFNESS,
     static_stiffness: STATIC_STIFFNESS,
     block: false,
+    wide: Wide::Levels(4),
 };
 
 impl Params {
@@ -383,11 +414,20 @@ pub fn solve_with(
 ) {
     // Nothing turns and no contact has points: the step compiled without
     // them, which is what a world before rotation ran (the tests for them,
-    // though never taken, cost the 5050 pyramid's solve 3%).
+    // though never taken, cost the 5050 pyramid's solve 3%). It stays one
+    // contact at a time: level with Box2D there already, and the lanes'
+    // arithmetic for a row at its normal isn't this loop's to the bit
+    // (it adds its zero turns), where the games' replays hold to it.
     if points.is_empty() && spinning.is_empty() {
         solve_all::<false>(params, (bodies, spinning), contacts, points, dt);
-    } else {
+    } else if params.wide == Wide::Off || params.separation != Separation::Turned || params.block {
         solve_all::<true>(params, (bodies, spinning), contacts, points, dt);
+    } else {
+        match params.wide {
+            Wide::Colored(8) | Wide::Levels(8) => lanes::solve::<8>(params, (bodies, spinning), contacts, points, dt),
+            Wide::Colored(4) | Wide::Levels(4) => lanes::solve::<4>(params, (bodies, spinning), contacts, points, dt),
+            _ => lanes::solve::<1>(params, (bodies, spinning), contacts, points, dt),
+        }
     }
 }
 
@@ -546,6 +586,7 @@ fn solve_all<const POINTS: bool>(
 
 /// A turning contact's points for the substeps, warm-started with `warm`
 /// of last step's impulses, and its fastest closing speed.
+#[inline(always)]
 fn prepare((a, qa): (&SolverBody, &Ang), (b, qb): (&SolverBody, &Ang), n: Vec2, from: &Points, at: usize, warm: f32) -> (Turning, f32) {
     let t = n.perp();
     let (ma, mb, ia, ib) = (a.inv_mass, b.inv_mass, qa.inv_inertia, qb.inv_inertia);
@@ -805,6 +846,697 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
     let ib = lin[b].inv_mass;
     lin[b].v += impulse * ib;
     ang[b].w += ang[b].inv_inertia * turn_b;
+}
+
+/// The solve of a step where something turns, in lanes: Box2D v3's layout
+/// (`contact_solver.c`: `b2ContactConstraintSIMD`,
+/// `b2SolveContactTwoPointsTask`), in plain arrays rather than intrinsics.
+/// Each step the contacts are split into groups in which no two share a
+/// body that moves, each group's contacts, in pair order, packed `N` to a
+/// batch, field by field. A pass solves a batch's lanes at once: its bodies
+/// gathered from one array of body states, each operation a loop over the
+/// lanes, and scattered back.
+///
+/// The groups are the levels of the pair-order sweep (`group`): a contact
+/// one level past the latest contact before it that shares a body with it.
+/// Solving the levels in turn, every contact sees the bodies as the sweep
+/// in pair order would have left them, so with `pass_points`' arithmetic,
+/// operation for operation, it is that solve bit for bit, whatever the
+/// width; it is level scheduling, as sparse triangular solves are run in
+/// parallel (Anderson and Saad, 1989). Box2D's graph coloring
+/// (`constraint_graph.c`) is the other grouping, `Wide::Colored`. See
+/// physics.md, "The solver's speed".
+mod lanes {
+    use super::*;
+    use std::ops::{Add, Mul, Neg, Sub};
+
+    /// `N` lanes of `f32`: each operation a loop over the lanes, which LLVM
+    /// makes one SIMD instruction a register (SSE2 on x86-64's baseline).
+    #[derive(Clone, Copy, Debug)]
+    pub struct F<const N: usize>(pub [f32; N]);
+
+    impl<const N: usize> F<N> {
+        pub const ZERO: F<N> = F([0.0; N]);
+
+        #[inline(always)]
+        pub fn splat(x: f32) -> F<N> {
+            F([x; N])
+        }
+
+        #[inline(always)]
+        fn zip(self, o: F<N>, f: impl Fn(f32, f32) -> f32) -> F<N> {
+            let mut r = self.0;
+            for l in 0..N {
+                r[l] = f(self.0[l], o.0[l]);
+            }
+            F(r)
+        }
+
+        /// x86's `maxps`, which SSE2 has one instruction for: where neither
+        /// is NaN, `f32::max`, so the lanes are the scalar solve to the bit.
+        #[inline(always)]
+        pub fn max(self, o: F<N>) -> F<N> {
+            self.zip(o, |a, b| if a > b { a } else { b })
+        }
+
+        /// `f32::clamp`, as it is written.
+        #[inline(always)]
+        pub fn clamp(self, lo: F<N>, hi: F<N>) -> F<N> {
+            let low = self.zip(lo, |x, lo| if x < lo { lo } else { x });
+            low.zip(hi, |x, hi| if x > hi { hi } else { x })
+        }
+
+        /// `a` where `self` is positive, else `b`.
+        #[inline(always)]
+        pub fn positive_then(self, a: F<N>, b: F<N>) -> F<N> {
+            let mut r = b.0;
+            for l in 0..N {
+                if self.0[l] > 0.0 {
+                    r[l] = a.0[l];
+                }
+            }
+            F(r)
+        }
+    }
+
+    impl<const N: usize> Add for F<N> {
+        type Output = F<N>;
+        #[inline(always)]
+        fn add(self, o: F<N>) -> F<N> {
+            self.zip(o, |a, b| a + b)
+        }
+    }
+
+    impl<const N: usize> Sub for F<N> {
+        type Output = F<N>;
+        #[inline(always)]
+        fn sub(self, o: F<N>) -> F<N> {
+            self.zip(o, |a, b| a - b)
+        }
+    }
+
+    impl<const N: usize> Mul for F<N> {
+        type Output = F<N>;
+        #[inline(always)]
+        fn mul(self, o: F<N>) -> F<N> {
+            self.zip(o, |a, b| a * b)
+        }
+    }
+
+    impl<const N: usize> Neg for F<N> {
+        type Output = F<N>;
+        #[inline(always)]
+        fn neg(self) -> F<N> {
+            let mut r = self.0;
+            for x in r.iter_mut() {
+                *x = -*x;
+            }
+            F(r)
+        }
+    }
+
+    /// A body as the passes read and write it, Box2D's `b2BodyState`: what
+    /// a pass reads of a body in one 32-byte line, its masses kept by each
+    /// contact instead.
+    #[derive(Clone, Copy, Default)]
+    #[repr(C, align(32))]
+    pub struct State {
+        v: Vec2,
+        w: f32,
+        moved: Vec2,
+        turned: Rot,
+    }
+
+    /// A batch's bodies at one end, their velocities.
+    #[derive(Clone, Copy)]
+    struct Vel<const N: usize> {
+        x: F<N>,
+        y: F<N>,
+        w: F<N>,
+    }
+
+    #[inline(always)]
+    fn gather<const N: usize>(s: &[State], at: &[u32; N]) -> (Vel<N>, [F<N>; 4]) {
+        let (mut v, mut pose) = (Vel { x: F::ZERO, y: F::ZERO, w: F::ZERO }, [F::ZERO; 4]);
+        for l in 0..N {
+            let b = s[at[l] as usize];
+            (v.x.0[l], v.y.0[l], v.w.0[l]) = (b.v.x, b.v.y, b.w);
+            (pose[0].0[l], pose[1].0[l], pose[2].0[l], pose[3].0[l]) = (b.moved.x, b.moved.y, b.turned.c, b.turned.s);
+        }
+        (v, pose)
+    }
+
+    #[inline(always)]
+    fn scatter<const N: usize>(s: &mut [State], at: &[u32; N], v: &Vel<N>) {
+        for l in 0..N {
+            let b = &mut s[at[l] as usize];
+            (b.v, b.w) = (Vec2::new(v.x.0[l], v.y.0[l]), v.w.0[l]);
+        }
+    }
+
+    /// A point of each lane's contact: `Point`, lane by lane.
+    #[derive(Clone, Copy)]
+    struct Pt<const N: usize> {
+        rax: F<N>,
+        ray: F<N>,
+        rbx: F<N>,
+        rby: F<N>,
+        base: F<N>,
+        normal_mass: F<N>,
+        tangent_mass: F<N>,
+        rna: F<N>,
+        rnb: F<N>,
+        rta: F<N>,
+        rtb: F<N>,
+        jn: F<N>,
+        jt: F<N>,
+        /// The substeps' impulses summed, as `Constraint::jn` carries them.
+        sum_jn: F<N>,
+        sum_jt: F<N>,
+        speed: F<N>,
+        pushed: [bool; N],
+        /// The relax passes' bias, found by the substep's first.
+        bias: F<N>,
+    }
+
+    /// `N` contacts, field by field. A lane with no contact (the last of a
+    /// color) is all zeros at a body nothing else in it moves, so solving
+    /// it changes nothing; a contact with one point has a second of zeros.
+    #[derive(Clone, Copy)]
+    pub struct Batch<const N: usize> {
+        a: [u32; N],
+        b: [u32; N],
+        nx: F<N>,
+        ny: F<N>,
+        /// Inverse masses and inertias, each end's.
+        ma: F<N>,
+        mb: F<N>,
+        ia: F<N>,
+        ib: F<N>,
+        friction: F<N>,
+        restitution: F<N>,
+        rate: F<N>,
+        soft_mass: F<N>,
+        soft_impulse: F<N>,
+        p: [Pt<N>; 2],
+        /// Whether it has two points, which restitution passes over
+        /// `Params::bounce` times, and whether it's a row at its normal (its
+        /// ends don't turn), which bounces if it pushed over the step.
+        two: [bool; N],
+        linear: [bool; N],
+        /// The ends' velocities as the warm start leaves them: kept, so
+        /// that its lanes are computed as vectors (the stores seed LLVM's
+        /// SLP vectorizer, which left them scalar without).
+        ends: [Vel<N>; 2],
+    }
+
+    impl<const N: usize> Batch<N> {
+        fn empty(nowhere: u32) -> Batch<N> {
+            let p = Pt {
+                rax: F::ZERO,
+                ray: F::ZERO,
+                rbx: F::ZERO,
+                rby: F::ZERO,
+                base: F::ZERO,
+                normal_mass: F::ZERO,
+                tangent_mass: F::ZERO,
+                rna: F::ZERO,
+                rnb: F::ZERO,
+                rta: F::ZERO,
+                rtb: F::ZERO,
+                jn: F::ZERO,
+                jt: F::ZERO,
+                sum_jn: F::ZERO,
+                sum_jt: F::ZERO,
+                speed: F::ZERO,
+                pushed: [false; N],
+                bias: F::ZERO,
+            };
+            Batch {
+                a: [nowhere; N],
+                b: [nowhere; N],
+                nx: F::ZERO,
+                ny: F::ZERO,
+                ma: F::ZERO,
+                mb: F::ZERO,
+                ia: F::ZERO,
+                ib: F::ZERO,
+                friction: F::ZERO,
+                restitution: F::ZERO,
+                rate: F::ZERO,
+                soft_mass: F::ZERO,
+                soft_impulse: F::ZERO,
+                p: [p; 2],
+                two: [false; N],
+                linear: [false; N],
+                ends: [Vel { x: F::ZERO, y: F::ZERO, w: F::ZERO }; 2],
+            }
+        }
+    }
+
+    /// Where a lane's results go: its contact, and its points (`NONE` for a
+    /// row at its normal) and how many.
+    #[derive(Clone, Copy)]
+    struct Lane {
+        contact: u32,
+        at: u32,
+        count: u8,
+    }
+
+    const NONE: u32 = u32::MAX;
+    /// Colors a body's contacts can take: a body in a pile touches up to
+    /// about 8; past 64, a contact is solved alone (Box2D's overflow).
+    const COLORS: usize = 64;
+    const OVERFLOW: u32 = u32::MAX - 1;
+    /// Solved not at all: neither end moves.
+    const UNSOLVED: u32 = u32::MAX;
+    /// How a pass finds a point's bias (`pass`'s `SEP`): from its separation,
+    /// storing it too, or as the last pass stored it.
+    const COMPUTE: u8 = 0;
+    const STORE: u8 = 1;
+    const LOAD: u8 = 2;
+
+    /// Each contact's group, in which no two share a body that moves, and
+    /// how many groups: a body that doesn't move (a static, a kinematic, the
+    /// one standing for sleeping bodies) can be in any number of a group's
+    /// contacts, since none of them changes it.
+    ///
+    /// By level (`Wide::Levels`): one past the latest level of the contacts
+    /// before it in pair order that share a body it moves, which in pair
+    /// order is the level the body's last contact left, so one pass finds
+    /// them. A pile of 10 000 has about 420 levels of 50 contacts, its
+    /// batches 97% full; a 5050 pyramid 590, 94%. Colored
+    /// (`Wide::Colored`): greedily in pair order, the lowest color no body it
+    /// moves is in already, and not color 0 for a contact with an end that
+    /// doesn't move (Box2D v3's `b2AddContactToGraph`).
+    fn group(contacts: &[Constraint], moves: &[bool], wide: Wide) -> (Vec<u32>, usize) {
+        // By body, in pair order so far: the next level, or the colors taken.
+        let mut used = vec![0u64; moves.len()];
+        let mut groups = 0;
+        let g = contacts
+            .iter()
+            .map(|c| {
+                let (a, b) = (c.a as usize, c.b as usize);
+                if !moves[a] && !moves[b] {
+                    return UNSOLVED;
+                }
+                let at = |e: usize| if moves[e] { used[e] } else { 0 };
+                let k = if let Wide::Colored(_) = wide {
+                    let mut free = !(at(a) | at(b));
+                    if !moves[a] || !moves[b] {
+                        free &= !1;
+                    }
+                    let k = free.trailing_zeros();
+                    if k as usize >= COLORS {
+                        return OVERFLOW;
+                    }
+                    for e in [a, b] {
+                        if moves[e] {
+                            used[e] |= 1u64 << k;
+                        }
+                    }
+                    k
+                } else {
+                    let level = at(a).max(at(b));
+                    for e in [a, b] {
+                        if moves[e] {
+                            used[e] = level + 1;
+                        }
+                    }
+                    level as u32
+                };
+                groups = groups.max(k as usize + 1);
+                k
+            })
+            .collect();
+        (g, groups)
+    }
+
+    #[inline(always)]
+    pub fn solve<const N: usize>(
+        params: &Params,
+        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+        contacts: &mut [Constraint],
+        points: &mut [Points],
+        dt: f32,
+    ) {
+        let substeps = params.substeps;
+        let h = dt / substeps as f32;
+        let inv_h = 1.0 / h;
+        let moving = Softness::new(params.stiffness * inv_h, DAMPING_RATIO, h);
+        let fixed = Softness::new(params.static_stiffness * inv_h, DAMPING_RATIO, h);
+        let share = 1.0 / substeps as f32;
+        let warm = if params.warm { share } else { 0.0 };
+        // One more state than bodies, standing still: where a batch's empty
+        // lanes point, so writing them back can't undo a real lane's write.
+        let nowhere = bodies.len() as u32;
+        let mut s: Vec<State> = bodies.iter().map(|b| State { v: b.v, ..State::default() }).collect();
+        s.push(State::default());
+        let mut inertia = vec![0.0f32; bodies.len()];
+        for sp in spinning.iter() {
+            s[sp.body as usize].w = sp.w;
+            inertia[sp.body as usize] = sp.inv_inertia;
+        }
+        let moves: Vec<bool> = bodies.iter().zip(inertia.iter()).map(|(b, i)| b.inv_mass > 0.0 || *i > 0.0).collect();
+
+        let (groups, n_groups) = group(contacts, &moves, params.wide);
+        // Batches: the overflow's first, one contact each (as Box2D solves
+        // its overflow first), then each group's, in pair order.
+        let mut count = vec![0usize; n_groups];
+        let mut overflow = 0;
+        for k in groups.iter() {
+            match *k {
+                UNSOLVED => (),
+                OVERFLOW => overflow += 1,
+                k => count[k as usize] += 1,
+            }
+        }
+        let mut first = vec![0usize; n_groups];
+        let mut batches = overflow;
+        for k in 0..n_groups {
+            first[k] = batches;
+            batches += count[k].div_ceil(N);
+        }
+        let (mut filled, mut overflowed) = (vec![0usize; n_groups], 0);
+        let mut out: Vec<Batch<N>> = vec![Batch::empty(nowhere); batches];
+        let mut lanes: Vec<[Lane; N]> = vec![[Lane { contact: NONE, at: NONE, count: 0 }; N]; batches];
+        let spins = |i: usize| inertia[i] > 0.0 || s[i].w != 0.0;
+
+        // Each contact in pair order, as the substeps start it, into its
+        // batch's lane: read in the order they're stored, written where
+        // they're solved. (History, 2026-09-27: filled batch by batch
+        // instead, reading contacts in the order they're solved, the
+        // prepare took 1223 µs against 887 on a pile of 10 000.)
+        // Points with the impulses they end with, where they aren't solved.
+        let mut kept: Vec<(usize, [(f32, f32); 2])> = Vec::new();
+        let mut solved: Vec<usize> = Vec::new();
+        for (i, c) in contacts.iter_mut().enumerate() {
+            let (a, b) = (c.a as usize, c.b as usize);
+            let (ma, mb) = (bodies[a].inv_mass, bodies[b].inv_mass);
+            let turns = c.points > 0 && (spins(a) || spins(b));
+            let k = groups[i];
+            let (jn, jt) = (c.jn, c.jt);
+            (c.jn, c.jt) = (0.0, 0.0);
+            let mut pts = [Point::default(); 2];
+            let (at, n_points) = if turns {
+                let at = c.points as usize - 1;
+                let ang = |i: usize| Ang { w: s[i].w, inv_inertia: inertia[i], turned: Rot::IDENTITY, angle: 0.0 };
+                let (t, speed) = prepare((&bodies[a], &ang(a)), (&bodies[b], &ang(b)), c.normal, &points[at], at, warm);
+                c.speed = speed;
+                solved.push(at);
+                pts = t.p;
+                (at as u32, t.count)
+            } else {
+                c.speed = -(bodies[b].v - bodies[a].v).dot(c.normal);
+                let k = ma + mb;
+                let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
+                pts[0] = Point {
+                    base: -c.depth,
+                    normal_mass: mass,
+                    tangent_mass: mass,
+                    jn: jn * share,
+                    jt: jt * share,
+                    speed: c.speed,
+                    ..Point::default()
+                };
+                (NONE, 1)
+            };
+            if k == UNSOLVED {
+                // What the solve as first built gives such a contact: last
+                // step's impulse, a substep's share of it summed.
+                let sum = |x: f32| (0..substeps).fold(0.0, |acc, _| acc + x);
+                if at == NONE {
+                    (c.jn, c.jt) = (sum(pts[0].jn), sum(pts[0].jt));
+                } else {
+                    let mut j = [(0.0, 0.0); 2];
+                    for (j, p) in j.iter_mut().zip(pts.iter()).take(n_points) {
+                        *j = (sum(p.jn), sum(p.jt));
+                    }
+                    c.jn = j[..n_points].iter().map(|j| j.0).sum();
+                    c.jt = j[..n_points].iter().map(|j| j.1).sum();
+                    kept.push((at as usize, j));
+                }
+                continue;
+            }
+            let (batch, l) = if k == OVERFLOW {
+                overflowed += 1;
+                (overflowed - 1, 0)
+            } else {
+                let j = filled[k as usize];
+                filled[k as usize] += 1;
+                (first[k as usize] + j / N, j % N)
+            };
+            let o = &mut out[batch];
+            lanes[batch][l] = Lane { contact: i as u32, at, count: n_points as u8 };
+            let soft = if ma == 0.0 || mb == 0.0 { fixed } else { moving };
+            o.a[l] = a as u32;
+            o.b[l] = b as u32;
+            (o.nx.0[l], o.ny.0[l]) = (c.normal.x, c.normal.y);
+            (o.ma.0[l], o.mb.0[l]) = (ma, mb);
+            (o.ia.0[l], o.ib.0[l]) = (inertia[a], inertia[b]);
+            (o.friction.0[l], o.restitution.0[l]) = (c.friction, c.restitution);
+            (o.rate.0[l], o.soft_mass.0[l], o.soft_impulse.0[l]) = (soft.rate, soft.mass, soft.impulse);
+            (o.two[l], o.linear[l]) = (n_points > 1, at == NONE);
+            for (q, p) in o.p.iter_mut().zip(pts.iter()).take(n_points) {
+                (q.rax.0[l], q.ray.0[l], q.rbx.0[l], q.rby.0[l]) = (p.ra.x, p.ra.y, p.rb.x, p.rb.y);
+                (q.base.0[l], q.normal_mass.0[l], q.tangent_mass.0[l]) = (p.base, p.normal_mass, p.tangent_mass);
+                (q.rna.0[l], q.rnb.0[l], q.rta.0[l], q.rtb.0[l]) = (p.rna, p.rnb, p.rta, p.rtb);
+                (q.jn.0[l], q.jt.0[l], q.speed.0[l]) = (p.jn, p.jt, p.speed);
+            }
+        }
+        for p in points.iter_mut() {
+            p.solved = false;
+            for q in p.point.iter_mut() {
+                (q.jn, q.jt) = (0.0, 0.0);
+            }
+        }
+        for at in solved {
+            points[at].solved = true;
+        }
+        for (at, j) in kept {
+            for (q, j) in points[at].point.iter_mut().zip(j) {
+                (q.jn, q.jt) = j;
+            }
+        }
+        let gravity: Vec<Vec2> = bodies.iter().map(|b| b.gravity).collect();
+        for (st, g) in s.iter_mut().zip(gravity.iter()) {
+            st.v -= *g;
+        }
+        let mut angle = vec![0.0f32; spinning.len()];
+
+        for _ in 0..substeps {
+            for (st, g) in s.iter_mut().zip(gravity.iter()) {
+                st.v += *g * share;
+            }
+            for o in out.iter_mut() {
+                warm_start(o, &mut s);
+            }
+            let last = params.relax == 0;
+            for o in out.iter_mut() {
+                pass::<N, true, COMPUTE>(o, &mut s, inv_h, last);
+            }
+            for st in s.iter_mut() {
+                st.moved += st.v * h;
+            }
+            for (sp, angle) in spinning.iter().zip(angle.iter_mut()) {
+                let b = &mut s[sp.body as usize];
+                *angle += h * b.w;
+                b.turned = match params.integrate {
+                    Integrate::Rotation => b.turned.integrate(h * b.w),
+                    Integrate::Angle => Rot::from_angle(*angle),
+                };
+            }
+            for r in 0..params.relax {
+                let last = r + 1 == params.relax;
+                // Positions don't move between relax passes, so neither do
+                // separations: the first finds each point's bias, the
+                // others read it.
+                if r == 0 {
+                    for o in out.iter_mut() {
+                        pass::<N, false, STORE>(o, &mut s, inv_h, last);
+                    }
+                } else {
+                    for o in out.iter_mut() {
+                        pass::<N, false, LOAD>(o, &mut s, inv_h, last);
+                    }
+                }
+            }
+        }
+
+        // Restitution, once, as `bounce`.
+        for o in out.iter_mut() {
+            if o.restitution.0.iter().any(|e| *e != 0.0) {
+                restitute(o, &mut s, params.bounce);
+            }
+        }
+
+        for (o, lanes) in out.iter().zip(lanes.iter()) {
+            for (l, lane) in lanes.iter().enumerate() {
+                if lane.contact == NONE {
+                    continue;
+                }
+                let c = &mut contacts[lane.contact as usize];
+                if lane.at == NONE {
+                    (c.jn, c.jt) = (o.p[0].sum_jn.0[l], o.p[0].sum_jt.0[l]);
+                    continue;
+                }
+                let n = lane.count as usize;
+                let to = &mut points[lane.at as usize];
+                for (q, p) in to.point.iter_mut().zip(o.p.iter()).take(n) {
+                    (q.jn, q.jt) = (p.sum_jn.0[l], p.sum_jt.0[l]);
+                }
+                c.jn = to.point[..n].iter().map(|p| p.jn).sum();
+                c.jt = to.point[..n].iter().map(|p| p.jt).sum();
+            }
+        }
+        for (b, st) in bodies.iter_mut().zip(s.iter()) {
+            (b.v, b.moved) = (st.v, st.moved);
+        }
+        for (sp, angle) in spinning.iter_mut().zip(angle) {
+            let st = s[sp.body as usize];
+            (sp.w, sp.turned, sp.angle) = (st.w, st.turned, angle);
+        }
+    }
+
+    /// The ends' velocities after an impulse `(ix, iy)` on `b` and its
+    /// opposite on `a`, turning each by `ta` and `tb`: `apply_at`.
+    #[inline(always)]
+    fn apply<const N: usize>(o: &Batch<N>, va: &mut Vel<N>, vb: &mut Vel<N>, (ix, iy): (F<N>, F<N>), (ta, tb): (F<N>, F<N>)) {
+        va.x = va.x - ix * o.ma;
+        va.y = va.y - iy * o.ma;
+        va.w = va.w - o.ia * ta;
+        vb.x = vb.x + ix * o.mb;
+        vb.y = vb.y + iy * o.mb;
+        vb.w = vb.w + o.ib * tb;
+    }
+
+    /// Last substep's impulses again, as the substeps' warm start.
+    #[inline(always)]
+    fn warm_start<const N: usize>(o: &mut Batch<N>, s: &mut [State]) {
+        let ((mut va, _), (mut vb, _)) = (gather(s, &o.a), gather(s, &o.b));
+        let (tx, ty) = (-o.ny, o.nx);
+        for p in o.p.iter() {
+            let i = (o.nx * p.jn + tx * p.jt, o.ny * p.jn + ty * p.jt);
+            let turn = (p.rna * p.jn + p.rta * p.jt, p.rnb * p.jn + p.rtb * p.jt);
+            apply(o, &mut va, &mut vb, i, turn);
+        }
+        o.ends = [va, vb];
+        scatter(s, &o.a, &o.ends[0]);
+        scatter(s, &o.b, &o.ends[1]);
+    }
+
+    /// `pass_points`, lane by lane: soft and pushing out when `PUSH`, else
+    /// rigid, with friction; `last`, the substep's last, sums its impulses.
+    #[inline(always)]
+    fn pass<const N: usize, const PUSH: bool, const SEP: u8>(o: &mut Batch<N>, s: &mut [State], inv_h: f32, last: bool) {
+        let ((mut va, pa), (mut vb, pb)) = (gather(s, &o.a), gather(s, &o.b));
+        let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
+        let (nx, ny) = (o.nx, o.ny);
+        let one = F::splat(1.0);
+        let (rate, soft_mass, soft_impulse, ma, mb, ia, ib) = (o.rate, o.soft_mass, o.soft_impulse, o.ma, o.mb, o.ia, o.ib);
+        let apply = |va: &mut Vel<N>, vb: &mut Vel<N>, (ix, iy): (F<N>, F<N>), (ta, tb): (F<N>, F<N>)| {
+            va.x = va.x - ix * ma;
+            va.y = va.y - iy * ma;
+            va.w = va.w - ia * ta;
+            vb.x = vb.x + ix * mb;
+            vb.y = vb.y + iy * mb;
+            vb.w = vb.w + ib * tb;
+        };
+        for p in o.p.iter_mut() {
+            let (bias, mass, relax) = if !PUSH && SEP == LOAD {
+                (p.bias, one, F::ZERO)
+            } else {
+                // The arms turned with their bodies: `Rot::rotate`.
+                let (bx, by) = (pb[2] * p.rbx - pb[3] * p.rby, pb[3] * p.rbx + pb[2] * p.rby);
+                let (ax, ay) = (pa[2] * p.rax - pa[3] * p.ray, pa[3] * p.rax + pa[2] * p.ray);
+                let sep = p.base + (((dx + bx) - ax) * nx + ((dy + by) - ay) * ny);
+                // A gap may close this substep, and no more: speculative, in
+                // either pass.
+                let spec = sep * F::splat(inv_h);
+                if PUSH {
+                    let soft = (rate * sep).max(F::splat(-MAX_PUSH));
+                    (sep.positive_then(spec, soft), sep.positive_then(one, soft_mass), sep.positive_then(F::ZERO, soft_impulse))
+                } else {
+                    let bias = sep.positive_then(spec, F::ZERO);
+                    if SEP == STORE {
+                        p.bias = bias;
+                    }
+                    (bias, one, F::ZERO)
+                }
+            };
+            let vn = ((vb.x - va.x) * nx + (vb.y - va.y) * ny) + vb.w * p.rnb - va.w * p.rna;
+            let jn = (p.jn - p.normal_mass * mass * (vn + bias) - relax * p.jn).max(F::ZERO);
+            let d = jn - p.jn;
+            p.jn = jn;
+            for l in 0..N {
+                p.pushed[l] |= jn.0[l] > 0.0;
+            }
+            apply(&mut va, &mut vb, (nx * d, ny * d), (p.rna * d, p.rnb * d));
+        }
+        if !PUSH {
+            let (tx, ty) = (-ny, nx);
+            let friction = o.friction;
+            for p in o.p.iter_mut() {
+                let vt = ((vb.x - va.x) * tx + (vb.y - va.y) * ty) + vb.w * p.rtb - va.w * p.rta;
+                let limit = friction * p.jn;
+                let jt = (p.jt - p.tangent_mass * vt).clamp(-limit, limit);
+                let d = jt - p.jt;
+                p.jt = jt;
+                apply(&mut va, &mut vb, (tx * d, ty * d), (p.rta * d, p.rtb * d));
+            }
+        }
+        if last {
+            for p in o.p.iter_mut() {
+                p.sum_jn = p.sum_jn + p.jn;
+                p.sum_jt = p.sum_jt + p.jt;
+            }
+        }
+        scatter(s, &o.a, &va);
+        scatter(s, &o.b, &vb);
+    }
+
+    /// `bounce`, lane by lane, and for a row at its normal the solve as
+    /// first built's rule: it bounces if it pushed over the step.
+    fn restitute<const N: usize>(o: &mut Batch<N>, s: &mut [State], passes: usize) {
+        // Whether a lane's point bounces: a later pass only ever bounces
+        // what the first could, so a batch the first can't is left alone.
+        let bounces = |o: &Batch<N>, k: usize, l: usize, pass: usize| {
+            let p = &o.p[k];
+            let hit = if o.linear[l] { p.sum_jn.0[l] != 0.0 } else { p.pushed[l] };
+            let again = pass == 0 || o.two[l];
+            o.restitution.0[l] != 0.0 && again && p.speed.0[l] > BOUNCE_THRESHOLD && hit
+        };
+        if !(0..2).any(|k| (0..N).any(|l| bounces(o, k, l, 0))) {
+            return;
+        }
+        let ((mut va, _), (mut vb, _)) = (gather(s, &o.a), gather(s, &o.b));
+        let (nx, ny) = (o.nx, o.ny);
+        for pass in 0..passes {
+            for k in 0..2 {
+                let mut on = [false; N];
+                for (l, on) in on.iter_mut().enumerate() {
+                    *on = bounces(o, k, l, pass);
+                }
+                if !on.contains(&true) {
+                    continue;
+                }
+                let p = o.p[k];
+                let vn = ((vb.x - va.x) * nx + (vb.y - va.y) * ny) + vb.w * p.rnb - va.w * p.rna;
+                let jn = (p.jn - p.normal_mass * (vn - o.restitution * p.speed)).max(F::ZERO);
+                let (mut d, mut kept) = (jn - p.jn, jn);
+                for l in 0..N {
+                    if !on[l] {
+                        (d.0[l], kept.0[l]) = (0.0, p.jn.0[l]);
+                    }
+                }
+                o.p[k].jn = kept;
+                o.p[k].sum_jn = p.sum_jn + d;
+                apply(o, &mut va, &mut vb, (nx * d, ny * d), (p.rna * d, p.rnb * d));
+            }
+        }
+        scatter(s, &o.a, &va);
+        scatter(s, &o.b, &vb);
+    }
 }
 
 #[cfg(test)]
