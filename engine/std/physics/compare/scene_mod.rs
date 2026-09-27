@@ -10,6 +10,7 @@
 //!              every raindrop from then on
 //!   orient     every dynamic body has a `Rotation` and no `Spin`: faces a
 //!              way, and doesn't turn
+//!   substeps <n>  physics's `Tuning` in the world, at n substeps
 //!
 //! Rain is a system rather than a message the bench sends each step, since
 //! that is how a game spawns and despawns: through a `Spawner` and a
@@ -22,7 +23,7 @@
 mod scene;
 
 use engine_api::{Cx, Despawns, Entity, Mod, Query, Spawner, Systems, WorldMut, export_mod};
-use physics::{Body, Collider, Gravity, Position, Rotation, Sleep, Spin, Velocity};
+use physics::{Body, Collider, Gravity, Position, Rotation, Sleep, Spin, Tuning, Velocity};
 use scene::{GRAVITY, Scene, Spec};
 
 engine_api::mod_state! {
@@ -128,6 +129,14 @@ impl Mod for Scenes {
                 was.into_iter().for_each(|e| world.despawn(e));
                 Ok("sleeping by default".into())
             }
+            Some(("substeps", n)) => {
+                let n: u32 = n.trim().parse().map_err(|e| format!("substeps {n:?}: {e}"))?;
+                let mut was = Vec::new();
+                world.for_each::<&Tuning>(|e, _| was.push(e));
+                was.into_iter().for_each(|e| world.despawn(e));
+                world.spawn((Tuning { substeps: n },));
+                Ok(format!("{n} substeps"))
+            }
             None if message.trim() == "drops" => Ok(format!("drops {} tick {}", self.drops.len(), self.tick)),
             None if message.trim() == "orient" => {
                 let mut bodies = Vec::new();
@@ -145,7 +154,7 @@ impl Mod for Scenes {
                 }
                 Ok(format!("{} bodies turn", bodies.len()))
             }
-            _ => Err("commands: build <scene> | sleep default | turn | drops".into()),
+            _ => Err("commands: build <scene> | sleep default | turn | orient | substeps <n> | drops".into()),
         }
     }
 }

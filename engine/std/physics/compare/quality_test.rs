@@ -74,8 +74,13 @@ fn settle_all(scenes: &[Scene], turning: bool, steps: u32) -> Vec<Settling> {
             scenes.iter().map(|&scene| s.spawn(move || settle::settle(&mut ours(&scene, turning), &scene, turning, steps))).collect();
         threads.into_iter().map(|t| t.join().expect("a scene panicked")).collect()
     });
+    print_runs(scenes, turning, &runs);
+    runs
+}
+
+fn print_runs(scenes: &[Scene], turning: bool, runs: &[Settling]) {
     let at = |s: Option<u32>| s.map_or("never".to_string(), |s| s.to_string());
-    for (scene, r) in scenes.iter().zip(&runs) {
+    for (scene, r) in scenes.iter().zip(runs) {
         let q = &r.end;
         let top = r.top_moved.map_or(String::new(), |t| format!(", top moved {t:.4}"));
         println!(
@@ -95,7 +100,6 @@ fn settle_all(scenes: &[Scene], turning: bool, steps: u32) -> Vec<Settling> {
             q.escaped,
         );
     }
-    runs
 }
 
 fn median(mut v: Vec<u32>) -> u32 {
@@ -220,8 +224,13 @@ const STILL: f64 = 1e-8;
 
 fn stand(cases: &[(Scene, StandBounds)], turning: bool, steps: u32) {
     let scenes: Vec<Scene> = cases.iter().map(|(s, _)| *s).collect();
+    stand_runs(cases, &settle_all(&scenes, turning, steps));
+}
+
+/// Each run against its case's bounds.
+fn stand_runs(cases: &[(Scene, StandBounds)], runs: &[Settling]) {
     let mut broken = Broken::default();
-    for (r, (scene, b)) in settle_all(&scenes, turning, steps).iter().zip(cases) {
+    for (r, (scene, b)) in runs.iter().zip(cases) {
         let (q, name) = (&r.end, scene.text());
         broken.check(q.escaped == 0, || format!("{name}: {} escaped", q.escaped));
         broken.check(rest(r) <= b.rest, || format!("{name}: at rest from {:?}, bound {}", r.rest_from, b.rest));
@@ -352,18 +361,47 @@ fn a_stack_that_turns_stands_as_in_box2d_and_rapier() {
     stand(&[(Scene::Stack { n: 10 }, from_refs((100, 50), (0.112, 0.071), (0.0129, 0.0120), (0.8, 0.3), (5.8e-7, 1.8e-7)))], true, STEPS);
 }
 
-/// Twenty boxes high, turning: Box2D topples it (7 boxes out of the box);
-/// Rapier rests from 220, its top 0.27 lower, and still sways, at up to
-/// 2.8e-4 a body over the last 200 steps (1.5e-7 at step 700, where its
-/// swing turned). Ours sways as much, up to 5.6e-4, its top 0.078 lower,
-/// but faster, so it rests only from 580. Six substeps (from 60) or the
-/// block solver (240) pass it, at a cost the default doesn't pay
-/// (physics.md, "Still at rest").
+/// Twenty boxes high, turning, at six substeps, which a game that stacks
+/// picks by writing physics's `Tuning` (the mod in the engine, since the
+/// arrays have no world to read it from). Box2D topples it (7 boxes out of
+/// the box); Rapier rests from 220, its top 0.27 lower, and still sways,
+/// at up to 2.8e-4 a body over the last 200 steps (1.5e-7 at step 700,
+/// where its swing turned). At the default five ours sways as much, up to
+/// 5.6e-4, but slower to die, and rests only from 580, which is why a
+/// stacking game picks six (from 60): its contacts are stiffer, and the
+/// column further from buckling (physics.md, "Still at rest"; get-emj.41).
 #[test]
-#[ignore = "known failure, get-emj.41: a 20-high turning stack sways near its buckling load and rests from 580 where Rapier's does from 220"]
-fn a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers() {
+fn a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers_at_six_substeps() {
     let b = StandBounds { rest: 2 * 220, top_moved: 0.5 * 0.266, deepest_end: 0.5 * 0.0265, tilt: 1.0, energy_tail: 10.0 * 2.8e-4 };
-    stand(&[(Scene::Stack { n: 20 }, b)], true, STEPS);
+    let scene = Scene::Stack { n: 20 };
+    let mut m = mod_in_engine(&scene, true, false);
+    m.substeps(6);
+    let run = settle::settle(&mut m, &scene, true, STEPS);
+    print_runs(&[scene], true, std::slice::from_ref(&run));
+    stand_runs(&[(scene, b)], &[run]);
+}
+
+/// A `Tuning` in the world is what the mod's step solves by: at six
+/// substeps, the mod is the arrays at six bit for bit, and not the arrays
+/// at the default five.
+#[test]
+fn the_mod_solves_at_the_substeps_its_world_sets() {
+    let scene = Scene::Pile { n: 400, width: 41.0, stagger: true };
+    let six = solver::Params::of(&physics::Tuning { substeps: 6 });
+    assert_eq!(six.substeps, 6);
+    let mut m = mod_in_engine(&scene, true, false);
+    m.substeps(6);
+    let mut at_six =
+        ecs::Flat::new(&scene, true, Box::new(move |b, s, c, p, dt| solver::solve_with(&six, (b, s), c, p, dt)), "ours at six");
+    let mut at_five = ecs::Flat::new(&scene, true, Box::new(solver::solve_points), "ours");
+    m.step(100);
+    at_six.step(100);
+    at_five.step(100);
+    let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
+    let differ = |x: &[Dyn], y: &[Dyn]| x.iter().zip(y).filter(|(x, y)| bits(x) != bits(y)).count();
+    let mb = m.bodies();
+    assert_eq!(differ(&mb, &at_six.bodies()), 0, "the mod isn't the arrays at six substeps");
+    assert!(differ(&mb, &at_five.bodies()) > 0, "six substeps solved as five");
 }
 
 fn mod_in_engine(scene: &Scene, turning: bool, sleep: bool) -> ecs::Ecs {

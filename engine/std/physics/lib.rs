@@ -22,7 +22,7 @@ use engine_api::{
 };
 use physics::{
     Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Vec2, Velocity,
+    Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Tuning, Vec2, Velocity,
 };
 use sleep::Sleepers;
 use solver::{Constraint, ContactPoint, Points, SolverBody, Spinning};
@@ -747,7 +747,7 @@ impl Physics {
         sleep: &mut Sleepers,
         _: &mut Cx,
         (dt, workers): (Dt, Workers),
-        (mut config, mut gravity): (Query<&Sleep>, Query<&Gravity>),
+        (mut config, mut gravity, mut tuning): (Query<&Sleep>, Query<&Gravity>, Query<&Tuning>),
         // Awake bodies only: a sleeping one is immovable, and in tables of
         // its own, so walks over bodies skip it by what they match.
         (mut moving, mut stills): (Moving<'_, '_>, Stills<'_, '_>),
@@ -881,7 +881,8 @@ impl Physics {
         self.time.solve_bodies += (t_bodies - start).as_nanos() as u64;
         self.time.solve_turning += (t_turning - t_bodies).as_nanos() as u64;
         let config = sleeping_by(&mut config);
-        solver::solve_points(&mut bodies, &mut spinning, &mut constraints, &mut points, dt);
+        let params = solver::Params::of(&tuning.single(|_, t| *t).unwrap_or(Tuning::DEFAULT));
+        solver::solve_with(&params, (&mut bodies, &mut spinning), &mut constraints, &mut points, dt);
         let after_solver = Instant::now();
 
         // A body's new velocity and position, `Mut`s stamping only what's

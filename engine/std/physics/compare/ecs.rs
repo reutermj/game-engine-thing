@@ -72,6 +72,13 @@ impl Ecs {
     pub fn asleep(&self) -> usize {
         field(&self.engine.send("physics", "sleeping").unwrap(), "asleep") as usize
     }
+
+    /// Physics's substeps, set as a game sets them: a `Tuning` in the world.
+    #[allow(dead_code)] // The quality tests set it; the comparison doesn't.
+    pub fn substeps(&mut self, n: u32) {
+        self.engine.send("scene", &format!("substeps {n}")).unwrap();
+        self.label += &format!(", {n} substeps");
+    }
 }
 
 impl Drop for Ecs {

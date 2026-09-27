@@ -9,7 +9,7 @@ use std::time::Instant;
 use engine_ecs::{Entity, World};
 use physics::{
     Body, Collider, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Placed, Position, Response, Rot, Rotation,
-    STATIC, Shape, Spin, Vec2, Velocity,
+    STATIC, Shape, Spin, Tuning, Vec2, Velocity,
 };
 
 use crate::narrow;
@@ -148,6 +148,10 @@ impl Arrays {
         let index: HashMap<Entity, u32> = entity.iter().enumerate().map(|(i, e)| (*e, i as u32)).collect();
         let at = |e: &Entity| pos[e];
         let gravity = w.values::<Gravity>().unwrap().first().map_or(Vec2::ZERO, |(_, g)| Vec2::new(g.x, g.y));
+        // The arrays solve at the default substeps, so a world tuned
+        // otherwise isn't one they can be the mod's step on.
+        let tuned = w.values::<Tuning>().unwrap_or_default();
+        assert!(tuned.iter().all(|(_, t)| t.substeps() == Tuning::DEFAULT.substeps()), "the arrays can't follow a Tuning: {tuned:?}");
         let manifolds: HashMap<Entity, Manifold> = w.values::<Manifold>().unwrap().into_iter().collect();
         let responses: HashMap<Entity, Response> = w.values::<Response>().unwrap().into_iter().collect();
         let impulses: HashMap<Entity, Impulse> = w.values::<Impulse>().unwrap().into_iter().collect();

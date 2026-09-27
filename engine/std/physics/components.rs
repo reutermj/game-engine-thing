@@ -402,6 +402,33 @@ impl Sleep {
 }
 
 component! {
+    /// How the step solves, on one entity; no entity, `Tuning::DEFAULT`.
+    /// The step reads it every step, so a write takes effect at the next,
+    /// as with 3D's `physics3d::Tuning`. `substeps` is how many the soft
+    /// step splits a step into: a contact is a spring as stiff as a share
+    /// of the substep rate, so more substeps stand tall stacks sooner (a
+    /// 20-high stack of turning boxes rests from step 60 at six, 580 at
+    /// five) and cost the solver about a fifth more each; 0 reads as the
+    /// default. See docs/architecture/physics.md, "Still at rest".
+    #[derive(Debug, Default, PartialEq, Copy)]
+    pub struct Tuning: "physics::Tuning" {
+        pub substeps: u32,
+    }
+}
+
+impl Tuning {
+    /// Five where Box2D has four: at five a pile of 10 000 sinks 0.013 deep
+    /// where at four it sinks 0.024, for 11% more time a step (physics.md,
+    /// "Settling").
+    pub const DEFAULT: Tuning = Tuning { substeps: 5 };
+
+    /// The substeps it names, the default's for 0.
+    pub fn substeps(&self) -> usize {
+        if self.substeps == 0 { Tuning::DEFAULT.substeps as usize } else { self.substeps as usize }
+    }
+}
+
+component! {
     /// On a sleeping body, put there by physics as its island falls asleep
     /// and taken off as it wakes: so sleeping bodies are tables of their
     /// own, which the step's walks skip by what they match rather than

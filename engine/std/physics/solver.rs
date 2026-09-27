@@ -39,11 +39,10 @@
 
 use physics::{Rot, Vec2};
 
-/// Five where Box2D has four: a soft contact is only as stiff as its
-/// substeps are short (`STIFFNESS`), and at five a pile of 10 000 sinks
-/// 0.013 deep where at four it sinks 0.024, for 11% more time a step
-/// (physics.md, "Settling").
-pub const SUBSTEPS: usize = 5;
+/// The default's substeps (`physics::Tuning`, which a world can change):
+/// a soft contact is only as stiff as its substeps are short
+/// (`STIFFNESS`).
+pub const SUBSTEPS: usize = physics::Tuning::DEFAULT.substeps as usize;
 /// Two where Box2D has one: with one, a pile of 10 000 still has bodies
 /// sliding at step 400; with two it's at rest by 240.
 pub const RELAX_ITERATIONS: usize = 2;
@@ -97,8 +96,8 @@ pub enum Integrate {
     Angle,
 }
 
-/// The solver's constants, for the comparison's variants; `solve` uses
-/// `PARAMS`.
+/// The solver's constants: `PARAMS`, as a world's `Tuning` sets them
+/// (`of`), or the comparison's variants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
     pub substeps: usize,
@@ -130,6 +129,13 @@ pub const PARAMS: Params = Params {
     static_stiffness: STATIC_STIFFNESS,
     block: false,
 };
+
+impl Params {
+    #[allow(dead_code)] // The benches that compile this file solve at the default.
+    pub fn of(t: &physics::Tuning) -> Params {
+        Params { substeps: t.substeps(), ..PARAMS }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SolverBody {
@@ -359,7 +365,9 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32) {
 }
 
 /// Bodies some of which turn (`spinning`), and contacts some of which have
-/// `points` (by `Constraint::points`).
+/// `points` (by `Constraint::points`), at the default `Tuning`: the arrays'
+/// solver, where the mod solves by its world's (`solve_with`).
+#[allow(dead_code)]
 pub fn solve_points(bodies: &mut [SolverBody], spinning: &mut [Spinning], contacts: &mut [Constraint], points: &mut [Points], dt: f32) {
     solve_with(&PARAMS, (bodies, spinning), contacts, points, dt);
 }
@@ -985,6 +993,13 @@ mod tests {
         let (linear, _) = roll(&Params { separation: Separation::Linear, ..PARAMS });
         assert!((turned.v.y - 20.0 * DT / 4.0).abs() < 0.01, "{turned:?}");
         assert!(linear.v.y.abs() < 1e-3, "{linear:?}");
+    }
+
+    #[test]
+    fn a_tuning_sets_the_substeps_and_none_reads_as_the_default() {
+        assert_eq!(Params::of(&physics::Tuning::default()), PARAMS);
+        assert_eq!(Params::of(&physics::Tuning::DEFAULT), PARAMS);
+        assert_eq!(Params::of(&physics::Tuning { substeps: 6 }), Params { substeps: 6, ..PARAMS });
     }
 
     #[test]

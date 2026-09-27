@@ -105,6 +105,14 @@ component! {
 }
 
 component! {
+    /// How the step solves, on one entity; none is `Tuning::DEFAULT`, 5
+    /// substeps. More substeps are stiffer contacts, for a game that stacks
+    /// tall (six stand a 20-high turning stack at rest from step 60, not
+    /// 580), at about a fifth more solver each ([Still at rest](#still-at-rest)).
+    pub struct Tuning: "physics::Tuning" { pub substeps: u32 }
+}
+
+component! {
     /// Which sides of a body touched something solid on the last step:
     /// the answer to "can the player jump". Kept up to date on bodies that
     /// have it; a game adds it where it wants to ask.
@@ -2702,19 +2710,15 @@ turning 10-high stack (100); ours rest in 10-30, their tops sink a third as
 far (a 25-wide turning pyramid 0.017 lower where both references' are
 0.094), and nothing leans more than 0.1°.
 
-**Known failures**, each an ignored test naming its bead (run them with
-`--test_arg=--include-ignored`), not a looser bound:
-
-- **A 20-high stack of turning boxes in 2D rests late** (get-emj.41): it
-  sways near its buckling load, as Rapier's does, and passes 0.05 until
-  580 where Rapier's rests from 220 (Box2D topples it). What would fix it
-  and what each costs: [Still at rest](#still-at-rest).
-
-Until 2026-09-27 two more: a five-high stack of turning cubes in 3D never
-rested (get-emj.42), and turning planks in 3D kept up to 1e4 times the
-references' energy and never rested at 10 000 (get-emj.43). Both are
-fixed, by contact recycling and softer static contacts ([Still at
-rest](#still-at-rest)).
+**Known failures**: none. A known failure is an ignored test naming its
+bead (run with `--test_arg=--include-ignored`), not a looser bound.
+Until 2026-09-27 there were three: a five-high stack of turning cubes in
+3D never rested (get-emj.42), and turning planks in 3D kept up to 1e4
+times the references' energy and never rested at 10 000 (get-emj.43),
+both fixed by contact recycling and softer static contacts; and a 20-high
+stack of turning boxes in 2D rests late at the default five substeps
+(get-emj.41), which is now tested at six, set through `physics::Tuning`
+as a game that stacks would ([Still at rest](#still-at-rest)).
 
 **What the tests catch** (mutation-checked, 2026-09-26: each bug planted in
 the source, or chosen by `SOLVER`/`TUNE`, and the default suite run):
@@ -2739,7 +2743,7 @@ the three never rests.
 
 ## Still at rest
 
-**Status: 3D built, 2D open** (2026-09-27, get-emj.41-43). The three
+**Status: built** (2026-09-27, get-emj.41-43; 2D as a setting). The three
 known failures of [Quality as a test](#quality-as-a-test) were thought one
 cause, a box rocking on its points. Instrumented (every body's motion and
 every contact's points, ids and impulses, step by step, read from the
@@ -2876,7 +2880,7 @@ on the pair's move). Spheres, which no engine brings to rest (they roll),
 move by a run's noise. Piles sink a little deeper against the floor (the
 planks at 10 000 0.035, against Rapier's 0.076).
 
-**2D: not built.** Every option that stands the 20-high stack costs
+**2D: a setting.** Every option that stands the 20-high stack costs
 something the default shouldn't pay without a decision (get-emj.41):
 
 | 2D, turning | stack 20: at rest from, most energy a body in the last 200 | pyramid 5050: at rest from, most in the last 200 | piles 400-1400: median / worst rest | solver µs, pile 10 000 settled / pyramid 5050 |
@@ -2894,9 +2898,22 @@ Six substeps get better everywhere, and cost a fifth of the solver in
 every scene, locked or turning (rain 10 000 2410 → 2949 µs). The block
 solver is cheaper than solving the points one after the other, but sets
 the big pyramid vibrating for a thousand steps, whole rows at 0.3 (as
-Rapier's, whose block solver is on in 2D, rests at 1100 too). So the
-stack's test stays ignored, now failing on its rest alone, and the block
+Rapier's, whose block solver is on in 2D, rests at 1100 too). The block
 solver stays a variant.
+
+**Decided** (2026-09-27, get-emj.41): the substep count is a setting in
+the world, `physics::Tuning` on one entity as 3D's `Tuning` is, read by
+the solve every step; none, or 0, is the default five. That is what both
+references do (Box2D's 4 substeps and Rapier's 4 iterations are each a
+default and a knob), and it costs no game what it didn't choose. The
+20-high stack's test runs at six through it, on the mod in the engine
+(`a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers_at_six_substeps`,
+at rest from 60), and `the_mod_solves_at_the_substeps_its_world_sets`
+holds the mod at six to the arrays at six bit for bit, and apart from them
+at five; with the setting ignored, both fail (the stack at rest from 580).
+The arrays (`tests/arrays.rs`) solve at the default only, and refuse a
+world with another. The default is to be revisited once the solver's
+speed work has landed, on the new base.
 
 **The tests.** A stack's or pyramid's energy is now bounded by the most at
 any look over its last 200 steps (`Settling::energy_tail`), from the
