@@ -32,6 +32,7 @@ SETTLE=1500 ./bazel run -c opt //engine/std/physics/compare  # how soon each com
 VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run -c opt //engine/std/physics/compare
 TURN=1 ./bazel run -c opt //engine/std/physics/compare   # only bodies that turn
 TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run -c opt //engine/std/physics/compare
+./bazel run -c opt //engine/std/physics/compare:solver_bench   # the 2D solver alone, each way of solving
 ```
 
 Every case runs twice by default: with rotation locked (every engine), as

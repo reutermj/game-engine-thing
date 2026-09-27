@@ -1490,6 +1490,8 @@ Estimated from the numbers above, at 10 000 bodies:
 4. **Colored, wide solving on one thread (algorithm).** 1.28–1.4× the
    solver, about 400–500 µs at 10 000 and more on the pyramid; another
    computation, deterministic, and the start of the parallel solve.
+   Done otherwise, 2026-09-27, for turning contacts: in lanes by level,
+   the same computation, twice as fast ([The solver's speed](#the-solvers-speed)).
 5. **Solver arrays kept between steps (ECS).** Most of the 170 µs the
    copies cost over the arrays; the transpose itself is cheap ([What the
    ECS costs](#what-the-ecs-costs)).
@@ -1940,7 +1942,8 @@ there are two, as above:
   contacts; Rapier in 4 substeps of one biased and one unbiased pass. The
   colored, wide solve that was measured at 1.3–1.4 times the scalar one
   without rotation ([Parallel solving](#parallel-solving)) is where the
-  gap closes, more so with rotation's longer rows.
+  gap closes, more so with rotation's longer rows. (It closed by level
+  rather than by color, 2026-09-27: [The solver's speed](#the-solvers-speed).)
 
 ### Against other engines, bodies turning
 
@@ -1992,7 +1995,8 @@ circles. The pyramids stand in all three.)
   gap is the one [Rotation in the soft step](#rotation-in-the-soft-step)
   names: a turning contact is two points of angular terms in 20 passes a
   step, scalar and in pair order, where Box2D's are 12 passes of SSE2 over
-  colored contacts and Rapier's 8.
+  colored contacts and Rapier's 8. Since halved, the same computation:
+  [The solver's speed](#the-solvers-speed).
 - **The narrowphase is in their range**: 901 µs on the settled pile against
   Box2D's 1616 (it clips every pair whose fat boxes overlap) and Rapier's
   531 (it reuses manifolds of pairs that barely moved). The broadphase is
@@ -2927,6 +2931,187 @@ stack; a recycled point's separation grown three times too fast,
 `a_box_stack_stands` and every 3D pile; recycling that never ends, four
 physics3d tests; the block solver's coupling halved, its unit test.
 
+## The solver's speed
+
+**Status: built** (2026-09-27). With bodies turning, the 2D solver was 2
+to 4 times Box2D v3.1.1's and Rapier 2D 0.36's (8215 µs against 2626 and
+3999 on the settled turning pile of 10 000, 7324 against 1725 and 2425 on
+the 5050 pyramid; [Against other engines, bodies
+turning](#against-other-engines-bodies-turning)). It now solves four
+contacts at a time, grouped by level of the sweep in pair order, which is
+the same computation as before bit for bit, and takes about half the time:
+within 10% of Box2D's at Box2D's number of passes, and 1.7 to 1.8 times it
+at ours, which are a quality choice ([Settling](#settling), [Still at
+rest](#still-at-rest)). Nothing the quality tests bound moved, since
+nothing moved at all.
+
+### Where the time went
+
+The solver alone, on the same inputs, timed by stage
+(`./bazel run -c opt //engine/std/physics/compare:solver_bench`, which
+captures the solver's input from the comparison's turning scenes at the
+steps it times; the stages by clocks put in a copy, since removed). µs
+per step, one thread, the turning pile of 10 000 (22 136 contacts, every
+one with points) and the 5050 pyramid (14 950):
+
+| stage | passes a step | pile, one at a time | pyramid, one at a time | Box2D's, pile (`b2Profile`) |
+|---|---|---|---|---|
+| preparing contacts | 1 | 1000 | 388 | 211 |
+| warm start | 5 (Box2D 4) | 493 | 345 | 214 |
+| the pushing pass | 5 (4) | 1645 | 1331 | 935 (with friction) |
+| moving bodies | 5 (4) | 103 | 52 | 152 |
+| relaxing passes | 10 (4) | 5311 | 5268 | 934 |
+| summing the substeps' impulses | 5 | 237 | 158 | – |
+| restitution, storing impulses | 1 | 141 | 37 | 149 |
+| **all** | | **9255** | **7550** | **2596** |
+
+- **It was latency, not arithmetic.** A relaxing pass was 24 ns a contact
+  on the pile and 35 on the pyramid, about 120 to 175 cycles. A contact's
+  four impulses (two points' normals, then their friction) each read the
+  velocities the last one wrote, and in pair order the next contact
+  shares a body with this one (pairs sort by their first body; a pyramid's
+  chain of contacts is the order), so every contact waited on the one
+  before. Box2D's pass is 44 ns a batch of four.
+- **Box2D** (read in v3.1.1's `solver.c`, `contact_solver.c`,
+  `constraint_graph.c`): contacts colored as they begin touching and kept
+  in their color (12 colors, the last an overflow solved one at a time;
+  a contact with a static body never in color 0), each color's contacts in
+  batches of 4 (SSE2) or 8 (AVX2) laid out field by field
+  (`b2ContactConstraintSIMD`, a one-point contact's second point zeros,
+  a color's last batch padded), bodies one array of 32-byte states
+  (`b2BodyState`: velocity, turn rate, move and turn this step) gathered
+  and scattered by transposes, inverse masses kept by each contact. A step
+  is one prepare, 4 × (warm start, pass, relax), restitution (skipping
+  batches with none), storing: 12 passes to our 20.
+- **Rapier 0.36** (its fetched source; a staged island solver, not the
+  upstream `VelocitySolver`): contacts colored in the narrowphase too,
+  by `u128` masks per body (dynamic pairs from the lowest color, pairs with
+  a fixed body from the highest), each color cut into chunks of 4
+  (`wide::f32x4` through simba) with body velocities gathered by
+  transposes; 4 substeps × (update and warm start, one biased pass
+  without friction, one unbiased with it), restitution once if anything
+  bounces: 12 passes.
+
+### The options, measured
+
+Each on the same captured inputs, one at a time before combining; µs per
+step, the median of 9 solves of each of 3 inputs; "bit for bit" is every
+body's velocity and turn rate against one contact at a time in pair order:
+
+| option | pile 10 000 | pyramid 5050 | bit for bit |
+|---|---|---|---|
+| one contact at a time in pair order, as it was | 9104 | 7470 | – |
+| the lanes' layout alone: batches of one, pair order[^pair-lanes] | 10 335 | 6434 | yes |
+| by level, 1 lane | 8793 | 5475 | yes |
+| **by level, 4 lanes (built)** | **4485** | **3075** | **yes** |
+| by level, 8 lanes (two SSE2 registers) | 4522 | 3139 | yes |
+| graph-colored as Box2D, 1 / 4 / 8 lanes | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: the pyramid falls |
+
+Then, each alone on 4 lanes by level, bit for bit unless said:
+
+| change | effect |
+|---|---|
+| restitution skips a batch no lane of which can bounce, before gathering | 189 → 38 µs of restitution on the pile |
+| the warm start's velocities stored in the batch before scattering | the pile 4915 → 4628 µs: the stores seed LLVM's SLP vectorizer, which had left the warm start scalar (80 `mulss`, 16 `mulps`; after, none and 28) |
+| the relaxing passes' bias found by the substep's first and read by the second (positions don't move between them) | −2.5% on the pile, −3.6% on the pyramid |
+| `prepare` inlined | the prepare's loop 642 → 417 µs |
+| **rejected:** the same stores in the passes, which LLVM vectorized already | no gain (4631 → 4714) |
+| **rejected:** batches filled one after another, reading contacts in the order they're solved | the prepare 887 → 1223 µs: reading them in pair order and writing to their batch is cheaper |
+| **rejected:** hot fields apart from cold ones | not built once batches padded by 128 bytes (17%) measured the same (4915 → 4868): the passes aren't bound by memory |
+| six substeps (a `Tuning`) | +17% (5226, 3583) |
+| one relaxing pass | −26% (3337, 2289); fails the quality tests ([Rotation in the soft step](#rotation-in-the-soft-step)) |
+| Box2D's passes: 4 substeps, 1 relaxing | 2822, 1910 to 2247 against Box2D's 2596 and 1725: within about 10% like for like; fails on depth and rest |
+
+- **Levels, not colors.** The sweep in pair order makes a contact wait
+  only on earlier contacts sharing a body it moves. A contact's level is
+  one past the latest such contact's (in pair order, the level its bodies'
+  last contact left, so one pass finds it), and solving the levels in
+  turn, each contact sees the bodies exactly as the sweep would have left
+  them: it is the sweep bit for bit, with no two contacts in a level
+  sharing a moving body, so a level's contacts can go in lanes. This is
+  level scheduling, as sparse triangular solves run in parallel (Anderson
+  and Saad, 1989). A pile of 10 000 has about 420 levels, a 5050 pyramid
+  590, and their batches are 97% and 94% full. Colors are 6 or 7 and
+  solve 3% faster, but in another order, so another computation: over 21
+  pile sizes it settles as well (median rest 260 either way), but a
+  turning 5050 pyramid never rests and comes apart (its top 2 to 5 lower,
+  boxes leaning 40°), with Box2D's rule for static contacts, the lowest
+  free color or Rapier's highest, six substeps, or even Box2D's softness
+  and passes; three relaxing passes stand a pyramid 60 wide but not 100
+  (get-emj.48). Pair order walks a pyramid row by row from the ground,
+  which colors scatter.
+- **Four lanes, not eight**: SSE2 is x86-64's baseline, and Box2D was
+  measured at SSE2; eight are two registers each, 1% slower on the pile
+  and 10% slower on the pyramid of 210.
+- **Plain arrays, no intrinsics and no unsafe**: `lanes::F` is an array
+  of `f32` with each operation a loop over the lanes, and LLVM made
+  SSE2 of it (checked in the disassembly: the relaxing pass 110 `mulps`,
+  no `mulss`), but only where a vector store seeds it, which is what the
+  warm start's stores are for. `std::simd` isn't stable; `std::arch`'s
+  loads and stores need `unsafe`.
+- **The layout** is Box2D's: bodies copied each step into one array of
+  32-byte states (velocity, turn rate, move and turn this step), their
+  masses kept by each contact; contacts in batches, field by field, a
+  one-point contact's second point and a batch's empty lanes zeros at a
+  body nothing moves. The copy is the solver's own layout for the step, as
+  decided in [What the ECS costs](#what-the-ecs-costs); nothing persists
+  outside the world.
+- **A world where nothing turns keeps the loop one contact at a time**:
+  it is level with Box2D already, and a lanes kernel adds a row's zero
+  turns, which isn't that loop to the bit the games' replays hold to
+  (get-emj.51). `Wide::Off` keeps the loop for turning contacts too: the
+  variants that only it has (the block solver, other separations) and
+  the test that the lanes are it bit for bit.
+
+**The tests.** `the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`
+(`:quality_test`) holds the default to the loop bit for bit on a turning
+pile and pyramid over 150 steps, and checks that colored differs, so an
+order is visible to it. Planted, it fails on a level off by one (every
+turning quality test fails with it) and on one sum in the pushing pass
+reassociated (nothing else sees that). The long quality tests take 24 s
+where they took 38.
+
+### Against the others now
+
+The comparison (runbook 005), before and after, the same session, one
+thread, `-c opt`, medians of 3 runs; each cell the step, then the solver
+stage, µs (the ECS mod; the arrays' solver agrees within 2%):
+
+| scene, turning | ours before | ours after | Box2D | Rapier |
+|---|---|---|---|---|
+| pile 1000, settled | 953 / 732 | 661 / 457 | 380 / 256 | 383 / 320 |
+| pile 10 000, falling | 3116 / 1870 | 2347 / 1110 | 2749 / 642 | 2589 / 1011 |
+| pile 10 000, settled | 10 598 / 8463 | 6639 / 4525 | 4452 / 2665 | 4901 / 3991 |
+| pyramid 210 | 368 / 294 | 216 / 141 | 111 / 72 | 106 / 93 |
+| pyramid 5050 | 8774 / 7334 | 4598 / 3094 | 2974 / 1758 | 2865 / 2489 |
+| rain 10 000 | 8606 / 5806 | 6334 / 3502 | 4997 / 1969 | 6593 / 2394 |
+
+Locked, where the code didn't change, within the runs' noise (the pile of
+10 000 settled 2415 → 2474 µs of solver, the pyramid 2202 → 2247). `:tax`,
+ECS / arrays: the turning pile of 10 000 settled, frame 10 568 / 11 338 →
+6750 / 7825, solver 8399 / 7999 → 4576 / 4487, bit for bit as before; 1000
+settled, 935 / 1047 → 680 / 787. The solver is now 1.1 to 1.3 times
+Rapier's and 1.7 to 1.8 times Box2D's where contacts press, from 20 passes
+to their 12 and a prepare twice Box2D's (get-emj.50); the step is 1.5 times
+Box2D's on the settled pile, where the narrowphase and upkeep are ours.
+
+**What it means for threads** (get-emj.32, get-znt.5): the levels are
+the one-thread schedule. 420 to 590 of them would be as many barriers a
+pass, where a barrier costs 0.19 µs on one CCD ([Parallel
+solving](#parallel-solving)): 80 to 110 µs a pass, more than the pass. The
+parallel solve is colors, whose batches run the same lanes and layout;
+only the grouping differs. But colors are another order, and at our
+stiffness they let the big turning pyramid fall, which a parallel solve
+has to fix first (get-emj.48).
+
+**3D** (engine/std/physics3d) has the same structure, rows in pair order,
+and the level schedule applies to it unchanged. Alone, rows reordered by
+level one at a time, it gained 1 to 2% (boxes of 10 000 turning 25 072 →
+24 793 µs of solver, planks 32 514 → 31 841, bit for bit), so it wasn't
+landed: the gain is the lanes, and 3D's kernel is its own (four points,
+friction on a disc at the centroid, twist, the `Tuning` variants), a
+port, not a change (get-emj.52).
+
 ## Open questions
 
 - **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation
@@ -3255,3 +3440,10 @@ frame 508.
     columns read, frame first: falling 910 / 563, broadphase 221 / 201,
     outside the systems 196; settled 1454 / 1279, 227 / 282, 101; at rest
     1384 / 1288, 220 / 283, 25 (medians of three runs).
+
+[^pair-lanes]: *(History, 2026-09-27.)* `Wide::Pair`, the lanes' layout
+    one contact to a batch in pair order, was built to check the layout
+    against the loop bit for bit before any grouping, and removed once
+    levels of one lane checked the same; so were three rules for colored
+    contacts with a static end (`Statics`: the lowest free color, not
+    color 0, the highest), since none stood the 5050 pyramid.

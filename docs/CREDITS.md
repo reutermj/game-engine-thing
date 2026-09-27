@@ -93,6 +93,22 @@ one would have to ship those files with it.
       `b2FinalizeBodies`) (`lib.rs`, `fall_asleep`);
     - in the comparison, a turning body's mass set with its shape's inertia
       at mass 1 (`b2Body_SetMassData`, `compare/box2d_shim.c`).
+  - the turning 2D solve in lanes (2026-09-27, `solver.rs`, `lanes`):
+    contacts in batches of four laid out field by field, a one-point
+    contact's second point zeros and a batch's empty lanes at a body
+    nothing moves (`b2ContactConstraintSIMD`, `b2PrepareContactsTask`),
+    bodies copied into one array of 32-byte states read and written by
+    gathering and scattering the batch's lanes (`b2BodyState`,
+    `b2GatherBodies`, `b2ScatterBodies`), inverse masses kept by each
+    contact, and restitution skipping a batch with nothing to bounce
+    (`b2ApplyRestitutionTask`). Read in v3.1.1's `contact_solver.c`. The
+    grouping is not Box2D's graph coloring (kept as a variant,
+    `Wide::Colored`, with its rule that a contact on a static body isn't in
+    color 0) but the levels of the sweep in pair order, which keep the
+    sweep's result bit for bit: level scheduling, from the numerical
+    literature on sparse triangular solves (E. Anderson and Y. Saad,
+    "Solving sparse triangular linear systems on parallel computers",
+    1989), not from any engine here (physics.md, "The solver's speed").
   - the 3D step (`//engine/std/physics3d`, experimental) descends from the
     2D one, and so inherits the same ideas: the soft step, speculative
     contacts, and mixing friction and restitution per contact
