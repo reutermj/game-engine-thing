@@ -117,8 +117,9 @@ const SIZES: [usize; 4] = [200, 300, 400, 500];
 
 /// Turning cubes (1000 steps, 2026-09-26). At rest from: Rapier 128, 265,
 /// 170, 203 (median 203); Box3D 117, 262, 203, 219 (219); Jolt 240, 835,
-/// 274, never; ours 142, 177, 187, 200. Deepest at the end: Rapier up to
-/// 0.016, Box3D 0.014, Jolt 0.020 (its slop); ours 0.0055. While settling:
+/// 274, never; ours 127, 189, 200, 160 (142, 177, 187, 200 before
+/// recycling, 2026-09-27). Deepest at the end: Rapier up to 0.016, Box3D
+/// 0.014, Jolt 0.020 (its slop); ours 0.0055. While settling:
 /// 0.116 and 0.088 (ours 0.075), mean 0.029 and 0.029 (ours 0.007).
 /// Partners a body 2.57-3.43 and 0.88-0.99 not columns everywhere.
 #[test]
@@ -139,7 +140,7 @@ fn piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
 /// Locked cubes. At rest from: Rapier 65, 90, never, 127 (median 127);
 /// Box3D 59, 90, never, 250 (250); both breathe at 400 (docs/lore: a locked
 /// box pile breathes forever under soft contacts at 4 iterations); Jolt 47,
-/// 68, 103, 83; ours 45, 55, 83, 69. Deepest at the end: 0.0021 and 0.0022
+/// 68, 103, 83; ours 42, 55, 80, 66. Deepest at the end: 0.0021 and 0.0022
 /// (Jolt 0.020); ours 0.0006. While settling 0.077 and 0.085 (ours 0.038),
 /// mean 0.029 and 0.027 (ours 0.005).
 #[test]
@@ -157,11 +158,10 @@ fn piles_of_locked_boxes_rest_as_soon_as_rapier_and_box3d_do() {
     piles_meet(Kind::BoxPile, &SIZES, false, &b);
 }
 
-/// Turning planks (0.5 by 0.125 by 0.25), 3D's weak spot at 10 000
-/// (`:quality_long_test`). At rest from: Rapier 212, 255, 364, 267
-/// (median 267); Box3D 823, 209, 254, 302 (302); Jolt 187, 421, 526, 992;
-/// ours 341, 239, 325, 354. Deepest at the end: Rapier up to 0.031, Box3D
-/// 0.040; ours 0.0058. While settling 0.27 and 0.29 (ours 0.30), mean 0.016
+/// Turning planks (0.5 by 0.125 by 0.25). At rest from: Rapier 212, 255,
+/// 364, 267 (median 267); Box3D 823, 209, 254, 302 (302); Jolt 187, 421,
+/// 526, 992; ours 303, 257, 249, 287 (341, 239, 325, 354 before recycling).
+/// Deepest at the end: Rapier up to 0.031, Box3D 0.040; ours 0.0085. While settling 0.27 and 0.29 (ours 0.30), mean 0.016
 /// and 0.019 (ours 0.014).
 #[test]
 fn piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
@@ -179,12 +179,11 @@ fn piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
     piles_meet(Kind::PlankPile, &SIZES, true, &b);
 }
 
-/// The same planks at rest are as still as Rapier's and Box3D's: ours
-/// 1.4e-7, 1.9e-10, 2.1e-8 and 3.0e-13 a body at step 1000, theirs under
-/// 1.0e-11. Every plank is under 0.05 at its farthest point, but some still
-/// rock at about 5e-4.
+/// The same planks at rest are as still as Rapier's and Box3D's: theirs
+/// under 1.0e-11 a body at step 1000, ours 3.7e-13 to 5.6e-13 (get-emj.43:
+/// 1.4e-7, 1.9e-10, 2.1e-8 and 3.0e-13 before recycling, some planks
+/// rocking at about 5e-4 on points that flickered between features).
 #[test]
-#[ignore = "known failure, get-emj.43: turning planks at rest keep up to 1e4 times the energy Rapier's and Box3D's do"]
 fn piles_of_turning_planks_are_as_still_at_rest_as_rapier_and_box3d() {
     let b = PileBounds {
         rest_worst: usize::MAX,
@@ -227,7 +226,7 @@ fn stands(n: usize, rest: (usize, usize), top: (f32, f32), deepest: (f32, f32), 
 
 /// 10, 15 and 20 cubes high, each set off by up to 0.04 (1000 steps,
 /// 2026-09-26; the arguments are Rapier's and Box3D's values). Ours: at rest
-/// from 2, 13, 18; the top 0.007, 0.016, 0.031 lower; 0.0012-0.0026 deep;
+/// from 2, 13, 18; the top 0.007, 0.017, 0.032 lower; 0.0012-0.0026 deep;
 /// leaning at most 0.1°. Jolt topples the 20 (8 cubes out).
 #[test]
 fn stacks_of_turning_boxes_stand_as_in_rapier_and_box3d() {
@@ -239,10 +238,10 @@ fn stacks_of_turning_boxes_stand_as_in_rapier_and_box3d() {
 }
 
 /// Five high: Rapier and Box3D rest from step 1 and 1, the top 0.006
-/// lower; ours never comes to rest (two cubes still at 0.09 at step 1000,
-/// energy 0.005), though it stands, the top 0.026 lower.
+/// lower; ours from 0, the top 0.002 lower, 2.7e-10 a body (get-emj.42:
+/// until static contacts were softened, never, the column circling on the
+/// floor's corners at 4.3 Hz, its top 0.026 lower).
 #[test]
-#[ignore = "known failure, get-emj.42: a five-high stack of turning cubes never comes to rest"]
 fn a_five_high_stack_of_turning_boxes_comes_to_rest() {
     stands(5, (1, 1), (0.006, 0.006), (0.0022, 0.0022), (0.0, 0.0), (3.7e-10, 1.9e-11));
 }
@@ -254,7 +253,7 @@ mod quality_long;
 /// they came to rest on (a pile that breathes isn't at rest; the bounds are
 /// ten times these, as in 2D). Turning cubes: Rapier up to 1.7e-9, Box3D
 /// 4.2e-11 (ours 3.1e-11). Locked: 4.6e-10 and 1.4e-10 (ours 1.1e-11).
-/// Turning planks: 1.0e-11 and 1.5e-12 (ours up to 1.4e-7).
+/// Turning planks: 1.0e-11 and 1.5e-12 (ours up to 5.6e-13).
 const BOXES_TURNING_ENERGY: f64 = 1.7e-9;
 const BOXES_LOCKED_ENERGY: f64 = 4.6e-10;
 const PLANKS_TURNING_ENERGY: f64 = 1.0e-11;

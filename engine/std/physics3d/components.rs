@@ -157,6 +157,11 @@ component! {
         pub points: [f32; 4 * MAX_POINTS],
         pub ids: [u32; MAX_POINTS],
         pub axis: u32, pub axis_sep: f32,
+        /// Each body's rotation when the points were last brought to its
+        /// pose, and the most the pair can have moved since the points
+        /// were found: what recycling reads (`Tuning::recycle`).
+        pub qa: [f32; 4], pub qb: [f32; 4],
+        pub moved: f32,
     }
 }
 
@@ -335,12 +340,29 @@ pub enum Reduce {
     Line,
 }
 
+/// What a step leaves its contacts to warm-start the next with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Carry {
+    /// The mean over the substeps.
+    #[default]
+    Mean,
+    /// The last substep's impulses (Box2D's, Box3D's, Rapier's).
+    Last,
+}
+
 /// Substeps a step, and relaxing passes a substep.
 pub const SUBSTEPS: u32 = 5;
 pub const RELAX_ITERATIONS: u32 = 2;
 /// Of the substep rate, between two moving bodies; against a static one.
+/// A static contact at 0.4 (twice the moving one, as in Box2D) let a box
+/// on the floor rock on its four corners, which rock at 1.22 times a
+/// contact's rate: 0.25 is Box3D's cap for static contacts (physics.md,
+/// "Still at rest").
 pub const STIFFNESS: f32 = 0.2;
-pub const STATIC_STIFFNESS: f32 = 0.4;
+pub const STATIC_STIFFNESS: f32 = 0.25;
+/// How far a pair may move, at most, before its manifold is found again:
+/// Box3D recycles within 0.05 (physics.md, "Still at rest").
+pub const RECYCLE: f32 = 0.03;
 
 component! {
     /// How the step is done, where more than one way was measured: one
@@ -368,6 +390,10 @@ component! {
         pub warm: u8,
         pub box_box: u8,
         pub reduce: u8,
+        /// How far a pair may move before its manifold is found again
+        /// (Box3D's contact recycling); 0 finds every pair every step.
+        pub recycle: f32,
+        pub carry: u8,
     }
 }
 
@@ -385,6 +411,8 @@ impl Default for Tuning {
             warm: Warm::default() as u8,
             box_box: BoxBox::default() as u8,
             reduce: Reduce::default() as u8,
+            recycle: RECYCLE,
+            carry: Carry::default() as u8,
         }
     }
 }
@@ -419,6 +447,10 @@ impl Tuning {
         code(&[Reduce::Area, Reduce::Line], self.reduce)
     }
 
+    pub fn carry(&self) -> Carry {
+        code(&[Carry::Mean, Carry::Last], self.carry)
+    }
+
     /// From a list like "sub=4,relax=1,stiff=0.125,warm=cold": how the
     /// bench names a variant. Unknown keys are refused.
     pub fn parse(s: &str) -> Result<Tuning, String> {
@@ -447,6 +479,9 @@ impl Tuning {
                 ("bb", "gjk") => t.box_box = BoxBox::GjkEpa as u8,
                 ("reduce", "area") => t.reduce = Reduce::Area as u8,
                 ("reduce", "line") => t.reduce = Reduce::Line as u8,
+                ("recycle", _) => t.recycle = num()?,
+                ("carry", "last") => t.carry = Carry::Last as u8,
+                ("carry", "mean") => t.carry = Carry::Mean as u8,
                 _ => return Err(format!("{kv}: unknown")),
             }
         }
@@ -490,10 +525,10 @@ mod tests {
 
     #[test]
     fn a_tuning_names_its_variants_and_reads_unknown_codes_as_the_default() {
-        let t = Tuning::parse("sub=4,warm=cold,bb=gjk,int=exact,anchors=linear").unwrap();
+        let t = Tuning::parse("sub=4,warm=cold,bb=gjk,int=exact,anchors=linear,carry=last,recycle=0").unwrap();
         assert_eq!(
-            (t.substeps, t.warm(), t.box_box(), t.integrate(), t.anchors()),
-            (4, Warm::Cold, BoxBox::GjkEpa, Integrate::Exact, Anchors::Linear)
+            (t.substeps, t.warm(), t.box_box(), t.integrate(), t.anchors(), t.carry(), t.recycle),
+            (4, Warm::Cold, BoxBox::GjkEpa, Integrate::Exact, Anchors::Linear, Carry::Last, 0.0)
         );
         assert_eq!(Tuning::parse("").unwrap(), Tuning::default());
         assert!(Tuning::parse("warm=hot").is_err() && Tuning::parse("sub").is_err());

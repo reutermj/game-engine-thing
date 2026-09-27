@@ -8,8 +8,9 @@
 //! and the solve's apply node re-sorts bodies that moved or turned.
 //!
 //! Everything a step carries to the next is in the world (contacts, their
-//! impulses and cached separating axes, the `Gravity` and `Tuning` it
-//! reads) or in this mod's state (steps and timings), so a reload swaps the
+//! impulses and cached separating axes, the rotations and move a resting
+//! pair's manifold is carried by until it is found again, the `Gravity`
+//! and `Tuning` it reads) or in this mod's state (steps and timings), so a reload swaps the
 //! step under a running simulation, as it does the 2D one.
 //!
 //! What it leaves out of the 2D step: layers and sensors, kinematic bodies,
@@ -25,7 +26,7 @@ use std::time::Instant;
 use engine_api::{Cx, Despawns, Dt, Entity, Kept, Mod, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
 pub use physics3d::{
-    Anchors, AngularVelocity, Body, BoxBox, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS, Manifold, Mat3,
+    Anchors, AngularVelocity, Body, BoxBox, Carry, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS, Manifold, Mat3,
     Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
 };
 use solver::{Constraint, ContactPoint, SolverBody};
@@ -63,6 +64,8 @@ field_struct! {
         points: u64,
         kept: u64,
         matched: u64,
+        /// Contacts carried from the last step without the narrowphase.
+        recycled: u64,
     }
 }
 
@@ -106,8 +109,66 @@ impl Slots {
 struct Item {
     entity: Entity,
     solid: Solid,
+    q: Quat,
+    /// The radius of a sphere around its collider.
+    reach: f32,
     friction: f32,
     restitution: f32,
+}
+
+fn quat(q: [f32; 4]) -> Quat {
+    Quat { v: Vec3::new(q[0], q[1], q[2]), w: q[3] }
+}
+
+fn array(q: Quat) -> [f32; 4] {
+    [q.v.x, q.v.y, q.v.z, q.w]
+}
+
+/// Last step's manifold carried to this step's poses without finding it
+/// again: Box3D's contact recycling (`b3CollideTask`, physics_world.c),
+/// which it says eliminates jitter. Each point is the material points of
+/// both bodies that were at it last step, moved rigidly with them; its
+/// separation grows by how far those came apart along the normal (held,
+/// as Box3D holds it), and the point is now halfway between them. The ids
+/// stay, so warm starting finds every impulse, and a resting pair's points
+/// can't flicker between features or between reductions to four, which
+/// kept piles of planks rocking (physics.md, "Still at rest").
+///
+/// None, so the pair is found again, once it may have moved `tolerance`
+/// since it was: Box3D bounds the move since it was found, which needs the
+/// poses then; this sums a bound over each step since (its centre's move
+/// in `a`'s frame, and the turn of either body or of one against the
+/// other at the reach of the larger), which needs only last step's
+/// rotations, and is never less.
+fn recycle(m: &Manifold, a: &Item, b: &Item, tolerance: f32) -> Option<Manifold> {
+    let (qa0, qb0) = (quat(m.qa), quat(m.qb));
+    let (dqa, dqb) = (a.q.times(qa0.conj()), b.q.times(qb0.conj()));
+    let (ca, cb) = (a.solid.at, b.solid.at);
+    let offset = m.offset();
+    // b's center in a's frame, then and now; and the turn between them.
+    let (rel0, rel) = (qa0.conj().rotate(-offset), a.q.conj().rotate(cb - ca));
+    let qr = qa0.conj().times(qb0).conj().times(a.q.conj().times(b.q));
+    let reach = a.reach.max(b.reach);
+    let turn = qr.v.len().max(dqa.v.len()).max(dqb.v.len());
+    // |q.v| is the sine of half the turn: twice it bounds how far a point
+    // at `reach` moves.
+    let moved = m.moved + (rel - rel0).len() + 2.0 * turn * reach;
+    if moved >= tolerance {
+        return None;
+    }
+    let n = m.normal();
+    let mut out = Manifold { ox: ca.x - cb.x, oy: ca.y - cb.y, oz: ca.z - cb.z, qa: array(a.q), qb: array(b.q), moved, ..*m };
+    let mut near = false;
+    for k in 0..m.count as usize {
+        let (ra, depth) = m.point(k);
+        let pa = ca + dqa.rotate(ra);
+        let pb = cb + dqb.rotate(ra + offset);
+        let depth = depth - (pb - pa).dot(n);
+        near |= depth >= -narrow::MARGIN;
+        let r = (pa + pb) * 0.5 - ca;
+        out.points[4 * k..4 * k + 4].copy_from_slice(&[r.x, r.y, r.z, depth]);
+    }
+    near.then_some(out)
 }
 
 type Moving<'w, 'a> = Query<'w, (&'a Position, &'a Rotation, &'a Collider, &'a Body, &'a Velocity)>;
@@ -126,6 +187,9 @@ fn stored(m: &narrow::Manifold, a: &Item, b: &Item) -> Manifold {
     // Mixed as Box2D does: friction by geometric mean, restitution by the
     // larger.
     Manifold {
+        qa: array(a.q),
+        qb: array(b.q),
+        moved: 0.0,
         nx: m.normal.x,
         ny: m.normal.y,
         nz: m.normal.z,
@@ -206,6 +270,8 @@ impl Physics3d {
         let item = |entity, p: &Position, q: &Rotation, c: &Collider, b: &Body| Item {
             entity,
             solid: Solid { at: p.at(), rot: q.quat().matrix(), shape: c.of() },
+            q: q.quat(),
+            reach: c.reach(),
             friction: b.friction,
             restitution: b.restitution,
         };
@@ -223,7 +289,7 @@ impl Physics3d {
         let key = |p: &ContactPair| (p.a, p.b);
         let mut found: Vec<(ContactPair, Manifold, Impulse)> = Vec::with_capacity(near.len());
         let mut o = 0;
-        let (mut points, mut kept, mut matched) = (0u64, 0u64, 0u64);
+        let (mut points, mut kept, mut matched, mut reused) = (0u64, 0u64, 0u64, 0u64);
         for &(a, b) in near {
             let (i, j) = (&items[slots.get(a).expect("gathered") as usize], &items[slots.get(b).expect("gathered") as usize]);
             let pair = ContactPair { a, b };
@@ -232,7 +298,18 @@ impl Physics3d {
             }
             let prev = old.get(o).filter(|x| x.0 == pair).map(|x| (&x.1, &x.2));
             let cache = prev.map_or((0, 0.0), |(m, _)| (m.axis, m.axis_sep));
-            if let Some(m) = narrow::collide(&i.solid, &j.solid, cache, narrow) {
+            // Box pairs only: a sphere's one point has no features to
+            // flicker between, is found for less than carrying it costs, and
+            // carried it rolls away from where the sphere touches (a pile of
+            // spheres kept ten times the energy).
+            let boxes = matches!((i.solid.shape, j.solid.shape), (Shape::Box(_), Shape::Box(_)));
+            let recycled = if how.recycle > 0.0 && boxes { prev.and_then(|(m, _)| recycle(m, i, j, how.recycle)) } else { None };
+            if let Some(manifold) = recycled {
+                points += manifold.count as u64;
+                kept += manifold.count as u64;
+                reused += 1;
+                found.push((pair, manifold, warm(prev, &manifold, how.warm(), &mut matched)));
+            } else if let Some(m) = narrow::collide(&i.solid, &j.solid, cache, narrow) {
                 let manifold = stored(&m, i, j);
                 points += m.count as u64;
                 kept += if prev.is_some() { m.count as u64 } else { 0 };
@@ -268,7 +345,7 @@ impl Physics3d {
         t.narrowphase += nanos(paired, narrowed);
         t.merge += nanos(narrowed, end);
         t.contacts += nanos(start, end);
-        self.found = Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched };
+        self.found = Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched, recycled: reused };
     }
 
     fn solve(
@@ -402,7 +479,11 @@ impl Mod for Physics3d {
                     per(t.solver),
                     per(t.write_back)
                 );
-                Ok(times + &format!(" pairs {} contacts {} points {} kept {} matched {}", f.pairs, f.contacts, f.points, f.kept, f.matched))
+                Ok(times
+                    + &format!(
+                        " pairs {} contacts {} points {} kept {} matched {} recycled {}",
+                        f.pairs, f.contacts, f.points, f.kept, f.matched, f.recycled
+                    ))
             }
             "reset_timings" => {
                 (self.time, self.steps) = (Timings::default(), 0);

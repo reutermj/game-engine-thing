@@ -13,7 +13,8 @@ use super::*;
 /// 1.6e-10 (ours 3.5e-11). 10 000: at rest from 716, 713, 1413, ours 374;
 /// deepest 0.042, 0.043 (ours 0.013); while settling 0.13, 0.14 (ours
 /// 0.15), mean 0.032, 0.032 (ours 0.018); energy 9.2e-6 and 1.4e-6 (ours
-/// 9.4e-10).
+/// 9.4e-10). Since recycling and softer static contacts (2026-09-27):
+/// ours at rest from 182 and 468, 0.007 and 0.013 deep.
 #[test]
 fn big_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
     let at_1000 = PileBounds {
@@ -42,16 +43,15 @@ fn big_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
     });
 }
 
-/// Turning planks, 3D's weak spot. 1000: at rest from Rapier 278, Box3D
-/// 262, Jolt 840, ours 408; deepest at the end 0.030 and 0.034 (ours 0.010);
+/// Turning planks, until recycling 3D's weak spot. 1000: at rest from
+/// Rapier 278, Box3D 262, Jolt 840, ours 408 (324 since, 2026-09-27); deepest at the end 0.030 and 0.034 (ours 0.010);
 /// while settling 0.28 and 0.27 (ours 0.36), mean 0.019 and 0.017 (ours
 /// 0.013); energy 5.6e-12 and 3.4e-13 (ours 1.0e-9). 10 000: at rest from
 /// 392, 369, Jolt never; ours never (6 planks still at up to 0.34 at step
-/// 1500); deepest 0.076 and 0.078 (ours 0.024); while settling 0.51 and
+/// 1500; 335 since, energy 6.1e-10); deepest 0.076 and 0.078 (ours 0.024); while settling 0.51 and
 /// 0.46 (ours 0.50), mean 0.025 and 0.025 (ours 0.014); energy 3.7e-11 and
 /// 9.7e-13 (ours 2.0e-6).
 #[test]
-#[ignore = "known failure, get-emj.43: 1000 turning planks rest at 408 where Rapier's rest at 278, and 10 000 never do where theirs rest by 392"]
 fn big_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
     let at_1000 = PileBounds {
         rest_worst: 2 * 278,

@@ -26,7 +26,7 @@
 //! last step's is projected onto this step's plane.
 
 use crate::narrow::MAX_POINTS;
-use crate::{Anchors, Inertia, Integrate, Mat3, Quat, Vec3};
+use crate::{Anchors, Carry, Inertia, Integrate, Mat3, Quat, Vec3};
 pub const DAMPING_RATIO: f32 = 10.0;
 /// The fastest a contact pushes bodies apart.
 pub const MAX_PUSH: f32 = 3.0;
@@ -48,6 +48,7 @@ pub struct Tuning {
     pub integrate: Integrate,
     pub inertia: Inertia,
     pub anchors: Anchors,
+    pub carry: Carry,
 }
 
 impl Tuning {
@@ -61,6 +62,7 @@ impl Tuning {
             integrate: t.integrate(),
             inertia: t.inertia(),
             anchors: t.anchors(),
+            carry: t.carry(),
         }
     }
 }
@@ -304,6 +306,22 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, ho
             p.jn = jn;
             cp.jn += d;
             push(&mut hot, r.a, r.b, r.n * d, p.ia * d, p.ib * d);
+        }
+    }
+    // `Carry::Last`: the next step warm-starts from the last substep's
+    // impulses, bounce included, as Box3D keeps them, scaled to a whole
+    // step's (the next takes a substep's share). The default is the mean
+    // the substeps summed to above: the last was measured, and stood a
+    // five-high stack sooner but let piles of a thousand planks rock
+    // longer (physics.md, "Still at rest").
+    if how.carry == Carry::Last {
+        let k = n_sub as f32;
+        for (r, c) in rows.iter().zip(contacts.iter_mut()) {
+            for (p, cp) in points[r.start..r.start + r.count].iter().zip(c.points.iter_mut()) {
+                cp.jn = p.jn * k;
+            }
+            c.jt = (r.t[0] * r.jt[0] + r.t[1] * r.jt[1]) * k;
+            c.twist = r.twist * k;
         }
     }
     for ((b, x), q) in bodies.iter_mut().zip(&hot).zip(turned) {

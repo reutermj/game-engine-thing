@@ -220,3 +220,45 @@ fn a_tuning_in_the_world_is_the_steps() {
     let (_, kept, matched) = run("tuned_cold", Some("warm=cold"));
     assert!(kept > 0 && matched == 0, "warm-started {matched} of {kept} cold");
 }
+
+/// What the last step's `stages` says of `key`.
+fn stage(s: &Sim, key: &str) -> u64 {
+    let stages = s.engine.send("physics3d", "stages").unwrap();
+    stages.split_whitespace().skip_while(|w| *w != key).nth(1).unwrap().parse().unwrap()
+}
+
+/// Recycling (`Tuning::recycle`): a box settling onto the floor from a
+/// tilt keeps its contact from step to step, its ids and so its impulses,
+/// with its points carried where the narrowphase finds them; one sliding
+/// faster than the recycling distance a step is found again every step.
+#[test]
+fn a_settling_box_keeps_its_contact_and_a_sliding_one_is_found_again() {
+    let (s, found) = (floor("recycles"), floor("recycles_off"));
+    found.send("tune recycle=0");
+    let tilt = (Vec3::new(1.0, 0.0, 0.3).normalize(), 0.02);
+    let at = Vec3::new(0.0, 0.51, 0.0);
+    let (b, c) = (s.body(UNIT, at, tilt, Vec3::ZERO, Vec3::ZERO), found.body(UNIT, at, tilt, Vec3::ZERO, Vec3::ZERO));
+    let manifold = |s: &Sim| s.engine.world().values::<Manifold>().unwrap()[0].1;
+    let mut carried = 0;
+    for step in 0..30 {
+        s.run(1);
+        found.run(1);
+        carried += stage(&s, "recycled");
+        assert_eq!(stage(&found, "recycled"), 0);
+        assert_eq!(stage(&s, "matched"), stage(&s, "kept"), "step {step}: every point warm-started");
+        let (kept, fresh) = (manifold(&s), manifold(&found));
+        for k in 0..kept.count as usize {
+            let (ra, depth) = kept.point(k);
+            let near = (0..fresh.count as usize).map(|j| fresh.point(j)).find(|(rb, _)| (*rb - ra).len() < 2e-3);
+            let (_, fresh_depth) = near.unwrap_or_else(|| panic!("step {step}: no point found near {ra:?}: {kept:?} against {fresh:?}"));
+            assert!((depth - fresh_depth).abs() < 2e-4, "step {step}, point {k}: {depth} deep carried, {fresh_depth} found");
+        }
+    }
+    assert!(carried >= 25, "carried {carried} of 30 steps");
+    assert!((s.at(b) - found.at(c)).len() < 1e-3, "{:?} and {:?}", s.at(b), found.at(c));
+
+    let slide = floor("slides");
+    slide.body(UNIT, Vec3::new(0.0, 0.5, 0.0), NONE, Vec3::new(4.0, 0.0, 0.0), Vec3::ZERO);
+    slide.run(10);
+    assert_eq!(stage(&slide, "recycled"), 0, "a box moving 0.067 a step is found again");
+}
