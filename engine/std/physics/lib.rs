@@ -17,7 +17,7 @@ mod solver;
 use std::time::Instant;
 
 use engine_api::{
-    Adds, Cx, Despawns, Dt, Entity, EventWriter, Mod, OrderKey, Query, Removes, Spawner, Systems, With, Without, Workers, export_mod,
+    Adds, Cx, Despawns, Dt, Entity, EventWriter, Kept, Mod, OrderKey, Query, Removes, Spawner, Systems, With, Without, Workers, export_mod,
     field_struct, phase,
 };
 use physics::{
@@ -60,6 +60,14 @@ field_struct! {
         sleeping: u64,
     }
 }
+
+/// How far each collider's fat box reaches past its box grown by the
+/// speculative margin: the broadphase keeps its pairs while bodies stay
+/// inside their fat boxes (`Kept`; docs/architecture/spatial-storage.md,
+/// "Keeping pairs"). A settled pile creeps less than any margin tried, so
+/// the smallest was cheapest, with the fewest candidates (0.02 against
+/// Box2D's 0.05: 131 µs against 139 at 10 000 settled, 2026-09-27).
+const FAT: f32 = 0.02;
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -389,7 +397,7 @@ impl Physics {
         (triggers, mut turned): (EventWriter<Trigger>, Turned<'_, '_>),
         // Gravity, for bodies woken here: see `fall_woken`.
         (dt, mut gravity, mut falling, mut records): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>, Records<'_, '_>),
-        workers: Workers,
+        (workers, mut kept): (Workers, Kept<'_, Position>),
     ) {
         let start = Instant::now();
         // Split across threads only while nothing sleeps: waking looks
@@ -446,7 +454,9 @@ impl Physics {
         // move. In entity order, lesser first, so what's found doesn't
         // depend on the order items were gathered in.
         let gathered = Instant::now();
-        let near = engine_api::near_pairs_with(&workers, &(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN);
+        // Kept between steps (`Kept`): a pile at rest or creeping inside its
+        // fat boxes finds its pairs without looking.
+        let near = kept.near_pairs_with(&workers, &(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN, FAT);
         let found_near = Instant::now();
         let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
         if par {
@@ -473,7 +483,7 @@ impl Physics {
                 slots.insert(e, k);
                 k
             };
-            for (a, b) in near {
+            for &(a, b) in near {
                 let (i, j) = (slots.get(a), slots.get(b));
                 let i = i.unwrap_or_else(|| fetch(a, &mut items, &mut slots));
                 let j = j.unwrap_or_else(|| fetch(b, &mut items, &mut slots));

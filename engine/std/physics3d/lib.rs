@@ -22,7 +22,7 @@ mod solver;
 
 use std::time::Instant;
 
-use engine_api::{Cx, Despawns, Dt, Entity, Mod, Query, Spawner, Systems, With, export_mod, field_struct, near_pairs, phase};
+use engine_api::{Cx, Despawns, Dt, Entity, Kept, Mod, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
 pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS, Manifold, Mat3,
@@ -65,6 +65,12 @@ field_struct! {
         matched: u64,
     }
 }
+
+/// How far each collider's fat box reaches past its box grown by the
+/// speculative margin, as 2D's `FAT`: in 3D a margin's candidates grow as
+/// its volume, so the smallest tried was cheaper still (314 µs against 387
+/// at 0.05, Box3D's cap, 10 000 boxes settled, 2026-09-27).
+const FAT: f32 = 0.02;
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -189,7 +195,7 @@ impl Physics3d {
         _: &mut (),
         _: &mut Cx,
         mut tuning: Query<&Tuning>,
-        (mut moving, mut statics): (Moving<'_, '_>, Statics<'_, '_>),
+        (mut moving, mut statics, mut kept_pairs): (Moving<'_, '_>, Statics<'_, '_>, Kept<'_, Position>),
         mut contacts: Query<(&ContactPair, &mut Manifold, &mut Impulse), (), Despawns>,
         new_contacts: Spawner<(ContactPair, Manifold, Impulse)>,
     ) {
@@ -211,13 +217,14 @@ impl Physics3d {
         let mut old = Vec::with_capacity(contacts.len());
         contacts.for_each_ordered(|_, (pair, m, j)| old.push((*pair, *m, *j)));
         let gathered = Instant::now();
-        let near = near_pairs(&moving, &statics, narrow::MARGIN);
+        // Kept between steps (`Kept`), as 2D's are.
+        let near = kept_pairs.near_pairs(&moving, &statics, narrow::MARGIN, FAT);
         let paired = Instant::now();
         let key = |p: &ContactPair| (p.a, p.b);
         let mut found: Vec<(ContactPair, Manifold, Impulse)> = Vec::with_capacity(near.len());
         let mut o = 0;
         let (mut points, mut kept, mut matched) = (0u64, 0u64, 0u64);
-        for &(a, b) in &near {
+        for &(a, b) in near {
             let (i, j) = (&items[slots.get(a).expect("gathered") as usize], &items[slots.get(b).expect("gathered") as usize]);
             let pair = ContactPair { a, b };
             while old.get(o).is_some_and(|x: &(ContactPair, Manifold, Impulse)| key(&x.0) < (a, b)) {
