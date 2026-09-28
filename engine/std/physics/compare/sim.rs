@@ -29,6 +29,22 @@ impl Dyn {
     }
 }
 
+/// A contact point as an engine reports it, for the debug view
+/// (`view.rs`): where, and the normal, from the first body to the second.
+/// `estimated` where the engine keeps no point (ours, where neither end
+/// turns: a normal and a depth), and the view puts one on the smaller
+/// body's face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub x: f32,
+    pub y: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub estimated: bool,
+    /// Held within the speculative margin, not pressed.
+    pub speculative: bool,
+}
+
 /// One engine running one scene.
 pub trait Sim {
     fn label(&self) -> String;
@@ -46,4 +62,13 @@ pub trait Sim {
     fn contacts(&self) -> usize;
     /// Its own counts, for the notes.
     fn native(&self) -> String;
+    /// Its contact points (`Mark`), for the debug view: none where it
+    /// can't say.
+    fn marks(&self) -> Vec<Mark> {
+        Vec::new()
+    }
+    /// Which of `bodies` sleep, in their order; empty where none can.
+    fn sleeping(&self) -> Vec<bool> {
+        Vec::new()
+    }
 }

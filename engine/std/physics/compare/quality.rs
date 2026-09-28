@@ -64,7 +64,7 @@ fn gap(a: &Dyn, b: &Dyn) -> f32 {
 }
 
 fn as_dyn(s: &Spec) -> Dyn {
-    Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 }
+    Dyn { circle: s.circle, hx: s.hx, hy: s.hy, x: s.x, y: s.y, vx: 0.0, vy: 0.0, angle: s.angle, w: 0.0 }
 }
 
 fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -81,9 +81,10 @@ pub fn measure(scene: &Scene, bodies: &[Dyn], turning: bool) -> Quality {
     let turned = bodies.iter().filter(|b| b.angle.abs() > 1e-6).count();
     assert!(turning || turned == 0, "{turned} bodies turned: rotation is not locked");
     let statics: Vec<Dyn> = scene.build().iter().filter(|s| !s.dynamic).map(as_dyn).collect();
-    // A grid of unit cells: no body is wider than one, so a pair within
-    // `TOUCH` is in neighboring cells.
-    let cell = |x: f32| x.floor() as i32;
+    // A grid of cells as wide as the widest body (a unit in every settling
+    // scene), so a pair within `TOUCH` is in neighboring cells.
+    let size = bodies.iter().map(|b| 2.0 * b.hx.hypot(b.hy) + TOUCH).fold(1.0, f32::max);
+    let cell = |x: f32| (x / size).floor() as i32;
     let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (i, b) in bodies.iter().enumerate() {
         grid.entry((cell(b.x), cell(b.y))).or_default().push(i);

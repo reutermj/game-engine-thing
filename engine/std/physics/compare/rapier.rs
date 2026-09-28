@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use rapier2d::prelude::*;
 
 use crate::scene::{GRAVITY, Scene, Spec};
+use crate::sim::Mark;
 use crate::{Dyn, Sim};
 
 pub struct Rapier {
@@ -13,6 +14,10 @@ pub struct Rapier {
     label: String,
     sleep: bool,
     turning: bool,
+    /// Full continuous collision on every dynamic body (`ccd_enabled`), off
+    /// as shipped: Rapier then sweeps fast bodies against fixed colliders
+    /// only.
+    ccd: bool,
     dynamic: VecDeque<(RigidBodyHandle, Spec)>,
     /// Per stage, milliseconds summed since `reset`.
     time: Vec<(String, f64)>,
@@ -20,7 +25,7 @@ pub struct Rapier {
 
 impl Rapier {
     /// `iterations` is `num_solver_iterations`, 4 by default.
-    pub fn new(scene: &Scene, iterations: usize, sleep: bool, turning: bool) -> Rapier {
+    pub fn new(scene: &Scene, iterations: usize, sleep: bool, turning: bool, ccd: bool) -> Rapier {
         let mut world = PhysicsWorld::new();
         world.gravity = Vector::new(0.0, GRAVITY);
         let defaults = world.integration_parameters.num_solver_iterations;
@@ -30,7 +35,10 @@ impl Rapier {
         if sleep {
             label += ", sleeping";
         }
-        let mut r = Rapier { world, label, sleep, turning, dynamic: VecDeque::new(), time: Vec::new() };
+        if ccd {
+            label += ", CCD";
+        }
+        let mut r = Rapier { world, label, sleep, turning, ccd, dynamic: VecDeque::new(), time: Vec::new() };
         for s in scene.build() {
             r.add(&s);
         }
@@ -48,14 +56,21 @@ impl Rapier {
             .restitution_combine_rule(CoefficientCombineRule::Max);
         let at = Vector::new(s.x, s.y);
         if !s.dynamic {
-            self.world.insert(RigidBodyBuilder::fixed().translation(at), collider);
+            self.world.insert(RigidBodyBuilder::fixed().translation(at).rotation(s.angle), collider);
             return;
         }
-        let body = RigidBodyBuilder::dynamic().translation(at).linvel(Vector::new(s.vx, s.vy)).can_sleep(self.sleep);
-        let body = if self.turning { body } else { body.lock_rotations() };
-        // Mass 1 whatever the shape, as in the engine; turning, the inertia
-        // follows from the shape at that mass, as the engine's does.
-        let (h, _) = self.world.insert(body, collider.mass(1.0));
+        let body = RigidBodyBuilder::dynamic()
+            .translation(at)
+            .rotation(s.angle)
+            .linvel(Vector::new(s.vx, s.vy))
+            .gravity_scale(s.gravity_scale)
+            .ccd_enabled(self.ccd)
+            .can_sleep(self.sleep);
+        let body = if self.turning { body.angvel(s.w) } else { body.lock_rotations() };
+        // The scene's mass (1 but where a scene sets one) whatever the
+        // shape, as in the engine; turning, the inertia follows from the
+        // shape at that mass, as the engine's does.
+        let (h, _) = self.world.insert(body, collider.mass(s.mass));
         self.dynamic.push_back((h, *s));
     }
 }
@@ -130,6 +145,27 @@ impl Sim for Rapier {
 
     fn contacts(&self) -> usize {
         self.world.narrow_phase.contact_pairs().filter(|p| p.has_any_active_contact()).count()
+    }
+
+    /// Every contact pair's manifold points, on the first collider's
+    /// surface.
+    fn marks(&self) -> Vec<Mark> {
+        let mut out = Vec::new();
+        for pair in self.world.narrow_phase.contact_pairs() {
+            let pose = self.world.colliders[pair.collider1].position();
+            for m in pair.manifolds() {
+                let n = m.data.normal;
+                for p in &m.points {
+                    let at = pose.transform_point(p.local_p1);
+                    out.push(Mark { x: at.x, y: at.y, nx: n.x, ny: n.y, estimated: false, speculative: p.dist > 0.0 });
+                }
+            }
+        }
+        out
+    }
+
+    fn sleeping(&self) -> Vec<bool> {
+        self.dynamic.iter().map(|(h, _)| self.world.bodies[*h].is_sleeping()).collect()
     }
 
     fn native(&self) -> String {

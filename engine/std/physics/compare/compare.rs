@@ -22,10 +22,20 @@
 //! soon each comes to rest instead of the timings; `TRACE=1` names what
 //! moves again; `SCENES=pile 800 41,stack 10` other scenes). What it found: docs/architecture/physics.md, "Against
 //! other engines" and "Settling".
+//!
+//! `BEHAVE=1` runs the behaviour scenes instead (`behave.rs`: ramps,
+//! bounces, mass ratios, overlap, bullets, structures; `SCENES` picks
+//! some), a table of what each engine did on each: physics.md, "Quality
+//! beyond settling". `VIEW=<scene>` draws a scene instead (`view.rs`):
+//! `VIEW_STEPS=0,60,300` the steps, `VIEW_OUT=<dir>` where the SVG goes
+//! (the working directory if unset), `VIEW_TEXT=<columns>` also prints it
+//! as text; every engine `ENGINES` leaves, side by side (runbook 005, "The
+//! debug view").
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
+mod behave;
 mod box2d;
 mod ecs;
 #[path = "../narrow.rs"]
@@ -41,6 +51,7 @@ mod solver;
 #[path = "../tests/split_impulse.rs"]
 mod split_impulse;
 mod variants;
+mod view;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -165,7 +176,7 @@ fn main() {
         ));
     }
     engines.push(("Box2D".into(), Box::new(move |s, t| Box::new(box2d::Box2d::new(s, 4, sleep, t)))));
-    engines.push(("Rapier".into(), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, 4, sleep, t)))));
+    engines.push(("Rapier".into(), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, 4, sleep, t, false)))));
     for v in env("VARIANTS").iter().flat_map(|v| v.split(",")) {
         if let Some(spec) = v.strip_prefix("arrays:") {
             let label = format!("ours (arrays) {spec}");
@@ -173,17 +184,34 @@ fn main() {
             engines.push((label.clone(), Box::new(move |s, t| Box::new(ecs::Flat::variant(s, t, &spec, &label)))));
             continue;
         }
-        let (which, n) = v.split_once(":").expect("VARIANTS: box2d:<substeps>, rapier:<iterations> or arrays:<solver>");
+        if v == "rapier:ccd" {
+            engines.push(("Rapier CCD".into(), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, 4, sleep, t, true)))));
+            continue;
+        }
+        let (which, n) = v.split_once(":").expect("VARIANTS: box2d:<substeps>, rapier:<iterations>, rapier:ccd or arrays:<solver>");
         let n: usize = n.parse().expect("a number");
         match which {
             "box2d" => engines.push((format!("Box2D {n}"), Box::new(move |s, t| Box::new(box2d::Box2d::new(s, n as i32, sleep, t))))),
-            "rapier" => engines.push((format!("Rapier {n}"), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, n, sleep, t))))),
+            "rapier" => engines.push((format!("Rapier {n}"), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, n, sleep, t, false))))),
             other => panic!("no engine {other}"),
         }
     }
     if let Some(wanted) = env("ENGINES") {
         let wanted: Vec<String> = wanted.split(",").map(str::to_lowercase).collect();
         engines.retain(|(name, _)| wanted.iter().any(|w| name.to_lowercase().contains(w.as_str())));
+    }
+
+    if let Some(scene) = env("VIEW") {
+        view(&scene, &engines, &env);
+        return;
+    }
+    if env("BEHAVE").is_some() {
+        let scenes = match env("SCENES") {
+            Some(s) => s.split(",").map(|t| Scene::parse(t).unwrap_or_else(|| panic!("SCENES: no scene {t:?}"))).collect(),
+            None => behave::scenes(),
+        };
+        behaviour(&scenes, &engines);
+        return;
     }
 
     let mut cases: Vec<Case> = Vec::new();
@@ -267,6 +295,55 @@ fn main() {
             }
         }
         report(case, &runs);
+    }
+}
+
+/// What each engine does on each behaviour scene (`behave.rs`), bodies
+/// turning: a table a scene, an engine a row.
+fn behaviour(scenes: &[Scene], engines: &[(String, Make)]) {
+    for scene in scenes {
+        println!("### {} ({} steps)\n", scene.text(), behave::steps(scene));
+        let runs: Vec<behave::Behaviour> =
+            engines.iter().map(|(_, make)| behave::behave(make(scene, true).as_mut(), scene, true)).collect();
+        let names: Vec<&str> = runs[0].values.iter().map(|(k, _)| *k).collect();
+        println!("| engine | {} |", names.join(" | "));
+        println!("|---|{}", "---|".repeat(names.len()));
+        for r in &runs {
+            let cells: Vec<String> = r.values.iter().map(|(_, v)| format!("{v:.4}")).collect();
+            println!("| {} | {} |", r.label, cells.join(" | "));
+            eprintln!("behave {}: {} {:?}", scene.text(), r.label, r.values);
+        }
+        println!();
+    }
+}
+
+/// `VIEW`: the scene drawn at `VIEW_STEPS` for every engine, as an SVG
+/// grid in `VIEW_OUT`, and as text with `VIEW_TEXT` (`view.rs`). Bodies
+/// turn with `TURN=1`, and always on the behaviour scenes, which is how
+/// their tables are made.
+fn view(text: &str, engines: &[(String, Make)], env: &dyn Fn(&str) -> Option<String>) {
+    let scene = Scene::parse(text).unwrap_or_else(|| panic!("VIEW: no scene {text:?}"));
+    let turning = scene.behaviour() || env("TURN").is_some_and(|t| t == "1");
+    let mut steps: Vec<u32> =
+        env("VIEW_STEPS").map_or(vec![0, 60, 300], |s| s.split(",").map(|n| n.trim().parse().expect("VIEW_STEPS")).collect());
+    steps.sort();
+    let mut rows: Vec<(u32, Vec<view::Panel>)> = steps.iter().map(|&s| (s, Vec::new())).collect();
+    for (_, make) in engines {
+        let mut sim = make(&scene, turning);
+        let mut at = 0;
+        for (step, panels) in &mut rows {
+            sim.step(*step - at);
+            at = *step;
+            panels.push(view::Panel { label: sim.label(), bodies: sim.bodies(), marks: sim.marks(), sleeping: sim.sleeping() });
+        }
+    }
+    let name: String = format!("{}{}", scene.text(), if turning { " turning" } else { "" }).replace(" ", "_");
+    let dir = std::path::PathBuf::from(env("VIEW_OUT").or_else(|| env("BUILD_WORKING_DIRECTORY")).unwrap_or_else(|| ".".into()));
+    let path = dir.join(format!("{name}.svg"));
+    std::fs::write(&path, view::svg(&scene, &rows)).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    eprintln!("wrote {}", path.display());
+    if let Some(cols) = env("VIEW_TEXT") {
+        print!("{}", view::text(&scene, &rows, cols.parse().expect("VIEW_TEXT: columns")));
     }
 }
 
