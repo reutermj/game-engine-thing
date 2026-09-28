@@ -103,6 +103,12 @@ pub enum Kind {
     Bounce,
     /// A unit cube n times as heavy on a light one (mass 1) on a floor.
     Ratio,
+    /// The pile's drop with every body its own shape and size, by its
+    /// index: a sphere or a box, radius or half extents 0.25 to 0.5 (a
+    /// box's three apart). One material, the pile's, since the engines mix
+    /// two frictions by different rules (Rapier the mean, the others the
+    /// geometric mean), which a pile of mixed materials would measure.
+    Mixed,
 }
 
 impl Kind {
@@ -118,6 +124,7 @@ impl Kind {
             Kind::RampRoll => "ramp_roll",
             Kind::Bounce => "bounce",
             Kind::Ratio => "ratio",
+            Kind::Mixed => "mixed",
         }
     }
 
@@ -138,7 +145,7 @@ impl Kind {
 
 /// Every kind, in an order that only grows: the scene mod keeps a kind as
 /// its place here.
-pub const KINDS: [Kind; 10] = [
+pub const KINDS: [Kind; 11] = [
     Kind::SpherePile,
     Kind::BoxPile,
     Kind::PlankPile,
@@ -149,6 +156,7 @@ pub const KINDS: [Kind; 10] = [
     Kind::RampRoll,
     Kind::Bounce,
     Kind::Ratio,
+    Kind::Mixed,
 ];
 
 /// How far above the floor `Kind::Bounce` drops its ball.
@@ -182,6 +190,17 @@ pub fn build(kind: Kind, n: usize) -> Scene {
         Kind::RampHold | Kind::RampSlide | Kind::RampRoll => ramp(kind),
         Kind::Bounce => bounce(n),
         Kind::Ratio => ratio(n),
+        Kind::Mixed => pile(kind, n, mixed),
+    }
+}
+
+/// A mixed pile's body `i`, the same in every engine: its own seeded draw.
+fn mixed(i: usize) -> Shape {
+    let mut rng = Rng::new(0x3a1d ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    if rng.next_u64().is_multiple_of(2) {
+        Shape::Sphere(rng.range(0.25, 0.5))
+    } else {
+        Shape::Box([rng.range(0.25, 0.5), rng.range(0.25, 0.5), rng.range(0.25, 0.5)])
     }
 }
 

@@ -92,3 +92,72 @@ pub fn settle(sim: &mut dyn Sim, scene: &Scene, turning: bool, max: u32) -> Sett
     s.us = wall * 1e6 / step.max(1) as f64;
     s
 }
+
+/// Calibration of rest and of a top's move (physics-testing.md,
+/// "Measurements that are themselves tested"): an engine scripted to move
+/// over known steps, and to put its one body at a known place.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::Spec;
+
+    /// One unit box, moving at 1 over the steps `moving` covers (from, to),
+    /// at rest elsewhere, at `at`.
+    struct Scripted {
+        step: u32,
+        moving: &'static [(u32, u32)],
+        at: (f32, f32),
+    }
+
+    impl Sim for Scripted {
+        fn label(&self) -> String {
+            "scripted".into()
+        }
+        fn step(&mut self, n: u32) {
+            self.step += n;
+        }
+        fn rain(&mut self, _: &[Spec], _: usize) {}
+        fn bodies(&self) -> Vec<Dyn> {
+            let vx = if self.moving.iter().any(|&(from, to)| (from..to).contains(&self.step)) { 1.0 } else { 0.0 };
+            vec![Dyn { circle: false, hx: 0.5, hy: 0.5, x: self.at.0, y: self.at.1, vx, vy: 0.0, angle: 0.0, w: 0.0 }]
+        }
+        fn reset(&mut self) {}
+        fn stages(&self) -> Vec<(String, f64)> {
+            Vec::new()
+        }
+        fn contacts(&self) -> usize {
+            0
+        }
+        fn native(&self) -> String {
+            String::new()
+        }
+    }
+
+    const ONE: Scene = Scene::Stack { n: 1 };
+
+    fn run(moving: &'static [(u32, u32)], at: (f32, f32)) -> Settling {
+        settle(&mut Scripted { step: 0, moving, at }, &ONE, false, 700)
+    }
+
+    #[test]
+    fn rest_is_the_look_from_which_every_body_stays_still() {
+        let r = run(&[(0, 130)], (0.0, -0.5));
+        assert_eq!((r.first_rest, r.rest_from), (Some(130), Some(130)));
+        // Moving again from 300 to 350: first at rest at 130, and at rest
+        // from 350 only.
+        let r = run(&[(0, 130), (300, 350)], (0.0, -0.5));
+        assert_eq!((r.first_rest, r.rest_from), (Some(130), Some(350)));
+        // Still moving at the last look: never.
+        let r = run(&[(0, 130), (650, 701)], (0.0, -0.5));
+        assert_eq!((r.first_rest, r.rest_from), (Some(130), None));
+        assert!(r.energy_tail > 0.4, "moving at 1 in the last {TAIL} steps: 0.5 a body, not {}", r.energy_tail);
+    }
+
+    #[test]
+    fn top_moved_is_how_far_the_last_body_is_from_where_it_began() {
+        // The stack of one begins at (-0.04, -0.5): 0.3 and 0.4 from there
+        // is 0.5.
+        let r = run(&[], (-0.04 + 0.3, -0.5 - 0.4));
+        assert!((r.top_moved.unwrap() - 0.5).abs() < 1e-5, "{:?}", r.top_moved);
+    }
+}

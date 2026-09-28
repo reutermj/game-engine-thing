@@ -16,27 +16,18 @@
 //! variants they should. The 1000- and 10 000-body scenes are
 //! `:quality_long_test` (manual).
 
-use physics3d_bench::measure::{self, Run};
-use physics3d_bench::scenes::{self, Kind};
-use physics3d_bench::{Config, Iters, make_backend};
+use std::sync::Arc;
+
+use physics3d_bench::measure::Run;
+use physics3d_bench::record::{SIZES, STILL};
+use physics3d_bench::scenes::Kind;
+use physics3d_bench::{baseline, record, runs};
 
 /// Our step on `kind` at each of `sizes`, in threads of their own, each
 /// printed so a failing run shows every number.
-fn runs(kind: Kind, sizes: &[usize], rotate: bool) -> Vec<Run> {
-    let tune: &'static str = std::env::var("TUNE").unwrap_or_default().leak();
-    let runs: Vec<Run> = std::thread::scope(|s| {
-        let threads: Vec<_> = sizes
-            .iter()
-            .map(|&n| {
-                s.spawn(move || {
-                    let scene = scenes::build(kind, n);
-                    let config = Config { iters: Iters::Default, sleep: false, max_bodies: (n + 16) as u32, rotate, tune };
-                    measure::run(&scene, make_backend("ours", &config).unwrap().as_mut())
-                })
-            })
-            .collect();
-        threads.into_iter().map(|t| t.join().expect("a scene panicked")).collect()
-    });
+/// Each run once in the binary (`runs.rs`), which the baseline reads too.
+fn runs(kind: Kind, sizes: &[usize], rotate: bool) -> Vec<Arc<Run>> {
+    let runs = runs::par(sizes, |&n| runs::ours(kind, n, rotate));
     for (n, r) in sizes.iter().zip(&runs) {
         let q = &r.quality;
         println!(
@@ -73,9 +64,6 @@ struct PileBounds {
     not_columns: f64,
 }
 
-/// Energies a body under this are rounding, not motion (2D's `STILL`).
-const STILL: f64 = 1e-8;
-
 /// Every bound broken, not the first.
 fn assert_none(broken: Vec<String>) {
     assert!(broken.is_empty(), "{} bounds broken:\n{}", broken.len(), broken.join("\n"));
@@ -110,10 +98,6 @@ fn piles_meet(kind: Kind, sizes: &[usize], rotate: bool, b: &PileBounds) {
     check(m <= b.rest_median, format!("at rest from {rests:?}: median {m}, bound {}", b.rest_median));
     assert_none(broken);
 }
-
-/// The piles of the default suite: `scenes.rs`'s, each size its own seeded
-/// drop, so its own pile.
-const SIZES: [usize; 4] = [200, 300, 400, 500];
 
 /// Turning cubes (1000 steps, 2026-09-26). At rest from: Rapier 128, 265,
 /// 170, 203 (median 203); Box3D 117, 262, 203, 219 (219); Jolt 240, 835,
@@ -257,3 +241,18 @@ mod quality_long;
 const BOXES_TURNING_ENERGY: f64 = 1.7e-9;
 const BOXES_LOCKED_ENERGY: f64 = 4.6e-10;
 const PLANKS_TURNING_ENERGY: f64 = 1.0e-11;
+
+/// The default suite's baseline, group `quality`: every value `record.rs`
+/// takes from these tests' runs, each within its band of `baseline.txt`,
+/// better or worse, all of them listed where any moved.
+#[test]
+fn baseline() {
+    baseline::assert_holds(record::DEFAULT, &["quality"], &record::quality(false), record::WRITE);
+}
+
+/// The long suite's, from `:quality_long_test`'s runs (`baseline_long.txt`).
+#[cfg(feature = "long")]
+#[test]
+fn baseline_long() {
+    baseline::assert_holds(record::LONG, &["quality"], &record::quality(true), record::WRITE_LONG);
+}

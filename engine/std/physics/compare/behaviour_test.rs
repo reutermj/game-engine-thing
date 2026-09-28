@@ -16,11 +16,15 @@
 //! `:quality_test`.
 //!
 //! A test that finds a real problem stays, ignored, naming its bead: run
-//! them with `--test_arg=--include-ignored`.
+//! them with `--test_arg=--include-ignored`. Every value these tests bound,
+//! the ignored ones' too, is also held to the baseline, both ways
+//! (`baseline` below; `record.rs`; physics-testing.md, "The baseline"),
+//! from the same runs (`runs.rs`).
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
+mod baseline;
 mod behave;
 #[cfg(feature = "long")]
 mod behaviour_long;
@@ -31,6 +35,10 @@ mod family;
 mod narrow;
 #[allow(dead_code)]
 mod quality;
+#[allow(dead_code)] // The quality group's, which `:quality_test` checks.
+mod record;
+#[allow(dead_code)]
+mod runs;
 #[allow(dead_code)]
 mod scene;
 #[allow(dead_code)]
@@ -49,21 +57,11 @@ pub use sim::{Dyn, Sim};
 use behave::Behaviour;
 use scene::Scene;
 
-/// Our step on arrays, or the variant `SOLVER` names; bodies turn.
-fn ours(scene: &Scene) -> ecs::Flat {
-    match std::env::var("SOLVER") {
-        Ok(spec) if !spec.is_empty() => ecs::Flat::variant(scene, true, &spec, &format!("ours ({spec})")),
-        _ => ecs::Flat::new(scene, true, Box::new(solver::solve_points), "ours"),
-    }
-}
-
-/// Each scene run, in threads of their own, and printed as the comparison
+/// Each scene run by ours on arrays (or the variant `SOLVER` names),
+/// bodies turning, in threads of their own, and printed as the comparison
 /// prints it, so a failing run shows every number.
 fn run(scenes: &[Scene]) -> Vec<Behaviour> {
-    let runs: Vec<Behaviour> = std::thread::scope(|s| {
-        let threads: Vec<_> = scenes.iter().map(|&scene| s.spawn(move || behave::behave(&mut ours(&scene), &scene, true))).collect();
-        threads.into_iter().map(|t| t.join().expect("a scene panicked")).collect()
-    });
+    let runs = runs::par(scenes, |&scene| runs::behaved(scene));
     for (scene, r) in scenes.iter().zip(&runs) {
         let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k} {v:.4}")).collect();
         println!("{}, {}: {}", scene.text(), r.label, values.join(", "));
@@ -492,7 +490,7 @@ fn the_mod_is_the_arrays_on_the_behaviour_scenes() {
     ];
     let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
     for scene in scenes {
-        let (mut m, mut a) = (ecs::Ecs::new(&manifest, &scene, false, true), ours(&scene));
+        let (mut m, mut a) = (ecs::Ecs::new(&manifest, &scene, false, true), runs::ours(&scene, true, ""));
         m.step(120);
         a.step(120);
         let (mb, ab) = (m.bodies(), a.bodies());
@@ -500,4 +498,20 @@ fn the_mod_is_the_arrays_on_the_behaviour_scenes() {
         let differ = mb.iter().zip(&ab).filter(|(x, y)| bits(x) != bits(y)).count();
         assert_eq!(differ, 0, "{}: {differ} bodies differ from the arrays", scene.text());
     }
+}
+
+/// The default suite's baseline, group `behaviour`: every value
+/// `record.rs` takes from these tests' scenes and families (the ignored
+/// tests' scenes too, so that fixing what they found shows), each within
+/// its band of `baseline.txt`, all of them listed where any moved.
+#[test]
+fn baseline() {
+    baseline::assert_holds(record::DEFAULT, &["behaviour"], &record::behaviour(false), record::WRITE);
+}
+
+/// The long suite's: the families on their long grids (`baseline_long.txt`).
+#[cfg(feature = "long")]
+#[test]
+fn baseline_long() {
+    baseline::assert_holds(record::LONG, &["behaviour"], &record::behaviour(true), record::WRITE_LONG);
 }

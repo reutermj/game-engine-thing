@@ -61,7 +61,15 @@ rust_library(
         "measure.rs",
         "ours.rs",
         "rapier.rs",
+        "record.rs",
+        "runs.rs",
+        "//engine/std/physics/compare:baseline.rs",
         "//engine/std/physics3d:tests/scenes.rs",
+    ],
+    # The baseline (record.rs), built in for the tests to check.
+    compile_data = [
+        "baseline.txt",
+        "baseline_long.txt",
     ],
     crate_name = "physics3d_bench",
     # Ours is the physics3d mod in the engine, on pile3d's scenes.
@@ -86,6 +94,39 @@ rust_binary(
     srcs = ["main.rs"],
     data = [":licenses"],
     deps = [":physics3d"],
+)
+
+# The baseline's tool, 2D's for 3D (physics-testing.md, "The baseline";
+# runbook 005): every value the baseline records, compared with the file;
+# --write writes it. The quality and behaviour tests check it, from their
+# own runs (their test "baseline").
+#   ./bazel run //bench/physics3d:baseline [-- --write]
+#   ./bazel run -c opt //bench/physics3d:baseline -- --long [--write]
+rust_binary(
+    name = "baseline",
+    srcs = ["baseline_main.rs"],
+    deps = [":physics3d"],
+)
+
+test_suite(
+    name = "baseline_test",
+    tests = [
+        ":behaviour_test",
+        ":quality_test",
+    ],
+)
+
+test_suite(
+    name = "baseline_long_test",
+    tags = ["manual"],
+    tests = [":quality_long_test"],
+)
+
+# The measures' own tests: each on bodies placed where its value is known
+# (physics-testing.md, "Measurements that are themselves tested").
+rust_test(
+    name = "measure_test",
+    crate = ":physics3d",
 )
 
 rust_test(

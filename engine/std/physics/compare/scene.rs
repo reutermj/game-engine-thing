@@ -133,6 +133,12 @@ pub enum Scene {
     Dominoes { n: u32, spacing: f32, mu: f32 },
     /// `Pyramid` at friction `mu` (the pyramid's is 0.6).
     PyramidAt { base: u32, mu: f32 },
+    /// `Pile`'s drop with every body its own shape, size and material,
+    /// by its index: a circle or a box, half extents 0.25 to 0.5 each way
+    /// (a box's two apart), friction 0.1 to 0.9 and restitution 0 to 0.5.
+    /// Mass 1 all, as every settling scene has it, so the measures read
+    /// alike. A game's pile is mixed.
+    Mixed { n: u32, width: f32 },
 }
 
 /// How far above the floor `Scene::Bounce` drops its ball's bottom.
@@ -165,6 +171,7 @@ impl Scene {
                 None => Some(Scene::Pyramid { base: num(1)? as u32 }),
             },
             "stack" => Some(Scene::Stack { n: num(1)? as u32 }),
+            "mixed" => Some(Scene::Mixed { n: num(1)? as u32, width: num(2)? }),
             "rain" => Some(Scene::Rain { n: num(1)? as u32, width: num(2)? }),
             "ramp" => Some(Scene::Ramp { deg: num(1)?, mu: num(2)?, circle: *words.get(3)? == "disc" }),
             "bounce" => Some(Scene::Bounce { e: num(1)? }),
@@ -191,7 +198,7 @@ impl Scene {
     /// Whether this is one of the behaviour scenes (`behave.rs`), which
     /// the settling tables leave out.
     pub fn behaviour(&self) -> bool {
-        !matches!(self, Scene::Pile { .. } | Scene::Pyramid { .. } | Scene::Stack { .. } | Scene::Rain { .. })
+        !matches!(self, Scene::Pile { .. } | Scene::Mixed { .. } | Scene::Pyramid { .. } | Scene::Stack { .. } | Scene::Rain { .. })
     }
 
     /// What `parse` reads.
@@ -201,6 +208,7 @@ impl Scene {
             Scene::Pile { n, width, stagger: false } => format!("columns {n} {width}"),
             Scene::Pyramid { base } => format!("pyramid {base}"),
             Scene::Stack { n } => format!("stack {n}"),
+            Scene::Mixed { n, width } => format!("mixed {n} {width}"),
             Scene::Rain { n, width } => format!("rain {n} {width}"),
             Scene::Ramp { deg, mu, circle } => format!("ramp {deg} {mu} {}", if *circle { "disc" } else { "box" }),
             Scene::Bounce { e } => format!("bounce {e}"),
@@ -230,6 +238,20 @@ impl Scene {
                     let jitter = ((k * 7919) % 100) as f32 / 100.0 * 0.2 - 0.1;
                     let shift = if stagger && row % 2 == 1 { 0.6 } else { 0.0 };
                     v.push(drop(k % 2 == 0, 1.5 + col as f32 * 1.2 + jitter + shift, HEIGHT - 1.0 - row as f32 * 1.2, 0.0));
+                }
+                v
+            }
+            Scene::Mixed { n, width } => {
+                let mut v = Scene::Pile { n, width, stagger: true }.build();
+                // The pile's rows are 1.2 apart, jittered 0.1 either way:
+                // bodies at most 0.5 across a half never overlap.
+                for (k, s) in v.iter_mut().filter(|s| s.dynamic).enumerate() {
+                    let u = |salt: u32| hashed(k as u32, salt);
+                    s.circle = u(1) < 0.5;
+                    s.hx = 0.25 + 0.25 * u(2);
+                    s.hy = if s.circle { s.hx } else { 0.25 + 0.25 * u(3) };
+                    s.friction = 0.1 + 0.8 * u(4);
+                    s.restitution = 0.5 * u(5);
                 }
                 v
             }
@@ -380,7 +402,9 @@ impl Scene {
     /// fallen off the pyramid's floor).
     pub fn escaped(&self, x: f32, y: f32) -> bool {
         match *self {
-            Scene::Pile { width, .. } | Scene::Rain { width, .. } => x < 0.0 || x > width || y > HEIGHT || y < -HEIGHT / 2.0,
+            Scene::Pile { width, .. } | Scene::Mixed { width, .. } | Scene::Rain { width, .. } => {
+                x < 0.0 || x > width || y > HEIGHT || y < -HEIGHT / 2.0
+            }
             Scene::Pyramid { base } | Scene::PyramidAt { base, .. } => y > 0.0 || x.abs() > base as f32 + 10.0,
             Scene::Stack { .. } => y > 0.0 || x.abs() > 10.0,
             Scene::Ramp { .. } | Scene::Bullet { .. } => false,
@@ -418,6 +442,19 @@ fn cards(rows: u32, lean: f32, mu: f32) -> Vec<Spec> {
         nb -= 1;
     }
     v
+}
+
+/// A number in [0, 1) from `k` and `salt`, the same in every engine: a
+/// mixed pile's bodies are chosen by it (a 32-bit mix, Chris Wellons's
+/// "lowbias32", which spreads neighbouring `k` apart).
+fn hashed(k: u32, salt: u32) -> f32 {
+    let mut x = k.wrapping_mul(0x9e37_79b9) ^ salt.wrapping_mul(0x85eb_ca6b);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    (x % 10_000) as f32 / 10_000.0
 }
 
 fn pile_walls(width: f32) -> Vec<Spec> {

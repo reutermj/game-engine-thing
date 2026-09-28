@@ -77,11 +77,24 @@ rust_binary(
     ],
 )
 
+# The baseline's format and comparison, which 3D's shares.
+exports_files(
+    ["baseline.rs"],
+    visibility = ["//bench/physics3d:__pkg__"],
+)
+
 # What the quality and behaviour tests share: the comparison's scenes,
-# measures and our step on arrays.
+# measures and our step on arrays, the runs each binary makes once
+# (runs.rs), and the baseline they are held to (record.rs, baseline.rs,
+# and the files, built in).
 MEASURE_SRCS = [
+    "baseline.rs",
+    "behave.rs",
     "ecs.rs",
+    "family.rs",
     "quality.rs",
+    "record.rs",
+    "runs.rs",
     "scene.rs",
     "settle.rs",
     "sim.rs",
@@ -90,6 +103,11 @@ MEASURE_SRCS = [
     "//engine/std/physics:solver.rs",
     "//engine/std/physics:tests/split_impulse.rs",
     "//engine/std/physics:tests/arrays.rs",
+]
+
+BASELINES = [
+    "baseline.txt",
+    "baseline_long.txt",
 ]
 
 QUALITY_SRCS = MEASURE_SRCS + ["quality_test.rs"]
@@ -109,6 +127,7 @@ QUALITY_DEPS = [
 rust_test(
     name = "quality_test",
     srcs = QUALITY_SRCS,
+    compile_data = BASELINES,
     crate_root = "quality_test.rs",
     data = [":scene_game"],
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
@@ -120,6 +139,7 @@ rust_test(
 rust_test(
     name = "quality_long_test",
     srcs = QUALITY_SRCS + ["quality_long.rs"],
+    compile_data = BASELINES,
     crate_features = ["long"],
     crate_root = "quality_test.rs",
     data = [":scene_game"],
@@ -134,15 +154,12 @@ rust_test(
 # by hand calculations and by what Box2D and Rapier do on the same scenes
 # (recorded, not linked). See the source, and physics.md, "Quality beyond
 # settling". Tests that found a problem are ignored, each naming its bead.
-BEHAVIOUR_SRCS = MEASURE_SRCS + [
-    "behave.rs",
-    "behaviour_test.rs",
-    "family.rs",
-]
+BEHAVIOUR_SRCS = MEASURE_SRCS + ["behaviour_test.rs"]
 
 rust_test(
     name = "behaviour_test",
     srcs = BEHAVIOUR_SRCS,
+    compile_data = BASELINES,
     crate_root = "behaviour_test.rs",
     data = [":scene_game"],
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
@@ -155,12 +172,48 @@ rust_test(
 rust_test(
     name = "behaviour_long_test",
     srcs = BEHAVIOUR_SRCS + ["behaviour_long.rs"],
+    compile_data = BASELINES,
     crate_features = ["long"],
     crate_root = "behaviour_test.rs",
     data = [":scene_game"],
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     tags = ["manual"],
     deps = QUALITY_DEPS,
+)
+
+# The baseline's tool (physics-testing.md, "The baseline"; runbook 005):
+# every value the baseline records, run and compared with the file, the
+# ones that moved past their band printed; --write writes the file.
+#   ./bazel run //engine/std/physics/compare:baseline [-- --write]
+#   ./bazel run -c opt //engine/std/physics/compare:baseline -- --long [--write]
+# The tests that check it are the quality and behaviour tests themselves,
+# whose runs it is recorded from (their test "baseline"): a target of its
+# own would run every scene a second time.
+rust_binary(
+    name = "baseline",
+    srcs = MEASURE_SRCS + ["baseline_main.rs"],
+    compile_data = BASELINES,
+    crate_root = "baseline_main.rs",
+    data = [":scene_game"],
+    env = { "SCENE_GAME": "$(rlocationpath :scene_game)" },
+    deps = QUALITY_DEPS,
+)
+
+test_suite(
+    name = "baseline_test",
+    tests = [
+        ":behaviour_test",
+        ":quality_test",
+    ],
+)
+
+test_suite(
+    name = "baseline_long_test",
+    tags = ["manual"],
+    tests = [
+        ":behaviour_long_test",
+        ":quality_long_test",
+    ],
 )
 
 # The 2D solver alone, on inputs captured from the comparison's turning

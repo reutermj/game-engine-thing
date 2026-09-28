@@ -78,3 +78,123 @@ fn big_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
         s.spawn(|| piles_meet(Kind::PlankPile, &[10000], true, &at_10000));
     });
 }
+
+// The wider families (`record::WIDE`): more sizes, each its own seeded
+// drop, bounded by the rules on Rapier's and Box3D's statistics over
+// exactly the same sizes (Jolt's recorded beside them), measured with
+// `bench -- <kind> <n> rapier,box3d,jolt [--rotate] --runs=1`, 2026-09-28
+// (physics-testing.md, "Wider families").
+
+/// One reference over a family: its median rest (`None` where most of its
+/// runs never rest), and the worst depth at the end, while settling and
+/// on average while settling, and energy a body, the worst of the runs at
+/// rest (of all, where most breathe; `None` where none rest).
+struct Refs {
+    rest: Option<usize>,
+    depth_end: f32,
+    during: f32,
+    mean_during: f32,
+    energy: Option<f64>,
+}
+
+/// 2D's rules (`by_the_rules` there) on Rapier's and Box3D's statistics;
+/// no bound on rest, or on energy, where a reference gives none.
+fn by_the_rules(r: Refs, b: Refs, partners: f64) -> PileBounds {
+    let later = match (r.rest, b.rest) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        _ => None,
+    };
+    let energy = match (r.energy, b.energy) {
+        (Some(x), Some(y)) => 10.0 * x.max(y),
+        _ => f64::INFINITY,
+    };
+    PileBounds {
+        rest_worst: later.map_or(usize::MAX, |l| 2 * l),
+        rest_median: later.map_or(usize::MAX, |l| l * 5 / 4),
+        deepest_end: 0.5 * r.depth_end.min(b.depth_end),
+        deepest_during: 1.25 * r.during.max(b.during),
+        mean_during: r.mean_during.min(b.mean_during),
+        energy_end: energy,
+        partners,
+        not_columns: 0.8,
+    }
+}
+
+fn wide(k: usize) -> (Kind, bool, &'static [usize]) {
+    record::WIDE[k]
+}
+
+fn wide_meet(k: usize, r: Refs, b: Refs, partners: f64) {
+    let (kind, rotate, sizes) = wide(k);
+    piles_meet(kind, sizes, rotate, &by_the_rules(r, b, partners));
+}
+
+/// Turning cubes, 200-1000 by 100: at rest from, Rapier 128-364 (median
+/// 220), Box3D 117-710 (215), Jolt 240-never (568); ours 127-281 (189).
+#[test]
+fn piles_of_turning_boxes_at_nine_sizes_rest_as_soon_as_rapier_and_box3d_do() {
+    let r = Refs { rest: Some(220), depth_end: 0.0224, during: 0.116, mean_during: 0.0293, energy: Some(3.1e-9) };
+    let b = Refs { rest: Some(215), depth_end: 0.0226, during: 0.106, mean_during: 0.0291, energy: Some(3.4e-8) };
+    wide_meet(0, r, b, 2.0);
+}
+
+/// Locked cubes, 200-1000: Rapier and Box3D rest at 200 and 300 (Box3D
+/// 500 too) and breathe at the other sizes (docs/lore: a locked box pile
+/// breathes under soft contacts at 4 iterations), so rest has no bound,
+/// and energy's is from all their runs, 3.6e-2 and 3.7e-2 a body at 700;
+/// Jolt rests 47-149; ours 42-92, but breathes at 700 too, at 1.5e-2.
+#[test]
+fn piles_of_locked_boxes_at_nine_sizes_sink_no_deeper_than_in_rapier_and_box3d() {
+    let r = Refs { rest: None, depth_end: 0.0052, during: 0.111, mean_during: 0.0286, energy: Some(3.6e-2) };
+    let b = Refs { rest: None, depth_end: 0.0049, during: 0.088, mean_during: 0.0268, energy: Some(3.7e-2) };
+    wide_meet(1, r, b, 2.0);
+}
+
+/// Turning planks, 200-1000: Rapier 212-364 (267), Box3D 209-823 (262),
+/// Jolt 187-never (907); ours 238-397 (288).
+#[test]
+fn piles_of_turning_planks_at_nine_sizes_rest_as_soon_as_rapier_and_box3d_do() {
+    let r = Refs { rest: Some(267), depth_end: 0.0340, during: 0.335, mean_during: 0.0185, energy: Some(2.2e-11) };
+    let b = Refs { rest: Some(262), depth_end: 0.0528, during: 0.356, mean_during: 0.0201, energy: Some(1.5e-12) };
+    wide_meet(2, r, b, 2.5);
+}
+
+/// Mixed spheres and boxes (`Kind::Mixed`), turning, 200-1000: no engine
+/// comes to rest in 1000 steps, the spheres rolling on (docs/lore), so
+/// only depth is bounded: at the end Rapier up to 0.052, Box3D 0.111,
+/// Jolt 0.057, ours 0.014.
+#[test]
+fn mixed_piles_that_turn_sink_no_deeper_than_in_rapier_and_box3d() {
+    let r = Refs { rest: None, depth_end: 0.0519, during: 0.235, mean_during: 0.0120, energy: None };
+    let b = Refs { rest: None, depth_end: 0.1111, during: 0.235, mean_during: 0.0126, energy: None };
+    wide_meet(3, r, b, 2.0);
+}
+
+/// Mixed, locked: Rapier 187-354 (285), Box3D 232-347 (274), Jolt
+/// 185-475 (308); ours 237-425 (297).
+#[test]
+fn mixed_piles_rest_as_soon_as_rapier_and_box3d_do() {
+    let r = Refs { rest: Some(285), depth_end: 0.0355, during: 0.249, mean_during: 0.0224, energy: Some(1.1e-10) };
+    let b = Refs { rest: Some(274), depth_end: 0.0293, during: 0.208, mean_during: 0.0226, energy: Some(8.1e-12) };
+    wide_meet(4, r, b, 2.0);
+}
+
+/// Turning cubes, 2000-5000 by 1000 (1500 steps): Rapier 214-711 (288),
+/// Box3D 206-439 (292), Jolt 528-never; ours 314, 505, 402, 298 (402,
+/// the bound 365) (get-emj.65).
+#[test]
+#[ignore = "get-emj.65: turning cubes 2000-5000 rest later than Rapier and Box3D"]
+fn bigger_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
+    let r = Refs { rest: Some(288), depth_end: 0.0299, during: 0.099, mean_during: 0.0246, energy: Some(4.2e-9) };
+    let b = Refs { rest: Some(292), depth_end: 0.0284, during: 0.109, mean_during: 0.0253, energy: Some(2.6e-10) };
+    wide_meet(5, r, b, 2.0);
+}
+
+/// Turning planks, 2000-5000: Rapier 270-381 (376), Box3D 291-340 (314),
+/// Jolt 1474-never; ours 320-546 (417).
+#[test]
+fn bigger_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
+    let r = Refs { rest: Some(376), depth_end: 0.0685, during: 0.411, mean_during: 0.0227, energy: Some(4.6e-11) };
+    let b = Refs { rest: Some(314), depth_end: 0.1258, during: 0.410, mean_during: 0.0221, energy: Some(1.2e-12) };
+    wide_meet(6, r, b, 2.5);
+}

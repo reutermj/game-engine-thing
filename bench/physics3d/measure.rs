@@ -352,3 +352,132 @@ pub fn run(scene: &Scene, backend: &mut dyn Backend) -> Run {
         },
     }
 }
+
+/// Calibration: each measure on bodies placed where its value is known by
+/// hand (physics-testing.md, "Measurements that are themselves tested"),
+/// so a measure that reads zero or reads the wrong thing fails here, where
+/// every upper bound on it would pass.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenes::{self, Kind};
+
+    const CUBE: Shape = Shape::Box([0.5; 3]);
+    const BALL: Shape = Shape::Sphere(0.5);
+
+    /// A floor whose top is at y = 0, 20 wide, and nothing else.
+    fn floor() -> Scene {
+        scenes::build(Kind::Stack, 0)
+    }
+
+    fn at(pos: [f32; 3]) -> State {
+        State { pos, rot: IDENTITY, ..State::default() }
+    }
+
+    /// A turn of `deg` about z.
+    fn about_z(deg: f32) -> [f32; 4] {
+        let h = deg.to_radians() / 2.0;
+        [0.0, 0.0, h.sin(), h.cos()]
+    }
+
+    fn near(a: f64, b: f64, what: &str) {
+        assert!((a - b).abs() < 1e-5, "{what}: {a}, expected {b}");
+    }
+
+    #[test]
+    fn depth_is_the_overlap_planted() {
+        // A cube sunk 0.03, one turned a quarter about y (the separating
+        // axes) sunk 0.02, a ball sunk 0.008: the deepest, and the mean
+        // over the pairs touching.
+        let turned = State { rot: [0.0, 0.5f32.sqrt(), 0.0, 0.5f32.sqrt()], ..at([3.0, 0.48, 0.0]) };
+        let q = quality(&floor(), &[CUBE, CUBE, BALL], &[at([0.0, 0.47, 0.0]), turned, at([6.0, 0.492, 0.0])]);
+        near(q.pen_max as f64, 0.03, "deepest");
+        near(q.pen_mean as f64, (0.03 + 0.02 + 0.008) / 3.0, "mean");
+        let q = quality(&floor(), &[CUBE], &[at([0.0, 0.5, 0.0])]);
+        assert_eq!(q.pen_max, 0.0, "touching is not overlapping");
+    }
+
+    #[test]
+    fn energy_is_kinetic_energy_at_mass_one_moving_and_turning() {
+        // 1-2-2 moving: 4.5. A cube turning at 4 about y, inertia (0.25 +
+        // 0.25) / 3: 4/3. A ball of radius 0.5 at 2, inertia 0.1: 0.2.
+        let moving = State { vel: [1.0, 2.0, 2.0], ..at([0.0, 5.0, 0.0]) };
+        let turning = State { ang: [0.0, 4.0, 0.0], ..at([3.0, 5.0, 0.0]) };
+        let ball = State { ang: [0.0, 0.0, 2.0], ..at([6.0, 5.0, 0.0]) };
+        let q = quality(&floor(), &[CUBE, CUBE, BALL], &[moving, turning, ball]);
+        near(q.kinetic_energy, 4.5 + 4.0 / 3.0 + 0.2, "energy");
+        near(q.max_speed as f64, 4.0 * 0.75f64.sqrt(), "fastest: the turning cube's corner, 4 times its reach");
+    }
+
+    #[test]
+    fn tilt_is_how_far_a_box_is_turned_from_lying_on_a_face() {
+        for (deg, tilt) in [(10.0, 10.0), (-10.0, 10.0), (100.0, 10.0), (45.0, 45.0), (90.0, 0.0)] {
+            let s = State { rot: about_z(deg), ..at([0.0, 5.0, 0.0]) };
+            let q = quality(&floor(), &[CUBE], &[s]);
+            // The measure's resolution: acos in f32 of a cosine within
+            // rounding of 1 reads 0.02° (a cube a quarter turned, lying on
+            // a face), far under any bound (1°) or band (0.05°).
+            assert!((q.tilt - tilt).abs() < 0.025, "turned {deg}°: {}, expected {tilt}", q.tilt);
+        }
+    }
+
+    #[test]
+    fn partners_and_columns_count_what_rests_on_what() {
+        // A cube on the floor, one on it: partners, the floor and each
+        // other, 3 over 2; the top one straight above, a column.
+        let q = quality(&floor(), &[CUBE, CUBE], &[at([0.0, 0.5, 0.0]), at([0.0, 1.5, 0.0])]);
+        near(q.contacts_per_body, 1.5, "partners a body");
+        assert_eq!((q.supported, q.not_columns), (1, 0.0));
+        // Set 0.3 aside, it rests across: not a column.
+        let q = quality(&floor(), &[CUBE, CUBE], &[at([0.0, 0.5, 0.0]), at([0.3, 1.5, 0.0])]);
+        assert_eq!((q.supported, q.not_columns), (1, 1.0));
+    }
+
+    #[test]
+    fn escaped_counts_the_bodies_outside_the_scene() {
+        let q = quality(&floor(), &[CUBE, CUBE, CUBE], &[at([0.0, 0.5, 0.0]), at([11.0, 0.5, 0.0]), at([0.0, -1.0, 0.0])]);
+        assert_eq!(q.escaped, 2, "one past the floor's end, one under it");
+    }
+
+    /// One cube, moving at 1 until step `until`: an engine scripted so
+    /// that its rest is known.
+    struct Scripted {
+        steps: usize,
+        until: usize,
+    }
+
+    impl Backend for Scripted {
+        fn name(&self) -> String {
+            "scripted".into()
+        }
+        fn solver(&self) -> String {
+            String::new()
+        }
+        fn add(&mut self, bodies: &[Spec]) -> Vec<u32> {
+            (0..bodies.len() as u32).collect()
+        }
+        fn step(&mut self, _: f32) {
+            self.steps += 1;
+        }
+        fn state(&self, out: &mut Vec<State>) {
+            let vx = if self.steps <= self.until { 1.0 } else { 0.0 };
+            *out = vec![State { vel: [vx, 0.0, 0.0], ..at([0.0, 0.5, 0.0]) }];
+        }
+        fn touching(&self) -> usize {
+            0
+        }
+        fn stages(&self) -> Vec<(&'static str, f64)> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn rest_is_the_step_from_which_every_body_stays_still() {
+        let scene = |steps: usize| Scene { spawn: vec![vec![Spec::new(CUBE, [0.0, 0.5, 0.0], false)]], steps, ..floor() };
+        let run = |until: usize, steps: usize| super::run(&scene(steps), &mut Scripted { steps: 0, until });
+        // Moving through the 40th step (index 39): at rest from step 40.
+        assert_eq!(run(40, 100).settled_at, Some(40));
+        assert_eq!(run(0, 100).settled_at, Some(0), "never moving: at rest from the start");
+        assert_eq!(run(100, 100).settled_at, None, "moving at the last step: never");
+    }
+}

@@ -20,10 +20,11 @@ pub struct Family {
     pub scenes: Vec<Scene>,
 }
 
-/// Every family, on its short grid (the default suite's) or its long one.
+/// Every family, on its short grid (the default suite's) or its long one,
+/// and with `long` the wider ones (`wide`) too.
 pub fn families(long: bool) -> Vec<Family> {
     let pick = |short: Vec<Scene>, full: Vec<Scene>| if long { full } else { short };
-    vec![
+    let mut v = vec![
         Family {
             name: "cards",
             scenes: pick(cards(&[4, 5], &[24.0, 25.0, 26.0], &[0.7, 0.8]), cards(&[4, 5, 6], &LEANS, &[0.65, 0.7, 0.75, 0.8, 0.9])),
@@ -55,6 +56,27 @@ pub fn families(long: bool) -> Vec<Family> {
             ),
         },
         Family { name: "pyramids", scenes: pick(pyramids(&[0.0, 0.1]), pyramids(&[0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.6])) },
+    ];
+    if long {
+        v.extend(wide());
+    }
+    v
+}
+
+/// Families on grids wider or finer than the long ones, in the long suite
+/// only: more runs near each edge before tuning, so that a change is
+/// judged on more than a few (physics-testing.md, "Wider families").
+/// Spacings skip the dominoes' reach (1.25), where the rule of `good`
+/// flips.
+fn wide() -> Vec<Family> {
+    let spacings = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.22, 1.28, 1.3, 1.35, 1.4, 1.45];
+    let ratios_at = [10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 70.0, 100.0, 150.0, 200.0, 300.0, 500.0, 700.0, 1000.0];
+    vec![
+        Family { name: "cards_wide", scenes: cards(&[3, 4, 5, 6, 7], &[23.0, 24.0, 25.0, 26.0, 27.0], &[0.6, 0.7, 0.8, 0.9]) },
+        Family { name: "dominoes_fine", scenes: dominoes(&spacings, &[0.3, 0.6]) },
+        Family { name: "stacks_fine", scenes: stacks(&(12..=30).collect::<Vec<u32>>()) },
+        Family { name: "ratios_fine", scenes: ratios(&ratios_at, &[1, 2, 3, 4, 5, 6]) },
+        Family { name: "pyramids_fine", scenes: pyramids(&[0.0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.4, 0.8]) },
     ]
 }
 

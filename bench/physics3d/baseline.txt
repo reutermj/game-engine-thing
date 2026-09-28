@@ -1,0 +1,81 @@
+# The 3D baseline, the default suite's scenes: our accepted results, which the
+# tests hold every change to within each band, both ways
+# (docs/architecture/physics-testing.md, "The baseline"). Group quality
+# is checked by the quality tests, behaviour by the behaviour tests.
+# Written by
+#     ./bazel run //bench/physics3d:baseline -- --write
+# never by hand: a change that moves a value writes it again in the same
+# commit. Columns: group, scene, measure, value, band.
+quality    boxes 200-500 turning   rest_median          189        steps 90 or 30%
+quality    boxes 200-500 turning   depth_end_median     0.005343   rel 0.5 or 1e-4
+quality    boxes 200-500 turning   depth_during_median  0.06094    rel 0.35 or 1e-4
+quality    boxes 200-500 turning   mean_during_worst    0.007059   rel 0.35 or 1e-4
+quality    boxes 200-500 turning   energy_end_median    2.681e-10  log 10 under 1e-8
+quality    boxes 200-500 turning   partners_least       2.687      rel 0.25
+quality    boxes 200-500 turning   escaped              0          exact
+quality    boxes 200-500           rest_median          66         steps 90 or 30%
+quality    boxes 200-500           depth_end_median     5.203e-4   rel 0.5 or 1e-4
+quality    boxes 200-500           depth_during_median  0.03264    rel 0.35 or 1e-4
+quality    boxes 200-500           mean_during_worst    0.004704   rel 0.35 or 1e-4
+quality    boxes 200-500           energy_end_median    9.176e-12  log 10 under 1e-8
+quality    boxes 200-500           partners_least       2.637      rel 0.25
+quality    boxes 200-500           escaped              0          exact
+quality    planks 200-500 turning  rest_median          287        steps 90 or 30%
+quality    planks 200-500 turning  depth_end_median     0.006436   rel 0.5 or 1e-4
+quality    planks 200-500 turning  depth_during_median  0.2621     rel 0.35 or 1e-4
+quality    planks 200-500 turning  mean_during_worst    0.01366    rel 0.35 or 1e-4
+quality    planks 200-500 turning  energy_end_median    4.344e-13  log 10 under 1e-8
+quality    planks 200-500 turning  partners_least       3.325      rel 0.25
+quality    planks 200-500 turning  escaped              0          exact
+quality    stack 5 turning         rest                 0          steps 10
+quality    stack 5 turning         top_moved            0.00174    rel 0.15 or 1e-4
+quality    stack 5 turning         depth_end            5.386e-4   rel 0.15 or 1e-4
+quality    stack 5 turning         tilt                 0          rel 0.1 or 0.05
+quality    stack 5 turning         energy_end           2.734e-10  log 3 under 1e-8
+quality    stack 5 turning         escaped              0          exact
+quality    stack 10 turning        rest                 2          steps 10
+quality    stack 10 turning        top_moved            0.006892   rel 0.15 or 1e-4
+quality    stack 10 turning        depth_end            0.001155   rel 0.15 or 1e-4
+quality    stack 10 turning        tilt                 0.03426    rel 0.1 or 0.05
+quality    stack 10 turning        energy_end           9.65e-10   log 3 under 1e-8
+quality    stack 10 turning        escaped              0          exact
+quality    stack 15 turning        rest                 13         steps 10
+quality    stack 15 turning        top_moved            0.0172     rel 0.15 or 1e-4
+quality    stack 15 turning        depth_end            0.001881   rel 0.15 or 1e-4
+quality    stack 15 turning        tilt                 0.02798    rel 0.1 or 0.05
+quality    stack 15 turning        energy_end           4.449e-8   log 3 under 1e-8
+quality    stack 15 turning        escaped              0          exact
+quality    stack 20 turning        rest                 18         steps 10
+quality    stack 20 turning        top_moved            0.03151    rel 0.15 or 1e-4
+quality    stack 20 turning        depth_end            0.002628   rel 0.15 or 1e-4
+quality    stack 20 turning        tilt                 0.05234    rel 0.1 or 0.05
+quality    stack 20 turning        energy_end           2.357e-6   log 3 under 1e-8
+quality    stack 20 turning        escaped              0          exact
+behaviour  ramp_hold 1             crept                9.027e-7   rel 0.05 or 2e-5
+behaviour  ramp_slide 1            a                    3.206      rel 0.002
+behaviour  ramp_roll 1             a                    3.503      rel 0.002
+behaviour  ramp_roll 1             slip                 0.03182    rel 0.03 or 1e-4
+behaviour  bounce 25               first_apex           0.05245    rel 0.01
+behaviour  bounce 50               first_apex           0.2481     rel 0.01
+behaviour  bounce 75               first_apex           0.5745     rel 0.01
+behaviour  bounce 100              first_apex           1.032      rel 0.01
+behaviour  bounce 100              most_apex            1.315      rel 0.01
+behaviour  bounce 100              last_apex            1.315      rel 0.01
+behaviour  ratio 10                top_sank             5.879e-4   rel 0.03 or 1e-4
+behaviour  ratio 10                deepest_at_end       7.609e-4   rel 0.03 or 1e-4
+behaviour  ratio 10                stands               1          exact
+behaviour  ratio 10                escaped              0          exact
+behaviour  ratio 10                at_rest_from         0          steps 10
+behaviour  ratio 10                jitter               2.64e-6    rel 0.03 or 1e-4
+behaviour  ratio 100               top_sank             0.009944   rel 0.03 or 1e-4
+behaviour  ratio 100               deepest_at_end       0.006984   rel 0.03 or 1e-4
+behaviour  ratio 100               stands               1          exact
+behaviour  ratio 100               escaped              0          exact
+behaviour  ratio 100               at_rest_from         42         steps 10
+behaviour  ratio 100               jitter               0.00101    rel 0.03 or 1e-4
+behaviour  ratio 1000              top_sank             0.9984     rel 0.03 or 1e-4
+behaviour  ratio 1000              deepest_at_end       4.619e-5   rel 0.03 or 1e-4
+behaviour  ratio 1000              stands               0          exact
+behaviour  ratio 1000              escaped              0          exact
+behaviour  ratio 1000              at_rest_from         316        steps 10
+behaviour  ratio 1000              jitter               1.215e-7   rel 0.03 or 1e-4

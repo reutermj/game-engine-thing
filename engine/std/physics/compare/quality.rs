@@ -161,3 +161,83 @@ pub fn moved(before: &[Dyn], after: &[Dyn]) -> (f64, f32) {
     let d: Vec<f32> = before.iter().zip(after).map(|(a, b)| ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()).collect();
     (d.iter().map(|&d| d as f64).sum::<f64>() / d.len().max(1) as f64, d.iter().copied().fold(0.0, f32::max))
 }
+
+/// Calibration: each measure on bodies placed where its value is known by
+/// hand (physics-testing.md, "Measurements that are themselves tested"),
+/// so a measure that reads zero or reads the wrong thing fails here, where
+/// every upper bound on it would pass.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A floor whose top is at y = 0 (y down), 20 wide, and nothing else.
+    const FLOOR: Scene = Scene::Stack { n: 0 };
+
+    /// A unit box with its middle at `x, y`, at rest.
+    fn unit(x: f32, y: f32) -> Dyn {
+        Dyn { circle: false, hx: 0.5, hy: 0.5, x, y, vx: 0.0, vy: 0.0, angle: 0.0, w: 0.0 }
+    }
+
+    fn near(a: f64, b: f64, what: &str) {
+        assert!((a - b).abs() < 1e-5, "{what}: {a}, expected {b}");
+    }
+
+    #[test]
+    fn depth_is_the_overlap_planted() {
+        // Sunk 0.03 and 0.004 into the floor, and one turned a quarter
+        // (the separating-axis path) sunk 0.02; a disc of radius 0.45 sunk 0.008.
+        let mut turned = unit(6.0, -0.48);
+        turned.angle = std::f32::consts::FRAC_PI_2;
+        let disc = Dyn { circle: true, hx: 0.45, hy: 0.45, y: -0.442, ..unit(9.0, 0.0) };
+        let q = measure(&FLOOR, &[unit(0.0, -0.47), unit(3.0, -0.496), turned, disc], true);
+        near(q.max_depth as f64, 0.03, "deepest");
+        near(q.mean_depth, (0.03 + 0.004 + 0.02 + 0.008) / 4.0, "mean");
+        assert_eq!(q.deep, 2, "deeper than 0.01: the 0.03 and the 0.02");
+        let q = measure(&FLOOR, &[unit(0.0, -0.5), unit(1.0, -0.5)], false);
+        assert_eq!((q.max_depth, q.deep), (0.0, 0), "touching is not overlapping");
+    }
+
+    #[test]
+    fn energy_is_kinetic_energy_at_mass_one_moving_and_turning() {
+        // 3-4-5 moving: 12.5. A unit box turning at 2 a second, inertia
+        // (0.25 + 0.25) / 3: 1/3. A disc of radius 0.5 at 4 a second,
+        // inertia 0.125: 1.
+        let moving = Dyn { vx: 3.0, vy: 4.0, ..unit(0.0, -5.0) };
+        let turning = Dyn { w: 2.0, ..unit(3.0, -5.0) };
+        let disc = Dyn { circle: true, w: 4.0, ..unit(6.0, -5.0) };
+        let q = measure(&FLOOR, &[moving, turning, disc], true);
+        near(q.energy, (12.5 + 1.0 / 3.0 + 1.0) / 3.0, "energy a body");
+        near(q.max_speed as f64, 5.0, "fastest");
+    }
+
+    #[test]
+    fn tilt_is_how_far_a_box_is_turned_from_resting_on_a_face() {
+        for (deg, tilt) in [(10.0, 10.0), (-10.0, 10.0), (100.0, 10.0), (135.0, 45.0), (90.0, 0.0)] {
+            let b = Dyn { angle: f32::to_radians(deg), ..unit(0.0, -5.0) };
+            let t = measure(&FLOOR, &[b], true).tilt;
+            assert!((t - tilt).abs() < 1e-3, "turned {deg}°: {t}, expected {tilt}");
+        }
+        let disc = Dyn { circle: true, angle: 0.3, ..unit(0.0, -5.0) };
+        assert_eq!(measure(&FLOOR, &[disc], true).tilt, 0.0, "a disc doesn't lean");
+    }
+
+    #[test]
+    fn contacts_and_islands_count_what_touches() {
+        // Two boxes side by side on the floor and one alone: touching, the
+        // two and each with the floor, 4 over 3 bodies; islands, the two
+        // and the one (the floor joins none).
+        let q = measure(&FLOOR, &[unit(0.0, -0.5), unit(1.0, -0.5), unit(5.0, -0.5)], false);
+        near(q.contacts_per_body, 4.0 / 3.0, "contacts a body");
+        assert_eq!(q.islands, 2);
+        // Just past touching, the second is an island of its own.
+        let q = measure(&FLOOR, &[unit(0.0, -0.5), unit(1.0 + 2.0 * TOUCH, -0.5), unit(5.0, -0.5)], false);
+        near(q.contacts_per_body, 1.0, "contacts a body");
+        assert_eq!(q.islands, 3);
+    }
+
+    #[test]
+    fn escaped_counts_the_bodies_outside_the_scene() {
+        let q = measure(&FLOOR, &[unit(0.0, -0.5), unit(11.0, -0.5), unit(0.0, 2.0)], false);
+        assert_eq!(q.escaped, 2, "one past the floor's end, one under it");
+    }
+}

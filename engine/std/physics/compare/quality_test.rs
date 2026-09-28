@@ -23,18 +23,31 @@
 //! worst of them and their median, never on one run. Pyramids and stacks
 //! stand and don't vary so: one scene each. The 10 000-body scenes are
 //! `:quality_long_test` (manual), with `--features long`.
+//!
+//! And every value these tests bound is held to the baseline, our own
+//! accepted results, both ways (`baseline` below; `record.rs`;
+//! physics-testing.md, "The baseline"), from the same runs: each scene is
+//! run once (`runs.rs`), whichever test asks first.
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
+mod baseline;
+#[allow(dead_code)] // The behaviour group's, which `:behaviour_test` checks.
+mod behave;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
+#[allow(dead_code)]
+mod family;
 #[path = "../narrow.rs"]
 mod narrow;
 #[allow(dead_code)]
 mod quality;
 #[cfg(feature = "long")]
 mod quality_long;
+#[allow(dead_code)]
+mod record;
+mod runs;
 #[allow(dead_code)]
 mod scene;
 mod settle;
@@ -49,44 +62,33 @@ mod variants;
 
 pub use sim::{Dyn, Sim};
 
+use record::{PILES, STEPS, STILL};
 use scene::Scene;
 use settle::Settling;
 
-/// Our step on arrays, or the variant `SOLVER` names.
-fn ours(scene: &Scene, turning: bool) -> ecs::Flat {
-    match std::env::var("SOLVER") {
-        Ok(spec) if !spec.is_empty() => ecs::Flat::variant(scene, turning, &spec, &format!("ours ({spec})")),
-        _ => ecs::Flat::new(scene, turning, Box::new(solver::solve_points), "ours"),
-    }
-}
-
-/// `spec`, a `rot` variant, on the solve `SOLVER` names where that is one
-/// too (`rot/carry=1` and `rot/order=3` make `rot/carry=1/order=3`): so the
-/// tests that pick an order or a grouping of their own still run the
-/// option being weighed.
-fn with_solver(spec: &str) -> String {
-    match std::env::var("SOLVER") {
-        Ok(s) if s.starts_with("rot") => spec.replacen("rot", &s, 1),
-        _ => spec.to_string(),
-    }
-}
-
-/// Steps every scene is run: past the latest bound on rest (a turning
-/// pile's, 500), so "at rest from" means it stayed so for a while. The
-/// references were measured over the same steps.
-const STEPS: u32 = 700;
-
-/// Each scene settled, in threads of their own (the test's time is its
-/// slowest scene's), and printed as the comparison prints it, so a failing
-/// run shows every number, not just the one that failed.
+/// Each scene settled by ours on arrays (or the variant `SOLVER` names),
+/// in threads of their own (the test's time is its slowest scene's), and
+/// printed as the comparison prints it, so a failing run shows every
+/// number, not just the one that failed.
 fn settle_all(scenes: &[Scene], turning: bool, steps: u32) -> Vec<Settling> {
-    let runs: Vec<Settling> = std::thread::scope(|s| {
-        let threads: Vec<_> =
-            scenes.iter().map(|&scene| s.spawn(move || settle::settle(&mut ours(&scene, turning), &scene, turning, steps))).collect();
-        threads.into_iter().map(|t| t.join().expect("a scene panicked")).collect()
-    });
+    let runs = runs::par(scenes, |&scene| runs::settled(scene, turning, steps, ""));
     print_runs(scenes, turning, &runs);
     runs
+}
+
+/// The default suite's baseline, group `quality`: every value `record.rs`
+/// takes from these tests' runs, each within its band of `baseline.txt`,
+/// better or worse, all of them listed where any moved.
+#[test]
+fn baseline() {
+    baseline::assert_holds(record::DEFAULT, &["quality"], &record::quality(false), record::WRITE);
+}
+
+/// The long suite's, from `:quality_long_test`'s runs (`baseline_long.txt`).
+#[cfg(feature = "long")]
+#[test]
+fn baseline_long() {
+    baseline::assert_holds(record::LONG, &["quality"], &record::quality(true), record::WRITE_LONG);
 }
 
 fn print_runs(scenes: &[Scene], turning: bool, runs: &[Settling]) {
@@ -187,7 +189,13 @@ fn rest(r: &Settling) -> u32 {
 
 fn piles_meet(sizes: &[u32], width: f32, turning: bool, steps: u32, b: &PileBounds) {
     let scenes: Vec<Scene> = sizes.iter().map(|&n| Scene::Pile { n, width, stagger: true }).collect();
-    let runs = settle_all(&scenes, turning, steps);
+    scenes_meet(&scenes, turning, steps, b);
+}
+
+/// `PileBounds` on any family of piles: the piles at several sizes, or
+/// the mixed ones (`Scene::Mixed`).
+fn scenes_meet(scenes: &[Scene], turning: bool, steps: u32, b: &PileBounds) {
+    let runs = settle_all(scenes, turning, steps);
     let mut broken = Broken::default();
     for (scene, r) in scenes.iter().zip(&runs) {
         let (q, name) = (&r.end, scene.text());
@@ -236,12 +244,8 @@ struct StandBounds {
     energy_tail: f64,
 }
 
-/// Energies under this are rounding, not motion: every body slower than
-/// about 1e-4, a five-hundredth of the sleep threshold. Where ten times a
-/// reference's energy is below it (a pyramid at rest, 1e-13 to 1e-9 a
-/// body in every engine), the bound is this.
-const STILL: f64 = 1e-8;
-
+/// Where ten times a reference's energy is below `STILL` (a pyramid at
+/// rest, 1e-13 to 1e-9 a body in every engine), the bound is `STILL`.
 fn stand(cases: &[(Scene, StandBounds)], turning: bool, steps: u32) {
     let scenes: Vec<Scene> = cases.iter().map(|(s, _)| *s).collect();
     stand_runs(cases, &settle_all(&scenes, turning, steps));
@@ -266,10 +270,7 @@ fn stand_runs(cases: &[(Scene, StandBounds)], runs: &[Settling]) {
     broken.assert();
 }
 
-/// The piles: the comparison's, 41 wide, staggered, rotation locked.
-const PILES: [u32; 5] = [400, 600, 800, 1000, 1200];
-
-/// At rest from, over `PILES` (700 steps, 2026-09-26): Box2D 140, 140,
+/// The piles (`record::PILES`), rotation locked. At rest from, over `PILES` (700 steps, 2026-09-26): Box2D 140, 140,
 /// 260, 260, 200 (median 200); Rapier 170, 130, 130, 160, 220 (160); ours
 /// 100, 140, 210, 230, 240. Deepest at the end: Box2D up to 0.067, Rapier
 /// 0.057; ours 0.014. While settling: deepest 0.36 and 0.32 (ours 0.31),
@@ -399,9 +400,7 @@ fn a_stack_that_turns_stands_as_in_box2d_and_rapier() {
 fn a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers_at_six_substeps() {
     let b = StandBounds { rest: 2 * 220, top_moved: 0.5 * 0.266, deepest_end: 0.5 * 0.0265, tilt: 1.0, energy_tail: 10.0 * 2.8e-4 };
     let scene = Scene::Stack { n: 20 };
-    let mut m = mod_in_engine(&scene, true, false);
-    m.substeps(6);
-    let run = settle::settle(&mut m, &scene, true, STEPS);
+    let run = runs::settled_on_mod(scene, true, 6, STEPS);
     print_runs(&[scene], true, std::slice::from_ref(&run));
     stand_runs(&[(scene, b)], &[run]);
 }
@@ -414,7 +413,7 @@ fn the_mod_solves_at_the_substeps_its_world_sets() {
     let scene = Scene::Pile { n: 400, width: 41.0, stagger: true };
     let six = solver::Params::of(&physics::Tuning { substeps: 6 });
     assert_eq!(six.substeps, 6);
-    let mut m = mod_in_engine(&scene, true, false);
+    let mut m = runs::mod_in_engine(&scene, true, false);
     m.substeps(6);
     let mut at_six =
         ecs::Flat::new(&scene, true, Box::new(move |b, s, c, p, dt| solver::solve_with(&six, (b, s), c, p, dt)), "ours at six");
@@ -425,11 +424,6 @@ fn the_mod_solves_at_the_substeps_its_world_sets() {
     let mb = m.bodies();
     assert_eq!(differ(&mb, &at_six.bodies()), 0, "the mod isn't the arrays at six substeps");
     assert!(differ(&mb, &at_five.bodies()) > 0, "six substeps solved as five");
-}
-
-fn mod_in_engine(scene: &Scene, turning: bool, sleep: bool) -> ecs::Ecs {
-    let manifest = engine_control::read_manifest(&std::env::var("SCENE_GAME").unwrap()).unwrap();
-    ecs::Ecs::new(&manifest, scene, sleep, turning)
 }
 
 /// Every bound here is on the arrays, so it must be the mod's step: on a
@@ -443,7 +437,7 @@ fn the_mod_is_the_arrays_bit_for_bit() {
         for turning in [false, true] {
             s.spawn(move || {
                 let (mut m, mut a) =
-                    (mod_in_engine(&scene, turning, false), ecs::Flat::new(&scene, turning, Box::new(solver::solve_points), "ours"));
+                    (runs::mod_in_engine(&scene, turning, false), ecs::Flat::new(&scene, turning, Box::new(solver::solve_points), "ours"));
                 m.step(150);
                 a.step(150);
                 let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
@@ -565,19 +559,7 @@ fn pyramid_50_refs() -> StandBounds {
 /// each against `bounds`.
 fn pyramid_stands_in(base: u32, bounds: impl Fn() -> StandBounds, specs: &[&str]) {
     let scene = Scene::Pyramid { base };
-    let runs: Vec<Settling> = std::thread::scope(|s| {
-        let threads: Vec<_> = specs
-            .iter()
-            .map(|spec| {
-                s.spawn(move || {
-                    let spec = with_solver(spec);
-                    let mut f = ecs::Flat::variant(&scene, true, &spec, &format!("ours ({spec})"));
-                    settle::settle(&mut f, &scene, true, STEPS)
-                })
-            })
-            .collect();
-        threads.into_iter().map(|t| t.join().expect("an order panicked")).collect()
-    });
+    let runs = runs::par(specs, |spec| runs::settled(scene, true, STEPS, &runs::with_solver(spec)));
     print_runs(&vec![scene; specs.len()], true, &runs);
     let cases: Vec<(Scene, StandBounds)> = specs.iter().map(|_| (scene, bounds())).collect();
     stand_runs(&cases, &runs);
@@ -591,20 +573,10 @@ fn pyramid_stands_in(base: u32, bounds: impl Fn() -> StandBounds, specs: &[&str]
 /// engine.
 #[test]
 fn sleeping_takes_every_body_of_a_pile_at_rest() {
-    std::thread::scope(|s| {
-        for (turning, rest) in [(false, 2 * 200), (true, 2 * 250)] {
-            s.spawn(move || {
-                let scene = Scene::Pile { n: 1000, width: 41.0, stagger: true };
-                let mut m = mod_in_engine(&scene, turning, true);
-                let limit = rest + 30 + settle::EVERY;
-                let mut step = 0;
-                while m.asleep() < 1000 {
-                    assert!(step < limit, "turning {turning}: {} of 1000 asleep at step {step}", m.asleep());
-                    m.step(settle::EVERY);
-                    step += settle::EVERY;
-                }
-                println!("pile 1000{}: all asleep at step {step}", if turning { ", turning" } else { "" });
-            });
-        }
-    });
+    let limits = [(false, 2 * 200 + 30 + settle::EVERY), (true, 2 * 250 + 30 + settle::EVERY)];
+    let at = runs::par(&limits, |&(turning, _)| runs::asleep_at(record::SLEEP_PILE, turning, record::SLEEP_MAX));
+    for ((turning, limit), at) in limits.iter().zip(at) {
+        println!("pile 1000{}: all asleep at step {at:?}, bound {limit}", if *turning { ", turning" } else { "" });
+        assert!(at.is_some_and(|s| s <= *limit), "turning {turning}: not all of 1000 asleep by step {limit} (at {at:?})");
+    }
 }

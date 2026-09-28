@@ -12,26 +12,17 @@
 //! `TUNE=<variant>` runs ours tuned so, as in `:quality_test`. A test that
 //! finds a real problem stays, ignored, naming its bead.
 
-use physics3d_bench::behave::{self, Behaviour};
-use physics3d_bench::scenes::{self, Kind};
-use physics3d_bench::{Config, Iters, make_backend};
+use std::sync::Arc;
 
-/// Ours on each scene, bodies turning, in threads of their own, each
+use physics3d_bench::behave::Behaviour;
+use physics3d_bench::scenes::Kind;
+use physics3d_bench::{baseline, record, runs};
+
+/// Ours on each scene, bodies turning, in threads of their own (each run
+/// once in the binary, `runs.rs`, which the baseline reads too), each
 /// printed so a failing run shows every number.
-fn run(cases: &[(Kind, usize)]) -> Vec<Behaviour> {
-    let tune: &'static str = std::env::var("TUNE").unwrap_or_default().leak();
-    let runs: Vec<Behaviour> = std::thread::scope(|s| {
-        let threads: Vec<_> = cases
-            .iter()
-            .map(|&(kind, n)| {
-                s.spawn(move || {
-                    let config = Config { iters: Iters::Default, sleep: false, max_bodies: 16, rotate: true, tune };
-                    behave::behave(&scenes::build(kind, n), make_backend("ours", &config).unwrap().as_mut())
-                })
-            })
-            .collect();
-        threads.into_iter().map(|t| t.join().expect("a scene panicked")).collect()
-    });
+fn run(cases: &[(Kind, usize)]) -> Vec<Arc<Behaviour>> {
+    let runs = runs::par(cases, |&(kind, n)| runs::behaved(kind, n));
     for ((kind, n), r) in cases.iter().zip(&runs) {
         let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
         println!("{} {n}: {}", kind.name(), values.join(", "));
@@ -175,4 +166,12 @@ fn heavy_cubes_stand_on_light_ones_sinking_less_than_in_rapier_and_box3d() {
         broken.most(*c, r, "escaped", 0.0);
     }
     broken.assert();
+}
+
+/// The default suite's baseline, group `behaviour`: every value
+/// `record.rs` takes from these tests' scenes, the ignored tests' too,
+/// each within its band of `baseline.txt`.
+#[test]
+fn baseline() {
+    baseline::assert_holds(record::DEFAULT, &["behaviour"], &record::behaviour(), record::WRITE);
 }

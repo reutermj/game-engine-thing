@@ -9,6 +9,9 @@
 //! code. The world is fixed across engines: y up, gravity (0, -9.81, 0), a
 //! 1/60 s step, mass 1, friction 0.5, restitution 0.
 
+// The baseline's format and comparison, 2D's.
+#[path = "../../engine/std/physics/compare/baseline.rs"]
+pub mod baseline;
 pub mod behave;
 pub mod box3d;
 mod ffi;
@@ -16,6 +19,8 @@ pub mod jolt;
 pub mod measure;
 pub mod ours;
 pub mod rapier;
+pub mod record;
+pub mod runs;
 // The scene mod builds the same scenes in the engine, from this file.
 #[path = "../../engine/std/physics3d/tests/scenes.rs"]
 pub mod scenes;

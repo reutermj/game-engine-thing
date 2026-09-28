@@ -1,0 +1,209 @@
+# The 2D baseline, the default suite's scenes: our accepted results, which the
+# tests hold every change to within each band, both ways
+# (docs/architecture/physics-testing.md, "The baseline"). Group quality
+# is checked by the quality tests, behaviour by the behaviour tests.
+# Written by
+#     ./bazel run //engine/std/physics/compare:baseline -- --write
+# never by hand: a change that moves a value writes it again in the same
+# commit. Columns: group, scene, measure, value, band.
+quality    piles 400-1200 41                 rest_median          210        steps 100 or 20%
+quality    piles 400-1200 41                 first_rest_median    210        steps 130 or 25%
+quality    piles 400-1200 41                 depth_end_median     0.01166    rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_end_worst      0.01406    rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_during_median  0.2833     rel 0.45 or 1e-4
+quality    piles 400-1200 41                 mean_during_worst    0.0279     rel 0.3 or 1e-4
+quality    piles 400-1200 41                 energy_end_median    1.199e-11  log 10 under 1e-8
+quality    piles 400-1200 41                 contacts_least       1.337      rel 0.03
+quality    piles 400-1200 41                 escaped              0          exact
+quality    pyramid 15                        rest                 10         steps 10
+quality    pyramid 15                        top_moved            0.006166   rel 0.02 or 1e-4
+quality    pyramid 15                        depth_end            8.619e-4   rel 0.02 or 1e-4
+quality    pyramid 15                        tilt                 0          rel 0.1 or 0.01
+quality    pyramid 15                        energy_tail          5.785e-11  log 3 under 1e-8
+quality    pyramid 15                        escaped              0          exact
+quality    pyramid 20                        rest                 10         steps 10
+quality    pyramid 20                        top_moved            0.01087    rel 0.02 or 1e-4
+quality    pyramid 20                        depth_end            0.001166   rel 0.02 or 1e-4
+quality    pyramid 20                        tilt                 0          rel 0.1 or 0.01
+quality    pyramid 20                        energy_tail          1.068e-10  log 3 under 1e-8
+quality    pyramid 20                        escaped              0          exact
+quality    pyramid 25                        rest                 20         steps 10
+quality    pyramid 25                        top_moved            0.01691    rel 0.02 or 1e-4
+quality    pyramid 25                        depth_end            0.001469   rel 0.02 or 1e-4
+quality    pyramid 25                        tilt                 0          rel 0.1 or 0.01
+quality    pyramid 25                        energy_tail          5.503e-11  log 3 under 1e-8
+quality    pyramid 25                        escaped              0          exact
+quality    piles 400-1200 41 turning         rest_median          220        steps 100 or 20%
+quality    piles 400-1200 41 turning         first_rest_median    220        steps 130 or 25%
+quality    piles 400-1200 41 turning         depth_end_median     0.01439    rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         depth_end_worst      0.02365    rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         depth_during_median  0.3218     rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         mean_during_worst    0.0201     rel 0.3 or 1e-4
+quality    piles 400-1200 41 turning         energy_end_median    1.098e-9   log 10 under 1e-8
+quality    piles 400-1200 41 turning         contacts_least       1.89       rel 0.03
+quality    piles 400-1200 41 turning         escaped              0          exact
+quality    pyramid 15 turning                rest                 20         steps 10
+quality    pyramid 15 turning                top_moved            0.005971   rel 0.02 or 1e-4
+quality    pyramid 15 turning                depth_end            8.235e-4   rel 0.02 or 1e-4
+quality    pyramid 15 turning                tilt                 0.03618    rel 0.1 or 0.01
+quality    pyramid 15 turning                energy_tail          3.975e-11  log 3 under 1e-8
+quality    pyramid 15 turning                escaped              0          exact
+quality    pyramid 20 turning                rest                 30         steps 10
+quality    pyramid 20 turning                top_moved            0.01055    rel 0.02 or 1e-4
+quality    pyramid 20 turning                depth_end            0.001117   rel 0.02 or 1e-4
+quality    pyramid 20 turning                tilt                 0.04642    rel 0.1 or 0.01
+quality    pyramid 20 turning                energy_tail          1.034e-11  log 3 under 1e-8
+quality    pyramid 20 turning                escaped              0          exact
+quality    pyramid 25 turning                rest                 30         steps 10
+quality    pyramid 25 turning                top_moved            0.01622    rel 0.02 or 1e-4
+quality    pyramid 25 turning                depth_end            0.001415   rel 0.02 or 1e-4
+quality    pyramid 25 turning                tilt                 0.06214    rel 0.1 or 0.01
+quality    pyramid 25 turning                energy_tail          6.781e-12  log 3 under 1e-8
+quality    pyramid 25 turning                escaped              0          exact
+quality    stack 10                          rest                 10         steps 10
+quality    stack 10                          top_moved            0.008328   rel 0.02 or 1e-4
+quality    stack 10                          depth_end            0.001621   rel 0.02 or 1e-4
+quality    stack 10                          tilt                 0          rel 0.1 or 0.01
+quality    stack 10                          energy_tail          5.054e-11  log 3 under 1e-8
+quality    stack 10                          escaped              0          exact
+quality    stack 20                          rest                 30         steps 10
+quality    stack 20                          top_moved            0.03468    rel 0.02 or 1e-4
+quality    stack 20                          depth_end            0.003422   rel 0.02 or 1e-4
+quality    stack 20                          tilt                 0          rel 0.1 or 0.01
+quality    stack 20                          energy_tail          3.343e-12  log 3 under 1e-8
+quality    stack 20                          escaped              0          exact
+quality    stack 10 turning                  rest                 20         steps 10
+quality    stack 10 turning                  top_moved            0.01204    rel 0.02 or 1e-4
+quality    stack 10 turning                  depth_end            0.001934   rel 0.02 or 1e-4
+quality    stack 10 turning                  tilt                 0.05681    rel 0.1 or 0.01
+quality    stack 10 turning                  energy_tail          1.698e-12  log 3 under 1e-8
+quality    stack 10 turning                  escaped              0          exact
+quality    stack 20 turning, 6 substeps      rest                 30         steps 10
+quality    stack 20 turning, 6 substeps      top_moved            0.03713    rel 0.02 or 1e-4
+quality    stack 20 turning, 6 substeps      depth_end            0.003019   rel 0.02 or 1e-4
+quality    stack 20 turning, 6 substeps      tilt                 0.08896    rel 0.1 or 0.01
+quality    stack 20 turning, 6 substeps      energy_tail          2.757e-5   log 3 under 1e-8
+quality    stack 20 turning, 6 substeps      escaped              0          exact
+quality    pyramid 40 turning rot            rest                 80         steps 10
+quality    pyramid 40 turning rot            top_moved            0.04053    rel 0.02 or 1e-4
+quality    pyramid 40 turning rot            depth_end            0.002334   rel 0.02 or 1e-4
+quality    pyramid 40 turning rot            tilt                 0.1127     rel 0.1 or 0.01
+quality    pyramid 40 turning rot            energy_tail          9.722e-9   log 3 under 1e-8
+quality    pyramid 40 turning rot            escaped              0          exact
+quality    pyramid 40 turning rot/order=3    rest                 60         steps 10
+quality    pyramid 40 turning rot/order=3    top_moved            0.04219    rel 0.02 or 1e-4
+quality    pyramid 40 turning rot/order=3    depth_end            0.002407   rel 0.02 or 1e-4
+quality    pyramid 40 turning rot/order=3    tilt                 0.09371    rel 0.1 or 0.01
+quality    pyramid 40 turning rot/order=3    energy_tail          1.387e-9   log 3 under 1e-8
+quality    pyramid 40 turning rot/order=3    escaped              0          exact
+quality    pyramid 50 turning rot/colored=4  rest                 120        steps 10
+quality    pyramid 50 turning rot/colored=4  top_moved            0.06338    rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/colored=4  depth_end            0.002963   rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/colored=4  tilt                 0.1458     rel 0.1 or 0.01
+quality    pyramid 50 turning rot/colored=4  energy_tail          5.366e-7   log 3 under 1e-8
+quality    pyramid 50 turning rot/colored=4  escaped              0          exact
+quality    pile 1000 41 sleeping             asleep_at            240        steps 60
+quality    pile 1000 41 turning sleeping     asleep_at            240        steps 60
+behaviour  ramp 20 0.6 box                   crept                1.152e-4   rel 0.05 or 2e-5
+behaviour  ramp 30 0.2 box                   a                    6.536      rel 0.002
+behaviour  ramp 30 0.6 disc                  a                    6.653      rel 0.002
+behaviour  ramp 30 0.6 disc                  slip                 0.0726     rel 0.03 or 1e-4
+behaviour  ramp 30 0.1 disc                  a                    8.277      rel 0.002
+behaviour  ramp 30 0.1 disc                  slip                 4.808      rel 0.03 or 1e-4
+behaviour  bounce 0.25                       first_apex           0.04373    rel 0.01
+behaviour  bounce 0.5                        first_apex           0.2442     rel 0.01
+behaviour  bounce 0.75                       first_apex           0.5791     rel 0.01
+behaviour  bounce 1                          first_apex           1.048      rel 0.01
+behaviour  bounce 1                          most_apex            1.639      rel 0.01
+behaviour  bounce 1                          last_apex            1.639      rel 0.01
+behaviour  ratio 10 1                        top_sank             0.001548   rel 0.03 or 1e-4
+behaviour  ratio 10 1                        deepest_at_end       0.001238   rel 0.03 or 1e-4
+behaviour  ratio 10 1                        stands               1          exact
+behaviour  ratio 10 1                        escaped              0          exact
+behaviour  ratio 10 1                        at_rest_from         2          steps 10
+behaviour  ratio 10 1                        jitter               1.441e-6   rel 0.03 or 1e-4
+behaviour  ratio 100 1                       top_sank             0.01419    rel 0.03 or 1e-4
+behaviour  ratio 100 1                       deepest_at_end       0.01139    rel 0.03 or 1e-4
+behaviour  ratio 100 1                       stands               1          exact
+behaviour  ratio 100 1                       escaped              0          exact
+behaviour  ratio 100 1                       at_rest_from         24         steps 10
+behaviour  ratio 100 1                       jitter               6.195e-4   rel 0.03 or 1e-4
+behaviour  ratio 1000 1                      top_sank             0.1384     rel 0.03 or 1e-4
+behaviour  ratio 1000 1                      deepest_at_end       0.115      rel 0.03 or 1e-4
+behaviour  ratio 1000 1                      stands               1          exact
+behaviour  ratio 1000 1                      escaped              0          exact
+behaviour  ratio 1000 1                      at_rest_from         199        steps 10
+behaviour  ratio 1000 1                      jitter               0.03683    rel 0.03 or 1e-4
+behaviour  ratio 100 5                       top_sank             0.1066     rel 0.03 or 1e-4
+behaviour  ratio 100 5                       deepest_at_end       0.02424    rel 0.03 or 1e-4
+behaviour  ratio 100 5                       stands               1          exact
+behaviour  ratio 100 5                       escaped              0          exact
+behaviour  ratio 100 5                       at_rest_from         48         steps 10
+behaviour  ratio 100 5                       jitter               0.02896    rel 0.03 or 1e-4
+behaviour  ratio 1000 5                      top_sank             5          rel 0.03 or 1e-4
+behaviour  ratio 1000 5                      deepest_at_end       2.819e-5   rel 0.03 or 1e-4
+behaviour  ratio 1000 5                      stands               0          exact
+behaviour  ratio 1000 5                      escaped              4          exact
+behaviour  ratio 1000 5                      at_rest_from         never      steps 10
+behaviour  ratio 1000 5                      jitter               82.88      rel 0.03 or 1e-4
+behaviour  bigonsmall                        top_sank             0.02822    rel 0.03 or 1e-4
+behaviour  bigonsmall                        deepest_at_end       0.02284    rel 0.03 or 1e-4
+behaviour  bigonsmall                        stands               1          exact
+behaviour  bigonsmall                        escaped              0          exact
+behaviour  bigonsmall                        at_rest_from         69         steps 10
+behaviour  bigonsmall                        jitter               0.006292   rel 0.03 or 1e-4
+behaviour  overlap 4 0.25                    peak_speed           3.038      rel 0.03 or 1e-4
+behaviour  overlap 4 0.25                    separated_at         20         steps 10
+behaviour  overlap 4 0.25                    at_rest_from         24         steps 10
+behaviour  overlap 4 0.25                    top_off              5.82e-4    rel 0.05 or 0.001
+behaviour  overlap 4 0.25                    escaped              0          exact
+behaviour  overlap 4 0.5                     peak_speed           3.119      rel 0.03 or 1e-4
+behaviour  overlap 4 0.5                     separated_at         33         steps 10
+behaviour  overlap 4 0.5                     at_rest_from         37         steps 10
+behaviour  overlap 4 0.5                     top_off              5.372e-4   rel 0.05 or 0.001
+behaviour  overlap 4 0.5                     escaped              0          exact
+behaviour  overlap 10 0.5                    peak_speed           11.78      rel 0.03 or 1e-4
+behaviour  overlap 10 0.5                    separated_at         50         steps 10
+behaviour  overlap 10 0.5                    at_rest_from         130        steps 10
+behaviour  overlap 10 0.5                    top_off              -0.01119   rel 0.05 or 0.001
+behaviour  overlap 10 0.5                    escaped              0          exact
+behaviour  ladder 30 0.4                     slid                 5.293e-5   rel 0.03 or 1e-4
+behaviour  ladder 30 0.3                     slid                 5.293e-5   rel 0.03 or 1e-4
+behaviour  ladder 30 0.24                    slid                 1.302      rel 0.03 or 1e-4
+behaviour  ladder 30 0.2                     slid                 1.348      rel 0.03 or 1e-4
+behaviour  dominoes 15                       toppled              15         exact
+behaviour  dominoes 15                       in_order             1          exact
+behaviour  dominoes 15                       wave                 2.601      rel 0.03 or 1e-4
+behaviour  dominoes 15                       last_lean            90         rel 0.03 or 1e-4
+behaviour  dominoes 15                       at_rest_from         447        steps 10
+behaviour  bullet 10 0.25 0.1                through              0          exact
+behaviour  bullet 20 0.25 0.1                through              0          exact
+behaviour  bullet 21 0.25 0.1                through              0          exact
+behaviour  bullet 25 0.25 0.1                through              1          exact
+behaviour  bullet 30 0.25 0.1                through              1          exact
+behaviour  bullet 40 0.25 0.1                through              2          exact
+behaviour  bullet 48 0.25 0.1                through              2          exact
+behaviour  bullet 50 0.25 0.1                through              3          exact
+behaviour  bullet 56.6 0.25 0.1              through              3          exact
+behaviour  bullet 80 0.25 0.1                through              3          exact
+behaviour  bullet 160 0.25 0.1               through              4          exact
+behaviour  bullet 400 0.25 0.1               through              4          exact
+behaviour  bullet 10 0.25 1                  through              0          exact
+behaviour  bullet 20 0.25 1                  through              0          exact
+behaviour  bullet 21 0.25 1                  through              0          exact
+behaviour  bullet 25 0.25 1                  through              0          exact
+behaviour  bullet 30 0.25 1                  through              0          exact
+behaviour  bullet 40 0.25 1                  through              0          exact
+behaviour  bullet 48 0.25 1                  through              0          exact
+behaviour  bullet 50 0.25 1                  through              1          exact
+behaviour  bullet 56.6 0.25 1                through              1          exact
+behaviour  bullet 80 0.25 1                  through              1          exact
+behaviour  bullet 160 0.25 1                 through              3          exact
+behaviour  bullet 400 0.25 1                 through              3          exact
+behaviour  family cards                      good                 11         within 1
+behaviour  family ramp                       good                 4          within 1
+behaviour  family ladder                     good                 4          within 1
+behaviour  family dominoes                   good                 3          within 1
+behaviour  family stacks                     good                 1          within 1
+behaviour  family ratios                     good                 2          within 1
+behaviour  family pyramids                   good                 1          within 1
