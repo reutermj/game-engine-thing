@@ -41,6 +41,7 @@ cc_library(
 rust_binary(
     name = "compare",
     srcs = [
+        "behave.rs",
         "box2d.rs",
         "compare.rs",
         "ecs.rs",
@@ -50,6 +51,7 @@ rust_binary(
         "settle.rs",
         "sim.rs",
         "variants.rs",
+        "view.rs",
         "//engine/std/physics:narrow.rs",
         "//engine/std/physics:solver.rs",
         "//engine/std/physics:tests/split_impulse.rs",
@@ -74,10 +76,11 @@ rust_binary(
     ],
 )
 
-QUALITY_SRCS = [
+# What the quality and behaviour tests share: the comparison's scenes,
+# measures and our step on arrays.
+MEASURE_SRCS = [
     "ecs.rs",
     "quality.rs",
-    "quality_test.rs",
     "scene.rs",
     "settle.rs",
     "sim.rs",
@@ -87,6 +90,8 @@ QUALITY_SRCS = [
     "//engine/std/physics:tests/split_impulse.rs",
     "//engine/std/physics:tests/arrays.rs",
 ]
+
+QUALITY_SRCS = MEASURE_SRCS + ["quality_test.rs"]
 
 QUALITY_DEPS = [
     "//engine/control",
@@ -119,6 +124,24 @@ rust_test(
     data = [":scene_game"],
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# Quality beyond settling: what a player sees a body do (a box on a ramp, a
+# disc rolling, a ball bouncing, heavy boxes on light ones, overlap pushed
+# apart, a ball fired at a wall, a card house, a ladder, dominoes), bounded
+# by hand calculations and by what Box2D and Rapier do on the same scenes
+# (recorded, not linked). See the source, and physics.md, "Quality beyond
+# settling". Tests that found a problem are ignored, each naming its bead.
+rust_test(
+    name = "behaviour_test",
+    srcs = MEASURE_SRCS + [
+        "behave.rs",
+        "behaviour_test.rs",
+    ],
+    crate_root = "behaviour_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     deps = QUALITY_DEPS,
 )
 

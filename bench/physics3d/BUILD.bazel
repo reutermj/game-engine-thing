@@ -53,6 +53,7 @@ filegroup(
 rust_library(
     name = "physics3d",
     srcs = [
+        "behave.rs",
         "box3d.rs",
         "ffi.rs",
         "jolt.rs",
@@ -101,6 +102,16 @@ rust_test(
     name = "quality_test",
     srcs = ["quality_test.rs"],
     crate_root = "quality_test.rs",
+    deps = [":physics3d"],
+)
+
+# Quality beyond settling, in 3D: a cube on a ramp, a sphere rolling, a ball
+# bouncing, a heavy cube on a light one, against hand calculations and
+# Rapier's and Box3D's values on the same scenes (the source has them;
+# physics.md, "Quality beyond settling").
+rust_test(
+    name = "behaviour_test",
+    srcs = ["behaviour_test.rs"],
     deps = [":physics3d"],
 )
 

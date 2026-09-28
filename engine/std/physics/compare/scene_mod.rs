@@ -48,18 +48,37 @@ fn collider(s: &Spec) -> Collider {
 }
 
 fn dynamic(s: &Spec) -> Dynamic {
-    let body = Body { friction: s.friction, restitution: s.restitution, ..Body::default() };
+    let body = Body {
+        friction: s.friction,
+        restitution: s.restitution,
+        inv_mass: 1.0 / s.mass,
+        gravity_scale: s.gravity_scale,
+        ..Body::default()
+    };
     (Position { x: s.x, y: s.y }, Velocity { x: s.vx, y: s.vy }, body, collider(s))
 }
 
 fn spawn(world: &mut WorldMut, s: &Spec) -> Entity {
-    if !s.dynamic {
+    let e = if s.dynamic {
+        world.spawn(dynamic(s))
+    } else if s.friction == Body::fixed().friction && s.restitution == Body::fixed().restitution {
         // A collider without a body is static with `Body::fixed()`'s
         // friction and restitution, which is what `scene::wall` gives the
         // other engines.
-        return world.spawn((Position { x: s.x, y: s.y }, collider(s)));
+        world.spawn((Position { x: s.x, y: s.y }, collider(s)))
+    } else {
+        let body = Body { friction: s.friction, restitution: s.restitution, ..Body::fixed() };
+        world.spawn((Position { x: s.x, y: s.y }, collider(s), body))
+    };
+    // A turned static is a ramp; a turned body starts so, and one spinning
+    // turns from the start (`turn` gives the rest theirs).
+    if s.angle != 0.0 {
+        world.insert(e, Rotation::from_angle(s.angle));
     }
-    world.spawn(dynamic(s))
+    if s.dynamic && s.w != 0.0 {
+        world.insert(e, Spin { w: s.w });
+    }
+    e
 }
 
 impl Scenes {
@@ -146,11 +165,27 @@ impl Mod for Scenes {
             }
             None if message.trim() == "turn" => {
                 self.turning = true;
-                let mut bodies = Vec::new();
-                world.for_each::<&Body>(|e, _| bodies.push(e));
+                let (mut bodies, mut turned, mut spinning) =
+                    (Vec::new(), std::collections::HashSet::new(), std::collections::HashSet::new());
+                world.for_each::<&Body>(|e, b| {
+                    if b.kind == physics::DYNAMIC {
+                        bodies.push(e)
+                    }
+                });
+                world.for_each::<&Rotation>(|e, _| {
+                    turned.insert(e);
+                });
+                world.for_each::<&Spin>(|e, _| {
+                    spinning.insert(e);
+                });
+                // Those the scene started turned or spinning keep it.
                 for &e in &bodies {
-                    world.insert(e, Rotation::default());
-                    world.insert(e, Spin::default());
+                    if !turned.contains(&e) {
+                        world.insert(e, Rotation::default());
+                    }
+                    if !spinning.contains(&e) {
+                        world.insert(e, Spin::default());
+                    }
                 }
                 Ok(format!("{} bodies turn", bodies.len()))
             }

@@ -9,14 +9,19 @@
 extern "C" {
 #endif
 
-// One body to add. shape 0 is a sphere of radius dims[0], shape 1 an
-// axis-aligned box of half-extents dims. A fixed body is static and ignores vel.
+// One body to add. shape 0 is a sphere of radius dims[0], shape 1 a box of
+// half-extents dims, turned by rot (x, y, z, w). A fixed body is static and
+// ignores vel and mass.
 typedef struct P3Spec {
 	int32_t shape;
 	float dims[3];
 	float pos[3];
 	float vel[3];
 	int32_t fixed;
+	float rot[4];
+	float friction;
+	float restitution;
+	float mass;
 } P3Spec;
 
 // velocity_iters and position_iters of 0 mean the engine's defaults. Box3D

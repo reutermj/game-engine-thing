@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::scene::{DT, GRAVITY, Scene, Spec};
+use crate::sim::Mark;
 use crate::{Dyn, Sim};
 
 #[repr(C)]
@@ -26,8 +27,14 @@ unsafe extern "C" {
         friction: f32,
         restitution: f32,
         turning: i32,
+        angle: f32,
+        mass: f32,
+        gravity_scale: f32,
     ) -> i32;
     fn bx_set_velocity(w: *mut World, handle: i32, vx: f32, vy: f32);
+    fn bx_set_spin(w: *mut World, handle: i32, spin: f32);
+    fn bx_awake(w: *const World, handle: i32) -> i32;
+    fn bx_marks(w: *const World, handle: i32, out: *mut f32, capacity: i32) -> i32;
     fn bx_remove(w: *mut World, handle: i32);
     fn bx_step(w: *mut World, dt: f32, substeps: i32);
     fn bx_state(w: *const World, handle: i32, out: *mut f32);
@@ -108,11 +115,28 @@ impl Box2d {
     fn add(&mut self, s: &Spec) {
         // SAFETY: the world is live; the rest are plain values.
         let h = unsafe {
-            bx_add(self.world, s.dynamic as i32, s.circle as i32, s.x, s.y, s.hx, s.hy, s.friction, s.restitution, self.turning as i32)
+            bx_add(
+                self.world,
+                s.dynamic as i32,
+                s.circle as i32,
+                s.x,
+                s.y,
+                s.hx,
+                s.hy,
+                s.friction,
+                s.restitution,
+                self.turning as i32,
+                s.angle,
+                s.mass,
+                s.gravity_scale,
+            )
         };
         if s.dynamic {
             // SAFETY: `h` is the handle just returned.
-            unsafe { bx_set_velocity(self.world, h, s.vx, s.vy) };
+            unsafe {
+                bx_set_velocity(self.world, h, s.vx, s.vy);
+                bx_set_spin(self.world, h, if self.turning { s.w } else { 0.0 });
+            }
             self.dynamic.push_back((h, *s));
             self.alive += 1;
         }
@@ -204,6 +228,32 @@ impl Sim for Box2d {
     /// Contacts in the constraint graph: touching, with a manifold.
     fn contacts(&self) -> usize {
         self.counters()[10..].iter().map(|&c| c as usize).sum()
+    }
+
+    /// Each dynamic body's contacts with points (a pair of dynamic bodies
+    /// twice, from each end, drawn over each other).
+    fn marks(&self) -> Vec<Mark> {
+        let mut buf = vec![0f32; 5 * 64];
+        let mut out = Vec::new();
+        for (h, _) in &self.dynamic {
+            // SAFETY: a live handle; `buf` holds 64 points of 5 floats.
+            let n = unsafe { bx_marks(self.world, *h, buf.as_mut_ptr(), 64) };
+            out.extend(buf.chunks(5).take(n as usize).map(|p| Mark {
+                x: p[0],
+                y: p[1],
+                nx: p[2],
+                ny: p[3],
+                estimated: false,
+                // Box2D keeps points within its speculative distance.
+                speculative: p[4] > 0.0,
+            }));
+        }
+        out
+    }
+
+    fn sleeping(&self) -> Vec<bool> {
+        // SAFETY: live handles.
+        self.dynamic.iter().map(|(h, _)| unsafe { bx_awake(self.world, *h) } == 0).collect()
     }
 
     fn native(&self) -> String {

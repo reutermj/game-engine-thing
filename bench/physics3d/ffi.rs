@@ -9,6 +9,10 @@ pub struct P3Spec {
     pos: [f32; 3],
     vel: [f32; 3],
     fixed: i32,
+    rot: [f32; 4],
+    friction: f32,
+    restitution: f32,
+    mass: f32,
 }
 
 impl From<&Spec> for P3Spec {
@@ -17,7 +21,17 @@ impl From<&Spec> for P3Spec {
             Shape::Sphere(r) => (0, [r, 0.0, 0.0]),
             Shape::Box(h) => (1, h),
         };
-        P3Spec { shape, dims, pos: s.pos, vel: s.vel, fixed: s.fixed as i32 }
+        P3Spec {
+            shape,
+            dims,
+            pos: s.pos,
+            vel: s.vel,
+            fixed: s.fixed as i32,
+            rot: s.rot,
+            friction: s.friction,
+            restitution: s.restitution,
+            mass: s.mass,
+        }
     }
 }
 

@@ -59,7 +59,7 @@ engine_api::mod_state! {
     }
 }
 
-const KINDS: [Kind; 5] = [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain, Kind::Stack];
+use scenes::KINDS;
 
 fn collider(s: Shape) -> Collider {
     match s {
@@ -79,6 +79,25 @@ fn vec(v: [f32; 3]) -> Vec3 {
     Vec3::new(v[0], v[1], v[2])
 }
 
+fn quat(q: [f32; 4]) -> Quat {
+    Quat { v: Vec3::new(q[0], q[1], q[2]), w: q[3] }
+}
+
+/// A scene's body as the scene sets it: its turn, material and mass.
+fn spec_body(b: &scenes::Spec, locked: bool) -> Moving {
+    let (p, q, c, body, _, w) = moving(vec(b.pos), quat(b.rot), collider(b.shape), locked);
+    let inv = 1.0 / b.mass;
+    let body =
+        Body { inv_mass: inv, ix: body.ix * inv, iy: body.iy * inv, iz: body.iz * inv, friction: b.friction, restitution: b.restitution };
+    (p, q, c, body, Velocity { x: b.vel[0], y: b.vel[1], z: b.vel[2] }, w)
+}
+
+/// A scene's static, turned and of its material.
+fn spec_static(b: &scenes::Spec) -> Still {
+    let (p, q, c, body, s) = fixed(vec(b.pos), quat(b.rot), collider(b.shape));
+    (p, q, c, Body { friction: b.friction, restitution: b.restitution, ..body }, s)
+}
+
 type Moving = (Position, Rotation, Collider, Body, Velocity, AngularVelocity);
 type Still = (Position, Rotation, Collider, Body, Static);
 
@@ -95,14 +114,11 @@ impl Pile {
         };
         if let Some(batch) = s.spawn.get(self.tick as usize) {
             for b in batch {
-                let c = collider(b.shape);
                 if b.fixed {
-                    still.spawn(fixed(vec(b.pos), Quat::IDENTITY, c));
+                    still.spawn(spec_static(b));
                     continue;
                 }
-                let (p, q, c, body, _, w) = moving(vec(b.pos), Quat::IDENTITY, c, self.locked);
-                let v = Velocity { x: b.vel[0], y: b.vel[1], z: b.vel[2] };
-                self.bodies.push(movers.spawn((p, q, c, body, v, w)));
+                self.bodies.push(movers.spawn(spec_body(b, self.locked)));
             }
         }
         self.tick += 1;
@@ -122,7 +138,7 @@ impl Pile {
         (self.kind, self.n, self.tick) = (vec![k as u8], n, 0);
         let s = self.scene().expect("just built");
         for b in &s.statics {
-            world.spawn(fixed(vec(b.pos), Quat::IDENTITY, collider(b.shape)));
+            world.spawn(spec_static(b));
         }
         let statics = s.statics.len();
         *scene = Some(s);

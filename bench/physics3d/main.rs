@@ -8,6 +8,15 @@
 //! sleep, --runs N repeats each run and reports the median phase times
 //! (default 3 up to 2000 bodies, 1 above), --tune=... runs a variant of ours
 //! (physics3d::Tuning::parse). Prints markdown tables.
+//!
+//! --behave runs behaviour scenes instead (physics.md, "Quality beyond
+//! settling"), whose size is the scene's parameter: ramp_hold, ramp_slide
+//! and ramp_roll (any size), bounce (restitution in hundredths), ratio (how
+//! many times as heavy), a table of what each engine did:
+//!
+//!     bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+//!     bench -- bounce 25,50,75,100 all --rotate --behave
+//!     bench -- ratio 10,100,1000 all --rotate --behave
 
 use physics3d_bench::measure::{self, Run};
 use physics3d_bench::scenes::{self, Kind, Scene};
@@ -28,11 +37,13 @@ fn main() {
     let mut rotate = false;
     let mut runs = None;
     let mut tune = "";
+    let mut behave = false;
     for f in flags {
         match f.as_str() {
             "--iters8" => iters = Iters::Eight,
             "--sleep" => sleep = true,
             "--rotate" => rotate = true,
+            "--behave" => behave = true,
             f if f.starts_with("--runs=") => runs = f["--runs=".len()..].parse().ok(),
             f if f.starts_with("--tune=") => tune = f["--tune=".len()..].to_string().leak(),
             f => panic!("unknown flag {f}"),
@@ -49,6 +60,10 @@ fn main() {
             let scene = scenes::build(kind, n);
             let runs = runs.unwrap_or(if n <= 2000 { 3 } else { 1 });
             let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32, rotate, tune };
+            if behave {
+                behaviour(&scene, &config, &backends);
+                continue;
+            }
             let mut results = Vec::new();
             for b in &backends {
                 let mut all: Vec<Run> = (0..runs)
@@ -68,6 +83,23 @@ fn main() {
             report(&scene, runs, &results);
         }
     }
+}
+
+/// Each engine on one behaviour scene, a row each.
+fn behaviour(scene: &Scene, config: &Config, backends: &[&str]) {
+    println!("## {} {}, {} steps\n", scene.kind.name(), scene.n, scene.steps);
+    let runs: Vec<_> = backends
+        .iter()
+        .map(|b| physics3d_bench::behave::behave(scene, make_backend(b, config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut()))
+        .collect();
+    let names: Vec<&str> = runs[0].values.iter().map(|(k, _)| *k).collect();
+    println!("| engine | {} |", names.join(" | "));
+    println!("|---|{}", "---|".repeat(names.len()));
+    for r in &runs {
+        let cells: Vec<String> = r.values.iter().map(|(_, v)| format!("{v:.6}")).collect();
+        println!("| {} | {} |", r.backend, cells.join(" | "));
+    }
+    println!();
 }
 
 fn median(mut v: Vec<f64>) -> f64 {

@@ -76,6 +76,55 @@ Check before trusting a run:
 
 Record what changed in physics.md, "Against other engines", with the date.
 
+## The debug view
+
+Look at a scene before trusting its numbers: a scene that isn't what it
+says (a pile standing in columns, a body through a wall, a card house
+built wrong) measures as confidently as one that is.
+
+```sh
+VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp ./bazel run -c opt //engine/std/physics/compare
+VIEW="ratio 1000 5" VIEW_STEPS=0,60,120 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run -c opt //engine/std/physics/compare
+TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run -c opt //engine/std/physics/compare
+```
+
+- `VIEW` is any scene `Scene::parse` reads (`scene.rs`): the settling
+  scenes, and the behaviour scenes (`ramp 30 0.2 box`, `bounce 0.5`,
+  `ratio 100 1`, `bigonsmall`, `overlap 4 0.25`, `bullet 40 0.25 1 0`,
+  `cards 5`, `ladder 30 0.2`, `dominoes 15`), which are always drawn
+  turning; `TURN=1` turns the others.
+- It writes `<VIEW_OUT>/<scene>.svg` (the directory `bazel run` was run
+  from if unset): a row a step of `VIEW_STEPS` (default 0, 60, 300), a
+  column an engine of `ENGINES`. Dynamic bodies blue, sleeping ones grey,
+  statics dark, a circle's radius line showing its turn; contact points
+  red with their normals, hollow orange where held within the speculative
+  margin, square where ours keeps no point and the view estimates one.
+- `VIEW_TEXT=<columns>` also prints each panel as characters, for reading
+  in a terminal or by an agent that can't open an image: statics `#`, each
+  body a letter, sleeping `.`, contact points `*` (pressed) and `+` (held)
+  where they fall outside a body. Shapes thinner than a character are drawn
+  by their outlines. 60-100 columns suit a small scene; a pile wants the
+  SVG.
+- Ours is drawn from the arrays (`ours (arrays)`) and from the mod
+  (`ours (ECS)`, the world's contacts), both; they should be identical.
+
+## The behaviour scenes
+
+```sh
+BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare > behave.md
+SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run -c opt //engine/std/physics/compare
+./bazel run -c opt //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+./bazel run -c opt //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
+./bazel run -c opt //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
+```
+
+A table a scene of what each engine did (`behave.rs` in each), about a
+minute in 2D and seconds in 3D. These are what `:behaviour_test` (2D and
+3D) records beside its bounds; after bumping a library or changing a
+scene, measure again and set each bound by the rules in physics.md,
+"Quality beyond settling". As with the quality tests, a bound ours no
+longer meets is a bead and an ignored test.
+
 ## Refreshing the quality tests' bounds
 
 The quality tests (physics.md, "Quality as a test") hold ours to bounds

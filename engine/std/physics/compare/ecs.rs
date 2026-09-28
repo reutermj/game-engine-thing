@@ -8,11 +8,29 @@ use std::time::Instant;
 
 use engine_ecs::Entity;
 use engine_loader::engine::Engine;
-use physics::{Body, Collider, DYNAMIC, Manifold, Position, Rot, Rotation, Spin, Vec2, Velocity};
+use physics::{Asleep, Body, Collider, ContactPair, ContactPoints, DYNAMIC, Manifold, Position, Rot, Rotation, Spin, Vec2, Velocity};
 
 use crate::arrays::{Arrays, Stages};
 use crate::scene::{GRAVITY, Scene, Spec};
+use crate::sim::Mark;
 use crate::{Dyn, Sim};
+
+/// Where a contact without points touches, for the view: on the face of
+/// the smaller of its two shapes, toward the other, which is right for a
+/// body on a floor or a wall and near enough between equals.
+fn estimate(a: (Vec2, &Collider), b: (Vec2, &Collider), n: Vec2, speculative: bool) -> Mark {
+    let ext = |c: &Collider| if c.shape == physics::CIRCLE { c.hx } else { n.x.abs() * c.hx + n.y.abs() * c.hy };
+    let p = if a.1.reach() <= b.1.reach() { a.0 + n * ext(a.1) } else { b.0 - n * ext(b.1) };
+    Mark { x: p.x, y: p.y, nx: n.x, ny: n.y, estimated: true, speculative }
+}
+
+/// A contact's points as `ContactPoints` has them, each at its arm from `a`.
+fn points(at_a: Vec2, cp: &ContactPoints, count: u8, n: Vec2, speculative: bool) -> impl Iterator<Item = Mark> + '_ {
+    (0..count as usize).map(move |k| {
+        let p = at_a + cp.anchors(k).0;
+        Mark { x: p.x, y: p.y, nx: n.x, ny: n.y, estimated: false, speculative }
+    })
+}
 
 /// `TURN=2`: where rotation is locked, ours still gives every dynamic body a
 /// `Rotation` (and no `Spin`), as a lock by a flag or by infinite inertia
@@ -66,6 +84,14 @@ impl Ecs {
 }
 
 impl Ecs {
+    /// The dynamic bodies, in the order they came.
+    fn dynamic(&self) -> Vec<Entity> {
+        let w = self.engine.world();
+        let mut bodies: Vec<Entity> = w.values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).map(|(e, _)| e).collect();
+        bodies.sort();
+        bodies
+    }
+
     /// Bodies physics has asleep: its count, which its tests check against
     /// the world's sleeping tables.
     #[allow(dead_code)] // The quality tests read it; the comparison doesn't.
@@ -117,11 +143,9 @@ impl Sim for Ecs {
         let colliders: HashMap<Entity, Collider> = w.values::<Collider>().unwrap().into_iter().collect();
         let rotations: HashMap<Entity, Rotation> = w.values::<Rotation>().unwrap_or_default().into_iter().collect();
         let spins: HashMap<Entity, Spin> = w.values::<Spin>().unwrap_or_default().into_iter().collect();
-        let mut bodies: Vec<(Entity, Body)> = w.values::<Body>().unwrap().into_iter().filter(|(_, b)| b.kind == DYNAMIC).collect();
-        bodies.sort_by_key(|(e, _)| *e);
-        bodies
+        self.dynamic()
             .iter()
-            .map(|(e, _)| {
+            .map(|e| {
                 let (p, v, c) = (pos[e], vel[e], colliders[e]);
                 let angle = rotations.get(e).map_or(0.0, |q| q.angle());
                 let w = spins.get(e).map_or(0.0, |s| s.w);
@@ -168,6 +192,33 @@ impl Sim for Ecs {
         let stats = self.engine.send("physics", "stats").unwrap();
         format!("contacts {} (pressed {})", field(&stats, "contacts"), self.contacts())
     }
+
+    /// Every contact in the world, its points from its `ContactPoints`
+    /// where either end turns, else estimated from its normal.
+    fn marks(&self) -> Vec<Mark> {
+        let w = self.engine.world();
+        let pos: HashMap<Entity, Position> = w.values::<Position>().unwrap().into_iter().collect();
+        let colliders: HashMap<Entity, Collider> = w.values::<Collider>().unwrap().into_iter().collect();
+        let manifolds: HashMap<Entity, Manifold> = w.values::<Manifold>().unwrap_or_default().into_iter().collect();
+        let cps: HashMap<Entity, ContactPoints> = w.values::<ContactPoints>().unwrap_or_default().into_iter().collect();
+        let at = |e: &Entity| Vec2::new(pos[e].x, pos[e].y);
+        let mut out = Vec::new();
+        for (c, pair) in w.values::<ContactPair>().unwrap_or_default() {
+            let m = &manifolds[&c];
+            let n = Vec2::new(m.nx, m.ny);
+            if m.points > 0 {
+                out.extend(points(at(&pair.a), &cps[&c], m.points, n, !m.pressed));
+            } else {
+                out.push(estimate((at(&pair.a), &colliders[&pair.a]), (at(&pair.b), &colliders[&pair.b]), n, !m.pressed));
+            }
+        }
+        out
+    }
+
+    fn sleeping(&self) -> Vec<bool> {
+        let asleep: HashMap<Entity, Asleep> = self.engine.world().values::<Asleep>().unwrap_or_default().into_iter().collect();
+        self.dynamic().iter().map(|e| asleep.contains_key(e)).collect()
+    }
 }
 
 pub struct Flat {
@@ -187,7 +238,12 @@ fn collider(s: &Spec) -> Collider {
 }
 
 fn body(s: &Spec) -> Body {
-    if s.dynamic { Body { friction: s.friction, restitution: s.restitution, ..Body::default() } } else { Body::fixed() }
+    let material = |b: Body| Body { friction: s.friction, restitution: s.restitution, ..b };
+    if s.dynamic {
+        material(Body { inv_mass: 1.0 / s.mass, gravity_scale: s.gravity_scale, ..Body::default() })
+    } else {
+        material(Body::fixed())
+    }
 }
 
 impl Flat {
@@ -217,6 +273,9 @@ impl Flat {
         let mut label = label.to_string();
         if turning {
             arrays = arrays.turning();
+            for (i, s) in specs.iter().enumerate() {
+                arrays.spin[i] = arrays.spin[i].map(|_| s.w);
+            }
         } else if oriented() {
             for (q, b) in arrays.rot.iter_mut().zip(&arrays.body) {
                 if b.kind == DYNAMIC {
@@ -224,6 +283,12 @@ impl Flat {
                 }
             }
             label += ", oriented";
+        }
+        // A turned static is a ramp, and a turned body starts so.
+        for (i, s) in specs.iter().enumerate() {
+            if s.angle != 0.0 {
+                arrays.rot[i] = Some(Rot::from_angle(s.angle));
+            }
         }
         Flat { arrays, solve, label, t: Stages::default(), wall: 0.0, statics, turning }
     }
@@ -322,5 +387,20 @@ impl Sim for Flat {
 
     fn native(&self) -> String {
         format!("contacts {} (pressed {})", self.arrays.contacts.len(), self.contacts())
+    }
+
+    fn marks(&self) -> Vec<Mark> {
+        let a = &self.arrays;
+        let mut out = Vec::new();
+        for c in &a.contacts {
+            let (i, j) = (c.a as usize, c.b as usize);
+            if c.points > 0 {
+                let p = &a.points[c.points as usize - 1];
+                out.extend(points(a.pos[i], &p.cp, p.count, c.normal, !c.pressed));
+            } else {
+                out.push(estimate((a.pos[i], &a.collider[i]), (a.pos[j], &a.collider[j]), c.normal, !c.pressed));
+            }
+        }
+        out
     }
 }

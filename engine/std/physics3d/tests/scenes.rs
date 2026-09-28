@@ -32,6 +32,23 @@ pub struct Spec {
     /// Ignored for a fixed body.
     pub vel: [f32; 3],
     pub fixed: bool,
+    /// A unit quaternion (x, y, z, w): a turned static is a ramp.
+    pub rot: [f32; 4],
+    /// The piles and stacks have the comparison's (friction 0.5, no
+    /// restitution, mass 1); the behaviour scenes their own, the same on a
+    /// body and on what it meets, so every engine's rule for mixing two
+    /// (Rapier's mean, Jolt's and ours' geometric mean, Box3D's) gives it.
+    pub friction: f32,
+    pub restitution: f32,
+    /// Ignored for a fixed body.
+    pub mass: f32,
+}
+
+impl Spec {
+    /// Unturned, with the comparison's friction, no restitution, mass 1.
+    pub fn new(shape: Shape, pos: [f32; 3], fixed: bool) -> Spec {
+        Spec { shape, pos, vel: [0.0; 3], fixed, rot: [0.0, 0.0, 0.0, 1.0], friction: 0.5, restitution: 0.0, mass: 1.0 }
+    }
 }
 
 /// splitmix64: enough randomness for jitter, and no crate to pin.
@@ -70,6 +87,22 @@ pub enum Kind {
     /// so the column leans a little: whether turning boxes stand it or rock
     /// on their edges (2D's `Scene::Stack`).
     Stack,
+    /// A unit cube on a ramp 20° steep, friction 0.6 on both (tan 20° =
+    /// 0.36): it holds. The ramp scenes and the next two are the behaviour
+    /// scenes (physics.md, "Quality beyond settling"), whose n says
+    /// something else or nothing.
+    RampHold,
+    /// A unit cube on a ramp 30° steep, friction 0.2: it slides at
+    /// g (sin θ − μ cos θ).
+    RampSlide,
+    /// A sphere of radius 0.5 on a ramp 30° steep, friction 0.6, above
+    /// (2/7) tan θ: it rolls without slipping at (5/7) g sin θ.
+    RampRoll,
+    /// A sphere of radius 0.5 dropped 5 onto a floor, both of restitution n
+    /// hundredths and no friction: it rebounds to e² of the drop.
+    Bounce,
+    /// A unit cube n times as heavy on a light one (mass 1) on a floor.
+    Ratio,
 }
 
 impl Kind {
@@ -80,13 +113,46 @@ impl Kind {
             Kind::PlankPile => "planks",
             Kind::Rain => "rain",
             Kind::Stack => "stack",
+            Kind::RampHold => "ramp_hold",
+            Kind::RampSlide => "ramp_slide",
+            Kind::RampRoll => "ramp_roll",
+            Kind::Bounce => "bounce",
+            Kind::Ratio => "ratio",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        [Kind::SpherePile, Kind::BoxPile, Kind::PlankPile, Kind::Rain, Kind::Stack].into_iter().find(|k| k.name() == s)
+        KINDS.into_iter().find(|k| k.name() == s)
+    }
+
+    /// The ramp scenes' slope in degrees and friction.
+    pub fn ramp(self) -> Option<(f32, f32)> {
+        match self {
+            Kind::RampHold => Some((20.0, 0.6)),
+            Kind::RampSlide => Some((30.0, 0.2)),
+            Kind::RampRoll => Some((30.0, 0.6)),
+            _ => None,
+        }
     }
 }
+
+/// Every kind, in an order that only grows: the scene mod keeps a kind as
+/// its place here.
+pub const KINDS: [Kind; 10] = [
+    Kind::SpherePile,
+    Kind::BoxPile,
+    Kind::PlankPile,
+    Kind::Rain,
+    Kind::Stack,
+    Kind::RampHold,
+    Kind::RampSlide,
+    Kind::RampRoll,
+    Kind::Bounce,
+    Kind::Ratio,
+];
+
+/// How far above the floor `Kind::Bounce` drops its ball.
+pub const DROP: f32 = 5.0;
 
 pub struct Scene {
     pub kind: Kind,
@@ -113,11 +179,61 @@ pub fn build(kind: Kind, n: usize) -> Scene {
         Kind::PlankPile => pile(kind, n, |_| Shape::Box(PLANK)),
         Kind::Rain => rain(n),
         Kind::Stack => stack(n),
+        Kind::RampHold | Kind::RampSlide | Kind::RampRoll => ramp(kind),
+        Kind::Bounce => bounce(n),
+        Kind::Ratio => ratio(n),
     }
 }
 
 fn fixed_box(pos: [f32; 3], half: [f32; 3]) -> Spec {
-    Spec { shape: Shape::Box(half), pos, vel: [0.0; 3], fixed: true }
+    Spec::new(Shape::Box(half), pos, true)
+}
+
+/// One behaviour scene: its statics and bodies at step 0, `steps` long,
+/// timed as a whole; its `n` is what `build` was given, which says which.
+fn one(kind: Kind, n: usize, statics: Vec<Spec>, bodies: Vec<Spec>, steps: usize) -> Scene {
+    Scene {
+        kind,
+        n,
+        statics,
+        spawn: vec![bodies],
+        steps,
+        phases: vec![("all", 1..steps)],
+        bounds: ([-50.0, -0.1, -50.0], [50.0, f32::MAX, 50.0]),
+    }
+}
+
+/// A static ramp turned θ about z, down toward +x (y is up), 40 long and
+/// 10 wide, and the body 12 up it from its middle, its bottom touching it.
+fn ramp(kind: Kind) -> Scene {
+    let (deg, mu) = kind.ramp().expect("a ramp");
+    let a = -deg.to_radians();
+    let rot = [0.0, 0.0, (a / 2.0).sin(), (a / 2.0).cos()];
+    // Down the slope, and out of its top face.
+    let (t, n) = ([a.cos(), a.sin(), 0.0], [-a.sin(), a.cos(), 0.0]);
+    let centre = [0.0, 20.0, 0.0];
+    let ramp = Spec { rot, friction: mu, ..Spec::new(Shape::Box([20.0, 0.5, 5.0]), centre, true) };
+    let at = |d: f32, up: f32| [0, 1, 2].map(|k| centre[k] + d * t[k] + up * n[k]);
+    let (shape, body_rot) =
+        if kind == Kind::RampRoll { (Shape::Sphere(RADIUS), [0.0, 0.0, 0.0, 1.0]) } else { (Shape::Box([HALF; 3]), rot) };
+    let body = Spec { rot: body_rot, friction: mu, ..Spec::new(shape, at(-12.0, 0.5 + 0.5), false) };
+    Scene { bounds: ([-50.0, -50.0, -50.0], [50.0, f32::MAX, 50.0]), ..one(kind, 1, vec![ramp], vec![body], 120) }
+}
+
+fn floor(friction: f32, restitution: f32) -> Spec {
+    Spec { friction, restitution, ..fixed_box([0.0, -0.5, 0.0], [10.0, 0.5, 10.0]) }
+}
+
+fn bounce(hundredths: usize) -> Scene {
+    let e = hundredths as f32 / 100.0;
+    let ball = Spec { friction: 0.0, restitution: e, ..Spec::new(Shape::Sphere(RADIUS), [0.0, DROP + RADIUS, 0.0], false) };
+    one(Kind::Bounce, hundredths, vec![floor(0.0, e)], vec![ball], if hundredths >= 100 { 1200 } else { 300 })
+}
+
+fn ratio(ratio: usize) -> Scene {
+    let light = Spec { friction: 0.6, ..Spec::new(Shape::Box([HALF; 3]), [0.0, 0.5, 0.0], false) };
+    let heavy = Spec { mass: ratio as f32, ..Spec { pos: [0.0, 1.5, 0.0], ..light } };
+    one(Kind::Ratio, ratio, vec![floor(0.6, 0.0)], vec![light, heavy], 600)
 }
 
 /// A walled box whose floor holds fewer bodies than are dropped into it, so
@@ -155,7 +271,7 @@ fn pile(kind: Kind, n: usize, shape: impl Fn(usize) -> Shape) -> Scene {
         let x = -span / 2.0 + col as f32 * cell + sx + rng.range(-jitter, jitter);
         let z = -span / 2.0 + row as f32 * cell + sz + rng.range(-jitter, jitter);
         let y = 1.0 + layer as f32 * layer_height;
-        bodies.push(Spec { shape: shape(i), pos: [x, y, z], vel: [0.0; 3], fixed: false });
+        bodies.push(Spec::new(shape(i), [x, y, z], false));
     }
 
     let wall_h = top + 2.0;
@@ -219,7 +335,7 @@ fn rain(n: usize) -> Scene {
             }
             recent.push((step, x, z));
             let shape = if (placed + this.len()) % 2 == 0 { Shape::Sphere(RADIUS) } else { Shape::Box([HALF; 3]) };
-            this.push(Spec { shape, pos: [x, height, z], vel: [0.0; 3], fixed: false });
+            this.push(Spec::new(shape, [x, height, z], false));
         }
         placed += this.len();
         spawn.push(this);
@@ -246,9 +362,7 @@ fn rain(n: usize) -> Scene {
 
 fn stack(n: usize) -> Scene {
     let off = |i: usize, k: usize| ((i * k) % 9) as f32 / 100.0 - 0.04;
-    let bodies = (0..n)
-        .map(|i| Spec { shape: Shape::Box([HALF; 3]), pos: [off(i, 7919), 0.5 + i as f32, off(i, 104_729)], vel: [0.0; 3], fixed: false })
-        .collect();
+    let bodies = (0..n).map(|i| Spec::new(Shape::Box([HALF; 3]), [off(i, 7919), 0.5 + i as f32, off(i, 104_729)], false)).collect();
     let steps = 1000;
     Scene {
         kind: Kind::Stack,
