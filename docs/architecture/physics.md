@@ -1491,8 +1491,9 @@ Estimated from the numbers above, at 10 000 bodies:
 4. **Colored, wide solving on one thread (algorithm).** 1.28–1.4× the
    solver, about 400–500 µs at 10 000 and more on the pyramid; another
    computation, deterministic, and the start of the parallel solve.
-   Done otherwise, 2026-09-27, for turning contacts: in lanes by level,
-   the same computation, twice as fast ([The solver's speed](#the-solvers-speed)).
+   Done for turning contacts: in lanes by level, the same computation,
+   twice as fast (2026-09-27), then colored as the default (2026-09-28,
+   get-emj.61; [The solver's speed](#the-solvers-speed)).
 5. **Solver arrays kept between steps (ECS).** Most of the 170 µs the
    copies cost over the arrays; the transpose itself is cheap ([What the
    ECS costs](#what-the-ecs-costs)).
@@ -1944,7 +1945,8 @@ there are two, as above:
   colored, wide solve that was measured at 1.3–1.4 times the scalar one
   without rotation ([Parallel solving](#parallel-solving)) is where the
   gap closes, more so with rotation's longer rows. (It closed by level
-  rather than by color, 2026-09-27: [The solver's speed](#the-solvers-speed).)
+  first, 2026-09-27, and by color since 2026-09-28: [The solver's
+  speed](#the-solvers-speed).)
 
 ### Against other engines, bodies turning
 
@@ -2840,8 +2842,9 @@ sliding.
 
 `BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare`
 (2026-09-28; Box2D v3.1.1, continuous on; Rapier 0.36 as shipped, its CCD
-changing nothing here). Deterministic, one run. The mod and the arrays
-agree on every scene to every digit.
+changing nothing here; ours re-run on get-emj.61's default the same day).
+Deterministic, one run. The mod and the arrays agree on every scene to
+every digit.
 
 | scene | expected | ours | Box2D | Rapier |
 |---|---|---|---|---|
@@ -2854,18 +2857,18 @@ agree on every scene to every digit.
 | bounce, e 0.75 | 0.5625 | **0.579** | 0.548 | 0.548 |
 | bounce, e 1: first; highest; last, 20 s | 1; 1; 1 | **1.048; 1.64; 1.64** | 0.996; 0.996; 0.919 | as Box2D |
 | 10:1: top sank; deepest; at rest from | – | 0.0015; 0.0012; 2 | 0.0097; 0.0077; 3 | 0.0097; 0.0077; 2 |
-| 100:1 | – | 0.014; 0.011; **77** | 0.088; 0.072; 23 | 0.089; 0.071; 23 |
-| 1000:1 | – | stands, 0.14; 0.11; **never** (0.15 a second) | crushed (1.0 lower); 41 | crushed; 29 |
-| 100:1 on five | – | stands, 0.11; **never** (0.06) | topples; 253 | crushes one (0.67); 68 |
-| 1000:1 on five | – | crushed, **two boxes out through the floor, 82 a second** | crushed, calm; 220 | crushed, 4.1 a second; 285 |
-| wide box on two, 400:1 | – | 0.040; 0.024; **never** (0.5) | 0.176; 0.141; 34 | 0.176; 0.141; 33 |
-| overlap, 4 wide at 0.25: fastest; apart at; at rest | at most the cap, 3 | 2.2; 20; 27 | 3.0; 67; 55 | 3.5; 46; 48 |
-| overlap, 4 wide at 0.5 | | 2.5; 31; 33 | 3.6; 56; 54 | 4.4; 57; 58 |
-| overlap, 10 wide at 0.5 | | 9.4; 43; 101, stands | 16.8; 75; 198, topples, two out | 16.5; 101; 241, topples |
-| card house: most moved; at rest | stands | 0.10; 27[^card-house] | 0.14; 21 | **two cards fall** |
+| 100:1 | – | 0.014; 0.011; 24 | 0.088; 0.072; 23 | 0.089; 0.071; 23 |
+| 1000:1 | – | stands, 0.14; 0.12; **199** | crushed (1.0 lower); 41 | crushed; 29 |
+| 100:1 on five | – | stands, 0.11; 48 | topples; 253 | crushes one (0.67); 68 |
+| 1000:1 on five | – | crushed, **four boxes out through the floor, 83 a second** | crushed, calm; 220 | crushed, 4.1 a second; 285 |
+| wide box on two, 400:1 | – | 0.028; 0.023; **69** | 0.176; 0.141; 34 | 0.176; 0.141; 33 |
+| overlap, 4 wide at 0.25: fastest; apart at; at rest | at most the cap, 3 | 3.0; 20; 24 | 3.0; 67; 55 | 3.5; 46; 48 |
+| overlap, 4 wide at 0.5 | | 3.1; 33; 37 | 3.6; 56; 54 | 4.4; 57; 58 |
+| overlap, 10 wide at 0.5 | | 11.8; 50; 130, stands | 16.8; 75; 198, topples, two out | 16.5; 101; 241, topples |
+| card house: most moved; at rest | stands | 0.10; 26[^card-house] | 0.14; 21 | **two cards fall** |
 | ladder, μ 0.4 and 0.3: slid | stands (0.269) | 0.00005 | 0.0004 | 0.00001 |
 | ladder, μ 0.24 and 0.2: slid | slides | 1.30, 1.35 | 1.31, 1.35 | 1.30, 1.35 |
-| dominoes: fell in order; wave; at rest | all | 15; 2.667 a second; 441 | 15; 2.667; 434 | 15; 2.736; 443 |
+| dominoes: fell in order; wave; at rest | all | 15; 2.60 a second; 447 | 15; 2.667; 434 | 15; 2.736; 443 |
 
 **Fast bodies**, phases of four that pass through the wall:
 
@@ -2917,8 +2920,9 @@ within 0.2% (the sliding box exact), the ladder standing and sliding
 either side of its friction, the dominoes falling at Box2D's speed. It
 stands heavy boxes the references crush, sinking 5-10 times less, as its
 stiffer contacts did on piles ([Settling](#settling)); pushes overlap
-apart more gently than either (at 2.2-2.5 a second where theirs reach
-3.0-4.4) and keeps the 10-wide pyramid standing where both topple it; and
+apart no faster than either (at 3.0-3.1 a second where theirs reach
+3.0-4.4; 2.2-2.5 before get-emj.61's default) and keeps the 10-wide
+pyramid standing where both topple it; and
 stands the card house Rapier drops (as measured then: at the edge, it now
 goes either way, and is judged as a family, [What a turning point
 carries](#what-a-turning-point-carries-the-decision-matrix)). Four things are wrong, each an ignored
@@ -2934,15 +2938,20 @@ looser bound:
   and e = 0.75 passes e². Below 0.5 every engine loses more to the soft
   contact than this adds, so it hides. Pong is spared: its ball has no
   gravity.
-- **A heavy box on light ones never comes to rest** (get-emj.57): at
-  100:1 it rests from 77 where both references rest from 23; at 1000:1, on
-  the column of five at 100:1, and under the wide box it keeps moving at
-  0.15, 0.06 and 0.5 a second, over the sleep threshold, so it never
-  sleeps. In 3D it rests (from 42 at 100:1, where Rapier rests from 55).
-- **A box 1000 times as heavy crushing a column of five throws two light
-  boxes out through the floor**, at up to 82 a second (get-emj.58); the
+- **A heavy box on light ones comes to rest late** (get-emj.57): at
+  1000:1 from 199 where the references rest from 41 and 29, and under the
+  wide box from 69 where they rest from 34 and 33; at 100:1 (24) and on
+  the column of five (48) no later than they do. (Before get-emj.61's
+  default, 100:1 rested from 77 and the others kept moving at 0.06 to 0.5
+  a second.) In 3D it rests (from 42 at 100:1, where Rapier rests from
+  55).
+- **A box 1000 times as heavy crushing a column of five throws four light
+  boxes out through the floor**, at up to 83 a second (get-emj.58); the
   references crush it too, calmly. The push-out cap doesn't hold a body
-  squeezed between a static and one a thousand times its mass.
+  squeezed between a static and one a thousand times its mass. It is the
+  tangent averaged over the substeps that lets it: with both impulses
+  carried from the last substep (`rot/carry=0`) nothing escapes, so it is
+  a condition of the default ([The decision](#the-decision-b-colored)).
 - **No continuous collision** (get-emj.59): the limit above, where both
   references never tunnel. Pinned by an active test at the limit
   (`a_ball_bounces_off_a_wall_while_a_step_is_within_the_margin_its_radius_and_half_the_wall`:
@@ -3180,16 +3189,22 @@ to 4 times Box2D v3.1.1's and Rapier 2D 0.36's (8215 µs against 2626 and
 3999 on the settled turning pile of 10 000, 7324 against 1725 and 2425 on
 the 5050 pyramid; [Against other engines, bodies
 turning](#against-other-engines-bodies-turning)). It now solves four
-contacts at a time, grouped by level of the sweep in pair order, which is
-the same computation as before bit for bit, and takes about half the time:
-within 10% of Box2D's at Box2D's number of passes, and 1.7 to 1.8 times it
-at ours, which are a quality choice ([Settling](#settling), [Still at
-rest](#still-at-rest)). Nothing the quality tests bound moved, since
-nothing moved at all. Graph coloring, the order threads would share, let
-a turning 5050 pyramid fall; that turned out to be a flaw in how a step
-warm-starts turning contacts, found and fixed on 2026-09-28 (get-emj.48,
-[Why colors let the pyramid fall](#why-colors-let-the-pyramid-fall)),
-which did move results, and for the better.
+contacts at a time and takes about half the time: within 10% of Box2D's
+at Box2D's number of passes, and 1.7 to 1.8 times it at ours, which are a
+quality choice ([Settling](#settling), [Still at rest](#still-at-rest)).
+Built grouped by level of the sweep in pair order, the same computation
+as before bit for bit, so that nothing the quality tests bound moved.
+Graph coloring, the order threads would share, let a turning 5050 pyramid
+fall; that turned out to be a flaw in how a step warm-starts turning
+contacts, found and fixed on 2026-09-28 (get-emj.48, [Why colors let the
+pyramid fall](#why-colors-let-the-pyramid-fall)), which did move results,
+and for the better. Since get-emj.61 (2026-09-28) the default groups by
+Box2D's colors, with a turning point's normal carried from the last
+substep and its tangent averaged ([What a turning point
+carries](#what-a-turning-point-carries-the-decision-matrix)): bit for bit
+the loop one contact at a time over the colors' order, which is what a
+parallel solve over the same colors can be too, so that going parallel
+is speed work alone.[^levels-default]
 
 ### Where the time went
 
@@ -3249,9 +3264,9 @@ body's velocity and turn rate against one contact at a time in pair order:
 | one contact at a time in pair order, as it was | 9104 | 7470 | – |
 | the lanes' layout alone: batches of one, pair order[^pair-lanes] | 10 335 | 6434 | yes |
 | by level, 1 lane | 8793 | 5475 | yes |
-| **by level, 4 lanes (built)** | **4485** | **3075** | **yes** |
+| by level, 4 lanes (built first) | 4485 | 3075 | yes |
 | by level, 8 lanes (two SSE2 registers) | 4522 | 3139 | yes |
-| graph-colored as Box2D, 1 / 4 / 8 lanes | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: another order[^colored-fell] |
+| graph-colored as Box2D, 1 / 4 / 8 lanes (4 the default since get-emj.61) | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: another order[^colored-fell]; against its own order one at a time, yes |
 
 Then, each alone on 4 lanes by level, bit for bit unless said:
 
@@ -3268,22 +3283,29 @@ Then, each alone on 4 lanes by level, bit for bit unless said:
 | one relaxing pass | −26% (3337, 2289); fails the quality tests ([Rotation in the soft step](#rotation-in-the-soft-step)) |
 | Box2D's passes: 4 substeps, 1 relaxing | 2822, 1910 to 2247 against Box2D's 2596 and 1725: within about 10% like for like; fails on depth and rest |
 
-- **Levels, not colors.** The sweep in pair order makes a contact wait
-  only on earlier contacts sharing a body it moves. A contact's level is
-  one past the latest such contact's (in pair order, the level its bodies'
-  last contact left, so one pass finds it), and solving the levels in
-  turn, each contact sees the bodies exactly as the sweep would have left
-  them: it is the sweep bit for bit, with no two contacts in a level
-  sharing a moving body, so a level's contacts can go in lanes. This is
-  level scheduling, as sparse triangular solves run in parallel (Anderson
-  and Saad, 1989). A pile of 10 000 has about 420 levels, a 5050 pyramid
-  590, and their batches are 97% and 94% full. Colors are 6 or 7 and
-  solve 3% faster, but in another order, so another computation. Since
-  get-emj.48 colors pass every quality test, the long ones included, but
-  pair order is still the better order for a pile or a pyramid: it walks
-  them row by row from the ground, which colors scatter, and settles the
-  5050 pyramid from 450 where colors take 1500 ([Why colors let the
-  pyramid fall](#why-colors-let-the-pyramid-fall)).
+- **Levels first, then colors.** The sweep in pair order makes a contact
+  wait only on earlier contacts sharing a body it moves. A contact's
+  level is one past the latest such contact's (in pair order, the level
+  its bodies' last contact left, so one pass finds it), and solving the
+  levels in turn, each contact sees the bodies exactly as the sweep would
+  have left them: it is the sweep bit for bit, with no two contacts in a
+  level sharing a moving body, so a level's contacts can go in lanes.
+  This is level scheduling, as sparse triangular solves run in parallel
+  (Anderson and Saad, 1989). A pile of 10 000 has about 420 levels, a
+  5050 pyramid 590, and their batches are 97% and 94% full. Colors are 6
+  or 7 and solve 3% faster, in another order, so another computation, but
+  the same argument holds of them: no two contacts in a color share a
+  moving body, so solving the colors in turn is the sweep over the
+  contacts in the colors' order (`solver::order`), bit for bit. That
+  makes the colors the default (get-emj.61): with 6 or 7 of them a pass
+  threads can share them, where 420 to 590 levels would be as many
+  barriers, and a parallel solve over the colors can be the one-thread
+  solve exactly. Pair order is still the better order for a pyramid,
+  which it walks row by row from the ground (by level the 5050 rested
+  from 450, colored from 780); with the normal carried and the tangent
+  averaged, colors meet every bound in every order, which pair order
+  didn't ([What a turning point
+  carries](#what-a-turning-point-carries-the-decision-matrix)).
 - **Four lanes, not eight**: SSE2 is x86-64's baseline, and Box2D was
   measured at SSE2; eight are two registers each, 1% slower on the pile
   and 10% slower on the pyramid of 210.
@@ -3307,12 +3329,23 @@ Then, each alone on 4 lanes by level, bit for bit unless said:
   variants that only it has (the block solver, other separations) and
   the test that the lanes are it bit for bit.
 
-**The tests.** `the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`
-(`:quality_test`) holds the default to the loop bit for bit on a turning
-pile and pyramid over 150 steps, and checks that colored differs, so an
-order is visible to it. Planted, it fails on a level off by one (every
-turning quality test fails with it) and on one sum in the pushing pass
-reassociated (nothing else sees that). The long quality tests take 24 s
+**The tests.** `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
+(`:quality_test`) holds the default, colored in four lanes, to the loop
+one contact at a time over the colors' order (`rot/scalar=1/order=4`)
+bit for bit on a turning pile and pyramid over 150 steps, and checks that
+the loop in pair order differs, so an order is visible to it: it is the
+test a parallel solve over the colors has to pass too. Planted, it fails
+on a color off by one (a contact marking the color after its own as
+taken, so the next contact at its body can share it) and on one sum in
+the lanes' separation reassociated. Both sides solve the same order, so
+a change to the order alone passes it (a static contact kept out of
+color 1 instead of color 0): `core_test`'s
+`contacts_are_colored_as_box2d_colors_them` pins Box2D's rule on five
+contacts, and fails on both planted changes to the colors. The level
+path stays as a variant with its test,
+`the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`
+(`rot/levels=4` against `rot/scalar=1`), which fails on a level off by
+one and on the same reassociated sum. The long quality tests take 24 s
 where they took 38.
 
 ### Against the others now
@@ -3339,14 +3372,15 @@ Rapier's and 1.7 to 1.8 times Box2D's where contacts press, from 20 passes
 to their 12 and a prepare twice Box2D's (get-emj.50); the step is 1.5 times
 Box2D's on the settled pile, where the narrowphase and upkeep are ours.
 
-**What it means for threads** (get-emj.32, get-znt.5): the levels are
+**What it means for threads** (get-emj.32, get-znt.5): the levels were
 the one-thread schedule. 420 to 590 of them would be as many barriers a
 pass, where a barrier costs 0.19 µs on one CCD ([Parallel
 solving](#parallel-solving)): 80 to 110 µs a pass, more than the pass. The
-parallel solve is colors, whose batches run the same lanes and layout;
-only the grouping differs. Colors are another order, and until get-emj.48
-they let the big turning pyramid fall; now it stands, later to rest than
-in pair order (get-emj.54).
+parallel solve is colors, and since get-emj.61 so is the one-thread
+default: the same batches, lanes and layout, so threads taking a color's
+batches between them compute what one thread does, and
+`the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
+is the test they have to pass.
 
 **3D** (engine/std/physics3d) has the same structure, rows in pair order,
 and the level schedule applies to it unchanged. Alone, rows reordered by
@@ -3487,25 +3521,29 @@ and `:quality_long_test` with `SOLVER=`):
   forward) helps colors and hurts pair order. The stiffness is a quality
   choice ([Settling](#settling)); get-emj.54 has the rest.
 
-**Colors as the default, or the parallel path?** Measured, not decided:
-colored now passes every quality test the default does, the long ones
-included, and is 3-5% faster at four lanes (pile 10 000 4338 against
-4482 µs, pyramid 2881 against 3042) and 8-11% at eight (4137, 2709). But
-it rests the 5050 pyramid at 1500 against 450 (Box2D 160, Rapier 1100;
-the bound 2200), the turning piles a little later at worst (380 against
-330), and pyramids 40 and 50 wide later than their bounds allow (40 at
-250 against 220; 50 keeps 7.8e-6 a body against 8.1e-7): an ignored test,
-`a_pyramid_that_turns_stands_when_its_contacts_are_colored`, and
-get-emj.54. For threads, colors are now a solve that stands; as one
-thread's default, pair order settles better for 3% more time.
+**Colors as the default, or the parallel path?** Both, since get-emj.61
+([What a turning point
+carries](#what-a-turning-point-carries-the-decision-matrix)). As first
+measured, with both impulses carried from the last substep, colored
+passed every quality test the default did, and was 3-5% faster at four
+lanes (pile 10 000 4338 against 4482 µs, pyramid 2881 against 3042) and
+8-11% at eight (4137, 2709), but rested the 5050 pyramid at 1500 against
+450 (Box2D 160, Rapier 1100; the bound 2200), and pyramids 40 and 50 wide
+later than their bounds allow (40 at 250 against 220; 50 kept 7.8e-6 a
+body against 8.1e-7; get-emj.54). With the tangent averaged, colored
+rests the 5050 from 780, the 50 from 120 with 5.4e-7 a body, and the 40
+in every order within its bounds, so get-emj.54 is closed and its test,
+`a_pyramid_that_turns_stands_when_its_contacts_are_colored`, runs.
 
 **The tests.** `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in`
 (`:quality_test`) holds a turning pyramid 40 wide to the references'
-bounds in pair order and from the top down, the smallest pyramid that
-tells the two warm starts apart (at 30 the average rests by 220 in
-every order); `:quality_long_test` holds the 50 in pair order, shuffled and
+bounds in the default's order and from the top down (since get-emj.61
+the colors of each), the smallest pyramid that tells the two warm starts
+apart (at 30 the average rests by 220 in every order);
+`:quality_long_test` holds the 50 in the default's order, shuffled and
 from the top down, and colored the 5050
 (`a_big_pyramid_that_turns_stands_when_its_contacts_are_colored`).
+Measured when the default was by level (pair order):
 Planted, the average back: the 40 from the top down rests from 310 and
 keeps 1.2e-6 a body, the 50 shuffled rests from 680 and top down from
 660; the last substep's
@@ -3515,7 +3553,8 @@ the fix in the lanes and not in the loop one contact at a time:
 
 ### What a turning point carries: the decision matrix
 
-**Status: open, the data for a choice** (2026-09-28, get-emj.61). Carrying
+**Status: decided** (2026-09-28, get-emj.61): **B colored** is the
+default ([The decision](#the-decision-b-colored)). Carrying
 both impulses from the last substep (above) broke one scene the others
 hadn't measured: Box2D's 5-storey card house, which lost two cards. The
 top A-frame's apex holds on friction at 0.54 of its 0.7 limit; in the
@@ -3528,10 +3567,10 @@ its edge: every engine drops it at friction 0.6; ours before fell at six
 storeys, Rapier at five, Box2D at eight. Three options, all built
 (`solver::Carry`, `arrays:rot/carry=<n>`), each also colored:
 
-- **A** (`Carry::Last`, the interim default): both impulses as the last
-  substep left them.
-- **B** (`Carry::Normal`, `carry=1`): the normal's last, the tangent's
-  mean.
+- **A** (`Carry::Last`, `carry=0`, the default from get-emj.48 to the
+  decision, by level): both impulses as the last substep left them.
+- **B** (`Carry::Normal`, `carry=1`, colored the default since): the
+  normal's last, the tangent's mean.
 - **C** (`Carry::Mean`, `carry=2`): both means, as before get-emj.48.
 
 **The families.** The single card house became a family, and five more
@@ -3629,6 +3668,59 @@ later). It is its own solver and its own measure; this matrix is 2D's.
 
 The whole listing, every bound under every option with its value, is in
 get-emj.61.
+
+#### The decision: B colored
+
+**Built** (2026-09-28, get-emj.61). The default for turning contacts is
+B in colored order: a point's normal impulse carried from the last
+substep and its tangent averaged (`Carry::Normal`), the contacts solved in
+Box2D's graph colors, four lanes wide (`Wide::Colored(4)`). A (both from
+the last substep, by level in pair order) and C (both averaged) stay
+variants: `rot/levels=4/carry=0` is A to the bit, `rot/carry=2` C colored.
+
+- **Why: to unblock parallelism.** Bc is the only option that meets
+  every bound in every contact order (338 of 338, the colored pyramids of
+  40, 50 and 5050 included), and it stands the most card houses (105 of
+  135, Box2D 104). With the colored order the default, a parallel solve
+  over the same colors can be bit-identical to one thread: no two
+  contacts in a color share a moving body, so threads splitting a color's
+  batches compute what one thread does, and
+  `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
+  is the test that path has to pass. Going parallel is then speed work
+  alone: no quality bound can move.
+- **Checked against the matrix.** The four suites with `MATRIX=1` and
+  `--include-ignored` on the new default give Bc's column above exactly,
+  every bound's value to the digit, but for the one test on the mod (the
+  20-high stack at six substeps), which the matrix ran at A because the
+  mod takes no variant; `rot/levels=4/carry=0` gives A's column exactly.
+  A world where nothing turns is untouched: no locked bound moved, and
+  pong's and the platformer's replays pass unchanged (nothing in either
+  turns).
+- **What moved**, A to Bc, every bound met: the turning piles of 400 to
+  1200 at rest from 200, 220, 210, 250, 290 → 220, 230, 200, 210, 260,
+  the deepest while settling 0.54 → 0.38; the piles of 9000 to 11 000
+  370, 310, 360 → 350, 320, 1870 (the worst bound 2490, the median 350
+  against 1760); the 5050 pyramid 450 → 780 (Box2D 160, Rapier 1100, the
+  bound 2200); pyramids of 15 to 25 at rest from 10, 20, 20 → 20, 30, 30;
+  the 40 from the top down 170 → 60; the 50 in the default's order,
+  shuffled and from the top down 150, 230, 180 → 120, 90, 90; overlap
+  recovery's fastest 2.2, 2.5, 9.1 → 3.0, 3.1, 11.8 (bounds 3.8, 4.5,
+  20.6); the card families 8 → 11 of 12 and 87 → 105 of 135. The mod's
+  20-high stack at six substeps still rests from 30, and at five from
+  240.
+- **Conditions of the default.** Under B, colored or not, the column
+  crushed by a box 1000 times as heavy throws light boxes through the
+  floor (four, at up to 83 a second), which A didn't: get-emj.58, raised
+  to P2 as a condition of this default, its test still ignored. The
+  colored pyramid 50 that A missed (get-emj.54) stands within its bounds,
+  and its test runs.
+- **Speed** (the comparison, `TURN=1`, `-c opt`, one thread, medians of
+  3 runs; the ECS mod's solver stage in µs, before → after): the turning
+  pile of 10 000 settled 4593 → 4518, the 5050 pyramid 3057 → 2936, rain
+  of 10 000 3517 → 3617 (with 5% more contacts pressing, 12 129 → 12 702,
+  since the rain falls otherwise); the whole step 6690 → 6589, 4560 →
+  4462, 6369 → 6499: 2% and 4% faster where contacts press, as the
+  solver alone measured colors (3-5%), and rain about the same a contact.
 
 ## Open questions
 
@@ -3982,6 +4074,15 @@ frame 508.
     pyramid fall](#why-colors-let-the-pyramid-fall). Measured here as a
     stack option, it was set aside for the piles' worst; on the lanes it
     moved the turning piles' worst from 440 to 330.
+
+[^levels-default]: *(History, 2026-09-28.)* From 2026-09-27 the default
+    grouped turning contacts by level of the pair-order sweep
+    (`Wide::Levels(4)`), bit for bit the loop one contact at a time in pair
+    order, and from get-emj.48 carried both of a turning point's impulses
+    from the last substep (`Carry::Last`): A in the decision matrix.
+    get-emj.61 replaced both, so that the one-thread solve is one a
+    parallel solve can match. Both stay as variants (`rot/levels=4`,
+    `rot/carry=0`), the level path with its equivalence test.
 
 [^pair-lanes]: *(History, 2026-09-27.)* `Wide::Pair`, the lanes' layout
     one contact to a batch in pair order, was built to check the layout
