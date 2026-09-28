@@ -377,3 +377,14 @@ one would have to ship those files with it.
   entity's entry, invisible, and purge once the dead could be a quarter of
   the set (`SparseSet::purge_dead`), since a despawn doesn't hold every
   set's guard.
+
+## hash-prospector
+
+- **Project:** hash-prospector, a search for integer hash functions,
+  by Chris Wellons (skeeto), https://github.com/skeeto/hash-prospector.
+- **License:** the Unlicense (public domain), as its `UNLICENSE` states
+  (read 2026-09-28).
+- **What we use:** the constants and shifts of its `lowbias32`, as given
+  in its README, for `hashed` in `engine/std/physics/compare/scene.rs`,
+  which chooses each body of a mixed pile (`Scene::Mixed`) the same way
+  in every engine. Nothing is linked.

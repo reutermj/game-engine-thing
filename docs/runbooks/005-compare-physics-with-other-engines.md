@@ -127,6 +127,57 @@ scene, measure again and set each bound by the rules in physics.md,
 "Quality beyond settling". As with the quality tests, a bound ours no
 longer meets is a bead and an ignored test.
 
+## The baseline
+
+Our own accepted results, per scene and measure, in four files:
+`engine/std/physics/compare/baseline.txt` and `baseline_long.txt` (2D),
+`bench/physics3d/baseline.txt` and `baseline_long.txt` (3D)
+(physics-testing.md, "The baseline"). The quality and behaviour tests
+check them, from their own runs (the test `baseline` in each, and
+`baseline_long` in the long ones), both ways: a value past its band fails,
+better or worse.
+
+- **Trigger:** a baseline test fails; or a change to the solver, the
+  narrowphase, the broadphase, sleeping, the step, a scene or a measure,
+  which may move values inside the bounds without failing anything.
+- **Compare**, before and after a change, and put the table in the
+  commit message or the report:
+
+  ```sh
+  ./bazel run -c opt //engine/std/physics/compare:baseline          # 2D default, 1 s
+  ./bazel run -c opt //engine/std/physics/compare:baseline -- --long  # 2D long, about a minute
+  ./bazel run -c opt //bench/physics3d:baseline                    # 3D default, seconds
+  ./bazel run -c opt //bench/physics3d:baseline -- --long            # 3D long, about 90 s
+  SOLVER=rot/carry=0 ./bazel run -c opt //engine/std/physics/compare:baseline   # a variant against the baseline
+  ```
+
+  Every value that moved past its band, with old, new, band and which
+  way. `--all` lists every value. Fastbuild gives the same numbers (the
+  steps are the same arithmetic), at about fifty times the time.
+- **Regenerate** when the change is accepted: add `--write` to each of
+  the four, in the same commit as the change. The file's diff is the
+  record of what the change did; say in the commit why each value that
+  moved the worse way is accepted. The long files are regenerated
+  whenever the long suites are run for a change (before merging any
+  change to the solver, the narrowphase, sleep or the step). Never edit
+  a file by hand.
+- **Merging** branches that touch physics: after the merge, run the four
+  comparisons on the merged tree against each parent's files
+  (`git show <parent>:<path> > <path>`, compare, restore), then write
+  them on the merged tree. A conflict in a baseline file is never
+  resolved by hand. A value that differs from both parents is a finding
+  about the combination (the card house of 2026-09-28 was one), and is
+  looked at before it's accepted.
+- **Bands** are set from measured spread, not guessed. To measure again
+  (after adding a family, or when a band fails on a change that
+  shouldn't matter): `--all --offset=<n>` runs every pile family at its
+  sizes moved by n percent (2D; 2 to 10 either way) or at another seed
+  (3D, n = 1-11), under the sizes' names, and the table's moves are the
+  spread over neighbouring sizes; then plant a reassociated sum in the
+  solver (`a + b + c` as `a + (b + c)`, in the separation, the normal
+  speed and the normal impulse), run `--all`, and revert. Set each band
+  just outside the larger spread, and record it in physics-testing.md.
+
 ## Refreshing the quality tests' bounds
 
 The quality tests (physics.md, "Quality as a test") hold ours to bounds

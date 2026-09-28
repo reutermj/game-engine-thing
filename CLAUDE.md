@@ -230,6 +230,16 @@ changing the ABI, the reload sequence or the Bazel rules.
   what it claimed to (a panicking mod that panicked on every step looked the
   same disabled or not). Check a new e2e test with `--runs_per_test=50`
   before trusting it.
+- **Physics is held to a baseline, both ways.** The quality and
+  behaviour tests (2D and 3D) check our own accepted results in
+  `baseline.txt` beside their scenes, each within a band set from
+  measured noise: a change that moves a value past its band, better or
+  worse, fails until `./bazel run -c opt //engine/std/physics/compare:baseline
+  -- --write` (and `//bench/physics3d:baseline`, and `--long` for the long
+  suites) writes it again in the same commit, whose message says why.
+  After merging physics branches, regenerate on the merged tree and
+  compare against both parents. Never edit a baseline by hand (runbook
+  005, [physics-testing.md](docs/architecture/physics-testing.md)).
 - **Long checks run only when a change touches what they cover.** Checks
   that take more than five minutes (Miri, fuzz campaigns, planted-bug
   checks) are for changes to unsafe code (`erased.rs`, `schema.rs`,

@@ -2636,10 +2636,18 @@ and a solver that crept for thousands of steps passed them
 
 | target | what | runtime |
 |---|---|---|
-| `//engine/std/physics/compare:quality_test` | 2D: piles 400-1200, pyramids 120-325, stacks 10 and 20, sleeping, the mod bit for bit the arrays | 6.7 s (fastbuild) |
-| `//engine/std/physics/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid | 37 s at `-c opt` |
-| `//bench/physics3d:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 10-20 | 21 s, the slowest pile (500 planks) 19 s (fastbuild) |
-| `//bench/physics3d:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000 | 99 s at `-c opt`, the known failures included |
+| `//engine/std/physics/compare:quality_test` | 2D: piles 400-1200, pyramids 15-50, stacks 10 and 20, sleeping, the mod bit for bit the arrays, the baseline | 49 s (fastbuild; 1.2 s at `-c opt`), 2026-09-28 |
+| `//engine/std/physics/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid, and the wider families (piles 21-401 wide, mixed piles, pyramids 30-120; physics-testing.md, "Wider families") | 80 s at `-c opt` |
+| `//bench/physics3d:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 5-20, the baseline | 17.5 s (fastbuild; 2.0 s at `-c opt`) |
+| `//bench/physics3d:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000, and the wider families (200-1000 and 2000-5000, mixed piles) | 86-130 s at `-c opt` |
+
+**And our own results, both ways.** The floor is upper bounds from the
+references; every value these tests bound is also held to our last
+accepted value, within a band set from measured noise, better or worse
+([physics-testing.md, "The baseline"](physics-testing.md#the-baseline-our-own-accepted-results)),
+and the long suites carry wider families of piles and pyramids, measured
+in every engine on the same grids
+([physics-testing.md, "Wider families"](physics-testing.md#wider-families)).
 
 **What runs.** The comparisons' own scenes and measures, not copies: 2D's
 `scene.rs` (a `Stack` scene added), `quality.rs` and `settle.rs` (the

@@ -1,10 +1,12 @@
 # Physics regression testing
 
-**Status: proposed** (2026-09-28). How physics is kept from getting worse
-as it changes, including the changes that are meant to improve it. Today's
-tests are described as they stand. The proposal adds what they miss: a
-record of our own accepted results, which every change is compared
-against in both directions.
+**Status: the baseline, the calibration tests and the wider families
+built** (2026-09-28, get-emj.62); the sleep scenes and `-c opt` for the
+default suite not yet (get-emj.68, get-emj.66). How physics is kept from
+getting worse as it changes, including the changes that are meant to
+improve it: the layers of tests as they stand, and the one added, a
+record of our own accepted results that every change is compared against
+in both directions.
 
 Physics is hard to regression-test for three reasons, all of which the
 design has to answer:
@@ -33,7 +35,8 @@ different kind of test:
    Getting worse within the floor, and getting suspiciously better, should
    both be seen and agreed to.
 
-Today's tests answer the first three. Nothing answers the fourth.
+The first four layers below answer the first three; the baseline answers
+the fourth.
 
 ## What exists today
 
@@ -44,6 +47,8 @@ Today's tests answer the first three. Nothing answers the fourth.
 | **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `compare:quality_test`, `quality_long_test`, `physics3d:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
 | **Scene sanity** | contacts per body, islands, nothing escaped | lower and upper | inside the floor tests | a scene that isn't what we think (the columns pile) | – |
 | **Unit behaviour** | single contacts and bodies against hand-checked outcomes | exact or tight | `physics:core_test`, `physics3d:core_test`, the solver's and narrowphase's unit tests | a landing that bounces, a friction limit, a feature id that jumps, a contact colored against Box2D's rule (which the equivalence tests can't see, solving the same order on both sides) | whole-scene behaviour |
+| **Baseline** | our values against our last accepted ones, per scene and measure, a band each set from measured noise | both ways | the `baseline` test in `compare:quality_test`, `behaviour_test` and 3D's, and `baseline_long` in the long ones | drift within the floor; a result suspiciously better | a pile family's median rest moving under 100 steps |
+| **Calibration** | each measure on bodies placed where its value is known | exact | `quality.rs`'s and `settle.rs`'s tests (2D), `physics3d:measure_test` | a measure that reads zero or the wrong thing | – |
 | **Game acceptance** | routes an agent played, replayed: "YOU WIN at frame 255, deaths 0" | exact outcome | `pong:pong_test`, `platformer:platformer_test`, their reload tests | a physics change that breaks a game | why: a changed outcome says nothing about better or worse |
 
 How bounds are set is in [physics.md, "Quality as a test"](physics.md#quality-as-a-test),
@@ -83,6 +88,11 @@ restored, an inverse mass squared. That keeps tolerances honest.
    orders. There's no budget, so each scene added is a small, permanent
    tax on every change.
 
+Gaps 1 and 2 are closed by the baseline, 3 by the calibration tests, 4 by
+the merge rule (runbook 005), within what the bands can see (a pile
+family's median rest moving under 100 steps isn't seen: "What the spread
+says"); 5 is get-emj.68; 6 is measured and has a way out (get-emj.66).
+
 ## The design
 
 Keep the four existing layers as they are. Add a fifth, the **baseline**,
@@ -90,61 +100,149 @@ and three smaller pieces.
 
 ### The baseline: our own accepted results
 
-**A checked-in file of our measured values, per scene and metric**, and a
-test that compares a run against it within a noise band, *in both
-directions*. A change that moves a value past its band fails, and becomes
-green again only when the file is regenerated in the same commit. So the
-diff of that file *is* the record of what the change did to physics, and
-review is where "worse but within the floor" or "suspiciously better"
-gets an explicit yes or no.
+**Built** (2026-09-28, get-emj.62). **A checked-in file of our measured
+values, per scene and measure**, and a test that compares a run against
+it within a noise band, *in both directions*. A change that moves a value
+past its band fails, and becomes green again only when the file is
+regenerated in the same commit. So the diff of that file *is* the record
+of what the change did to physics, and review is where "worse but within
+the floor" or "suspiciously better" gets an explicit yes or no.
 
-- **Where:** `engine/std/physics/compare/baseline.txt` (2D) and
-  `bench/physics3d/baseline.txt` (3D), next to the scenes. Two files per
-  dimension: one for the default suite's scenes, one for the long suite's.
-- **Format:** plain text, one line per scene and metric, sorted, so diffs
-  read directly:
+- **Where:** four files, next to the scenes:
+  `engine/std/physics/compare/baseline.txt` (2D, the default suite's
+  scenes: 201 values) and `baseline_long.txt` (the long suite's: 198),
+  `bench/physics3d/baseline.txt` (73) and `baseline_long.txt` (67).
+  `baseline.rs` is the format and the comparison, shared; `record.rs` in
+  each says what is recorded and with which band; `runs.rs` in each runs
+  every scene once per test binary.
+- **Format:** plain text, one line per scene and measure, in the order
+  the suite records them, columns separated by two spaces or more (a
+  scene's name has single spaces):
 
   ```
-  # scene                      metric          value      band
-  pile 400 41 turning          rest            200        steps 30
-  pile 400 41 turning          depth_end       0.0137     rel 0.10
-  pile 400 41 turning          energy_end      1.6e-8     log 10
-  pyramid 5050 turning         rest            450        steps 50
-  card_house 5                 fallen          0          exact
-  piles 400-1200 turning       rest_median     220        steps 30
+  quality    piles 400-1200 41 turning  rest_median          220        steps 100 or 20%
+  quality    piles 400-1200 41 turning  depth_end_median     0.01439    rel 0.45 or 1e-4
+  quality    pyramid 25 turning         energy_tail          6.781e-12  log 3 under 1e-8
+  quality    pile 1000 41 sleeping      asleep_at            240        steps 60
+  behaviour  ratio 1000 5               escaped              4          exact
+  behaviour  family cards               good                 11         within 1
   ```
+
+  The first column is the group, the test binary that checks the line:
+  `quality` the quality tests, `behaviour` the behaviour tests.
 - **What's recorded:** the numbers the floor and law tests already
-  compute, no new measures. For chaotic families (piles at several sizes)
-  the median and the worst over the sizes are recorded, not each size.
-  Those are what's stable.
-- **Bands by kind of metric:**
+  compute, no new measures, and the ignored tests' too (a heavy box
+  through the floor, a bounce over e², the bullets through a wall), so
+  that fixing what they found shows as a value moving the better way. For
+  a pile family (one scene at several sizes) its statistics over the
+  sizes, never one size's value: the medians of its rest and of its first
+  look at rest, of its depths at the end and while landing, of its
+  energy; the worst of its depth and of its mean overlap; the least
+  contacts a body; escapes. A family's worst rest isn't recorded, nor its
+  worst energy, since one pile decides them (below). For a pyramid family,
+  medians and worsts of rest, the top's move, depth, tilt, energy, and the
+  count standing. For an edge family, its count of runs that did what
+  they should.
+- **Bands by kind of measure,** each set just outside the spread measured
+  under changes that shouldn't matter (the next list):
 
-  | kind | band | why |
+  | kind | band | spread measured |
   |---|---|---|
-  | steps (rest) | absolute steps, plus a percentage for large values | rest is sampled every 10 steps, and moves in jumps |
-  | lengths (depth, top moved) | relative, about 10% | smooth in the parameters |
-  | energy | a factor (log scale), with values under `STILL` (1e-8) equal | energies span ten decades, and anything under `STILL` is rounding |
-  | counts and flags (fallen, escaped, stands) | exact | a card falling is never noise |
-  | analytic results (ramp acceleration) | tighter than the law test's tolerance | the law test is the floor; the baseline sees drift inside it |
+  | a pile family's median rest (5 sizes or more) | 100 steps or 20% | 90 (161 wide, turning); 80 at the default's turning family at sizes 10% more |
+  | its median first look at rest | 130 or 25% | 120 |
+  | the same, three sizes (the big piles) | 250 or 30% | 240 |
+  | a family's depths (median; the worst at the end) | rel 0.45 | 41% (21 wide, landing) |
+  | its greatest mean overlap | rel 0.3 | 24% |
+  | its median energy | a factor of 10, equal under `STILL` | 1.04 where it rests |
+  | contacts a body | rel 0.03 | 1.6% |
+  | a scene that stands (pyramid, stack; a pyramid family) | rest 10 steps (a look); top and depth rel 0.02; tilt rel 0.1 or 0.01°; energy a factor of 3 | rest 0; 0.2%; 4%; 1.13 |
+  | a pile of 1000 all asleep | 60 steps | 50 |
+  | behaviour: lengths and speeds; steps to rest or apart | rel 0.03; 10 steps | 1.2%; 0 |
+  | a hand calculation (ramp acceleration); a bounce's apex | rel 0.002; rel 0.01 | 0; 0 |
+  | an edge family's count | within one run, or 2% of a long grid | one (dominoes 3 → 4 of 4, cards 105 → 106 of 135) |
+  | escapes, a heavy box standing, dominoes in order | exact | 0 |
+  | 3D: a pile family's median rest; depth; landing and mean; partners | 90 or 30%; rel 0.5; rel 0.35; rel 0.25 | 84; 41%; 31%; 20% |
+  | 3D: one big pile (the long suite's 1000 and 10 000): depth, mean overlap, partners; energy | rel 0.6, 0.25, 0.15; a factor of 10 | 55%, 19%, 14%; 6.6 |
+  | 3D: a stack: rest; top and depth; tilt; energy | 10 steps; rel 0.15; rel 0.1 or 0.05°; a factor of 3 | 0; 9%; 0.014° (the measure's resolution is 0.02°); 1.13 |
 
-  Band sizes start from what we measure: run each scene family under
-  small perturbations that shouldn't matter (a reassociated sum, a
-  different pile size in the family) and set each band just outside that
-  spread.
+  Counts are exact except an edge family's: a single run at the edge of
+  stability is flipped by rounding, which is why these are families (and
+  a card count that moved by one was the first thing the planted sums
+  showed).
+- **How the spread was measured** (2026-09-28): every family at sizes 2,
+  3, 5 and 10% either way (`--offset=<percent>`; in 3D each size's pile
+  at the next seeds, `--offset=1` to `11`), recorded under the sizes'
+  names, so that a family's statistics are read at its neighbours; and
+  three sums reassociated in the 2D solver (the separation, `a + (b + c)`;
+  the turning part of the normal speed; the locked contacts' normal
+  impulse, `a - b - c` as `a - (b + c)`) and two in 3D's (the separation;
+  the normal speed), each run and reverted. Then every one of those runs
+  was compared against the written files, and each band widened until
+  none failed.
+- **What the spread says:**
+  - *Stand scenes and behaviour scenes are steady:* no rest moved, no
+    length by more than 1.2% (3D stacks 9%). Their bands are tight, and a
+    real change shows.
+  - *A pile family's statistics are not.* Its median rest moves by up to
+    90 steps at neighbouring sizes; its worst is one pile's and flips
+    (from 240 to 390, from 400 to 1050, from never to 1380). Where piles
+    move again after resting (get-emj.63; the big turning piles in every
+    engine), even the median does: the big turning piles' is 350, 690,
+    740 or never at sizes 2-10% away, the locked 81-wide family's 260 or
+    510. So those families record only their first look at rest. This is
+    the lore on chaotic rest, measured on the families, and it is what the
+    baseline can and can't see: a change that moves a pile family's
+    median rest by less than 100 steps is not seen, and more sizes are the
+    only way to see less (the long suite's families have 7-10).
+  - *First measured bands were too tight.* Measured on offsets of 10-50
+    bodies alone, the default family's median moved 30 and a band of 40
+    looked enough; sizes 10% away moved it 80, and the wider families' by
+    up to 250. The bands above hold every run of both.
 - **Regenerating:** one command writes the file from a run:
-  `./bazel run //engine/std/physics/compare:baseline -- --write`. Bazel
-  runs it with `BUILD_WORKSPACE_DIRECTORY` set, so it can write into the
-  source tree. Without `--write` it prints the comparison as a table: old,
-  new, band, and *better* or *worse* for each value that moved. That table
-  is the before-and-after every physics report already includes, made
-  automatic.
-- **The test:** `compare:baseline_test` (and 3D's) fails on any value past
-  its band, listing all of them, not just the first. It's the same
-  `Broken` pattern the floor tests use.
+  `./bazel run -c opt //engine/std/physics/compare:baseline -- --write`
+  (`--long` for the long file, about a minute at -c opt; 3D's is
+  `//bench/physics3d:baseline`). Bazel runs it with
+  `BUILD_WORKSPACE_DIRECTORY` set, so it writes into the source tree.
+  Without `--write` it prints the comparison as a table: old, new, band,
+  and *better*, *worse* or *moved* for each value past its band (`--all`:
+  every value). Fastbuild and -c opt write the same file (checked: the
+  steps are the same arithmetic), the default suite's in 51 s and 1 s.
+  `SOLVER=<variant>` (3D: `TUNE=`) compares a variant against the
+  baseline, as the tests take it.
+- **The test:** each quality and behaviour test binary has a test
+  `baseline` (and in the long ones `baseline_long`) that checks its
+  group's lines and fails on any value past its band, listing all of
+  them as the table, with the command that writes the file. They read the
+  runs the other tests in the binary make (`runs.rs`: each scene run once,
+  whichever test asks first), so the baseline costs the default suite no
+  runs of its own: `:quality_test` went from 58 to 51 s with it, since the
+  pyramids and the sleeping pile that two tests ran are now run once.
+  `//engine/std/physics/compare:baseline_test` (and 3D's, and
+  `baseline_long_test`) is a test suite of those binaries: a target of
+  its own would run every scene a second time. The file is built in
+  (`include_str!`), so a change to it reruns the tests.
 - **Improvements update it too.** A value that got better past its band
   also fails until the file is regenerated. That tightens the ratchet, so
   a later change can't quietly give the gain back, and it's what turns
   "too good" into something a person sees.
+- **Checked by planting** (2026-09-28, each in the source, the tests run,
+  the source restored):
+  - Friction halved in the 2D solver fails `:behaviour_test`'s
+    `baseline` on 19 values (the ramps, the slipping disc, the ladders,
+    the dominoes' wave, overlap recovery, a fifth light box through the
+    floor, the card, ramp and ladder families) and `:quality_test`'s on
+    16 (the piles' contacts a body, the turning pyramids' tops and tilts,
+    the sleeping pile all asleep at 460 where it was 240). No pile
+    family's rest moved past its band: those bands are wide (above).
+  - The same change with the file written passes both.
+  - Friction restored against that file, a change for the better, fails
+    on the same values the other way (the sliding box back to 6.536
+    where it was 8.268, the cards 11 where they were 0), as *better*,
+    until written.
+  - In 3D, friction halved fails `:behaviour_test`'s baseline (3 values)
+    but not `:quality_test`'s: no pile family or stack moved past its
+    band. One relax pass (`TUNE=relax=1`) fails it on 11; the separation
+    to first order in the turn (`anchors=linear`) on none.
 
 **Why a band and not exact values.** The runs are deterministic, so an
 exact baseline is possible. But every solver change, even a reassociated
@@ -160,7 +258,8 @@ first time we accept a regression.
 
 ### Merging
 
-After merging branches that touch physics, the baseline is regenerated on
+**Built** as a rule (runbook 005, "The baseline"; CLAUDE.md). After
+merging branches that touch physics, the baseline is regenerated on
 the merged tree and compared against *both* parents' files. A conflict in
 the file is never resolved by hand: it's regenerated. A value that differs
 from both parents is a finding about the combination, which is exactly
@@ -168,12 +267,35 @@ the card-house case.
 
 ### Measurements that are themselves tested
 
-Calibration scenes where every metric has a known value: a box resting
-with a planted overlap (depth), a body moving at a known speed (energy), a
-box turned by a known angle (lean), a layout with a known count of
-contacts and islands, a body still from a known step (rest). A unit test
-per metric in `quality.rs` and 3D's `measure.rs`. This closes gap 3,
-cheaply.
+**Built** (2026-09-28). Every measure the floor and the baseline read is
+tested on bodies placed where its value is known by hand, so a measure
+that reads zero, or reads the wrong thing, fails there instead of passing
+every upper bound on it (gap 3):
+
+- **2D** (`quality.rs` and `settle.rs`, run by `:quality_test` and
+  `:behaviour_test`): depth (boxes sunk 0.03 and 0.004 into a floor, one
+  turned a quarter, a disc 0.008: the deepest, the mean, the count past
+  0.01; touching is not overlapping); energy (a 3-4-5 motion, a box and a
+  disc turning, by their inertias); tilt (turned 10°, -10°, 100°, 135°,
+  90°; a disc doesn't lean); contacts a body and islands (two boxes side
+  by side and one alone, and just past touching); escapes; rest (an
+  engine scripted to move until step 130, again from 300 to 350, and to
+  the end); a top's move (0.3 and 0.4 from where it began).
+- **3D** (`measure.rs`, `//bench/physics3d:measure_test`): depth (a cube
+  sunk 0.03, one turned a quarter, a ball); energy (moving, and a cube and
+  a ball turning); tilt; partners and columns (a cube on a cube, straight
+  above and set 0.3 aside); escapes; rest (a scripted backend: at rest
+  from step 40, from the start, never).
+- **Checked by breaking each measure** (2026-09-28): the depth ignoring
+  statics, the energy without its turning part, the tilt without the
+  quarter turn (2D) or by `asin` (3D), islands never joined, a column
+  judged at a unit off, rest never reset once a body moves again, rest a
+  step early, a top's move sideways only, escapes by x alone. Each fails
+  its test (thirteen breaks, thirteen failures).
+- **What it found:** 3D's tilt reads 0.02° for a cube lying flat after a
+  quarter turn, `acos` in f32 of a cosine within rounding of 1: the
+  measure's resolution, far under any bound (1°) or band (0.05°), now
+  pinned by its test.
 
 ### Scenes for the named gaps
 
@@ -213,19 +335,129 @@ on one such run is a coin toss that a correct change can lose. So:
   law test, not an edge: it stays, and would catch a friction model that
   isn't Coulomb's.
 
+### Wider families
+
+**Built** (2026-09-28). More data before tuning, so that no change is
+fitted to a few scenes: in the long suites only, so the default suite
+doesn't grow. Each family is measured in the references on exactly the
+same grid (runbook 005) and bounded by the same rules as the default's
+([physics.md, "Quality as a test"](physics.md#quality-as-a-test)):
+medians over sizes for chaotic scenes, a share for edge-of-stability ones.
+A bound we don't meet is an ignored test and a bead, never a looser bound.
+The debug view was checked on the new scenes (a mixed pile is a pile in
+ours and Box2D at steps 0 and 600).
+
+**2D** (`record::WIDE_PILES`, `MIXED`, `PYRAMID_FAMILIES`;
+`family::wide`): at rest from, median over the sizes (worst), ours against
+Box2D and Rapier, bodies locked / turning:
+
+| family | ours | Box2D | Rapier | bounds |
+|---|---|---|---|---|
+| piles 21 wide, 150-450 (7) | 200 (320) / 210 (350) | 160 (190) / 230 (410) | 180 (210) / 190 (310) | met / **energy**: the 450 keeps 2.9e-6 a body, bound 2.5e-7 (get-emj.63) |
+| piles 41 wide, 300-1200 by 100 (10) | 210 (240) / 210 (300) | 170 (260) / 210 (700) | 160 (220) / 250 (400) | met / met |
+| piles 81 wide, 800-2400 (9) | 260 (**never**) / **370** (650) | 190 (250) / 290 (never) | 220 (250) / 260 (750) | **locked piles move again after resting: 1380, never, 1150 at 1800-2200** / median past 362 (get-emj.63) |
+| piles 161 wide, 2000-4800 (8) | 230 (**410**) / 380 (**never**) | 200 (230) / 350 (390) | 180 (260) / 780 (1470) | worst past 400 / the 4800 never at rest (get-emj.63) |
+| piles 401 wide, 5000-12000 (8) | 230 (340) / 360 (2150) | 190 (230) / 1590 (2360) | 190 (210) / 2450 (never) | met / met |
+| mixed shapes and materials, 41 wide, 400-1200 (9) | 250 (380) / 260 (480) | 210 (290) / 290 (360) | 200 (230) / 270 (never) | met / met |
+| pyramids 30-60 (7) | 50 (80) / 110 (190) | 80 (90) / 60 (90) | 210 (260) / 160 (330) | met / met |
+| pyramids 70-120 (8) | 150 (200) / 780 (1200) | 80 (110) / 160 (310) | 280 (never) / 1100 (1650) | met / met (get-emj.64) |
+
+Ours sinks a quarter to a fifth as deep in every one of them (at the end,
+0.011-0.028 where both references reach 0.046-0.14), as on the default
+scenes. The mixed pile is circles and boxes of half extents 0.25-0.5, a
+box's two apart, friction 0.1-0.9 and restitution 0-0.5, by index
+(`Scene::Mixed`).
+
+Edge families on wider or finer grids (`:behaviour_long_test`), runs that
+did what they should:
+
+| family | ours | Box2D | Rapier |
+|---|---|---|---|
+| card houses 3-7 storeys, lean 23-27°, friction 0.6-0.9 (100) | 69 | 72 | 48 |
+| ten dominoes 0.8-1.45 apart by twentieths, friction 0.3 and 0.6 (30) | 25 | 25 | 26 |
+| stacks 12-30 high, every height (19) | 9 (to 20) | 0 | 14 (to 25) |
+| a box 10-1000 times as heavy on 1-6 (84) | 60 | 33 | 49 |
+| a pyramid 20 wide at friction 0-0.8, finest near 0 (12) | 11 | 11 | 11 |
+
+**3D** (`record::WIDE` in `//bench/physics3d`), against Rapier and Box3D
+(Jolt beside them): at rest from, median (worst):
+
+| family | ours | Rapier | Box3D | Jolt | bounds |
+|---|---|---|---|---|---|
+| cubes turning, 200-1000 by 100 (9) | 189 (281) | 220 (364) | 215 (710) | 568 (never) | met |
+| cubes locked (9) | 69 (never) | breathe from 400 | breathe from 400 | 116 (149) | depth only |
+| planks turning (9) | 288 (397) | 267 (364) | 262 (823) | 907 (never) | met |
+| mixed spheres and boxes, turning (9) | never | never | never | never | depth only: spheres roll on |
+| mixed, locked (9) | 297 (425) | 285 (354) | 274 (347) | 308 (475) | met |
+| cubes turning, 2000-5000 (4) | **402** (505) | 288 (711) | 292 (439) | never | median past 365 (get-emj.65) |
+| planks turning, 2000-5000 (4) | 417 (546) | 376 (381) | 314 (340) | 1499 (never) | met |
+
+The 3D mixed pile is one material, the pile's: the engines mix two
+frictions by different rules (Rapier the mean, the others the geometric
+mean), which a pile of mixed materials would measure instead of the
+solvers.
+
+**What the wider data says about get-emj.62's two drifts.**
+
+- *The turning pile of 11 000 at rest from 1870* is not an outlier in
+  its family, and not a trend at scale: of eight sizes from 5000 to
+  12 000 two rest late (8000 from 2150, 11 000 from 1870) and the others
+  from 250-690; the family's median is 360. It is the big turning piles'
+  way in every engine: a body now and then moving over 0.05 long after
+  the pile came to rest. Box2D's median over the same sizes is 1590 and
+  Rapier's 2450, and every engine is first at rest by 320-400. The
+  baseline records only the first look at rest for these families, since
+  their rest from goes 350, 690, 740 or never with the sizes 2-10% away.
+  No gap to the references: a bead isn't warranted.
+- *The 5050 pyramid at rest from 780* is in line with its neighbours: the
+  turning pyramids 70-120 wide rest from 290, 410, 560, 640, 780, 880, 980
+  and 1200, about ten steps a unit of width, and none of them moved with
+  a reassociated sum. So it is a trend with size, not noise. Against the
+  references it sits between them (Box2D 90-310, Rapier 450-1650), four to
+  five times Box2D's, while sinking a fifth as far (the top 0.26 lower,
+  Box2D's 1.46): get-emj.64 records it, within the bound.
+- *Where the wider data does show a gap* is elsewhere: piles 81 and 161
+  wide, where ours comes to rest and then moves again, or doesn't rest,
+  and neither reference does (get-emj.63: body 1476 of the locked pile
+  of 2000, 81 wide, creeps at 0.07 mid-pile from step 1140 to the end),
+  and 3D's turning cubes at 2000-5000 (get-emj.65, four sizes, just past
+  the noise).
+
 ### A time budget for the default suite
 
 - **Default suite:** each physics test target within about 30 s in
   fastbuild, and the physics targets together within about 2 minutes of
   wall time when run in parallel. A scene goes in the default suite if
-  it's fast and covers something no other default scene does.
+  it's fast and covers something no other default scene does. Measured
+  (2026-09-28, each target alone): `compare:quality_test` 49 s,
+  `compare:behaviour_test` 7.7 s, `physics3d:quality_test` 17.5 s,
+  `physics3d:behaviour_test` 0.3 s, the same with the baseline tests
+  skipped (it costs nothing: its runs are the other tests'). With the whole
+  suite running beside it, `:quality_test` takes 66 s. It is over the
+  budget, and was before this work (58 s beside the other physics
+  targets).
 - **Long suite** (manual targets, `-c opt`): everything else, with its
   own baseline. It runs before merging any change to the solver, the
   narrowphase, sleep or the step, and its baseline diff goes in that
-  commit.
-- **Compiling physics tests at `-c opt`** would cut the default suite's
-  time several-fold, since the scenes are compute-bound. Worth measuring:
-  it costs a separate build configuration for those targets.
+  commit. Measured: `compare:quality_long_test` 80 s,
+  `behaviour_long_test` 4 s, `physics3d:quality_long_test` 86-130 s.
+- **Compiling physics tests at `-c opt`, measured (not adopted):** the
+  default targets at `-c opt` run in 1.2 s (`:quality_test`, from 49 s),
+  0.6 s (`:behaviour_test`, from 7.7), 2.0 s (3D's quality, from 17.5)
+  and 0.1 s: forty times less, since the scenes are compute-bound and
+  fastbuild runs them unoptimized. The results are bit for bit
+  the same (the baseline tool writes the same file in both). The cost: a
+  rebuild after a solver edit takes 4.7 s at `-c opt` against 1.5 s, a
+  one-time build of the engine, the loader and the physics mods in a
+  second configuration (the comparisons build it already), and a rule:
+  Bazel can't set `-c opt` per target from a BUILD file, so each physics
+  test would become a small wrapping rule with an outgoing transition on
+  `compilation_mode` (or the `with_cfg.bzl` module's generic one), which
+  forwards the test's runfiles and environment. About 40 lines of
+  Starlark in `engine/defs.bzl` or a `physics_test` macro; the clippy
+  and rustfmt aspects follow the transition. It would bring the default
+  suite well within the budget, and let the long suites' scenes move
+  into the default suite. The decision is the user's (get-emj.66).
 
 ### Game acceptance tests
 
@@ -260,20 +492,23 @@ which values moved, which way, and why that's accepted.
 
 ## Plan
 
-1. The baseline for 2D's default suite: format, the `baseline` tool,
-   `baseline_test`, bands set from measured spread. Then 3D, then the long
-   suites.
-2. Calibration tests for every measure.
-3. The sleep scenes.
-4. Move the default suite within budget, and measure `-c opt` for physics
-   test targets.
-5. Update runbook 005 and CLAUDE.md's testing conventions: when to
-   regenerate the baseline, and the merge rule.
+1. ~~The baseline, 2D and 3D, default and long suites, bands from
+   measured spread.~~ Done (2026-09-28).
+2. ~~Calibration tests for every measure.~~ Done.
+3. ~~Wider families in the long suites, measured in the references.~~
+   Done; they found get-emj.63 and get-emj.65, and settled get-emj.62.
+4. The sleep scenes (get-emj.68).
+5. Move the default suite within budget: `-c opt` measured, forty times
+   faster, awaiting a yes (get-emj.66).
+6. ~~Runbook 005 and CLAUDE.md: when to regenerate, the merge rule.~~
+   Done.
+7. Tighter pile bands from more sizes or seeds per family (get-emj.67).
 
 ## Open questions
 
-- **Band sizes.** The table above is a starting shape. The real sizes come
-  from measuring spread under changes that shouldn't matter.
+- **Band sizes** are measured now ("The baseline"). Open: whether pile
+  families' medians are worth a band 100 steps wide, or families need more
+  members to say anything about rest (get-emj.67).
 - **Other machines.** The runs are deterministic on one machine and build.
   Different CPUs or compiler versions could shift float results. That
   matters once there's CI, or a second developer.
