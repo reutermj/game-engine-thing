@@ -134,15 +134,15 @@ extern "C" void p3_jolt_add(JoltWorld* w, uint32_t n, const P3Spec* specs, uint3
 			// up to 0.05 * (sqrt(3) - 1) = 0.037 deeper than Jolt thinks it is.
 			shape = new BoxShape(Vec3(s.dims[0], s.dims[1], s.dims[2]));
 		const bool is_fixed = s.fixed != 0;
-		BodyCreationSettings b(shape, RVec3(s.pos[0], s.pos[1], s.pos[2]), Quat::sIdentity(),
+		BodyCreationSettings b(shape, RVec3(s.pos[0], s.pos[1], s.pos[2]), Quat(s.rot[0], s.rot[1], s.rot[2], s.rot[3]),
 							   is_fixed ? EMotionType::Static : EMotionType::Dynamic, is_fixed ? kStatic : kMoving);
-		b.mFriction = 0.5f;
-		b.mRestitution = 0.0f;
+		b.mFriction = s.friction;
+		b.mRestitution = s.restitution;
 		b.mAllowSleeping = w->allow_sleep;
 		if (!is_fixed) {
 			if (!w->rotate) b.mAllowedDOFs = EAllowedDOFs::TranslationX | EAllowedDOFs::TranslationY | EAllowedDOFs::TranslationZ;
 			b.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
-			b.mMassPropertiesOverride.mMass = 1.0f;
+			b.mMassPropertiesOverride.mMass = s.mass;
 			b.mLinearVelocity = Vec3(s.vel[0], s.vel[1], s.vel[2]);
 		}
 		Body* body = bi.CreateBody(b);

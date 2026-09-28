@@ -9,6 +9,7 @@
 //! code. The world is fixed across engines: y up, gravity (0, -9.81, 0), a
 //! 1/60 s step, mass 1, friction 0.5, restitution 0.
 
+pub mod behave;
 pub mod box3d;
 mod ffi;
 pub mod jolt;

@@ -136,7 +136,7 @@ pub fn touching_pairs(shapes: &[Shape], pos: &[[f32; 3]], rot: &[[f32; 4]], stat
             }
         }
         for (s, st) in statics.iter().enumerate() {
-            let d = depth_turned(shapes[i], pos[i], rot[i], st.shape, st.pos, IDENTITY);
+            let d = depth_turned(shapes[i], pos[i], rot[i], st.shape, st.pos, st.rot);
             if d > -TOUCH_GAP {
                 pairs.push(Pair { a: i, b: n + s, depth: d });
             }

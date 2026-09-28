@@ -59,6 +59,7 @@ void p3_box3d_add(Box3dWorld* w, uint32_t n, const P3Spec* specs, uint32_t* out_
 		b3BodyDef bd = b3DefaultBodyDef();
 		bd.type = fixed ? b3_staticBody : b3_dynamicBody;
 		bd.position = (b3Pos){s->pos[0], s->pos[1], s->pos[2]};
+		bd.rotation = (b3Quat){{s->rot[0], s->rot[1], s->rot[2]}, s->rot[3]};
 		bd.enableSleep = w->allow_sleep;
 		if (!fixed) {
 			bd.linearVelocity = (b3Vec3){s->vel[0], s->vel[1], s->vel[2]};
@@ -69,17 +70,17 @@ void p3_box3d_add(Box3dWorld* w, uint32_t n, const P3Spec* specs, uint32_t* out_
 		b3BodyId body = b3CreateBody(w->world, &bd);
 
 		b3ShapeDef sd = b3DefaultShapeDef();
-		sd.baseMaterial.friction = 0.5f;
-		sd.baseMaterial.restitution = 0.0f;
+		sd.baseMaterial.friction = s->friction;
+		sd.baseMaterial.restitution = s->restitution;
 		if (s->shape == 0) {
 			const float r = s->dims[0];
-			// Density for a mass of 1; b3Body_SetMassData afterwards would do too,
-			// but costs a second mass update per body.
-			sd.density = 1.0f / (4.0f / 3.0f * 3.14159265f * r * r * r);
+			// Density for the spec's mass; b3Body_SetMassData afterwards would do
+			// too, but costs a second mass update per body.
+			sd.density = s->mass / (4.0f / 3.0f * 3.14159265f * r * r * r);
 			b3Sphere sphere = {{0.0f, 0.0f, 0.0f}, r};
 			b3CreateSphereShape(body, &sd, &sphere);
 		} else {
-			sd.density = 1.0f / (8.0f * s->dims[0] * s->dims[1] * s->dims[2]);
+			sd.density = s->mass / (8.0f * s->dims[0] * s->dims[1] * s->dims[2]);
 			b3BoxHull box = b3MakeBoxHull(s->dims[0], s->dims[1], s->dims[2]);
 			b3CreateHullShape(body, &sd, &box.base);
 		}

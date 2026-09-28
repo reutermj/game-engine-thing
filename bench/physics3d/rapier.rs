@@ -3,7 +3,7 @@
 
 use rapier3d::prelude::*;
 
-use crate::{Backend, Config, FRICTION, GRAVITY, Iters, MASS, RESTITUTION, Shape, Spec, State};
+use crate::{Backend, Config, GRAVITY, Iters, Shape, Spec, State};
 
 pub struct Rapier {
     world: PhysicsWorld,
@@ -43,21 +43,28 @@ impl Backend for Rapier {
         let mut handles = Vec::with_capacity(bodies.len());
         for s in bodies {
             let pos = Vector::new(s.pos[0], s.pos[1], s.pos[2]);
+            // The axis times the angle, as Rapier takes a rotation.
+            let (q, angle) = (s.rot, 2.0 * s.rot[3].clamp(-1.0, 1.0).acos());
+            let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            let turn = if norm > 1e-6 { Vector::new(q[0], q[1], q[2]) * (angle / norm) } else { Vector::ZERO };
             let body = if s.fixed {
-                RigidBodyBuilder::fixed().translation(pos)
+                RigidBodyBuilder::fixed().translation(pos).rotation(turn)
             } else {
-                let b =
-                    RigidBodyBuilder::dynamic().translation(pos).linvel(Vector::new(s.vel[0], s.vel[1], s.vel[2])).can_sleep(self.sleep);
+                let b = RigidBodyBuilder::dynamic()
+                    .translation(pos)
+                    .rotation(turn)
+                    .linvel(Vector::new(s.vel[0], s.vel[1], s.vel[2]))
+                    .can_sleep(self.sleep);
                 if self.rotate { b } else { b.lock_rotations() }
             };
             let collider = match s.shape {
                 Shape::Sphere(r) => ColliderBuilder::ball(r),
                 Shape::Box([x, y, z]) => ColliderBuilder::cuboid(x, y, z),
             }
-            .friction(FRICTION)
-            .restitution(RESTITUTION)
+            .friction(s.friction)
+            .restitution(s.restitution)
             // Sets the density that gives this mass; ignored on a fixed body.
-            .mass(MASS);
+            .mass(s.mass);
             let (handle, _) = self.world.insert(body, collider);
             if !s.fixed {
                 self.dynamic.push(handle);
