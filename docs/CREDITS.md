@@ -31,6 +31,16 @@ one would have to ship those files with it.
 - **What for:** the reference C engine in `//engine/std/physics/compare`,
   and nothing else; see docs/architecture/physics.md, "Against other
   engines".
+- **Scenes taken from its samples** (`samples/` in the same archive, read,
+  not built; physics.md, "Quality beyond settling"): the behaviour
+  scenes' card house (`sample_stacking.cpp`, "Card House", which credits
+  PEEL, below), dominoes ("Double Domino", with its knock as a starting
+  speed and spin), overlap recovery (`sample_robustness.cpp`, "Overlap
+  Recovery"), the wide box on two small ones ("HighMassRatio2") and the
+  idea of a heavy box on light ones ("HighMassRatio1"), each rebuilt in
+  `engine/std/physics/compare/scene.rs` with y turned down (the card house
+  also five times larger); its arch ("Arch") needs polygons, so a ladder
+  stands in.
 - **Notice:** MIT asks that the copyright and permission notice go with
   copies of the software. We don't commit Box2D's source or ship a
   binary; the fetched archive keeps its `LICENSE`, which the build exports
@@ -301,6 +311,16 @@ one would have to ship those files with it.
   measured it (`engine/std/physics/tests/split_impulse.rs`; Bullet's
   `btContactSolverInfo::m_splitImpulse` and its push velocities in
   `btSequentialImpulseConstraintSolver`).
+
+## PEEL
+
+- **Project:** PEEL, the Physics Engine Evaluation Lab, a set of scenes
+  for comparing physics engines, by Pierre Terdiman.
+- **License:** not read: nothing of it is fetched or built.
+- **What for:** the card house among the behaviour scenes, which reaches
+  us through Box2D's sample of it (`sample_stacking.cpp`, "Card House",
+  marked "From PEEL"), rebuilt from that sample (physics.md, "Quality
+  beyond settling").
 
 ## Flecs
 

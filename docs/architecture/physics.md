@@ -2746,6 +2746,245 @@ default suite's sizes only a stack's energy and planks see it.
 `:quality_long_test`'s turning 10 000 piles are where it shows: one of
 the three never rests.
 
+## Quality beyond settling
+
+**Status: built** (2026-09-28, get-emj.13 for the view). [Quality as a
+test](#quality-as-a-test) asks whether piles, pyramids and stacks come to
+rest, how deep they sink and what energy is left. What a player feels is
+something else: whether a box on a slope holds or slides as fast as it
+should, a ball bounces as high, a heavy crate stays on a light one,
+overlap is pushed apart without a bang, a fast ball stops at a wall, and a
+structure that stands on friction stands. These are now scenes, run in
+every engine, with tests bounding ours by a hand calculation or by what
+the references do on the same scene, and a debug view to look at any of
+them.
+
+| target | what | runtime |
+|---|---|---|
+| `//engine/std/physics/compare:behaviour_test` | 2D: ramps, bounces, mass ratios, overlap, bullets, the card house, the ladder, dominoes; the mod bit for bit the arrays on them | 2-5 s (fastbuild) |
+| `//bench/physics3d:behaviour_test` | 3D: ramps, bounces, mass ratios | under 1 s |
+
+### The debug view
+
+`view.rs` in the comparison draws any scene at chosen steps for every
+engine side by side: an SVG, a row a step and a column an engine, and, for
+whoever reads rather than sees (agents included), the same as text, a
+character grid. Bodies come from what every engine reports
+(`Sim::bodies`: positions and angles, boxes turned, circles with a radius
+line showing their turn), statics from the scene, sleeping bodies from
+each engine (grey; `.` in text), and contacts from each engine's own:
+ours from the arrays or, on the mod, from the world's `ContactPair`,
+`Manifold` and `ContactPoints`; Box2D's from `b2Body_GetContactData`;
+Rapier's manifolds. Each point is drawn with its normal, pressed (red,
+`*`) or held within the speculative margin (hollow orange, `+`); where
+neither end of our contact turns, it keeps no point, only a normal and a
+depth, and the view puts one on the smaller body's face (a square). It is
+test and bench code: nothing renders in the physics mod.
+
+    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run -c opt //engine/std/physics/compare
+
+(runbook 005, "The debug view"). Behaviour scenes are drawn turning, as
+they run; `TURN=1` turns the others; `ENGINES` picks the columns.
+
+### The scenes
+
+Each is built by `scene.rs` (3D: `scenes.rs`) for every engine, bodies
+turning, and measured from positions and velocities every step by
+`behave.rs`, the same code for all (the settling measures, depth, contacts
+a body and islands, beside). Gravity 20 in 2D and 9.81 in 3D; a body and
+what it meets have the same friction and restitution, so every engine's
+rule for mixing two gives it.
+
+- **Friction on a ramp.** A unit box on a static ramp 20° steep at
+  friction 0.6 (tan 20° = 0.36): it holds, and creeps nothing. At 30° and
+  0.2 it slides at g (sin θ − μ cos θ), 6.536 (3D 3.206), from its speed
+  at steps 30 and 90. A disc at 30° and 0.6 rolls without slipping at
+  (2/3) g sin θ = 6.667 while μ ≥ tan θ / 3, its contact point still
+  (`v − ω r` along the slope); at 0.1, below that, it slips and slides at
+  g (sin θ − μ cos θ). In 3D a sphere, at (5/7) g sin θ = 3.504.
+- **Restitution.** A ball dropped 5 onto a floor, no friction, rebounds to
+  e² of the drop: its first apex against e², at e = 0.25, 0.5, 0.75 and 1;
+  at 1, over 20 s, the highest and the last apex (a lossless ball gaining
+  height is energy from nowhere).
+- **Mass ratios.** A unit box 10, 100 and 1000 times as heavy on one of
+  mass 1; 100 and 1000 times on a column of five; and Box2D's
+  "HighMassRatio2", a 20-wide box 400 times as heavy on two unit boxes 18
+  apart. How far the heavy box sinks, how deep, whether it stands, how
+  soon it rests, and what still moves in the last second (jitter).
+- **Overlap recovery.** Box2D's "Overlap Recovery": a pyramid of unit
+  boxes 4 wide spawned a quarter and half a box into each other, and one
+  10 wide at half. The fastest any body goes, the step nothing is deeper
+  than 0.01, when it rests, and its top against where it rests once apart.
+- **Fast bodies.** Pong's ball, radius 0.25, no gravity, restitution 1,
+  fired at a static wall 0.1 thick, and at one a unit thick (pong's
+  paddle), at 10 to 400 a second, each at four phases (where in a step it
+  reaches the wall). Whether it passes through.
+- **Structures.** Box2D's card house (from PEEL), five storeys, scaled five
+  times so its cards are 2 tall and 0.01 thick, friction 0.7; Box2D's 15
+  dominoes, the first knocked over as its impulse knocks it; and a ladder
+  in place of Box2D's arch, whose blocks are wedges and physics has boxes
+  and circles only: a plank 5 long and 0.2 thick leaning 30° on a
+  frictionless wall, which stands on the floor's friction while μ ≥ tan θ /
+  2 − hx / (2 hy) = 0.269 (its weight's moment about its foot against the
+  wall's push at its top), at 0.4, 0.3, 0.24 and 0.2. Whether they stand,
+  how far anything moved, whether the dominoes fall in order, and how fast.
+
+**Checked to be what they say** (the counts, and the view): the ramp
+bodies have one contact, the ladder two until it slides and one after,
+the card house one island of 2.6 contacts a card in ours (3.0 in Box2D);
+the pictures show the cards leaning in pairs under flat ones, the
+dominoes lying in a chain at the end, the ladder flat on the floor after
+sliding.
+
+### Results, 2D
+
+`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare`
+(2026-09-28; Box2D v3.1.1, continuous on; Rapier 0.36 as shipped, its CCD
+changing nothing here). Deterministic, one run. The mod and the arrays
+agree on every scene to every digit.
+
+| scene | expected | ours | Box2D | Rapier |
+|---|---|---|---|---|
+| box, 20°, μ 0.6: crept in 2 s | 0 | 0.0001 | 0.00008 | 0.0003 |
+| box, 30°, μ 0.2: a | 6.536 | 6.536 | 6.547 | 6.536 |
+| disc, 30°, μ 0.6: a; slip | 6.667; 0 | 6.653; 0.073 | 6.641; 0.052 | 6.634; 0.052 |
+| disc, 30°, μ 0.1: a (slipping) | 8.268 | 8.277 | 8.284 | 8.274 |
+| bounce, e 0.25: first apex / drop | 0.0625 | 0.044 | 0.038 | 0.038 |
+| bounce, e 0.5 | 0.25 | 0.244 | 0.229 | 0.229 |
+| bounce, e 0.75 | 0.5625 | **0.579** | 0.548 | 0.548 |
+| bounce, e 1: first; highest; last, 20 s | 1; 1; 1 | **1.048; 1.64; 1.64** | 0.996; 0.996; 0.919 | as Box2D |
+| 10:1: top sank; deepest; at rest from | – | 0.0015; 0.0012; 2 | 0.0097; 0.0077; 3 | 0.0097; 0.0077; 2 |
+| 100:1 | – | 0.014; 0.011; **77** | 0.088; 0.072; 23 | 0.089; 0.071; 23 |
+| 1000:1 | – | stands, 0.14; 0.11; **never** (0.15 a second) | crushed (1.0 lower); 41 | crushed; 29 |
+| 100:1 on five | – | stands, 0.11; **never** (0.06) | topples; 253 | crushes one (0.67); 68 |
+| 1000:1 on five | – | crushed, **two boxes out through the floor, 82 a second** | crushed, calm; 220 | crushed, 4.1 a second; 285 |
+| wide box on two, 400:1 | – | 0.040; 0.024; **never** (0.5) | 0.176; 0.141; 34 | 0.176; 0.141; 33 |
+| overlap, 4 wide at 0.25: fastest; apart at; at rest | at most the cap, 3 | 2.2; 20; 27 | 3.0; 67; 55 | 3.5; 46; 48 |
+| overlap, 4 wide at 0.5 | | 2.5; 31; 33 | 3.6; 56; 54 | 4.4; 57; 58 |
+| overlap, 10 wide at 0.5 | | 9.4; 43; 101, stands | 16.8; 75; 198, topples, two out | 16.5; 101; 241, topples |
+| card house: most moved; at rest | stands | 0.10; 27 | 0.14; 21 | **two cards fall** |
+| ladder, μ 0.4 and 0.3: slid | stands (0.269) | 0.00005 | 0.0004 | 0.00001 |
+| ladder, μ 0.24 and 0.2: slid | slides | 1.30, 1.35 | 1.31, 1.35 | 1.30, 1.35 |
+| dominoes: fell in order; wave; at rest | all | 15; 2.667 a second; 441 | 15; 2.667; 434 | 15; 2.736; 443 |
+
+**Fast bodies**, phases of four that pass through the wall:
+
+| speed (a step) | wall 0.1: ours | wall 1 (pong's paddle): ours | Box2D, Rapier (with or without CCD) |
+|---|---|---|---|
+| 10 to 21 (0.35) | 0 | 0 | 0 |
+| 25, 30 | 1 | 0 | 0 |
+| 40 (pong's fastest across), 48 (0.8) | 2 | 0 | 0 |
+| 50, 56.6 (pong's fastest diagonal), 80 | 3 | 1 | 0 |
+| 160, 400 | 4 | 3 | 0 |
+
+Ours has no continuous collision ([Open questions](#open-questions)): a
+ball is stopped only if some step leaves it within the speculative margin
+(0.05) of the wall or short of its middle, so it bounces for certain while
+a step is at most the margin, its radius and half the wall, 0.35 (21 a
+second) and 0.8 (48); past that, whether it tunnels depends on the phase.
+Pong's ball meets its paddles at 40 across the court at most, 20% under
+the paddle's 48. Box2D sweeps fast bodies against statics
+(`b2SolveContinuous`), and Rapier, with CCD off as shipped, does too
+([lore](../lore/rapier-sweeps-fast-bodies-against-fixed-colliders-with-ccd-off.md)).
+
+### Results, 3D
+
+`./bazel run -c opt //bench/physics3d:bench -- <scene> <n> all --rotate --behave`
+(2026-09-28; Rapier 3D 0.36, Jolt 5.6, Box3D 0.1, each at its defaults).
+
+| scene | expected | ours | Rapier | Jolt | Box3D |
+|---|---|---|---|---|---|
+| cube, 20°, μ 0.6: crept in 2 s | 0 | 0.000001 | 0.000068 | 0.000001 | 0.000063 |
+| cube, 30°, μ 0.2: a | 3.2059 | 3.2059 | 3.2059 | 3.0460 | 3.2059 |
+| sphere, 30°, μ 0.6: a; slip | 3.5036; 0 | 3.5025; 0.032 | 3.5045; 0.032 | 3.3288; 0.000 | 3.5023; 0.035 |
+| bounce, e 0.25; 0.5 | 0.0625; 0.25 | 0.053; 0.248 | 0.049; 0.238 | 0.051; 0.232 | 0.052; 0.241 |
+| bounce, e 0.75 | 0.5625 | **0.575** | 0.554 | 0.527 | 0.557 |
+| bounce, e 1: first; highest; last, 20 s | 1; 1; 1 | **1.032; 1.31; 1.31** | 0.996; 0.996; 0.962 | 0.935; 0.935; 0.529 | 0.999; 0.999; 0.998 |
+| 10:1: top sank; deepest; at rest from | – | 0.0006; 0.0008; 0 | 0.0026; 0.0030; 1 | 0.0009; 0.0023; 2 | 0.0026; 0.0030; 1 |
+| 100:1 | – | 0.0099; 0.0070; 42 | 0.033; 0.028; 55 | 0.030; 0.020; 193 | 0.033; 0.028; 21 |
+| 1000:1: crushed in all; at rest from | – | 316 | 210 | 101 | 279 |
+
+Jolt is 5% slow on the ramps because every Jolt body is damped by default
+(`BodyCreationSettings::mLinearDamping` and `mAngularDamping`, 0.05 a
+second), which the comparison leaves on: at a mean 3 a second over the
+steps measured, 0.16 of the 3.21. Its bounces lose height to the same
+([lore](../lore/jolt-damps-every-body-by-default.md)).
+
+### What they found, and what is ignored
+
+Ours meets the hand calculations as closely as any reference: every ramp
+within 0.2% (the sliding box exact), the ladder standing and sliding
+either side of its friction, the dominoes falling at Box2D's speed. It
+stands heavy boxes the references crush, sinking 5-10 times less, as its
+stiffer contacts did on piles ([Settling](#settling)); pushes overlap
+apart more gently than either (at 2.2-2.5 a second where theirs reach
+3.0-4.4) and keeps the 10-wide pyramid standing where both topple it; and
+stands the card house Rapier drops. Four things are wrong, each an ignored
+test naming its bead (run with `--test_arg=--include-ignored`), not a
+looser bound:
+
+- **A bounce returns a step's gravity more than it came in with**
+  (get-emj.56; 3D get-emj.60). `integrate_velocities` adds the step's
+  gravity before contacts are found, and restitution restores e times the
+  closing speed before the step, gravity included; the references take it
+  before gravity. At 14 a second that is 2.4% of speed a bounce: the
+  lossless ball climbs to 1.64 of its drop in 12 bounces (3D 1.31 in 9),
+  and e = 0.75 passes e². Below 0.5 every engine loses more to the soft
+  contact than this adds, so it hides. Pong is spared: its ball has no
+  gravity.
+- **A heavy box on light ones never comes to rest** (get-emj.57): at
+  100:1 it rests from 77 where both references rest from 23; at 1000:1, on
+  the column of five at 100:1, and under the wide box it keeps moving at
+  0.15, 0.06 and 0.5 a second, over the sleep threshold, so it never
+  sleeps. In 3D it rests (from 42 at 100:1, where Rapier rests from 55).
+- **A box 1000 times as heavy crushing a column of five throws two light
+  boxes out through the floor**, at up to 82 a second (get-emj.58); the
+  references crush it too, calmly. The push-out cap doesn't hold a body
+  squeezed between a static and one a thousand times its mass.
+- **No continuous collision** (get-emj.59): the limit above, where both
+  references never tunnel. Pinned by an active test at the limit
+  (`a_ball_bounces_off_a_wall_while_a_step_is_within_the_margin_its_radius_and_half_the_wall`:
+  every phase bounces up to it, some tunnel just past it), so building
+  continuous collision fails that test, which is when to move it.
+
+**How the bounds are set**, as [Quality as a test](#quality-as-a-test)
+sets them, per scene, the reference values beside each in the tests: a
+hand calculation within 1% (the references are within 0.5%, Jolt aside);
+where there is none, twice the later reference's rest, a quarter over the
+smaller reference's fastest, half the smaller reference's sinking and
+depth where the references stand the scene, and a coarse bound where they
+fail it (half a box, a quarter of one deep, 0.1 for a pyramid that stood
+where theirs toppled); a bounce never 1% over e², nor a quarter further
+under it than the lower reference. In 3D, Rapier's and Box3D's values set
+the bounds and Jolt's, damped, is recorded beside them.
+
+**What the tests catch** (planted, 2026-09-28, each in the source, the
+suite run, the source restored):
+
+| planted | 2D fails | 3D fails |
+|---|---|---|
+| friction halved (on each body; in 3D a quarter on the body, half through the geometric mean) | the box holding, the box sliding, the slipping disc, the ladder, the card house, the dominoes | the cube holding, the cube sliding |
+| restitution ignored | the bounce, the bullets (no rebound) | the bounce |
+| inverse mass squared (a heavy box heavier) | heavy boxes standing | heavy cubes standing |
+| a disc as a ring (a sphere as a hollow one) | the rolling disc | the rolling sphere |
+| the push-out cap ten times (30) | overlap recovery (and a solver unit test) | – |
+| the speculative margin 0.01 | the bullets, at their check that the limit is 21 and 48 (and three narrowphase unit tests) | – |
+
+The rolling disc survives friction halved (0.3 still rolls it) and
+catches only its inertia; the bullets catch the margin only through the
+check of the limit their speeds are chosen about.
+
+**What the view showed.** On the settling scenes, nothing the numbers
+hadn't: the 1000-body pile at step 400 is a pile in all four (ours, the
+arrays, Box2D, Rapier), and the turning 20-wide pyramid stands in each. One
+thing the numbers put differently: our pile's top stands 1.3 higher than
+Box2D's and Rapier's (its median body 0.4-0.7), which is its shallower
+overlap (at rest 0.014 deep at most, against their 0.057-0.067) over some
+25 layers, not a looser pile. On the new scenes it showed how the worst
+mass ratio fails: "ratio 1000 5" buckles sideways by step 60 and has two
+light boxes under the floor by step 120 in ours, where Box2D's column lies
+flat on it.
+
 ## Still at rest
 
 **Status: built** (2026-09-27, get-emj.41-43; 2D as a setting). The three
@@ -3124,7 +3363,11 @@ port, not a change (get-emj.52).
 - **Tunneling.** No continuous collision: a body moving more than its own
   size per step can pass through a thin collider. Pong's ball tops out at
   40 cells/s, 0.67 cells a step against paddles a cell thick, which is
-  within it; substepping is the cheap fix if a game needs more.
+  within it; substepping is the cheap fix if a game needs more. Measured
+  since ([Quality beyond settling](#quality-beyond-settling), get-emj.59):
+  a ball is stopped for certain while a step is at most the margin, its
+  radius and half the wall, 0.8 for pong's (48 cells/s), and pinned by a
+  test at that limit.
 
 ## Spike results
 
