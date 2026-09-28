@@ -273,11 +273,13 @@ fn real_piles_rest_as_soon_as_box2d_and_rapier_do() {
 }
 
 /// The same piles, turning: at rest from, Box2D 170, 160, 210, 240, 250
-/// (median 210); Rapier 160, 400, 250, 230, 310 (250); ours 230, 220, 400,
-/// 440, 290. Deepest at the end: Box2D up to 0.136, Rapier 0.099; ours
-/// 0.024. While settling: deepest 0.53 and 0.48 (ours 0.44), mean 0.056
-/// and 0.055 (ours 0.020). Energy at the end: 1.3e-8 and 3.3e-8 (ours
-/// 1.6e-7). Contacts a body 1.90-2.09, 1-3 islands (ours 1.89-1.95, 1-2).
+/// (median 210); Rapier 160, 400, 250, 230, 310 (250); ours 200, 220, 210,
+/// 250, 290. Deepest at the end: Box2D up to 0.136, Rapier 0.099; ours
+/// 0.022. While settling: deepest 0.53 and 0.48 (ours 0.54), mean 0.056
+/// and 0.055 (ours 0.021). Energy at the end: 1.3e-8 and 3.3e-8 (ours
+/// 1.6e-8). Contacts a body 1.90-2.09, 1-3 islands (ours 1.91-1.94, 1).
+/// (Ours before get-emj.48, 2026-09-28: at rest from 230, 220, 400, 440,
+/// 290.)
 #[test]
 fn real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
@@ -324,8 +326,8 @@ fn pyramids_stand_as_in_box2d_and_rapier() {
     );
 }
 
-/// The same, turning: ours at rest from 10, 20, 30, the top 0.006, 0.011,
-/// 0.017 lower, 0.0008-0.0014 deep, leaning at most 0.1°.
+/// The same, turning: ours at rest from 10, 20, 20, the top 0.006, 0.010,
+/// 0.016 lower, 0.0008-0.0014 deep, leaning at most 0.1°.
 #[test]
 fn pyramids_that_turn_stand_as_in_box2d_and_rapier() {
     stand(
@@ -366,10 +368,11 @@ fn a_stack_that_turns_stands_as_in_box2d_and_rapier() {
 /// arrays have no world to read it from). Box2D topples it (7 boxes out of
 /// the box); Rapier rests from 220, its top 0.27 lower, and still sways,
 /// at up to 2.8e-4 a body over the last 200 steps (1.5e-7 at step 700,
-/// where its swing turned). At the default five ours sways as much, up to
-/// 5.6e-4, but slower to die, and rests only from 580, which is why a
-/// stacking game picks six (from 60): its contacts are stiffer, and the
-/// column further from buckling (physics.md, "Still at rest"; get-emj.41).
+/// where its swing turned). At the default five ours sways longer, and
+/// rests only from 240, which is why a stacking game picks six (from 30):
+/// its contacts are stiffer, and the column further from buckling
+/// (physics.md, "Still at rest"; get-emj.41). (Before get-emj.48,
+/// 2026-09-28: from 580 at five, 60 at six.)
 #[test]
 fn a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers_at_six_substeps() {
     let b = StandBounds { rest: 2 * 220, top_moved: 0.5 * 0.266, deepest_end: 0.5 * 0.0265, tilt: 1.0, energy_tail: 10.0 * 2.8e-4 };
@@ -458,6 +461,56 @@ fn the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit() {
         assert_eq!(differ(&one, &run(PARAMS.wide)), 0, "{}: by level isn't one at a time", scene.text());
         assert!(differ(&one, &run(Wide::Colored(4))) > 0, "{}: colored is one at a time", scene.text());
     }
+}
+
+/// A turning pyramid 50 wide (1275 boxes) stands whatever order its
+/// contacts are solved in: in pair order (by level, the default), shuffled
+/// afresh each step, and row by row from the top down (`variants.rs`,
+/// `rot/order`), which is the worst order for a stack's first pass. While
+/// each step restarted its points from the substeps' average impulse, only
+/// pair order stood: shuffled, it rested from 680, and from the top down
+/// from 660 (get-emj.48; physics.md, "Why colors let the pyramid fall").
+#[test]
+fn a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in() {
+    pyramid_50_stands_in(&["rot", "rot/order=2", "rot/order=3"]);
+}
+
+/// The same, graph-colored as Box2D colors (`rot/colored=4`), the order
+/// threads would share: it stands, where it came apart before (the top
+/// 1.19 aside, never at rest), but settles later than pair order and keeps
+/// 7.8e-6 a body over the last 200 steps, ten times what the bound allows
+/// (get-emj.54). The 5050 pyramid colored stands within its bounds
+/// (`quality_long.rs`).
+#[test]
+#[ignore = "get-emj.54: colored settles this pyramid slower than the references' bounds"]
+fn a_pyramid_that_turns_stands_when_its_contacts_are_colored() {
+    pyramid_50_stands_in(&["rot/colored=4"]);
+}
+
+/// A turning pyramid 50 wide solved by each of `specs` against the
+/// references on the same scene (700 steps, 2026-09-28): Box2D and Rapier
+/// at rest from 70 and 220, the top 0.368 and 0.379 lower, 0.0190 and
+/// 0.0173 deep, leaning 0.6° and 0.9°, at most 4.1e-11 and 8.1e-8 a body
+/// over the last 200 steps. Ours by level: at rest from 150, the top 0.062
+/// lower, 0.0028 deep, leaning 0.1°.
+fn pyramid_50_stands_in(specs: &[&str]) {
+    let scene = Scene::Pyramid { base: 50 };
+    let runs: Vec<Settling> = std::thread::scope(|s| {
+        let threads: Vec<_> = specs
+            .iter()
+            .map(|spec| {
+                s.spawn(move || {
+                    let mut f = ecs::Flat::variant(&scene, true, spec, &format!("ours ({spec})"));
+                    settle::settle(&mut f, &scene, true, STEPS)
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().expect("an order panicked")).collect()
+    });
+    print_runs(&vec![scene; specs.len()], true, &runs);
+    let cases: Vec<(Scene, StandBounds)> =
+        specs.iter().map(|_| (scene, from_refs((70, 220), (0.368, 0.379), (0.0190, 0.0173), (0.6, 0.9), (4.1e-11, 8.1e-8)))).collect();
+    stand_runs(&cases, &runs);
 }
 
 /// Once a pile is at rest, sleeping takes every body within its half

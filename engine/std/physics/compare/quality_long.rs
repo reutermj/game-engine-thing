@@ -37,14 +37,15 @@ fn big_real_piles_rest_as_soon_as_box2d_and_rapier_do() {
 /// Turning: no engine stays at rest, a body now and then moving over 0.05
 /// again long after the pile came to rest (which sleeping would take in its
 /// stride). At rest from: Box2D 1550, 1760, 2300 (median 1760); Rapier
-/// 2490, 2270, never (2490); ours 330, 350, 1620. So rest from is bounded
-/// by the references' medians themselves (the worst of ours by the later,
-/// the median by the earlier), and the first look at rest by the rules:
-/// Box2D 330, 470, 280 (median 330), Rapier 240, 430, 520 (430); ours 330,
-/// 350, 450. Deepest at the end: Box2D up to 0.126, Rapier 0.095, ours
-/// 0.027. While settling: 0.47 and 0.45 (ours 0.41), mean 0.052 and 0.052
-/// (ours 0.018). Energy at the end: 4.1e-8 and 6.7e-7 (ours 5.3e-8).
-/// Contacts a body 2.02-2.07, 1-4 islands (ours 1.95-1.97, 3-5).
+/// 2490, 2270, never (2490); ours 370, 310, 360 (before get-emj.48, 330,
+/// 350, 1620). So rest from is bounded by the references' medians
+/// themselves (the worst of ours by the later, the median by the earlier),
+/// and the first look at rest by the rules:
+/// Box2D 330, 470, 280 (median 330), Rapier 240, 430, 520 (430); ours 370,
+/// 310, 360. Deepest at the end: Box2D up to 0.126, Rapier 0.095, ours
+/// 0.024. While settling: 0.47 and 0.45 (ours 0.47), mean 0.052 and 0.052
+/// (ours 0.018). Energy at the end: 4.1e-8 and 6.7e-7 (ours 7.0e-9).
+/// Contacts a body 2.02-2.07, 1-4 islands (ours 1.96-1.97, 1-4).
 #[test]
 fn big_real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
@@ -62,13 +63,29 @@ fn big_real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
 }
 
 /// The pyramid 100 wide (5050 boxes): ours at rest from 150, its top 0.27
-/// lower, 0.006 deep; turning, 440, 0.26, 0.006, leaning 0.3°.
+/// lower, 0.006 deep; turning, 450, 0.25, 0.006, leaning 0.3°.
 #[test]
 fn a_big_pyramid_stands_as_in_box2d_and_rapier() {
     let locked = from_refs((70, 280), (0.834, 0.834), (0.0188, 0.0188), (0.0, 0.0), (4.1e-11, 1.9e-10));
     stand(&[(Scene::Pyramid { base: 100 }, locked)], false, LONG_STEPS);
     let turning = from_refs((160, 1100), (1.462, 1.545), (0.0408, 0.0350), (1.5, 1.8), (5.9e-10, 8.2e-8));
     stand(&[(Scene::Pyramid { base: 100 }, turning)], true, LONG_STEPS);
+}
+
+/// The pyramid 100 wide turning, graph-colored as Box2D colors
+/// (`rot/colored=4`), the order threads would share, by the same bounds:
+/// at rest from 1500, the top 0.30 lower, leaning 0.4°. While each step
+/// restarted its points from the substeps' average impulse it never
+/// rested, its top 5.06 lower and a box leaning 37° (get-emj.48;
+/// physics.md, "The solver's speed").
+#[test]
+fn a_big_pyramid_that_turns_stands_when_its_contacts_are_colored() {
+    let scene = Scene::Pyramid { base: 100 };
+    let b = from_refs((160, 1100), (1.462, 1.545), (0.0408, 0.0350), (1.5, 1.8), (5.9e-10, 8.2e-8));
+    let mut colored = ecs::Flat::variant(&scene, true, "rot/colored=4", "ours (rot/colored=4)");
+    let run = settle::settle(&mut colored, &scene, true, LONG_STEPS);
+    print_runs(&[scene], true, std::slice::from_ref(&run));
+    stand_runs(&[(scene, b)], &[run]);
 }
 
 /// Kinetic energy a body at the end: ten times the references' worst.

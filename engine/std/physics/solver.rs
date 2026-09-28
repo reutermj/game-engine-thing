@@ -144,7 +144,8 @@ pub enum Wide {
     Levels(usize),
     /// Graph-colored as Box2D v3 colors, that many lanes at once: another
     /// order, so another computation, and the one threads could share.
-    /// Measured and not the default: it lets a turning pyramid of 5050 fall.
+    /// Measured and not the default: it passes the quality tests, but rests
+    /// a turning pyramid of 5050 three times later than pair order.
     Colored(usize),
 }
 
@@ -241,8 +242,18 @@ impl Constraint {
 }
 
 /// One contact point as the mod hands it over: its arms from each body's
-/// center (world axes), separation, and impulses (in, last step's by
-/// feature; out, this step's).
+/// center (world axes), separation, and impulses: in, by feature, what the
+/// last step left for this one to start from; out, what this step leaves,
+/// which is its last substep's impulse (restitution's included) times the
+/// substeps, not their sum. A substep's share of it is where the next
+/// step's first substep starts, so the accumulated impulses run on across
+/// steps as within them, as Box2D's do (`b2StoreImpulsesTask`,
+/// `b2PrepareContactsTask`). Their average would lag two substeps behind
+/// at every step, which lets a turning pyramid solved in any order but pair
+/// order fall (physics.md, "Why colors let the pyramid fall"). Counted as
+/// a whole step's, it still starts a world that changes its substeps where
+/// it was. The contact's own impulse (`Constraint::jn`) is the sum, what
+/// the step pushed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ContactPoint {
     pub ra: Vec2,
@@ -565,6 +576,11 @@ fn solve_all<const POINTS: bool>(
             }
             c.jn = out.point[..t.count].iter().map(|p| p.jn).sum();
             c.jt = out.point[..t.count].iter().map(|p| p.jt).sum();
+            // The points carry out where the substeps left off, not their
+            // sum: `ContactPoint::jn`.
+            for (p, out) in t.p[..t.count].iter().zip(&mut out.point) {
+                (out.jn, out.jt) = (p.jn * substeps as f32, p.jt * substeps as f32);
+            }
             continue;
         }
         if c.restitution == 0.0 || c.speed <= BOUNCE_THRESHOLD || c.jn == 0.0 || r.mass == 0.0 {
@@ -1262,19 +1278,22 @@ mod lanes {
                 (NONE, 1)
             };
             if k == UNSOLVED {
-                // What the solve as first built gives such a contact: last
-                // step's impulse, a substep's share of it summed.
+                // What the solve one contact at a time gives such a
+                // contact: last step's impulse, a substep's share of it
+                // summed, and its points that share times the substeps
+                // (`ContactPoint::jn`).
                 let sum = |x: f32| (0..substeps).fold(0.0, |acc, _| acc + x);
                 if at == NONE {
                     (c.jn, c.jt) = (sum(pts[0].jn), sum(pts[0].jt));
                 } else {
-                    let mut j = [(0.0, 0.0); 2];
-                    for (j, p) in j.iter_mut().zip(pts.iter()).take(n_points) {
+                    let (mut j, mut last) = ([(0.0, 0.0); 2], [(0.0, 0.0); 2]);
+                    for ((j, last), p) in j.iter_mut().zip(last.iter_mut()).zip(pts.iter()).take(n_points) {
                         *j = (sum(p.jn), sum(p.jt));
+                        *last = (p.jn * substeps as f32, p.jt * substeps as f32);
                     }
                     c.jn = j[..n_points].iter().map(|j| j.0).sum();
                     c.jt = j[..n_points].iter().map(|j| j.1).sum();
-                    kept.push((at as usize, j));
+                    kept.push((at as usize, last));
                 }
                 continue;
             }
@@ -1382,11 +1401,11 @@ mod lanes {
                 }
                 let n = lane.count as usize;
                 let to = &mut points[lane.at as usize];
+                c.jn = o.p[..n].iter().map(|p| p.sum_jn.0[l]).sum();
+                c.jt = o.p[..n].iter().map(|p| p.sum_jt.0[l]).sum();
                 for (q, p) in to.point.iter_mut().zip(o.p.iter()).take(n) {
-                    (q.jn, q.jt) = (p.sum_jn.0[l], p.sum_jt.0[l]);
+                    (q.jn, q.jt) = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
                 }
-                c.jn = to.point[..n].iter().map(|p| p.jn).sum();
-                c.jt = to.point[..n].iter().map(|p| p.jt).sum();
             }
         }
         for (b, st) in bodies.iter_mut().zip(s.iter()) {

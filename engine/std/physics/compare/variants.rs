@@ -32,7 +32,10 @@
 //!   `STATIC_STIFFNESS`), `block=0` a contact's two points one after the
 //!   other in the relax passes; `scalar=1` one contact at a time
 //!   (`Wide::Off`), `levels=<n>` by level `n` wide (the default, 4),
-//!   `colored=<n>` graph-colored `n` wide (physics.md, "The solver's speed").
+//!   `colored=<n>` graph-colored `n` wide (physics.md, "The solver's speed");
+//!   `order` the contacts in another order than the pairs': 1 reversed, 2
+//!   shuffled each step, 3 rows from the top down (physics.md, "Why colors
+//!   let the pyramid fall").
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -108,6 +111,7 @@ pub fn parse(spec: &str) -> Variant {
     }
     if name == "rot" {
         let mut params = PARAMS;
+        let mut order = 0;
         let mut v = Variant::of(Box::new(|_, _, _, _, _| {}));
         for (k, x) in kvs {
             match k.as_str() {
@@ -123,10 +127,17 @@ pub fn parse(spec: &str) -> Variant {
                 "colored" => params.wide = Wide::Colored(x as usize),
                 "warm" => v.warm = [Warm::None, Warm::Ids, Warm::Nearest, Warm::Either][x as usize],
                 "deepest" => v.deepest = x != 0.0,
+                "order" => order = x as u32,
                 _ => panic!("rot: {k}"),
             }
         }
-        v.solve = Box::new(move |b, s, c, p, dt| solve_with(&params, (b, s), c, p, dt));
+        if order == 0 {
+            v.solve = Box::new(move |b, s, c, p, dt| solve_with(&params, (b, s), c, p, dt));
+        } else {
+            let seed = RefCell::new(0x9e37_79b9_u32);
+            v.solve =
+                Box::new(move |b, s, c, p, dt| reordered(order, &mut seed.borrow_mut(), c, |c| solve_with(&params, (b, s), c, p, dt)));
+        }
         return v;
     }
     assert_eq!(name, "soft", "no variant {name}");
@@ -147,6 +158,37 @@ pub fn parse(spec: &str) -> Variant {
         }
     }
     Variant::of(without_points(move |b, c, dt| soft(&s, b, c, dt)))
+}
+
+/// `solve` over the contacts in another order than the pairs' (`rot/order`):
+/// 1 reversed, 2 shuffled afresh each step, 3 by their lower body, highest
+/// first (a pyramid's rows from the top down, each in pair order, and the
+/// ground last: by the higher body, the arrays' immovable body, which is
+/// last, would put the ground first), and back in pair order after, so
+/// the arrays see no difference
+/// but the solve's. The solve by level is the sweep of whatever order it's
+/// given, bit for bit, so this is that order solved one at a time.
+fn reordered(order: u32, seed: &mut u32, contacts: &mut [Constraint], solve: impl FnOnce(&mut [Constraint])) {
+    let mut at: Vec<usize> = (0..contacts.len()).collect();
+    match order {
+        1 => at.reverse(),
+        2 => {
+            for i in (1..at.len()).rev() {
+                // xorshift32: any fixed sequence will do.
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 17;
+                *seed ^= *seed << 5;
+                at.swap(i, *seed as usize % (i + 1));
+            }
+        }
+        3 => at.sort_by_key(|&i| std::cmp::Reverse(contacts[i].a.min(contacts[i].b))),
+        _ => panic!("rot/order={order}"),
+    }
+    let mut mine: Vec<Constraint> = at.iter().map(|&i| contacts[i]).collect();
+    solve(&mut mine);
+    for (&i, c) in at.iter().zip(mine) {
+        contacts[i] = c;
+    }
 }
 
 // ---- The split impulse, as it was, and with friction on its pseudo velocities ----
