@@ -93,6 +93,11 @@ const fn sized(native: usize, miri: usize) -> usize {
     if cfg!(miri) { miri } else { native }
 }
 
+/// How far rows are spread in 2D and 3D: sized with them, so Miri's fewer
+/// are about as dense.
+const PLANE: f32 = if cfg!(miri) { 6.0 } else { 30.0 };
+const SPACE: f32 = if cfg!(miri) { 4.0 } else { 12.0 };
+
 fn lcg(s: &mut u64) -> f32 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*s >> 40) as f32 / (1u64 << 24) as f32
@@ -245,7 +250,7 @@ struct Space3;
 
 impl Space for Plane {
     fn spawn(m: &mut engine_ecs::WorldMut<'_>, seed: &mut u64, i: usize) -> Entity {
-        let at = At { x: lcg(seed) * 30.0, y: lcg(seed) * 30.0 };
+        let at = At { x: lcg(seed) * PLANE, y: lcg(seed) * PLANE };
         // Every twentieth big, a pass of the order of its own.
         let size = if i % 20 == 1 { Size { hx: 3.0, hy: 0.5 } } else { Size { hx: 0.1 + lcg(seed) * 0.5, hy: 0.1 + lcg(seed) * 0.5 } };
         let tag = Tag { n: i as u32 };
@@ -266,7 +271,7 @@ impl Space for Plane {
         m.remove::<At>(e);
     }
     fn key(m: &mut engine_ecs::WorldMut<'_>, e: Entity) {
-        m.insert(e, At { x: 15.0, y: 15.0 });
+        m.insert(e, At { x: PLANE / 2.0, y: PLANE / 2.0 });
     }
     fn found_brute(w: &World) -> Vec<(Entity, Entity)> {
         brute(boxes2(w))
@@ -281,7 +286,7 @@ impl Space for Plane {
 
 impl Space for Space3 {
     fn spawn(m: &mut engine_ecs::WorldMut<'_>, seed: &mut u64, i: usize) -> Entity {
-        let at = At3 { x: lcg(seed) * 12.0, y: lcg(seed) * 12.0, z: lcg(seed) * 12.0 };
+        let at = At3 { x: lcg(seed) * SPACE, y: lcg(seed) * SPACE, z: lcg(seed) * SPACE };
         let size = Size3 { h: if i % 20 == 1 { 3.0 } else { 0.1 + lcg(seed) * 0.5 } };
         let tag = Tag { n: i as u32 };
         match i % 7 {
@@ -301,7 +306,7 @@ impl Space for Space3 {
         m.remove::<At3>(e);
     }
     fn key(m: &mut engine_ecs::WorldMut<'_>, e: Entity) {
-        m.insert(e, At3 { x: 6.0, y: 6.0, z: 6.0 });
+        m.insert(e, At3 { x: SPACE / 2.0, y: SPACE / 2.0, z: SPACE / 2.0 });
     }
     fn found_brute(w: &World) -> Vec<(Entity, Entity)> {
         brute(boxes3(w))
@@ -403,6 +408,15 @@ fn run<S: Space>(rows: usize) {
     script.extend([(CREEP, true, Some(Kept)); 6]);
     script.extend([(REST, false, Some(Same)), (SHAKE, true, None), (CREEP, false, None), (REST, false, None)]);
     let (mut moved, mut nudged) = (0, std::collections::HashSet::new());
+    // Under Miri, the start and the frames that churn: what drives the
+    // storage's unsafe glue (spawns, despawns, moves between tables).
+    if cfg!(miri) {
+        let mut frame = 0;
+        script.retain(|&(_, churned, _)| {
+            frame += 1;
+            frame <= 3 || churned
+        });
+    }
     for (frame, &(scene, churned, how)) in script.iter().enumerate() {
         if churned {
             churn::<S>(&w, &mut es, &mut keyless, &mut seed, scene == ALONE);
@@ -411,10 +425,13 @@ fn run<S: Space>(rows: usize) {
         FRAME.store(frame as u32, Ordering::SeqCst);
         let _ = if scene == ALONE { alone.run_sequential(&w) } else { s.run_sequential(&w) };
         let (got, fresh, stats) = FOUND.lock().unwrap().take().expect("the pairs system ran");
-        assert!(fresh.len() > rows / 3, "frame {frame}: {} pairs; too sparse to see much", fresh.len());
+        // What the script says about how, and how many, is for its full
+        // size: under Miri, fewer rows cross the thresholds differently.
+        let full = !cfg!(miri);
+        assert!(fresh.len() > rows / 3 || !full, "frame {frame}: {} pairs; too sparse to see much", fresh.len());
         assert_eq!(fresh, S::found_brute(&w), "frame {frame}: near_pairs against brute force");
         assert!(got == fresh, "frame {frame} (scene {scene}, {stats:?}): live pairs aren't near_pairs'");
-        if let Some(how) = how {
+        if let Some(how) = how.filter(|_| full) {
             assert_eq!(stats.how, how, "frame {frame} (scene {scene}): {stats:?}");
         }
         if scene == CREEP {
@@ -425,6 +442,9 @@ fn run<S: Space>(rows: usize) {
         }
     }
     // Some nudge makes a pair or ends one, so retesting a few is seen to.
+    if cfg!(miri) {
+        return;
+    }
     assert!(nudged.len() > 1, "nudging changed no pair");
     // Creeping, few rows leave their fat boxes: that's what keeping is for.
     assert!(moved > 0 && moved < rows, "{moved} rows left their fat boxes creeping, of {rows} over 16 frames");
@@ -432,12 +452,12 @@ fn run<S: Space>(rows: usize) {
 
 #[test]
 fn live_pairs_are_near_pairs_in_2d() {
-    run::<Plane>(600);
+    run::<Plane>(sized(600, 24));
 }
 
 #[test]
 fn live_pairs_are_near_pairs_in_3d() {
-    run::<Space3>(600);
+    run::<Space3>(sized(600, 24));
 }
 
 /// The script's relation read the other way (tagged rows active), wider,
@@ -588,7 +608,7 @@ fn two_relations_on_one_key_are_kept_apart() {
     let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let w = World::new();
     let mut seed = 11;
-    let rows = sized(600, 60);
+    let rows = sized(600, 24);
     let mut es: Vec<Entity> = {
         let mut m = w.between_frames(Build::default()).unwrap();
         (0..rows).map(|i| Plane::spawn(&mut m, &mut seed, i)).collect()
@@ -625,7 +645,7 @@ fn two_relations_on_one_key_are_kept_apart() {
                 assert!(how.is_none(), "frame {frame}: a relation that should have run didn't");
                 continue;
             };
-            assert!(!fresh.is_empty(), "frame {frame}: no pairs to see");
+            assert!(!fresh.is_empty() || cfg!(miri), "frame {frame}: no pairs to see");
             assert!(got == fresh, "frame {frame} ({stats:?}): live pairs aren't near_pairs'");
             if let Some(how) = how.filter(|_| !cfg!(miri)) {
                 assert_eq!(stats.how, how, "frame {frame}: {stats:?}");
@@ -662,7 +682,7 @@ fn a_declared_margin_is_the_one_kept() {
     let mut seed = 5;
     {
         let mut m = w.between_frames(Build::default()).unwrap();
-        for i in 0..sized(600, 60) {
+        for i in 0..sized(600, 24) {
             Plane::spawn(&mut m, &mut seed, i);
         }
     }

@@ -194,22 +194,26 @@ MIRI_TESTS = ecs_miri_test(
     crate_root = "lib.rs",
 ) + [
     test
-    for name in [
-        "model_test",
-        "world_test",
-        "spatial_test",
-        "ordered_test",
-        "page_test",
-    ]
+    for name, deps in {
+        "model_test": [":ops"],
+        "world_test": [],
+        "spatial_test": [],
+        # The 3D bounds glue, the two-extent `refs` included.
+        "spatial3d_test": [],
+        "ordered_test": [],
+        "page_test": [],
+        # No unsafe of its own; it drives the spatial glue through spawns,
+        # despawns and table moves.
+        "live_test": [],
+        # Not graph_test: pure logic, and no test of it finished in 45
+        # minutes interpreted (2026-09-27).
+    }.items()
     for test in ecs_miri_test(
         name = "miri_" + name,
         srcs = ["tests/{}.rs".format(name)],
         crate_name = name,
         crate_root = "tests/{}.rs".format(name),
-        deps = [
-            ":ecs",
-            ":ops",
-        ],
+        deps = [":ecs"] + deps,
     )
 ]
 

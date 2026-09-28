@@ -38,6 +38,12 @@ impl SpatialKey for At2 {
     }
 }
 
+/// `native` rows or frames, or `miri` under Miri, where each costs a
+/// thousand times more.
+const fn sized(native: usize, miri: usize) -> usize {
+    if cfg!(miri) { miri } else { native }
+}
+
 fn lcg(s: &mut u64) -> f32 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*s >> 40) as f32 / (1u64 << 24) as f32
@@ -118,7 +124,7 @@ fn regions_and_pairs_agree_with_brute_force_in_3d() {
     let mut spawned = Vec::new();
     {
         let mut m = w.between_frames(Build::default()).unwrap();
-        for k in 0..900 {
+        for k in 0..sized(900, 120) {
             let at = At3 { x: lcg(&mut seed) * 12.0, y: lcg(&mut seed) * 9.0, z: lcg(&mut seed) * 10.0 };
             // Mostly small, a few big (their own pages), some with no size.
             let e = match k % 30 {
@@ -130,7 +136,9 @@ fn regions_and_pairs_agree_with_brute_force_in_3d() {
         }
     }
     check(&w);
-    for frame in 0..40 {
+    // Past frame 10 under Miri too: every tenth frame moves everything, and
+    // every seventh after the third churns.
+    for frame in 0..sized(40, 12) {
         let schedule = if frame % 10 == 9 { &all } else { &s };
         schedule.run_sequential(&w);
         check(&w);
@@ -143,11 +151,11 @@ fn regions_and_pairs_agree_with_brute_force_in_3d() {
         assert_eq!(*PAIRS.lock().unwrap(), brute_pairs(&w, 0.05), "frame {frame}");
         if frame % 7 == 3 {
             let mut m = w.between_frames(Build::default()).unwrap();
-            for _ in 0..40 {
+            for _ in 0..sized(40, 6) {
                 let i = (lcg(&mut seed) * spawned.len() as f32) as usize % spawned.len();
                 m.despawn(spawned.swap_remove(i));
             }
-            for _ in 0..60 {
+            for _ in 0..sized(60, 9) {
                 let at = At3 { x: lcg(&mut seed) * 12.0, y: lcg(&mut seed) * 9.0, z: lcg(&mut seed) * 10.0 };
                 spawned.push(m.spawn((at, Size3 { h: 0.25 })));
             }

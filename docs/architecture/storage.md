@@ -354,9 +354,10 @@ The drivers are run:
 - **Seeded**, in the default suite (`//engine/ecs:model_test`, 5 s), and
   for as long as wanted as a soak.
 - **Under Miri**, with the crate's unit tests and the integration tests
-  that drive the unsafe code (world, spatial, ordered, page), under both
-  Stacked and Tree Borrows, with symbolic alignment checks and strict
-  provenance: `./bazel test //engine/ecs:miri`, 22 minutes. It sees
+  that drive the unsafe code (world, spatial in 2D and 3D, ordered, page,
+  live relations), under both Stacked and Tree Borrows, with symbolic
+  alignment checks and strict provenance: `./bazel test //engine/ecs:miri`,
+  25 minutes. It sees
   what no native run can: aliasing violations, uninitialized reads,
   provenance, misalignment. Inputs are sized down under `cfg(miri)`, and
   the tests whose point needs thousands of rows (dense piles, splits across

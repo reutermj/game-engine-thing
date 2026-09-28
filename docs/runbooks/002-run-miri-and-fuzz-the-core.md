@@ -26,11 +26,28 @@ of its own: [runbook 003](003-fuzz-hot-reload.md).
 ```
 
 Each is a pair of targets per test crate, `_sb` (Stacked Borrows) and `_tb`
-(Tree Borrows), run in parallel. Measured on 32 cores (2026-09-25): the
-first took 22 minutes of wall clock, its longest targets being the Tree
-Borrows runs of `model_test`, `spatial_test` and `page_test` (20 to 22
-minutes each; Stacked Borrows takes half that); the second, 41 minutes, in
-16 shards per model. The first run also builds the Miri sysroot (about a
+(Tree Borrows), run in parallel. The first covers the crate's own tests
+(`miri_unit`) and `model_test`, `world_test`, `spatial_test`,
+`spatial3d_test` (the 3D bounds glue, two-extent `refs` included),
+`ordered_test`, `page_test` and `live_test` (no unsafe of its own, but it
+drives the spatial glue through spawns, despawns and table moves).
+`graph_test` is left out: pure logic, and none of its tests finished in 45
+minutes interpreted. Measured on 32 cores (2026-09-27), the first takes
+about 25 minutes of wall clock, the longest target; seconds, Stacked /
+Tree Borrows:
+
+| target | sb | tb |
+|---|---|---|
+| `miri_unit` | 41 | 56 |
+| `model_test` | 342 | 1185 |
+| `world_test` | 33 | 239 |
+| `spatial_test` | 822 | 1463 |
+| `spatial3d_test` | 362 | 589 |
+| `ordered_test` | 226 | 543 |
+| `page_test` | 526 | 1061 |
+| `live_test` | 135 | 352 |
+
+The second, 41 minutes (2026-09-25), in 16 shards per model. The first run also builds the Miri sysroot (about a
 minute). A failure's
 `test.log` has Miri's report: the kind of UB, and a backtrace to the line.
 
