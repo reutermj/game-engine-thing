@@ -2862,7 +2862,7 @@ agree on every scene to every digit.
 | overlap, 4 wide at 0.25: fastest; apart at; at rest | at most the cap, 3 | 2.2; 20; 27 | 3.0; 67; 55 | 3.5; 46; 48 |
 | overlap, 4 wide at 0.5 | | 2.5; 31; 33 | 3.6; 56; 54 | 4.4; 57; 58 |
 | overlap, 10 wide at 0.5 | | 9.4; 43; 101, stands | 16.8; 75; 198, topples, two out | 16.5; 101; 241, topples |
-| card house: most moved; at rest | stands | 0.10; 27 | 0.14; 21 | **two cards fall** |
+| card house: most moved; at rest | stands | 0.10; 27[^card-house] | 0.14; 21 | **two cards fall** |
 | ladder, μ 0.4 and 0.3: slid | stands (0.269) | 0.00005 | 0.0004 | 0.00001 |
 | ladder, μ 0.24 and 0.2: slid | slides | 1.30, 1.35 | 1.31, 1.35 | 1.30, 1.35 |
 | dominoes: fell in order; wave; at rest | all | 15; 2.667 a second; 441 | 15; 2.667; 434 | 15; 2.736; 443 |
@@ -2919,7 +2919,9 @@ stands heavy boxes the references crush, sinking 5-10 times less, as its
 stiffer contacts did on piles ([Settling](#settling)); pushes overlap
 apart more gently than either (at 2.2-2.5 a second where theirs reach
 3.0-4.4) and keeps the 10-wide pyramid standing where both topple it; and
-stands the card house Rapier drops. Four things are wrong, each an ignored
+stands the card house Rapier drops (as measured then: at the edge, it now
+goes either way, and is judged as a family, [What a turning point
+carries](#what-a-turning-point-carries-the-decision-matrix)). Four things are wrong, each an ignored
 test naming its bead (run with `--test_arg=--include-ignored`), not a
 looser bound:
 
@@ -3511,6 +3513,123 @@ impulse without the factor of the substeps: every turning quality test;
 the fix in the lanes and not in the loop one contact at a time:
 `the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`.
 
+### What a turning point carries: the decision matrix
+
+**Status: open, the data for a choice** (2026-09-28, get-emj.61). Carrying
+both impulses from the last substep (above) broke one scene the others
+hadn't measured: Box2D's 5-storey card house, which lost two cards. The
+top A-frame's apex holds on friction at 0.54 of its 0.7 limit; in the
+landing (steps 10-15) its tangent impulse swings from +0.55 to +0.06
+within a step, and carried from the last substep it sticks at the limit
+(-0.700), sliding, where the mean re-sticks at -0.54. Restitution is 0
+there, and Box2D carries both impulses from the last substep too
+(`b2StoreImpulsesTask`), so neither is the difference. The scene is at
+its edge: every engine drops it at friction 0.6; ours before fell at six
+storeys, Rapier at five, Box2D at eight. Three options, all built
+(`solver::Carry`, `arrays:rot/carry=<n>`), each also colored:
+
+- **A** (`Carry::Last`, the interim default): both impulses as the last
+  substep left them.
+- **B** (`Carry::Normal`, `carry=1`): the normal's last, the tangent's
+  mean.
+- **C** (`Carry::Mean`, `carry=2`): both means, as before get-emj.48.
+
+**The families.** The single card house became a family, and five more
+scenes near an edge were built as families (`family.rs`;
+physics-testing.md, "Families at the edge"), each a grid measured for
+ours and both references, with the debug view checked on the ones that
+fail (dominoes 1.2 apart: ours pushes one, Box2D three; a box 300 times
+as heavy on three: both columns knocked over). Runs that did what they
+should, on each long grid:
+
+| family (long grid) | Box2D | Rapier | A | B | C | A colored | B colored | C colored |
+|---|---|---|---|---|---|---|---|---|
+| card houses: 4-6 storeys, lean 23-27°, friction 0.65-0.9 | 104/135 | 70/135 | 87 | **102** | 91 | 91 | **105** | 98 |
+| 5-storey houses, lean 23-27° by quarters, friction 0.65-0.9 (a sweep, not a test) | – | – | 134/187 | **156** | 142 | 139 | **161** | 155 |
+| a box 0.1-2° either side of the friction angle (μ 0.3, 0.5, 0.7) | 30/30 | 30/30 | 30 | 30 | 30 | 30 | 30 | 30 |
+| the ladder 0.005-0.05 from its friction, at 20°, 30°, 40° | 24/24 | 24/24 | 24 | 24 | 24 | 24 | 24 | 24 |
+| ten dominoes 0.8-1.4 apart, friction 0.3 and 0.6 | 13/16 | 14/16 | 13 | 13 | 13 | 14 | 13 | 13 |
+| stacks 12-28 high, turning | 0/12 | 10/12 | 6 | 6 | 6 | 6 | 6 | 6 |
+| a box 10-1000 times as heavy on 1, 2, 3, 5 | 21/44 | 28/44 | 34 | 34 | 34 | 34 | 34 | 35 |
+| a pyramid 20 wide at friction 0-0.6 | 6/7 | 6/7 | 6 | 6 | 6 | 6 | 6 | 6 |
+
+- **Only the card houses tell the options apart.** B stands 15 more of
+  135 than A (and 22 more of 187 on the finer sweep), C 4 more; Box2D
+  stands 104, so B is at Box2D's reliability and A between Box2D and
+  Rapier.
+- **The rest are decided by other things.** Ramps and the ladder are
+  right in every engine at every point (Coulomb friction on one contact
+  is exact); stacks topple from 21 high in ours whichever option, Rapier
+  from 26, Box2D from 12 (it sways a column over at its softness); heavy
+  boxes stand more often in ours than in either reference; a pyramid
+  needs friction only at 0.
+- **Friction halved**, the short card grid stands none of 12 (the bound
+  is 7).
+
+**Every bound, each option** (`MATRIX=1` prints each bound's value and
+limit, met or not; `:quality_test`, `:quality_long_test`,
+`:behaviour_test` and `:behaviour_long_test` with `SOLVER=` and
+`--include-ignored`, 2026-09-28). A row a test where the options differ,
+the failing bounds with their value and limit; tests every option meets
+alike are left out, and the long suites' copies of the default tests
+counted once. The tests on the mod (the 20-high stack at six substeps,
+sleeping) can't take a variant and are left out:
+
+| suite | test | A | B | C | Ac | Bc | Cc |
+|---|---|---|---|---|---|---|---|
+| quality | `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in` | 12/12 | 12/12 | **10/12**: pyramid 40: at rest from Some(310), bound 220; pyramid 40: energy 1.15e-6 a body in the last 200 steps, bound 1e-7 | **11/12**: pyramid 40: at rest from Some(250), bound 220 | 12/12 | **7/12**: pyramid 40: at rest from Some(550), bound 220; pyramid 40: its top moved 0.164, bound 0.118; … |
+| quality | `real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do` | 36/36 | **35/36**: pile 1200 41: at rest from Some(530), bound 500 | 36/36 | 36/36 | 36/36 | **33/36**: pile 400 41: energy 6.97e-7 a body at the end, bound 3.29e-7; pile 1200 41: at rest from Some(700), bound 500; … |
+| quality | `a_pyramid_that_turns_stands_when_its_contacts_are_colored (ignored)` | **5/6**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 6/6 | **2/6**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … | **5/6**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 6/6 | **2/6**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … |
+| quality_long | `quality_long::a_pyramid_50_wide_that_turns_stands_whatever_order_its_contacts_are_solved_in` | 18/18 | **17/18**: pyramid 50: energy 1.72e-6 a body in the last 200 steps, bound 8.1e-7 | **13/18**: pyramid 50: at rest from Some(680), bound 440; pyramid 50: energy 5.39e-3 a body in the last 200 steps, bound 8.1e-7; … | **17/18**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 18/18 | **9/18**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … |
+| quality_long | `quality_long::a_big_pyramid_stands_as_in_box2d_and_rapier` | 12/12 | 12/12 | 12/12 | 12/12 | 12/12 | **8/12**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … |
+| quality_long | `quality_long::a_big_pyramid_that_turns_stands_when_its_contacts_are_colored` | 6/6 | 6/6 | **2/6**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … | 6/6 | 6/6 | **2/6**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … |
+| behaviour | `a_ball_never_rebounds_higher_than_e_squared (ignored)` | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 |
+| behaviour | `a_heavy_box_crushing_a_column_throws_nothing_through_the_floor (ignored)` | 2/2 | **0/2**: ratio 1000 5: escaped 1, bound 0; ratio 1000 5: jitter 62.560, bound 8.262 | **0/2**: ratio 1000 5: escaped 2, bound 0; ratio 1000 5: jitter 81.516, bound 8.262 | 2/2 | **0/2**: ratio 1000 5: escaped 4, bound 0; ratio 1000 5: jitter 82.876, bound 8.262 | **0/2**: ratio 1000 5: escaped 4, bound 0; ratio 1000 5: jitter 80.369, bound 8.262 |
+| behaviour | `heavy_boxes_on_light_ones_come_to_rest_as_soon_as_in_box2d_and_rapier (ignored)` | **3/5**: ratio 1000 1: at rest from 197, bound 82; bigonsmall: at rest from 72, bound 68 | **4/5**: ratio 1000 1: at rest from 296, bound 82 | **1/5**: ratio 100 1: at rest from 77, bound 46; ratio 1000 1: at rest from inf, bound 82; … | **3/5**: ratio 1000 1: at rest from 268, bound 82; bigonsmall: at rest from 74, bound 68 | **3/5**: ratio 1000 1: at rest from 199, bound 82; bigonsmall: at rest from 69, bound 68 | **2/5**: ratio 1000 1: at rest from inf, bound 82; ratio 100 1: at rest from 181, bound 46; … |
+| **all** | bounds met, tests not ignored | **338/338** | **336/338** | **327/338** | **336/338** | **338/338** | **313/338** |
+| **all** | bounds met, ignored tests too | **413/450** | **411/450** | **395/450** | **411/450** | **412/450** | **382/450** |
+| behaviour | family ramp | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) |
+| behaviour | family ladder | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) |
+| behaviour | family ratios | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 3/4 (≥ 0) |
+| behaviour | family dominoes | 3/4 (≥ 3) | 3/4 (≥ 3) | 3/4 (≥ 3) | 4/4 (≥ 3) | 3/4 (≥ 3) | 3/4 (≥ 3) |
+| behaviour | family stacks | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) |
+| behaviour | family cards | 8/12 (≥ 7) | 9/12 (≥ 7) | 10/12 (≥ 7) | 11/12 (≥ 7) | 11/12 (≥ 7) | 11/12 (≥ 7) |
+| behaviour | family pyramids | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) |
+| behaviour_long | family ramp | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) |
+| behaviour_long | family ladder | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) |
+| behaviour_long | family ratios | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 35/44 (≥ 21) |
+| behaviour_long | family dominoes | 13/16 (≥ 13) | 13/16 (≥ 13) | 13/16 (≥ 13) | 14/16 (≥ 13) | 13/16 (≥ 13) | 13/16 (≥ 13) |
+| behaviour_long | family stacks | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) |
+| behaviour_long | family cards | 87/135 (≥ 70) | 102/135 (≥ 70) | 91/135 (≥ 70) | 91/135 (≥ 70) | 105/135 (≥ 70) | 98/135 (≥ 70) |
+| behaviour_long | family pyramids | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) |
+
+- **A** meets every bound of the tests not ignored, the card family's
+  short grid by one house (8 of 12, bound 7); of the ignored, it misses
+  the colored pyramid 50's energy (7.8e-6 a body against 8.1e-7).
+- **B** misses two: the turning pile of 1200 rests at 530 (bound 500) and
+  pyramid 50 from the top down keeps 1.7e-6 a body (8.1e-7). It passes
+  the ignored colored pyramid 50, which A doesn't.
+- **C** misses eleven, all the pyramid orders get-emj.48 was about.
+- **Colored**, B is the only option to meet every bound (338/338),
+  pyramids of 40, 50 and 5050 in every order included; A colored misses
+  two (pyramid 40 from the top down rests at 250, pyramid 50's energy);
+  C colored twenty-five.
+- The ignored tests' failures (a ball over e², bullets through a thin
+  wall, heavy boxes' rest) are the same under every option but two: the
+  column crushed by a box 1000 times as heavy throws bodies through the
+  floor under B and C, colored or not (1 to 4 escaped), and not under A.
+- **Speed**: the options differ by a multiply a point at the end of the
+  step; not measurable.
+
+**3D** carries the same choice another way: physics3d's default is the
+mean of both (`Carry::Mean`, as C), with the last substep a variant
+(`Carry::Last`; [Still at rest](#still-at-rest): the mean lags a
+rocking contact two substeps, the last let piles of 1000 planks rest
+later). It is its own solver and its own measure; this matrix is 2D's.
+
+The whole listing, every bound under every option with its value, is in
+get-emj.61.
+
 ## Open questions
 
 - **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation
@@ -3843,6 +3962,12 @@ frame 508.
     columns read, frame first: falling 910 / 563, broadphase 221 / 201,
     outside the systems 196; settled 1454 / 1279, 227 / 282, 101; at rest
     1384 / 1288, 220 / 283, 25 (medians of three runs).
+
+[^card-house]: *(History, 2026-09-28.)* Measured on the solver before
+    get-emj.48. Since, carrying both impulses from the last substep, it
+    loses two cards, as Rapier's does; the test on it became a family of
+    houses bounded by the references' share ([What a turning point
+    carries](#what-a-turning-point-carries-the-decision-matrix)).
 
 [^colored-fell]: *(History, 2026-09-27.)* When this table was measured,
     colors let a turning 5050 pyramid fall, its top 2 to 5 lower and boxes

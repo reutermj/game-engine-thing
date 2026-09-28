@@ -45,6 +45,7 @@ rust_binary(
         "box2d.rs",
         "compare.rs",
         "ecs.rs",
+        "family.rs",
         "quality.rs",
         "rapier.rs",
         "scene.rs",
@@ -133,15 +134,32 @@ rust_test(
 # by hand calculations and by what Box2D and Rapier do on the same scenes
 # (recorded, not linked). See the source, and physics.md, "Quality beyond
 # settling". Tests that found a problem are ignored, each naming its bead.
+BEHAVIOUR_SRCS = MEASURE_SRCS + [
+    "behave.rs",
+    "behaviour_test.rs",
+    "family.rs",
+]
+
 rust_test(
     name = "behaviour_test",
-    srcs = MEASURE_SRCS + [
-        "behave.rs",
-        "behaviour_test.rs",
-    ],
+    srcs = BEHAVIOUR_SRCS,
     crate_root = "behaviour_test.rs",
     data = [":scene_game"],
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
+# The edge-of-stability families on their long grids (family.rs): minutes,
+# so manual, and meant for -c opt:
+#   ./bazel test -c opt //engine/std/physics/compare:behaviour_long_test
+rust_test(
+    name = "behaviour_long_test",
+    srcs = BEHAVIOUR_SRCS + ["behaviour_long.rs"],
+    crate_features = ["long"],
+    crate_root = "behaviour_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
     deps = QUALITY_DEPS,
 )
 

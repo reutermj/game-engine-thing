@@ -93,7 +93,8 @@ fn a_pyramid_50_wide_that_turns_stands_whatever_order_its_contacts_are_solved_in
 fn a_big_pyramid_that_turns_stands_when_its_contacts_are_colored() {
     let scene = Scene::Pyramid { base: 100 };
     let b = from_refs((160, 1100), (1.462, 1.545), (0.0408, 0.0350), (1.5, 1.8), (5.9e-10, 8.2e-8));
-    let mut colored = ecs::Flat::variant(&scene, true, "rot/colored=4", "ours (rot/colored=4)");
+    let spec = with_solver("rot/colored=4");
+    let mut colored = ecs::Flat::variant(&scene, true, &spec, &format!("ours ({spec})"));
     let run = settle::settle(&mut colored, &scene, true, LONG_STEPS);
     print_runs(&[scene], true, std::slice::from_ref(&run));
     stand_runs(&[(scene, b)], &[run]);

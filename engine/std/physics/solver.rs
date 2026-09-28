@@ -126,6 +126,39 @@ pub struct Params {
     /// How a step where something turns orders and lays out its contacts
     /// (`Wide`).
     pub wide: Wide,
+    /// What a turning contact's points carry to the next step (`Carry`).
+    pub carry: Carry,
+}
+
+/// What a turning contact's points carry out of a step, for the next to
+/// warm-start from (`ContactPoint::jn`). The last substep's impulses is the
+/// default, as Box2D carries them; the others are the comparison's
+/// variants, kept because the choice is open (get-emj.61; physics.md, "Why
+/// colors let the pyramid fall").
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Carry {
+    /// Both impulses as the last substep left them (times the substeps).
+    Last,
+    /// The normal's last, the tangent's mean over the substeps: stands more
+    /// card houses, and some piles later.
+    Normal,
+    /// Both means over the substeps, as before get-emj.48: lets a turning
+    /// pyramid solved in any order but pair order fall.
+    Mean,
+}
+
+impl Carry {
+    /// What's carried, from the last substep's impulses and the means, each
+    /// (normal, tangent) and counted as a whole step's.
+    #[inline(always)]
+    fn of(self, last: (f32, f32), mean: (f32, f32)) -> (f32, f32) {
+        match self {
+            Carry::Last => last,
+            Carry::Normal => (last.0, mean.1),
+            Carry::Mean => mean,
+        }
+    }
 }
 
 /// How a step where something turns solves its contacts (physics.md, "The
@@ -160,6 +193,7 @@ pub const PARAMS: Params = Params {
     static_stiffness: STATIC_STIFFNESS,
     block: false,
     wide: Wide::Levels(4),
+    carry: Carry::Last,
 };
 
 impl Params {
@@ -579,7 +613,8 @@ fn solve_all<const POINTS: bool>(
             // The points carry out where the substeps left off, not their
             // sum: `ContactPoint::jn`.
             for (p, out) in t.p[..t.count].iter().zip(&mut out.point) {
-                (out.jn, out.jt) = (p.jn * substeps as f32, p.jt * substeps as f32);
+                let last = (p.jn * substeps as f32, p.jt * substeps as f32);
+                (out.jn, out.jt) = params.carry.of(last, (out.jn, out.jt));
             }
             continue;
         }
@@ -1289,7 +1324,7 @@ mod lanes {
                     let (mut j, mut last) = ([(0.0, 0.0); 2], [(0.0, 0.0); 2]);
                     for ((j, last), p) in j.iter_mut().zip(last.iter_mut()).zip(pts.iter()).take(n_points) {
                         *j = (sum(p.jn), sum(p.jt));
-                        *last = (p.jn * substeps as f32, p.jt * substeps as f32);
+                        *last = params.carry.of((p.jn * substeps as f32, p.jt * substeps as f32), *j);
                     }
                     c.jn = j[..n_points].iter().map(|j| j.0).sum();
                     c.jt = j[..n_points].iter().map(|j| j.1).sum();
@@ -1404,7 +1439,8 @@ mod lanes {
                 c.jn = o.p[..n].iter().map(|p| p.sum_jn.0[l]).sum();
                 c.jt = o.p[..n].iter().map(|p| p.sum_jt.0[l]).sum();
                 for (q, p) in to.point.iter_mut().zip(o.p.iter()).take(n) {
-                    (q.jn, q.jt) = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
+                    let last = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
+                    (q.jn, q.jt) = params.carry.of(last, (p.sum_jn.0[l], p.sum_jt.0[l]));
                 }
             }
         }

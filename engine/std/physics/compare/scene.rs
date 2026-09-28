@@ -116,17 +116,23 @@ pub enum Scene {
     /// step it reaches the wall, which decides whether a step skips it.
     Bullet { speed: f32, radius: f32, thick: f32, phase: f32 },
     /// Box2D's "Card House" (from PEEL), `rows` storeys, scaled five times
-    /// (cards 2 tall and 0.01 thick), friction 0.7.
-    Cards { rows: u32 },
+    /// (cards 2 tall and 0.01 thick), each pair leaning `lean` degrees
+    /// (Box2D's 25) and friction `mu` (0.7): at the edge of standing, so a
+    /// family of them is what's judged (`family.rs`).
+    Cards { rows: u32, lean: f32, mu: f32 },
     /// A plank 5 long and 0.2 thick leaning `deg` from upright against a
     /// frictionless wall, on a floor of friction `mu`: it stands while
     /// μ ≥ tan θ / 2 − hx / (2 hy) (`Scene::ladder_mu`). A structure that
     /// stands on friction alone, in place of Box2D's arch, whose blocks are
     /// wedges (polygons), which physics doesn't have.
     Ladder { deg: f32, mu: f32 },
-    /// Box2D's "Double Domino": `n` dominoes 0.25 by 1, a unit apart,
-    /// friction 0.6, the first knocked over as Box2D's impulse knocks it.
-    Dominoes { n: u32 },
+    /// Box2D's "Double Domino": `n` dominoes 0.25 by 1, `spacing` apart
+    /// (Box2D's 1), friction `mu` (0.6), the first knocked over as Box2D's
+    /// impulse knocks it. One reaches the next while the spacing is under
+    /// its height and thickness, 1.25.
+    Dominoes { n: u32, spacing: f32, mu: f32 },
+    /// `Pyramid` at friction `mu` (the pyramid's is 0.6).
+    PyramidAt { base: u32, mu: f32 },
 }
 
 /// How far above the floor `Scene::Bounce` drops its ball's bottom.
@@ -154,7 +160,10 @@ impl Scene {
         match *words.first()? {
             "pile" => Some(Scene::Pile { n: num(1)? as u32, width: num(2)?, stagger: true }),
             "columns" => Some(Scene::Pile { n: num(1)? as u32, width: num(2)?, stagger: false }),
-            "pyramid" => Some(Scene::Pyramid { base: num(1)? as u32 }),
+            "pyramid" => match num(2) {
+                Some(mu) => Some(Scene::PyramidAt { base: num(1)? as u32, mu }),
+                None => Some(Scene::Pyramid { base: num(1)? as u32 }),
+            },
             "stack" => Some(Scene::Stack { n: num(1)? as u32 }),
             "rain" => Some(Scene::Rain { n: num(1)? as u32, width: num(2)? }),
             "ramp" => Some(Scene::Ramp { deg: num(1)?, mu: num(2)?, circle: *words.get(3)? == "disc" }),
@@ -163,9 +172,9 @@ impl Scene {
             "bigonsmall" => Some(Scene::BigOnSmall),
             "overlap" => Some(Scene::Overlap { base: num(1)? as u32, overlap: num(2)? }),
             "bullet" => Some(Scene::Bullet { speed: num(1)?, radius: num(2)?, thick: num(3)?, phase: num(4)? }),
-            "cards" => Some(Scene::Cards { rows: num(1)? as u32 }),
+            "cards" => Some(Scene::Cards { rows: num(1)? as u32, lean: num(2).unwrap_or(25.0), mu: num(3).unwrap_or(0.7) }),
             "ladder" => Some(Scene::Ladder { deg: num(1)?, mu: num(2)? }),
-            "dominoes" => Some(Scene::Dominoes { n: num(1)? as u32 }),
+            "dominoes" => Some(Scene::Dominoes { n: num(1)? as u32, spacing: num(2).unwrap_or(1.0), mu: num(3).unwrap_or(0.6) }),
             _ => None,
         }
     }
@@ -199,9 +208,12 @@ impl Scene {
             Scene::BigOnSmall => "bigonsmall".to_string(),
             Scene::Overlap { base, overlap } => format!("overlap {base} {overlap}"),
             Scene::Bullet { speed, radius, thick, phase } => format!("bullet {speed} {radius} {thick} {phase}"),
-            Scene::Cards { rows } => format!("cards {rows}"),
+            Scene::Cards { rows, lean, mu } if (*lean, *mu) == (25.0, 0.7) => format!("cards {rows}"),
+            Scene::Cards { rows, lean, mu } => format!("cards {rows} {lean} {mu}"),
             Scene::Ladder { deg, mu } => format!("ladder {deg} {mu}"),
-            Scene::Dominoes { n } => format!("dominoes {n}"),
+            Scene::Dominoes { n, spacing, mu } if (*spacing, *mu) == (1.0, 0.6) => format!("dominoes {n}"),
+            Scene::Dominoes { n, spacing, mu } => format!("dominoes {n} {spacing} {mu}"),
+            Scene::PyramidAt { base, mu } => format!("pyramid {base} {mu}"),
         }
     }
 
@@ -222,13 +234,20 @@ impl Scene {
                 v
             }
             Scene::Pyramid { base } => {
-                let mut v = vec![wall(0.0, 0.5, base as f32 + 10.0, 0.5)];
+                // Its floor at a collider's default friction, as the
+                // pyramid was built before it had a friction of its own.
+                let mut v = Scene::PyramidAt { base, mu: 0.6 }.build();
+                v[0].friction = SPEC.friction;
+                v
+            }
+            Scene::PyramidAt { base, mu } => {
+                let mut v = vec![Spec { friction: mu, ..wall(0.0, 0.5, base as f32 + 10.0, 0.5) }];
                 for row in 0..base {
                     let count = base - row;
                     for j in 0..count {
                         let x = j as f32 - (count - 1) as f32 / 2.0;
                         let y = -0.5 - row as f32;
-                        v.push(Spec { x, y, friction: 0.6, ..SPEC });
+                        v.push(Spec { x, y, friction: mu, ..SPEC });
                     }
                 }
                 v
@@ -299,7 +318,7 @@ impl Scene {
                     ..SPEC
                 },
             ],
-            Scene::Cards { rows } => cards(rows),
+            Scene::Cards { rows, lean, mu } => cards(rows, lean, mu),
             Scene::Ladder { deg, mu } => {
                 let (hx, hy) = LADDER;
                 let a = deg.to_radians();
@@ -314,11 +333,11 @@ impl Scene {
                     Spec { x, y, hx, hy, friction: mu, angle: a, ..SPEC },
                 ]
             }
-            Scene::Dominoes { n } => {
-                let mut v = vec![Spec { friction: 0.6, ..wall(0.0, 1.0, 100.0, 1.0) }];
-                let x0 = -0.5 * n as f32;
+            Scene::Dominoes { n, spacing, mu } => {
+                let mut v = vec![Spec { friction: mu, ..wall(0.0, 1.0, 100.0, 1.0) }];
+                let x0 = -0.5 * n as f32 * spacing;
                 for i in 0..n {
-                    let mut d = Spec { x: x0 + i as f32, y: -0.5, hx: 0.125, hy: 0.5, friction: 0.6, ..SPEC };
+                    let mut d = Spec { x: x0 + i as f32 * spacing, y: -0.5, hx: 0.125, hy: 0.5, friction: mu, ..SPEC };
                     if i == 0 {
                         // Box2D's impulse of 0.2 to the right at the top of
                         // a domino of mass 0.25: 0.8 a second, and turning
@@ -362,7 +381,7 @@ impl Scene {
     pub fn escaped(&self, x: f32, y: f32) -> bool {
         match *self {
             Scene::Pile { width, .. } | Scene::Rain { width, .. } => x < 0.0 || x > width || y > HEIGHT || y < -HEIGHT / 2.0,
-            Scene::Pyramid { base } => y > 0.0 || x.abs() > base as f32 + 10.0,
+            Scene::Pyramid { base } | Scene::PyramidAt { base, .. } => y > 0.0 || x.abs() > base as f32 + 10.0,
             Scene::Stack { .. } => y > 0.0 || x.abs() > 10.0,
             Scene::Ramp { .. } | Scene::Bullet { .. } => false,
             Scene::Bounce { .. } | Scene::Ratio { .. } | Scene::Overlap { .. } | Scene::Ladder { .. } => y > 0.0 || x.abs() > 10.0,
@@ -374,13 +393,13 @@ impl Scene {
 /// Box2D's card house (`sample_stacking.cpp`, "Card House", from PEEL),
 /// y turned down and every length five times: pairs of cards leaning 25°
 /// into each other, a flat card across each two pairs, `rows` storeys.
-fn cards(rows: u32) -> Vec<Spec> {
+fn cards(rows: u32, lean: f32, mu: f32) -> Vec<Spec> {
     let s = CARD_SCALE;
     let (height, thick) = (0.2 * s, 0.001 * s);
-    let card = |x: f32, y: f32, angle: f32| Spec { x, y: -y, hx: thick, hy: height, friction: 0.7, angle, ..SPEC };
+    let card = |x: f32, y: f32, angle: f32| Spec { x, y: -y, hx: thick, hy: height, friction: mu, angle, ..SPEC };
     // The sample's floor is a box 2 deep under y = 0, friction 0.7.
-    let mut v = vec![Spec { friction: 0.7, ..wall(0.0, 2.0 * s, 40.0 * s, 2.0 * s) }];
-    let lean = 25f32.to_radians();
+    let mut v = vec![Spec { friction: mu, ..wall(0.0, 2.0 * s, 40.0 * s, 2.0 * s) }];
+    let lean = lean.to_radians();
     let (mut z0, mut y, mut nb) = (0.0, height - 0.02 * s, rows);
     while nb > 0 {
         let mut z = z0;

@@ -66,13 +66,13 @@ pub fn scenes() -> Vec<Scene> {
         Scene::Overlap { base: 4, overlap: 0.25 },
         Scene::Overlap { base: 4, overlap: 0.5 },
         Scene::Overlap { base: 10, overlap: 0.5 },
-        Scene::Cards { rows: 5 },
+        Scene::Cards { rows: 5, lean: 25.0, mu: 0.7 },
         // Stands above 0.269 (`Scene::ladder_mu`), slides below.
         Scene::Ladder { deg: 30.0, mu: 0.4 },
         Scene::Ladder { deg: 30.0, mu: 0.3 },
         Scene::Ladder { deg: 30.0, mu: 0.24 },
         Scene::Ladder { deg: 30.0, mu: 0.2 },
-        Scene::Dominoes { n: 15 },
+        Scene::Dominoes { n: 15, spacing: 1.0, mu: 0.6 },
     ];
     // A thin wall, and pong's paddle (a unit thick) and ball (radius 0.25),
     // each met at four points in a step.
@@ -90,7 +90,7 @@ pub fn steps(scene: &Scene) -> u32 {
         Scene::Ramp { .. } => 120,
         Scene::Bounce { e } if e >= 1.0 => 1200,
         Scene::Bullet { .. } => 60,
-        Scene::Cards { .. } | Scene::Dominoes { .. } => 600,
+        Scene::Cards { .. } | Scene::Dominoes { .. } | Scene::Stack { .. } | Scene::Pyramid { .. } | Scene::PyramidAt { .. } => 600,
         _ => 300,
     }
 }
@@ -161,7 +161,16 @@ pub fn behave(sim: &mut dyn Sim, scene: &Scene, turning: bool) -> Behaviour {
             b.put("stands", ((z.x - a.x).abs() < 0.05) as u8 as f64);
             b.put("needs mu", Scene::ladder_mu(deg) as f64);
         }
-        Scene::Dominoes { n } => dominoes(&mut b, &t, n),
+        Scene::Dominoes { n, .. } => dominoes(&mut b, &t, n),
+        // The families' stacks and pyramids (`family.rs`): whether the top
+        // box stayed within half a box of where it began.
+        Scene::Stack { .. } | Scene::Pyramid { .. } | Scene::PyramidAt { .. } => {
+            let top = first.len() - 1;
+            let off = moved(&first[top], &end[top]);
+            b.put("top moved", off);
+            b.put("most moved", first.iter().zip(end).map(|(a, z)| moved(a, z)).fold(0.0, f64::max));
+            b.put("stands", (off < 0.5) as u8 as f64);
+        }
         _ => panic!("{} is not a behaviour scene", scene.text()),
     }
     // At rest from the step every body stayed slower than `REST` to the end.

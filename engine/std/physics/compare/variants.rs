@@ -33,6 +33,9 @@
 //!   other in the relax passes; `scalar=1` one contact at a time
 //!   (`Wide::Off`), `levels=<n>` by level `n` wide (the default, 4),
 //!   `colored=<n>` graph-colored `n` wide (physics.md, "The solver's speed");
+//!   `carry` what a turning contact's points carry to the next step (0 the
+//!   last substep's impulses, the default; 1 the normal's last and the
+//!   tangent's mean; 2 both means, as before get-emj.48; `solver::Carry`);
 //!   `order` the contacts in another order than the pairs': 1 reversed, 2
 //!   shuffled each step, 3 rows from the top down (physics.md, "Why colors
 //!   let the pyramid fall").
@@ -43,7 +46,7 @@ use std::collections::HashMap;
 use physics::Vec2;
 
 use crate::arrays::Warm;
-use crate::solver::{BOUNCE_THRESHOLD, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, solve_with};
+use crate::solver::{BOUNCE_THRESHOLD, Carry, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, solve_with};
 use crate::split_impulse as old;
 
 /// A solver for the arrays: over bodies some of which may turn and
@@ -128,6 +131,7 @@ pub fn parse(spec: &str) -> Variant {
                 "warm" => v.warm = [Warm::None, Warm::Ids, Warm::Nearest, Warm::Either][x as usize],
                 "deepest" => v.deepest = x != 0.0,
                 "order" => order = x as u32,
+                "carry" => params.carry = [Carry::Last, Carry::Normal, Carry::Mean][x as usize],
                 _ => panic!("rot: {k}"),
             }
         }

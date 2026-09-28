@@ -113,6 +113,8 @@ TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run -c opt //engin
 ```sh
 BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare > behave.md
 SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run -c opt //engine/std/physics/compare
+FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run -c opt //engine/std/physics/compare   # the edge-of-stability families, short grids
+FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run -c opt //engine/std/physics/compare   # a long grid
 ./bazel run -c opt //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
 ./bazel run -c opt //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
 ./bazel run -c opt //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave

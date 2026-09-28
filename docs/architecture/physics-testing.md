@@ -183,6 +183,36 @@ cheaply.
   harness can turn on (`SLEEP=1`).
 - Every new scene family gets scene-sanity checks, as the piles have.
 
+### Families at the edge
+
+**Built** (2026-09-28, get-emj.61). A scene at the edge of stability (a
+card house, a stack near its buckling height, dominoes near their reach,
+heavy boxes on light ones) goes either way on rounding, in every engine:
+Box2D's 5-storey card house stands in Box2D, loses two cards in Rapier,
+and in ours stood or fell as the warm start's last bits changed. A bound
+on one such run is a coin toss that a correct change can lose. So:
+
+- **Edge-of-stability scenes are judged as families, by a share bound,**
+  as chaotic piles are judged by medians over their sizes. A family is a
+  grid of one scene across what decides it (lean and friction, angle
+  about the friction angle, height, spacing, mass ratio), each run a yes
+  or a no by a fixed rule, and the family's share of yeses is bounded.
+- **The bound is the less reliable reference's count on exactly that
+  grid**, measured once and dated, as the floor's other bounds are. Not a
+  coarser or neighbouring grid: shares move with where the grid sits
+  against the edge. Where a reference fails most of a grid (Box2D sways
+  stacks over), the bound is weak, and the family is a record of how far
+  ours is from the other.
+- **A short grid in the default suite, the full one in the long suite**
+  (`compare:behaviour_test`, `behaviour_long_test`; `family.rs` holds the
+  grids and the rule). The short grid is chosen to straddle the edge, so a
+  planted break moves it: friction halved, the short card grid stands
+  none of 12 against a bound of 7.
+- A family whose every engine is right at every point (a box 0.1° either
+  side of the friction angle, the ladder 0.005 from its friction) is a
+  law test, not an edge: it stays, and would catch a friction model that
+  isn't Coulomb's.
+
 ### A time budget for the default suite
 
 - **Default suite:** each physics test target within about 30 s in

@@ -30,7 +30,9 @@
 //! `VIEW_STEPS=0,60,300` the steps, `VIEW_OUT=<dir>` where the SVG goes
 //! (the working directory if unset), `VIEW_TEXT=<columns>` also prints it
 //! as text; every engine `ENGINES` leaves, side by side (runbook 005, "The
-//! debug view").
+//! debug view"). `FAMILIES=<names>` (`all`) measures each engine's share of
+//! the edge-of-stability families (`family.rs`), `FAMILY_LONG=1` their
+//! long grids.
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
@@ -38,6 +40,7 @@ mod arrays;
 mod behave;
 mod box2d;
 mod ecs;
+mod family;
 #[path = "../narrow.rs"]
 mod narrow;
 mod quality;
@@ -205,6 +208,10 @@ fn main() {
         view(&scene, &engines, &env);
         return;
     }
+    if let Some(names) = env("FAMILIES") {
+        families(&names, env("FAMILY_LONG").is_some(), &engines);
+        return;
+    }
     if env("BEHAVE").is_some() {
         let scenes = match env("SCENES") {
             Some(s) => s.split(",").map(|t| Scene::parse(t).unwrap_or_else(|| panic!("SCENES: no scene {t:?}"))).collect(),
@@ -295,6 +302,22 @@ fn main() {
             }
         }
         report(case, &runs);
+    }
+}
+
+/// `FAMILIES`: each engine's share of each family's grid (`family.rs`), and
+/// which of its runs did what they should, in grid order: what the family
+/// tests' bounds are set from.
+fn families(names: &str, long: bool, engines: &[(String, Make)]) {
+    for f in family::families(long) {
+        if names != "all" && !names.split(",").any(|n| n == f.name) {
+            continue;
+        }
+        for (_, make) in engines {
+            let runs: Vec<behave::Behaviour> = f.scenes.iter().map(|s| behave::behave(make(s, true).as_mut(), s, true)).collect();
+            let (yes, marks) = family::share(&f, &runs);
+            println!("family {} ({}), {}: {yes} of {} {marks}", f.name, if long { "long" } else { "short" }, runs[0].label, runs.len());
+        }
     }
 }
 

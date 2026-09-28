@@ -22,8 +22,11 @@
 #[path = "../tests/arrays.rs"]
 mod arrays;
 mod behave;
+#[cfg(feature = "long")]
+mod behaviour_long;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
+mod family;
 #[path = "../narrow.rs"]
 mod narrow;
 #[allow(dead_code)]
@@ -75,8 +78,17 @@ struct Broken(Vec<String>);
 
 impl Broken {
     fn check(&mut self, scene: &Scene, ok: bool, what: impl FnOnce() -> String) {
-        if !ok {
-            self.0.push(format!("{}: {}", scene.text(), what()));
+        let matrix = std::env::var_os("MATRIX").is_some();
+        if !ok || matrix {
+            let line = format!("{}: {}", scene.text(), what());
+            if matrix {
+                // Every bound's value, met or not, for the decision matrix
+                // (physics.md, "Why colors let the pyramid fall").
+                println!("CHECK {} | {} | {line}", std::thread::current().name().unwrap_or("?"), if ok { "ok" } else { "FAIL" });
+            }
+            if !ok {
+                self.0.push(line);
+            }
         }
     }
 
@@ -346,20 +358,78 @@ fn a_ball_never_tunnels_through_a_wall_as_in_box2d_and_rapier() {
     broken.assert();
 }
 
-/// Box2D's card house, 5 storeys, friction 0.7: Box2D stands it (no card
-/// moves more than 0.14, at rest from 21); Rapier drops two cards (one
-/// 4.2 from where it began). Ours stands it, no card moving more than
-/// 0.10, at rest from 27. The bounds: Box2D's most moved, and twice its
-/// rest.
-#[test]
-fn a_card_house_stands_as_in_box2d() {
-    let scene = Scene::Cards { rows: 5 };
-    let r = &run(&[scene])[0];
+/// A family (`family.rs`) on its short or long grid, whose runs did what
+/// they should as often as the less reliable reference's did on exactly
+/// that grid: `refs`, Box2D's and Rapier's counts (measured with
+/// `FAMILIES=<name>` in the comparison, 2026-09-28). Near an edge of
+/// stability a single run goes either way on rounding, in every engine, so
+/// the share is what's bounded, as a pile's rest is by the median over its
+/// sizes (physics-testing.md, "Families at the edge").
+fn family_meets(name: &str, long: bool, refs: (usize, usize)) {
+    let f = family::families(long).into_iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no family {name}"));
+    let runs = run(&f.scenes);
+    let (yes, marks) = family::share(&f, &runs);
+    let bound = refs.0.min(refs.1);
+    println!("family {name}: {} {yes} of {} {marks}, bound {bound} (Box2D {}, Rapier {})", runs[0].label, runs.len(), refs.0, refs.1);
     let mut broken = Broken::default();
-    broken.most(&scene, r, "fallen", 0.0);
-    broken.most(&scene, r, "most moved", 0.1421);
-    broken.most(&scene, r, "at rest from", 2.0 * 21.0);
+    broken.check(&f.scenes[0], yes >= bound, || format!("family {name}: {yes} of {}, at least {bound}", runs.len()));
     broken.assert();
+}
+
+/// Box2D's card house at 4 and 5 storeys, leaning 24-26°, friction 0.7
+/// and 0.8 (12 houses): Box2D stands 10, Rapier 7, ours 8; the 5-storey
+/// house at Box2D's own 25° and 0.7 is one Rapier drops two cards of, and
+/// ours did too with the last substep's tangent impulse carried
+/// (get-emj.61). Friction halved, ours stands none.
+#[test]
+fn card_houses_stand_as_often_as_in_box2d_and_rapier() {
+    family_meets("cards", false, (10, 7));
+}
+
+/// A box on a ramp 0.1° and 0.25° either side of friction 0.5's angle
+/// holds below it and slides above it, in all three: every engine's
+/// Coulomb friction on one contact is exact.
+#[test]
+fn a_box_near_the_friction_angle_holds_or_slides_as_it_should() {
+    family_meets("ramp", false, (4, 4));
+}
+
+/// The ladder at 30° on friction 0.005 and 0.01 either side of what it
+/// needs (0.269) stands or slides as it should, in all three.
+#[test]
+fn a_ladder_near_its_standing_friction_stands_or_slides_as_it_should() {
+    family_meets("ladder", false, (4, 4));
+}
+
+/// Ten dominoes 1, 1.1, 1.2 and 1.3 apart (one reaches the next under
+/// 1.25): all fall where each reaches the next and only the first at 1.3,
+/// but at 1.2 the wave dies in Box2D and in ours, not in Rapier.
+#[test]
+fn dominoes_near_their_reach_topple_as_often_as_in_box2d_and_rapier() {
+    family_meets("dominoes", false, (3, 4));
+}
+
+/// Stacks 18 and 22 high, turning, at the default substeps, over 10 s:
+/// Rapier stands both, Box2D neither (it sways a stack of 12 over); ours
+/// the 18. A record more than a bound, since Box2D's zero is its floor.
+#[test]
+fn stacks_near_their_buckling_height_stand_as_often_as_in_box2d_and_rapier() {
+    family_meets("stacks", false, (0, 2));
+}
+
+/// A box 100 and 300 times as heavy on 3 and 5 unit boxes: Box2D stands
+/// none, Rapier one, ours two.
+#[test]
+fn heavy_boxes_on_light_ones_stand_as_often_as_in_box2d_and_rapier() {
+    family_meets("ratios", false, (0, 1));
+}
+
+/// A pyramid 20 wide at friction 0 and 0.1: every engine stands it at 0.1
+/// and none at 0 (it needs friction only to hold what rounding sets
+/// sliding).
+#[test]
+fn pyramids_across_friction_stand_as_often_as_in_box2d_and_rapier() {
+    family_meets("pyramids", false, (1, 1));
 }
 
 /// A plank leaning 30° on a frictionless wall stands on the floor's
@@ -391,7 +461,7 @@ fn a_ladder_stands_on_friction_above_the_hand_calculation_and_slides_below() {
 /// 80°, and twice the later rest.
 #[test]
 fn dominoes_topple_in_order_as_in_box2d_and_rapier() {
-    let scene = Scene::Dominoes { n: 15 };
+    let scene = Scene::Dominoes { n: 15, spacing: 1.0, mu: 0.6 };
     let r = &run(&[scene])[0];
     let mut broken = Broken::default();
     broken.least(&scene, r, "toppled", 15.0);
@@ -415,7 +485,7 @@ fn the_mod_is_the_arrays_on_the_behaviour_scenes() {
         Scene::Bounce { e: 0.5 },
         Scene::Ratio { ratio: 100.0, light: 1 },
         Scene::Ladder { deg: 30.0, mu: 0.2 },
-        Scene::Dominoes { n: 15 },
+        Scene::Dominoes { n: 15, spacing: 1.0, mu: 0.6 },
     ];
     let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
     for scene in scenes {

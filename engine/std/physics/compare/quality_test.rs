@@ -60,6 +60,17 @@ fn ours(scene: &Scene, turning: bool) -> ecs::Flat {
     }
 }
 
+/// `spec`, a `rot` variant, on the solve `SOLVER` names where that is one
+/// too (`rot/carry=1` and `rot/order=3` make `rot/carry=1/order=3`): so the
+/// tests that pick an order or a grouping of their own still run the
+/// option being weighed.
+fn with_solver(spec: &str) -> String {
+    match std::env::var("SOLVER") {
+        Ok(s) if s.starts_with("rot") => spec.replacen("rot", &s, 1),
+        _ => spec.to_string(),
+    }
+}
+
 /// Steps every scene is run: past the latest bound on rest (a turning
 /// pile's, 500), so "at rest from" means it stayed so for a while. The
 /// references were measured over the same steps.
@@ -150,8 +161,17 @@ struct Broken(Vec<String>);
 
 impl Broken {
     fn check(&mut self, ok: bool, what: impl FnOnce() -> String) {
-        if !ok {
-            self.0.push(what());
+        let matrix = std::env::var_os("MATRIX").is_some();
+        if !ok || matrix {
+            let line = what();
+            if matrix {
+                // Every bound's value, met or not, for the decision matrix
+                // (physics.md, "Why colors let the pyramid fall").
+                println!("CHECK {} | {} | {line}", std::thread::current().name().unwrap_or("?"), if ok { "ok" } else { "FAIL" });
+            }
+            if !ok {
+                self.0.push(line);
+            }
         }
     }
 
@@ -514,7 +534,8 @@ fn pyramid_stands_in(base: u32, bounds: impl Fn() -> StandBounds, specs: &[&str]
             .iter()
             .map(|spec| {
                 s.spawn(move || {
-                    let mut f = ecs::Flat::variant(&scene, true, spec, &format!("ours ({spec})"));
+                    let spec = with_solver(spec);
+                    let mut f = ecs::Flat::variant(&scene, true, &spec, &format!("ours ({spec})"));
                     settle::settle(&mut f, &scene, true, STEPS)
                 })
             })
