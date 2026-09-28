@@ -463,38 +463,52 @@ fn the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit() {
     }
 }
 
-/// A turning pyramid 50 wide (1275 boxes) stands whatever order its
-/// contacts are solved in: in pair order (by level, the default), shuffled
-/// afresh each step, and row by row from the top down (`variants.rs`,
-/// `rot/order`), which is the worst order for a stack's first pass. While
-/// each step restarted its points from the substeps' average impulse, only
-/// pair order stood: shuffled, it rested from 680, and from the top down
-/// from 660 (get-emj.48; physics.md, "Why colors let the pyramid fall").
+/// A turning pyramid 40 wide (820 boxes) stands whatever order its
+/// contacts are solved in: in pair order (by level, the default) and row
+/// by row from the top down (`variants.rs`, `rot/order=3`), the worst
+/// order for a stack's first pass. While each step restarted its points
+/// from the substeps' average impulse, only pair order stood: from the top
+/// down it rested from 310, and still moved at 0.003 in its last 200 steps
+/// (get-emj.48; physics.md, "Why colors let the pyramid fall"). Ours now:
+/// at rest from 80 and 170. The references on the same scene (700 steps,
+/// 2026-09-28): Box2D and Rapier at rest from 50 and 110, the top 0.237 and
+/// 0.244 lower, 0.0158 and 0.0138 deep, leaning 0.5° and 0.7°, at most
+/// 9.9e-12 and 1.0e-8 a body over the last 200 steps. Pyramid 50 in these
+/// orders and shuffled is `quality_long.rs`'s: a pyramid 40 is the smallest
+/// that tells the average from the last substep (at 30 the average rests
+/// by 220 in every order), and costs two thirds of the 50.
 #[test]
 fn a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in() {
-    pyramid_50_stands_in(&["rot", "rot/order=2", "rot/order=3"]);
+    let refs = || from_refs((50, 110), (0.237, 0.244), (0.0158, 0.0138), (0.5, 0.7), (9.9e-12, 1.0e-8));
+    pyramid_stands_in(40, refs, &["rot", "rot/order=3"]);
 }
 
-/// The same, graph-colored as Box2D colors (`rot/colored=4`), the order
-/// threads would share: it stands, where it came apart before (the top
-/// 1.19 aside, never at rest), but settles later than pair order and keeps
-/// 7.8e-6 a body over the last 200 steps, ten times what the bound allows
-/// (get-emj.54). The 5050 pyramid colored stands within its bounds
+/// Graph-colored as Box2D colors (`rot/colored=4`), the order threads would
+/// share, a turning pyramid 50 wide stands, where it came apart before (the
+/// top 1.19 aside, never at rest), but settles later than pair order and
+/// keeps 7.8e-6 a body over the last 200 steps, ten times what the bound
+/// allows (get-emj.54). The 5050 pyramid colored stands within its bounds
 /// (`quality_long.rs`).
 #[test]
 #[ignore = "get-emj.54: colored settles this pyramid slower than the references' bounds"]
 fn a_pyramid_that_turns_stands_when_its_contacts_are_colored() {
-    pyramid_50_stands_in(&["rot/colored=4"]);
+    pyramid_stands_in(50, pyramid_50_refs, &["rot/colored=4"]);
 }
 
-/// A turning pyramid 50 wide solved by each of `specs` against the
-/// references on the same scene (700 steps, 2026-09-28): Box2D and Rapier
-/// at rest from 70 and 220, the top 0.368 and 0.379 lower, 0.0190 and
-/// 0.0173 deep, leaning 0.6° and 0.9°, at most 4.1e-11 and 8.1e-8 a body
-/// over the last 200 steps. Ours by level: at rest from 150, the top 0.062
-/// lower, 0.0028 deep, leaning 0.1°.
-fn pyramid_50_stands_in(specs: &[&str]) {
-    let scene = Scene::Pyramid { base: 50 };
+/// A turning pyramid 50 wide's bounds, from the references on the same
+/// scene (700 steps, 2026-09-28): Box2D and Rapier at rest from 70 and 220,
+/// the top 0.368 and 0.379 lower, 0.0190 and 0.0173 deep, leaning 0.6° and
+/// 0.9°, at most 4.1e-11 and 8.1e-8 a body over the last 200 steps. Ours
+/// by level: at rest from 150, the top 0.062 lower, 0.0028 deep, leaning
+/// 0.1°.
+fn pyramid_50_refs() -> StandBounds {
+    from_refs((70, 220), (0.368, 0.379), (0.0190, 0.0173), (0.6, 0.9), (4.1e-11, 8.1e-8))
+}
+
+/// A turning pyramid `base` wide solved by each of `specs` (`variants.rs`),
+/// each against `bounds`.
+fn pyramid_stands_in(base: u32, bounds: impl Fn() -> StandBounds, specs: &[&str]) {
+    let scene = Scene::Pyramid { base };
     let runs: Vec<Settling> = std::thread::scope(|s| {
         let threads: Vec<_> = specs
             .iter()
@@ -508,8 +522,7 @@ fn pyramid_50_stands_in(specs: &[&str]) {
         threads.into_iter().map(|t| t.join().expect("an order panicked")).collect()
     });
     print_runs(&vec![scene; specs.len()], true, &runs);
-    let cases: Vec<(Scene, StandBounds)> =
-        specs.iter().map(|_| (scene, from_refs((70, 220), (0.368, 0.379), (0.0190, 0.0173), (0.6, 0.9), (4.1e-11, 8.1e-8)))).collect();
+    let cases: Vec<(Scene, StandBounds)> = specs.iter().map(|_| (scene, bounds())).collect();
     stand_runs(&cases, &runs);
 }
 

@@ -3498,11 +3498,15 @@ get-emj.54. For threads, colors are now a solve that stands; as one
 thread's default, pair order settles better for 3% more time.
 
 **The tests.** `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in`
-(`:quality_test`) holds a turning pyramid 50 wide to the references'
-bounds in pair order, shuffled and from the top down;
-`a_big_pyramid_that_turns_stands_when_its_contacts_are_colored`
-(`:quality_long_test`) the 5050 pyramid colored. Planted, the average
-back: shuffled rests from 680 and top down from 660; the last substep's
+(`:quality_test`) holds a turning pyramid 40 wide to the references'
+bounds in pair order and from the top down, the smallest pyramid that
+tells the two warm starts apart (at 30 the average rests by 220 in
+every order); `:quality_long_test` holds the 50 in pair order, shuffled and
+from the top down, and colored the 5050
+(`a_big_pyramid_that_turns_stands_when_its_contacts_are_colored`).
+Planted, the average back: the 40 from the top down rests from 310 and
+keeps 1.2e-6 a body, the 50 shuffled rests from 680 and top down from
+660; the last substep's
 impulse without the factor of the substeps: every turning quality test;
 the fix in the lanes and not in the loop one contact at a time:
 `the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`.

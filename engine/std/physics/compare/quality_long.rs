@@ -72,6 +72,17 @@ fn a_big_pyramid_stands_as_in_box2d_and_rapier() {
     stand(&[(Scene::Pyramid { base: 100 }, turning)], true, LONG_STEPS);
 }
 
+/// A turning pyramid 50 wide (1275 boxes) stands in pair order, shuffled
+/// afresh each step, and row by row from the top down (`rot/order`), by
+/// the references' bounds (`pyramid_50_refs`). While each step restarted
+/// its points from the substeps' average impulse, only pair order stood:
+/// shuffled, it rested from 680, and from the top down from 660
+/// (get-emj.48). Ours now: 150, 230, 180.
+#[test]
+fn a_pyramid_50_wide_that_turns_stands_whatever_order_its_contacts_are_solved_in() {
+    pyramid_stands_in(50, pyramid_50_refs, &["rot", "rot/order=2", "rot/order=3"]);
+}
+
 /// The pyramid 100 wide turning, graph-colored as Box2D colors
 /// (`rot/colored=4`), the order threads would share, by the same bounds:
 /// at rest from 1500, the top 0.30 lower, leaning 0.4°. While each step
