@@ -27,6 +27,9 @@ monolithic design doc.
   other: contacts, colliders and hierarchy, measured
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
+- [physics-testing.md](physics-testing.md) — how physics is kept from
+  regressing: equivalence, physical law, the reference floor, and a
+  baseline of our own accepted results
 
 ## Conventions
 
