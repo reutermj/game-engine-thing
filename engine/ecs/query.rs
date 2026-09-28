@@ -780,10 +780,17 @@ pub enum ParamDecl {
     Group(Vec<ParamDecl>),
     /// The run's length in time: touches nothing.
     Dt,
-    /// The pairs a spatial key's broadphase keeps (`kept::Kept`): written
-    /// by whoever takes them, so two systems that do are ordered.
-    Kept {
+    /// A live relation (`live::Live`), by the index the world keeps it
+    /// at: written by whoever takes it, so two systems that do are ordered.
+    /// First in a group with its sides' reads of the key, one per filter,
+    /// the active side's first; the filters are here too, for the checks
+    /// at registration (`live::check_live`).
+    Live {
+        relation: usize,
+        name: &'static str,
         key: ComponentId,
+        active: Vec<FilterDecl>,
+        passive: Vec<FilterDecl>,
     },
 }
 
@@ -815,7 +822,7 @@ impl ParamDecl {
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
             ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
-            ParamDecl::Dt | ParamDecl::Kept { .. } => false,
+            ParamDecl::Dt | ParamDecl::Live { .. } => false,
         }
     }
 }
@@ -1744,9 +1751,9 @@ pub struct SideTable<'a> {
     pub(crate) order: &'a SpatialOrder,
     pub(crate) filters: &'a [(ComponentId, bool, SparseGuard<'a>)],
     /// The tick a row last left the table at: what a kept broadphase looks
-    /// at before asking which (`kept.rs`).
+    /// at before asking which (`live.rs`).
     pub(crate) left: u32,
-    /// The table's spatial key: a kept broadphase is one key's.
+    /// The table's spatial key: a live relation is one key's.
     pub(crate) key: ComponentId,
 }
 
@@ -1786,6 +1793,15 @@ impl<D: Data, F, C> NearSide for Query<'_, D, F, C> {
 
 impl NearSide for () {
     fn spatial_tables<'a>(&'a self, _: &mut Vec<SideTable<'a>>) {}
+}
+
+/// A side of any number of queries, as a live relation's are.
+impl<S: NearSide> NearSide for [S] {
+    fn spatial_tables<'a>(&'a self, out: &mut Vec<SideTable<'a>>) {
+        for s in self {
+            s.spatial_tables(out);
+        }
+    }
 }
 
 impl<A: NearSide + ?Sized> NearSide for &A {
@@ -2311,13 +2327,7 @@ pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Resul
             return Err(format!("{name}: reads and writes one event type, or writes it twice"));
         }
     }
-    let kept: Vec<ComponentId> = leaves.iter().filter_map(|p| if let ParamDecl::Kept { key } = p { Some(*key) } else { None }).collect();
-    for (i, k) in kept.iter().enumerate() {
-        if kept[i + 1..].contains(k) {
-            return Err(format!("{name}: takes {}'s kept pairs twice", world.name(*k)));
-        }
-    }
-    Ok(())
+    crate::live::check_live(world, name, &leaves)
 }
 
 // ---- Spawning ----

@@ -1,10 +1,10 @@
 # A broadphase bench alone flatters lookups by entity three times
 
-Measured 2026-09-27, with `KeptStats`' timings (three clock reads a call),
+Measured 2026-09-27, with `LiveStats`' timings (three clock reads a call),
 in `//bench/physics3d`'s 10 000 boxes settled and in
-`//engine/ecs:kept_bench`'s lattice of 10 000 creeping, 3D, one thread.
+`//engine/ecs:live_bench`'s lattice of 10 000 creeping, 3D, one thread.
 
-The kept broadphase (`engine/ecs/kept.rs`) keeps a record per row by entity
+The kept broadphase (`engine/ecs/live.rs`) keeps a record per row by entity
 index, and each step walks the changed pages' rows into their records and
 tests each candidate pair's two records. Rows on a page are neighbors in
 space, not in entity index, so both are loads at random into about 640 KB.

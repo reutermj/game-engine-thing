@@ -13,7 +13,7 @@ rust_library(
         "events.rs",
         "graph.rs",
         "harness.rs",
-        "kept.rs",
+        "live.rs",
         "lib.rs",
         "ordered.rs",
         "par.rs",
@@ -103,10 +103,11 @@ rust_test(
     deps = [":ecs"],
 )
 
-# The broadphase that keeps its pairs, against near_pairs and brute force.
+# Live relations: their pairs against near_pairs and brute force, their
+# footprints, and what registration refuses.
 rust_test(
-    name = "kept_test",
-    srcs = ["tests/kept_test.rs"],
+    name = "live_test",
+    srcs = ["tests/live_test.rs"],
     deps = [":ecs"],
 )
 
@@ -117,10 +118,10 @@ rust_test(
     deps = [":ecs"],
 )
 
-#   ./bazel run -c opt //engine/ecs:kept_bench [-- margin most]
+#   ./bazel run -c opt //engine/ecs:live_bench [-- margin most]
 rust_binary(
-    name = "kept_bench",
-    srcs = ["tests/kept_bench.rs"],
+    name = "live_bench",
+    srcs = ["tests/live_bench.rs"],
     deps = [":ecs"],
 )
 

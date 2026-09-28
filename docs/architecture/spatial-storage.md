@@ -183,10 +183,9 @@ spatial key with any extent, and physics is one user. What it assumes:
   `near_pairs(active, passive, grow)` leaves out pairs of two passive
   rows ([Two sides](#two-sides)), which is how physics skips statics
   against statics and sleeping bodies against both.
-- **Kept pairs are a key's** ([Keeping pairs](#keeping-pairs)): one set
-  a spatial key, for the sides and grow of its last call; a system that
-  asks with others starts it over, so two broadphases over one key would
-  want a set each.
+- **Kept pairs are a relation's** ([Keeping pairs](#keeping-pairs)): any
+  number of relations on one key, each its own set; a side can't filter by
+  a sparse component, which registration refuses.
 
 ## The broadphase, reworked
 
@@ -617,11 +616,12 @@ is static, so there the pair splits no tables.
 
 ## Keeping pairs
 
-**Status: built** (2026-09-27, get-emj.36): `engine_ecs::Kept<K>`
-(`kept.rs`), which physics and physics3d find their pairs through. This
+**Status: built** (2026-09-27, get-emj.36, get-pmk): live proximity
+relations, `engine_ecs::Live<R>` for a declared `R: Proximity` (`live.rs`),
+which physics and physics3d find their pairs through. This
 section is its measurements and choices; the design (the problem, its
 use, storage, testing, lineage and how it could grow) is
-[kept.md](kept.md). The
+[live.md](live.md). The
 [retrospective](../retrospectives/2026-09-26-physics-against-other-engines.md)
 found `near_pairs` finding every pair afresh: that won when everything
 fell and lost when little moved (a resting 2D pile 400 µs a step against
@@ -629,9 +629,10 @@ Box2D's nothing; 3D 3 to 10 times Rapier's). Now a pile at rest costs a
 look per page, a settled pile a test per kept pair, and falling what it
 did.
 
-**What it does.** `Kept<K>` is a system parameter: the pairs spatial key
-`K`'s broadphase keeps, and `kept.near_pairs(active, passive, grow, margin)`
-answers what `near_pairs(active, passive, grow)` would, bit for bit.
+**What it does.** `Live<R>` is a system parameter: the pairs relation `R`
+keeps (its key, its sides, its grow and margin declared by `R`), and
+`live.pairs()` answers what `near_pairs(active, passive, R::GROW)` would,
+bit for bit.
 
 - **Fat boxes.** Each row keeps a fat box, its box (grown by `grow`) grown
   by `margin` when last found, as long as its box stays inside it and it
@@ -664,28 +665,29 @@ answers what `near_pairs(active, passive, grow)` would, bit for bit.
   walk to find out every step.
 - **Nothing changed**: the last answer, borrowed.
 
-**Where it lives.** The world's, in the key's `ComponentInfo`, like the
-order it's found in: plain data, so a reload keeps it; taken by a system as
-a parameter, for writing (`ParamDecl::Kept`), so two systems that take one
-key's pairs are ordered like two writers of a component, a system reading
-the key isn't held up, and a system can't take one key's twice
-(`kept_pairs_are_a_footprint_the_scheduler_sees`). Its entries are by
+**Where it lives.** The world's, one set per relation, like the order it's
+found in: plain data, so a reload keeps it; taken by a system as a
+parameter, for writing (`ParamDecl::Live`) and reading the key in the
+sides' tables, so two systems that take one relation are ordered like two
+writers of a component, a system reading the key isn't held up, relations
+on one key are apart, and a system can't take one relation twice
+(`live_relations_are_a_footprint_the_scheduler_sees`). Its entries are by
 entity index, not by page: the re-sort moves rows between pages every step
 (5% of a settled pile, 18% falling), and pairs by entity don't notice.
 
-**Tested** (`//engine/ecs:kept_test`) against `near_pairs` and brute force,
+**Tested** (`//engine/ecs:live_test`) against `near_pairs` and brute force,
 in 2D and 3D, every frame of a script: at rest, creeping, a few rows
 nudged back and forth (the few-changed path, which is seen to make and end
 pairs), everything wobbled once, 2% flying, extents written, everything
 falling and shaken (afresh, then waiting), rows spawned, despawned (their
 indices reused, and not), moved between tables, between the sides and out
 of the spatial tables, and despawns with nothing else re-sorting. After
-every call `Kept::check` compares everything kept with the tables by
+every call `Live::check` compares everything kept with the tables by
 brute force: each row's side, box and fat box, nothing kept of rows gone,
 the candidates exactly the pairs whose fat boxes meet, and whether each
 meets. How each frame was answered is asserted (at rest the last answer,
 nudged the few-changed path, falling afresh, then waiting). 24 mutations
-of `kept.rs`, the new footprint rules in `graph.rs` and `query.rs`, and
+of the kept state, the new footprint rules in `graph.rs` and `query.rs`, and
 the stamps in `spatial.rs` are caught, most by the check. One isn't: the
 slack for rounding in the search, which takes coordinates of about 1e5 to
 matter. The stamp on a pushed row was taken out rather than tested: the
@@ -724,7 +726,7 @@ exactly, and our narrowphase costs more per pair than a box test).
 
 **Decisions, each measured** (µs a step, one thread, `-c opt`, 10 000
 bodies unless said; 2D the real pile of `//engine/std/physics/compare`,
-3D `//bench/physics3d`'s boxes turning; `kept_bench` the lattice without
+3D `//bench/physics3d`'s boxes turning; `live_bench` the lattice without
 physics):
 
 1. **The margin.** A settled pile creeps less than any margin tried, so
@@ -755,7 +757,8 @@ physics):
    memory, but a creeping row crosses a grid line with each step's
    motion over the margin, where a kept fat box lets it drift a whole
    margin first; not built either.
-3. **Where the pairs live.** The world's, per key, taken as a parameter
+3. **Where the pairs live.** The world's, per relation (per key until
+   the relations were declared, the same day), taken as a parameter
    (built). In the mod's own state (how it was first built) it ran the same, but
    the scheduler couldn't see it, two systems couldn't share it, and a
    reload lost it. As entities (the contact table, or a table of pairs),
@@ -774,16 +777,17 @@ physics):
    the pairs of pages whose rows changed is `near_pairs` afresh on a
    settled pile, whose rows on changed pages are 45% of them (2D) to all
    (3D) every step: 406 and 1195 µs.
-5. **The API.** A new parameter whose `near_pairs` returns the pairs
-   borrowed (built). Keeping `near_pairs` and caching inside it would copy
+5. **The API.** A parameter whose `pairs()` returns the pairs borrowed
+   (built), for a relation declared as a type (live.md, "What using it
+   looks like"). Keeping `near_pairs` and caching inside it would copy
    the answer out every call, 9 µs in 2D and 28 in 3D at 10 000 on the
-   lattice (`kept_bench`), where the pairs at rest cost 0.8; and a cache
+   lattice (`live_bench`), where the pairs at rest cost 0.8; and a cache
    inside a read-only call is one the scheduler can't see. Pairs begun
    and ended, as Rapier's events, suit a narrowphase that keeps its own
    pairs; ours tests every pair every step, so it would keep the whole
    list anyway.
 6. **When to go afresh.** Looking for a moving row's pairs costs about
-   0.4 µs in 2D and 1 in 3D (`kept_bench`); past about a tenth of the rows
+   0.4 µs in 2D and 1 in 3D (`live_bench`); past about a tenth of the rows
    moving, `near_pairs` afresh is cheaper. Kept against afresh, 10 000:
 
    | rows moving a call | 1% | 5% | 20% |

@@ -16,7 +16,7 @@ pub mod erased;
 pub mod events;
 pub mod graph;
 pub mod harness;
-pub mod kept;
+pub mod live;
 pub mod ordered;
 pub mod par;
 pub mod query;
@@ -29,7 +29,7 @@ pub use between::WorldMut;
 pub use component::{__component_fingerprint, __drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __write_default};
 pub use component::{Component, ComponentDesc, Crossing, DefaultFn, DropFn, Entity, FieldDesc, FieldKind, FieldType, Storage};
 pub use events::{Event, EventReader, EventWriter};
-pub use kept::Kept;
+pub use live::{AnyOf, Live, Proximity, Tables};
 pub use ordered::{ChildOf, OrderKey, children_of, entity_key, pair_key, pairs_from};
 pub use par::{Executor, Scoped, Workers};
 pub use query::{

@@ -536,7 +536,7 @@ pub struct SpatialPages<const D: usize = 2> {
     pub rebounded: usize,
     /// By page, the world tick its lanes last changed at: a row's box
     /// re-bounded, a row arrived or left. What a broadphase that keeps its
-    /// pairs walks to see what moved since it last looked (`kept.rs`),
+    /// pairs walks to see what moved since it last looked (`live.rs`),
     /// where a page none of whose rows changed is skipped with a look.
     pub changed: Vec<u32>,
 }

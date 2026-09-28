@@ -23,7 +23,7 @@ mod solver;
 
 use std::time::Instant;
 
-use engine_api::{Cx, Despawns, Dt, Entity, Kept, Mod, Query, Spawner, Systems, With, export_mod, field_struct, phase};
+use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
 pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Carry, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS, Manifold, Mat3,
@@ -74,6 +74,18 @@ field_struct! {
 /// its volume, so the smallest tried was cheaper still (314 µs against 387
 /// at 0.05, Box3D's cap, 10 000 boxes settled, 2026-09-27).
 const FAT: f32 = 0.02;
+
+/// What the broadphase finds, kept live between steps, as 2D's
+/// `Contacts`: the tables of `Moving`, against those of `Statics`.
+struct Contacts;
+
+impl Proximity for Contacts {
+    type Key = Position;
+    type Active = (With<(Position, Rotation, Collider, Body)>, With<Velocity>);
+    type Passive = (With<(Position, Rotation, Collider, Body)>, With<Static>);
+    const GROW: f32 = narrow::MARGIN;
+    const MARGIN: f32 = FAT;
+}
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -259,7 +271,7 @@ impl Physics3d {
         _: &mut (),
         _: &mut Cx,
         mut tuning: Query<&Tuning>,
-        (mut moving, mut statics, mut kept_pairs): (Moving<'_, '_>, Statics<'_, '_>, Kept<'_, Position>),
+        (mut moving, mut statics, mut near): (Moving<'_, '_>, Statics<'_, '_>, Live<'_, Contacts>),
         mut contacts: Query<(&ContactPair, &mut Manifold, &mut Impulse), (), Despawns>,
         new_contacts: Spawner<(ContactPair, Manifold, Impulse)>,
     ) {
@@ -283,8 +295,8 @@ impl Physics3d {
         let mut old = Vec::with_capacity(contacts.len());
         contacts.for_each_ordered(|_, (pair, m, j)| old.push((*pair, *m, *j)));
         let gathered = Instant::now();
-        // Kept between steps (`Kept`), as 2D's are.
-        let near = kept_pairs.near_pairs(&moving, &statics, narrow::MARGIN, FAT);
+        // Kept live between steps (`Contacts`), as 2D's are.
+        let near = near.pairs();
         let paired = Instant::now();
         let key = |p: &ContactPair| (p.a, p.b);
         let mut found: Vec<(ContactPair, Manifold, Impulse)> = Vec::with_capacity(near.len());

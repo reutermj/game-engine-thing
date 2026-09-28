@@ -39,6 +39,9 @@ pub const PAGE_ROWS: usize = 256;
 const MAX_COMPONENTS: usize = 4096;
 const MAX_TABLES: usize = 4096;
 pub(crate) const MAX_EVENTS: usize = 1024;
+/// Live relations a world can keep: each is a type a mod declares, so a
+/// handful per game.
+const MAX_RELATIONS: usize = 256;
 /// Entities are allocated in segments of this many, on demand.
 const SEGMENT: usize = 4096;
 const SEGMENTS: usize = 1024;
@@ -225,11 +228,6 @@ pub struct ComponentInfo {
     /// still maps their code.
     sparse: OnceLock<RwLock<SparseSet>>,
     installed: RwLock<Option<Installed>>,
-    /// For a spatial key, the pairs its broadphase keeps between steps
-    /// (`kept.rs`): the world's, like the order they're found in, and taken
-    /// by a system as a parameter (`Kept`), so the scheduler sees who uses
-    /// them. Plain data, so a reload keeps them.
-    kept: RwLock<crate::kept::KeptPairs>,
 }
 
 struct Installed {
@@ -428,6 +426,13 @@ pub struct World {
     by_set: Mutex<HashMap<Vec<ComponentId>, TableId>>,
     pub(crate) events: Arena<RwLock<EventQueue>>,
     pub(crate) events_by_name: Mutex<HashMap<String, usize>>,
+    /// Each live relation's kept state (`live.rs`), by relation, named by
+    /// its type: the world's, like the orders it's found in, and taken by a
+    /// system as a parameter (`Live`), so the scheduler sees who uses it.
+    /// Plain data, so a reload keeps it. Its key isn't part of it: one
+    /// key's relations share its pages' ticks and nothing else.
+    relations: Arena<RwLock<crate::live::LivePairs>>,
+    relations_by_name: Mutex<HashMap<String, usize>>,
     components: Arena<ComponentInfo>,
     by_name: Mutex<HashMap<String, ComponentId>>,
     /// The names of spatial keys' extents: writing one moves rows too.
@@ -459,6 +464,8 @@ impl World {
             by_set: Mutex::new(HashMap::new()),
             events: Arena::new(MAX_EVENTS),
             events_by_name: Mutex::new(HashMap::new()),
+            relations: Arena::new(MAX_RELATIONS),
+            relations_by_name: Mutex::new(HashMap::new()),
             entities: Entities::new(),
             frame: AtomicU64::new(0),
             frame_open: AtomicBool::new(false),
@@ -521,7 +528,6 @@ impl World {
             ordered: desc.order.is_some(),
             installed: RwLock::new(None),
             sparse: OnceLock::new(),
-            kept: RwLock::new(crate::kept::KeptPairs::default()),
         };
         if let Some(s) = desc.spatial {
             self.extents.lock().unwrap().extend(s.extents.iter().flatten().map(|(name, _)| name.to_string()));
@@ -633,9 +639,20 @@ impl World {
         self.components.get(id.0 as usize)
     }
 
-    /// The pairs kept for spatial key `c`'s broadphase.
-    pub(crate) fn kept_pairs(&self, c: ComponentId) -> &RwLock<crate::kept::KeptPairs> {
-        &self.component(c).kept
+    /// The index live relation `name` is kept at, made if it's new.
+    pub fn intern_relation(&self, name: &str) -> usize {
+        let mut by_name = self.relations_by_name.lock().unwrap();
+        if let Some(&r) = by_name.get(name) {
+            return r;
+        }
+        let r = self.relations.push(RwLock::new(crate::live::LivePairs::default()));
+        by_name.insert(name.into(), r);
+        r
+    }
+
+    /// What live relation `r` keeps.
+    pub(crate) fn live_pairs(&self, r: usize) -> &RwLock<crate::live::LivePairs> {
+        self.relations.get(r)
     }
 
     pub fn components(&self) -> impl Iterator<Item = (ComponentId, &ComponentInfo)> {

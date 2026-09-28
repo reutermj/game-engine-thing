@@ -17,8 +17,8 @@ mod solver;
 use std::time::Instant;
 
 use engine_api::{
-    Adds, Cx, Despawns, Dt, Entity, EventWriter, Kept, Mod, OrderKey, Query, Removes, Spawner, Systems, With, Without, Workers, export_mod,
-    field_struct, phase,
+    Adds, AnyOf, Cx, Despawns, Dt, Entity, EventWriter, Live, Mod, OrderKey, Proximity, Query, Removes, Spawner, Systems, With, Without,
+    Workers, export_mod, field_struct, phase,
 };
 use physics::{
     Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
@@ -63,11 +63,31 @@ field_struct! {
 
 /// How far each collider's fat box reaches past its box grown by the
 /// speculative margin: the broadphase keeps its pairs while bodies stay
-/// inside their fat boxes (`Kept`; docs/architecture/spatial-storage.md,
+/// inside their fat boxes (`Contacts`; docs/architecture/spatial-storage.md,
 /// "Keeping pairs"). A settled pile creeps less than any margin tried, so
 /// the smallest was cheapest, with the fewest candidates (0.02 against
 /// Box2D's 0.05: 131 µs against 139 at 10 000 settled, 2026-09-27).
 const FAT: f32 = 0.02;
+
+/// What the broadphase finds, kept live between steps: the pairs of
+/// colliders whose boxes, grown by the speculative margin, meet, one of
+/// them awake and able to move. Its sides are the tables of
+/// `find_contacts`' queries: the awake colliders by whether they have a
+/// body and a velocity (moving, held, drifting), against statics and
+/// sleeping colliders, which pair only with an awake one.
+struct Contacts;
+
+impl Proximity for Contacts {
+    type Key = Position;
+    type Active = AnyOf<(
+        (With<(Position, Collider, Body, Velocity)>, Without<Asleep>),
+        (With<(Position, Collider, Body)>, Without<(Velocity, Asleep)>),
+        (With<(Position, Collider, Velocity)>, Without<(Body, Asleep)>),
+    )>;
+    type Passive = AnyOf<((With<(Position, Collider)>, Without<(Body, Velocity)>), With<(Position, Collider, Body, Asleep)>)>;
+    const GROW: f32 = narrow::MARGIN;
+    const MARGIN: f32 = FAT;
+}
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -397,7 +417,7 @@ impl Physics {
         (triggers, mut turned): (EventWriter<Trigger>, Turned<'_, '_>),
         // Gravity, for bodies woken here: see `fall_woken`.
         (dt, mut gravity, mut falling, mut records): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>, Records<'_, '_>),
-        (workers, mut kept): (Workers, Kept<'_, Position>),
+        (workers, mut near): (Workers, Live<'_, Contacts>),
     ) {
         let start = Instant::now();
         // Split across threads only while nothing sleeps: waking looks
@@ -454,9 +474,9 @@ impl Physics {
         // move. In entity order, lesser first, so what's found doesn't
         // depend on the order items were gathered in.
         let gathered = Instant::now();
-        // Kept between steps (`Kept`): a pile at rest or creeping inside its
-        // fat boxes finds its pairs without looking.
-        let near = kept.near_pairs_with(&workers, &(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN, FAT);
+        // Kept live between steps (`Contacts`): a pile at rest or creeping
+        // inside its fat boxes finds its pairs without looking.
+        let near = near.pairs_with(&workers);
         let found_near = Instant::now();
         let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
         if par {

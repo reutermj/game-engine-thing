@@ -20,9 +20,9 @@ monolithic design doc.
   structural change and events without stop-the-world points
 - [spatial-storage.md](spatial-storage.md) — tables kept in
   spatial order, so pages are neighborhoods and region queries are queries
-- [kept.md](kept.md) — derived relations storage keeps between frames:
-  `Kept`, the broadphase's pairs, what it costs storage, and how it could
-  grow
+- [live.md](live.md) — live relations, derived results storage keeps
+  current between frames: `Proximity` declared, taken as `Live<R>`, the
+  broadphase's pairs, what it costs storage, and how it could grow
 - [relationships.md](relationships.md) — how entities refer to each
   other: contacts, colliders and hierarchy, measured
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,

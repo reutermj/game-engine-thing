@@ -1,16 +1,18 @@
-//! The broadphase that keeps its pairs (`engine_ecs::kept`) against
+//! A live proximity relation's broadphase (`engine_ecs::live`) against
 //! `near_pairs` afresh, without physics, on touching boxes on a lattice (as
 //! `spatial3d_bench`'s), in 2D and 3D: at rest, creeping as a settled pile
-//! does, one row in a hundred flying, and everything falling.
-//! `./bazel run -c opt //engine/ecs:kept_bench [-- margin most]`.
+//! does, one row in a hundred flying, and everything falling. The state
+//! alone (`LivePairs`, whose margin and threshold the arguments set), and
+//! the same through a declared relation, `Live<R>`, at the defaults.
+//! `./bazel run -c opt //engine/ecs:live_bench [-- margin most]`.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
-use engine_ecs::kept::{KeptPairs, KeptStats};
-use engine_ecs::{Bounds, Build, Query, SpatialKey, Workers, World, component, near_pairs};
+use engine_ecs::live::{LivePairs, LiveStats};
+use engine_ecs::{AnyOf, Bounds, Build, Live, Proximity, Query, SpatialKey, With, Workers, World, component, near_pairs};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -34,6 +36,23 @@ impl SpatialKey<3> for At3 {
     fn bounds(&self, _: Option<&At3>) -> Bounds<3> {
         Bounds::around([self.x, self.y, self.z], [0.45, 0.45, 0.45])
     }
+}
+
+/// The lattice's pairs, as a relation: every row active.
+struct Lattice;
+impl Proximity for Lattice {
+    type Key = At;
+    type Active = With<At>;
+    type Passive = AnyOf<()>;
+    const GROW: f32 = 0.05;
+}
+
+struct Lattice3;
+impl Proximity for Lattice3 {
+    type Key = At3;
+    type Active = With<At3>;
+    type Passive = AnyOf<()>;
+    const GROW: f32 = 0.05;
 }
 
 const REST: u32 = 0;
@@ -69,13 +88,19 @@ fn delta<const N: usize>(i: u32) -> Option<[f32; N]> {
     }
 }
 
-/// Time in each broadphase, summed, and the last call's stats.
-static TIMES: Mutex<(u128, u128, usize, Vec<KeptStats>)> = Mutex::new((0, 0, 0, Vec::new()));
+/// Time in each broadphase, summed (the state alone, afresh, through
+/// `Live`), and the last call's stats.
+static TIMES: Mutex<(u128, u128, u128, usize, Vec<LiveStats>)> = Mutex::new((0, 0, 0, 0, Vec::new()));
 static COPY: Mutex<u128> = Mutex::new(0);
-static KEPT: Mutex<Option<KeptPairs>> = Mutex::new(None);
+static KEPT: Mutex<Option<LivePairs>> = Mutex::new(None);
 static HOW: Mutex<(f32, f32)> = Mutex::new((0.05, 0.1));
 
-fn both(now: u32, q: &impl engine_ecs::NearSide) {
+/// Each way, one after another: the state alone, `Live`'s (another
+/// state, over the same pages), and afresh.
+fn both<R: Proximity>(now: u32, q: &impl engine_ecs::NearSide, live: &mut Live<'_, R>) {
+    let t = Instant::now();
+    let l = live.pairs().len();
+    let l_ns = t.elapsed().as_nanos();
     let mut kept = KEPT.lock().unwrap();
     let kept = kept.as_mut().expect("made before the frames");
     let t = Instant::now();
@@ -90,10 +115,10 @@ fn both(now: u32, q: &impl engine_ecs::NearSide) {
     let t = Instant::now();
     let m = near_pairs(q, &(), 0.05).len();
     let a = t.elapsed().as_nanos();
-    assert_eq!(n, m);
+    assert_eq!((n, l), (m, m));
     let mut out = TIMES.lock().unwrap();
-    (out.0, out.1, out.2) = (out.0 + k, out.1 + a, n);
-    out.3.push(kept.stats());
+    (out.0, out.1, out.2, out.3) = (out.0 + k, out.1 + a, out.2 + l_ns, n);
+    out.4.push(kept.stats());
     *COPY.lock().unwrap() += copy;
 }
 
@@ -113,12 +138,12 @@ fn move3(_: &mut Cx, mut q: Query<&mut At3>) {
     });
 }
 
-fn pairs2(_: &mut Cx, q: Query<&At>) {
-    both(q.now(), &q);
+fn pairs2(_: &mut Cx, q: Query<&At>, mut live: Live<Lattice>) {
+    both(q.now(), &q, &mut live);
 }
 
-fn pairs3(_: &mut Cx, q: Query<&At3>) {
-    both(q.now(), &q);
+fn pairs3(_: &mut Cx, q: Query<&At3>, mut live: Live<Lattice3>) {
+    both(q.now(), &q, &mut live);
 }
 
 fn frames(dims: usize, n: usize, scene: u32, (margin, most): (f32, f32)) {
@@ -140,13 +165,13 @@ fn frames(dims: usize, n: usize, scene: u32, (margin, most): (f32, f32)) {
     } else {
         Schedule { systems: vec![move2.system(&w, "move"), pairs2.system(&w, "pairs")] }
     };
-    *KEPT.lock().unwrap() = Some(KeptPairs::default());
+    *KEPT.lock().unwrap() = Some(LivePairs::default());
     *HOW.lock().unwrap() = (margin, most);
     SCENE.store(scene, Ordering::Relaxed);
     let (warm, timed) = (30, 100);
     for f in 0..warm + timed {
         if f == warm {
-            *TIMES.lock().unwrap() = (0, 0, 0, Vec::new());
+            *TIMES.lock().unwrap() = (0, 0, 0, 0, Vec::new());
             *COPY.lock().unwrap() = 0;
         }
         FRAME.store(f, Ordering::Relaxed);
@@ -157,9 +182,9 @@ fn frames(dims: usize, n: usize, scene: u32, (margin, most): (f32, f32)) {
         }
         let _ = s.run_sequential(&w);
     }
-    let (k, a, pairs, stats) = std::mem::take(&mut *TIMES.lock().unwrap());
+    let (k, a, l, pairs, stats) = std::mem::take(&mut *TIMES.lock().unwrap());
     let us = |t: u128| t as f64 / timed as f64 / 1e3;
-    let mean = |f: fn(&KeptStats) -> usize| stats.iter().map(f).sum::<usize>() as f64 / stats.len() as f64;
+    let mean = |f: fn(&LiveStats) -> usize| stats.iter().map(f).sum::<usize>() as f64 / stats.len() as f64;
     let mut hows: Vec<String> = Vec::new();
     for how in ["Same", "Kept", "Rebuilt", "Afresh"] {
         let c = stats.iter().filter(|s| format!("{:?}", s.how) == how).count();
@@ -168,9 +193,10 @@ fn frames(dims: usize, n: usize, scene: u32, (margin, most): (f32, f32)) {
         }
     }
     println!(
-        "| {dims}D | {n} | {} | {:.1} | {:.1} | {pairs} | {:.0} | {:.1} | {:.0} | {} |",
+        "| {dims}D | {n} | {} | {:.1} | {:.1} | {:.1} | {pairs} | {:.0} | {:.1} | {:.0} | {} |",
         NAMES[scene as usize],
         us(k),
+        us(l),
         us(a),
         mean(|s| s.walked),
         mean(|s| s.moved),
@@ -198,10 +224,13 @@ fn thrash() {
 
 fn main() {
     let args: Vec<f32> = std::env::args().skip(1).map(|a| a.parse().expect("margin most")).collect();
-    let (margin, most) = (args.first().copied().unwrap_or(0.02), args.get(1).copied().unwrap_or(engine_ecs::kept::MOST));
-    println!("margin {margin}, afresh above {most} moving; µs a frame, 100 frames after 30\n");
-    println!("| dims | rows | scene | kept | afresh | pairs | walked | moved | candidates | how |");
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    let (margin, most) =
+        (args.first().copied().unwrap_or(engine_ecs::live::MARGIN), args.get(1).copied().unwrap_or(engine_ecs::live::MOST));
+    println!("margin {margin}, afresh above {most} moving; µs a frame, 100 frames after 30");
+    println!("(kept: the state alone at those; Live: through the parameter, at the defaults)\n");
+    println!("| dims | rows | scene | kept | Live | afresh | pairs | walked | moved | candidates | how |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+
     for dims in [2, 3] {
         for n in [1000, 10000] {
             for scene in [REST, CREEP, FLY, FLY5, FLY20, FALL] {

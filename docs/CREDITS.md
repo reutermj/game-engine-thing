@@ -115,7 +115,7 @@ one would have to ship those files with it.
     (`engine/std/physics3d/solver.rs`, `lib.rs`). What it takes for
     rotation is Box3D's (below).
   - the broadphase that keeps its pairs (2026-09-27,
-    `engine/ecs/kept.rs`): each shape's fat box, its box grown by a
+    `engine/ecs/live.rs`): each shape's fat box, its box grown by a
     margin (`B2_AABB_MARGIN`, 0.05 m, the margin we measured best too),
     kept until the box leaves it, and pairs whose fat boxes meet kept
     until they don't, looked for again only for shapes that left theirs
@@ -154,7 +154,7 @@ one would have to ship those files with it.
   What else it does differently is in physics.md, "Against other engines"
   and "Settling".
 - **The broadphase that keeps its pairs** (2026-09-27,
-  `engine/ecs/kept.rs`) takes from 0.36.0's `broad_phase_bvh` that a pair
+  `engine/ecs/live.rs`) takes from 0.36.0's `broad_phase_bvh` that a pair
   can only change if one of its ends changed, so only pairs beside
   changed colliders are looked at (`pair_adjacency`): ours finds a
   changed row's pairs by searching its kept pairs from either end, when
@@ -263,7 +263,7 @@ one would have to ship those files with it.
   - fat boxes kept between steps, as Box2D's (above), with the margin
     Box3D caps shapes at (`B3_MAX_AABB_MARGIN`, 0.05; its margin is an
     eighth of a shape's size below that, ours one for all)
-    (`engine/ecs/kept.rs`, physics3d's `FAT`).
+    (`engine/ecs/live.rs`, physics3d's `FAT`).
   - contact recycling (2026-09-27, physics.md, "Still at rest"): a pair's
     manifold kept while its bodies barely move, each point's anchors
     carried with both bodies and its separation updated from how far they

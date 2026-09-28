@@ -1,4 +1,8 @@
-//! A broadphase that keeps its pairs between calls: what `near_pairs`
+//! Live relations: a result the world keeps current as the rows under it
+//! change, and always exact. The one kind so far is `Proximity`, a spatial
+//! key's pairs, taken by a system as `Live<R>` (docs/architecture/live.md).
+//!
+//! Its broadphase keeps its pairs between calls: what `near_pairs`
 //! answers, found from what changed since the last call rather than
 //! afresh. Each row has a fat box, its box grown by a margin when it was
 //! last found, kept until the row leaves it; pairs whose fat boxes meet are
@@ -12,10 +16,11 @@
 use std::marker::PhantomData;
 use std::sync::RwLockWriteGuard;
 
-use crate::component::{Component, Entity};
+use crate::component::{Component, Entity, Storage};
 use crate::par::Workers;
 use crate::query::{
-    Declare, FrameCx, NearSide, Param, ParamDecl, Side, SideTable, SweptPage, Unit, meet_unit, meets, near_pairs_with, sweep,
+    ChangeDecl, Declare, Filter, FilterDecl, FrameCx, NearSide, Param, ParamDecl, Query, QueryDecl, Side, SideTable, SweptPage, Unit,
+    meet_unit, meets, near_pairs_with, sweep,
 };
 use crate::spatial::{Axes, Bounds, Dims, SPATIAL_PAGE_ROWS, contains};
 use crate::world::{ComponentId, TableId, TakeGuard, World};
@@ -64,7 +69,7 @@ impl PageRows {
 
 /// What a call did, for benches and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct KeptStats {
+pub struct LiveStats {
     /// Rows on pages that changed since the last call, walked.
     pub walked: usize,
     /// Rows that left their fat boxes, or arrived.
@@ -137,7 +142,7 @@ struct Pairs<const D: usize> {
     /// whose boxes changed in their fat boxes.
     left: Vec<u32>,
     touched: Vec<u32>,
-    stats: KeptStats,
+    stats: LiveStats,
 }
 
 impl<const D: usize> Default for Pairs<D> {
@@ -162,7 +167,7 @@ impl<const D: usize> Default for Pairs<D> {
             by_b_ok: false,
             left: Vec::new(),
             touched: Vec::new(),
-            stats: KeptStats::default(),
+            stats: LiveStats::default(),
         }
     }
 }
@@ -185,7 +190,16 @@ where
     /// This call's pairs, into `out`: as `near_pairs(act, pas, grow)`, which
     /// `afresh` is, called when more than `most` of the active rows moved
     /// (or a side filters by a sparse component, which can change what
-    /// passes with no page changing). `now` is the world's tick.
+    /// passes with no page changing: `Live` refuses such a side, but the
+    /// state alone, as benches use it, is still right). `now` is the world's tick.
+    ///
+    /// Kept out of line: without it, physics's pairs call through `Live` ran
+    /// 4% slower than the same call before `Live` (2026-09-27, 2D pile of
+    /// 10 000 settled, 110 µs against 106, interleaved runs of both
+    /// builds), and with it at the same speed. The work is the same, so
+    /// it's where the loop lands, which inlining into a caller as large as
+    /// `find_contacts` decides.
+    #[inline(never)]
     fn update<'a>(
         &mut self,
         now: u32,
@@ -218,14 +232,14 @@ where
         if filtered {
             self.tick = now;
             self.out = afresh();
-            self.stats = KeptStats { found: self.out.len(), how: How::Afresh, ..KeptStats::default() };
+            self.stats = LiveStats { found: self.out.len(), how: How::Afresh, ..LiveStats::default() };
             return;
         }
         self.lags = self.skip > 0;
         if self.skip > 0 {
             self.skip -= 1;
             self.out = afresh();
-            self.stats = KeptStats { found: self.out.len(), how: How::Afresh, ..KeptStats::default() };
+            self.stats = LiveStats { found: self.out.len(), how: How::Afresh, ..LiveStats::default() };
             return;
         }
         let t0 = std::time::Instant::now();
@@ -308,7 +322,7 @@ where
         let active: usize = sides.iter().filter(|(s, _)| *s == ACTIVE).map(|(_, t)| t.rows.iter().map(Vec::len).sum::<usize>()).sum();
         let t1 = std::time::Instant::now();
         let ns = [(t1 - t0).as_nanos() as u64, 0, 0];
-        let stats = |how, candidates, found| KeptStats { walked, moved, candidates, found, how, ns };
+        let stats = |how, candidates, found| LiveStats { walked, moved, candidates, found, how, ns };
         if !changed && self.kept {
             self.stats = stats(How::Same, self.candidates.len(), self.out.len());
             return;
@@ -580,34 +594,51 @@ fn search<const D: usize>(mut swept: Vec<SweptPage<'_, D>>, units: &[&Side<'_, D
 
 /// The share of active rows leaving their fat boxes in a call above which
 /// it finds its pairs afresh: looking for new candidates costs about 0.4
-/// µs a row moving in 2D and 1.1 in 3D (`kept_bench`), where `near_pairs`
+/// µs a row moving in 2D and 1.1 in 3D (`live_bench`), where `near_pairs`
 /// afresh is about 0.04 and 0.2 a row, so the two meet near a tenth.
 pub const MOST: f32 = 0.1;
 
-/// The pairs one broadphase keeps between calls, in whichever dimensions
-/// its tables are: what a spatial key's `Kept` holds.
+/// The pairs one proximity relation keeps between calls, in whichever
+/// dimensions its tables are: what `Live` holds, the world's (one per
+/// relation, `World::live_pairs`).
 #[derive(Default)]
-pub struct KeptPairs {
+pub struct LivePairs {
     plane: Pairs<2>,
     space: Pairs<3>,
     dims: usize,
 }
 
-impl KeptPairs {
+impl LivePairs {
     /// `near_pairs_with(workers, active, passive, grow)`, bit for bit, from
     /// what changed since the last call, with fat boxes `margin` past each
     /// row's box grown. `now` is the world's tick while the sides hold their
-    /// guards (`Query::now`); `most` is `MOST` but in benches.
+    /// guards (`Query::now`); `most` is `MOST` but in benches. Sides that
+    /// differ from the last call's, or another `grow` or `margin`, start
+    /// over: `Live` always passes its relation's, so that's only after a
+    /// reload changed them.
     pub fn near_pairs(
         &mut self,
         now: u32,
         workers: &Workers,
         (active, passive): (&impl NearSide, &impl NearSide),
+        how: (f32, f32, f32),
+    ) -> &[(Entity, Entity)] {
+        self.near_pairs_of(now, workers, (active, passive), how, |_, _| {})
+    }
+
+    /// `near_pairs`, with `check` shown the sides' tables first.
+    fn near_pairs_of(
+        &mut self,
+        now: u32,
+        workers: &Workers,
+        (active, passive): (&impl NearSide, &impl NearSide),
         (grow, margin, most): (f32, f32, f32),
+        check: impl FnOnce(&[SideTable<'_>], &[SideTable<'_>]),
     ) -> &[(Entity, Entity)] {
         let (mut act, mut pas) = (Vec::new(), Vec::new());
         active.spatial_tables(&mut act);
         passive.spatial_tables(&mut pas);
+        check(&act, &pas);
         let dims = act.iter().chain(&pas).map(|t| t.order.dims()).next().unwrap_or(2);
         assert!(act.iter().chain(&pas).all(|t| t.order.dims() == dims), "a broadphase is over tables of one dimension");
         self.dims = dims;
@@ -623,12 +654,10 @@ impl KeptPairs {
     }
 
     /// What the last call did.
-    pub fn stats(&self) -> KeptStats {
+    pub fn stats(&self) -> LiveStats {
         if self.dims == 3 { self.space.stats } else { self.plane.stats }
     }
-}
 
-impl KeptPairs {
     /// Checks what's kept for the sides of the last call: for tests.
     #[doc(hidden)]
     pub fn check(&self, active: &impl NearSide, passive: &impl NearSide) -> Result<(), String> {
@@ -639,70 +668,203 @@ impl KeptPairs {
     }
 }
 
-/// The pairs spatial key `K`'s broadphase keeps between steps, as a system
-/// parameter: the world's, taken for writing, so two systems that take a
-/// key's are ordered like two writers of a component, and a system that
-/// doesn't is never held up by one that does. `near_pairs` on it is
-/// `engine_ecs::near_pairs`, found from what changed since the last call.
-pub struct Kept<'w, K> {
-    pairs: RwLockWriteGuard<'w, KeptPairs>,
-    world: &'w World,
-    key: ComponentId,
-    _marker: PhantomData<fn() -> K>,
+/// The margin a fat box is past its row's box, unless a relation says
+/// otherwise: the smallest measured, which was the cheapest, since a
+/// settled pile creeps less than any margin tried (spatial-storage.md,
+/// "Keeping pairs", decision 1).
+pub const MARGIN: f32 = 0.02;
+
+/// A proximity relation: the pairs of rows of spatial key `Key` whose
+/// boxes, grown by `GROW`, meet, at least one of them `Active`. A
+/// declaration of *what* is related; a system takes it as `Live<R>`, which
+/// is *how* it's kept. The type names the relation, and each relation is
+/// kept apart from every other, on its key or another. See
+/// docs/architecture/live.md.
+///
+/// A side is a filter, or several as `AnyOf<(..)>`: the tables that match
+/// any of them. Each must require `Key`, and none may name a sparse
+/// component; a system that takes the relation is refused otherwise.
+pub trait Proximity: 'static {
+    type Key: Component;
+    type Active: Tables;
+    type Passive: Tables;
+    /// How far each box is grown before they're tested: `near_pairs`' grow.
+    const GROW: f32;
+    /// How far past its grown box a row's fat box is: a cost, never the
+    /// answer.
+    const MARGIN: f32 = MARGIN;
 }
 
-impl<K> Kept<'_, K> {
-    /// Every pair of rows whose boxes, grown by `grow`, meet, and at least
-    /// one of which is `active`: `near_pairs(active, passive, grow)`, bit for
-    /// bit. Each row's fat box is `margin` past its box grown; a call with
-    /// another margin, grow or tables than the last starts over. The sides'
-    /// tables must all be `K`'s.
-    pub fn near_pairs(&mut self, active: &impl NearSide, passive: &impl NearSide, grow: f32, margin: f32) -> &[(Entity, Entity)] {
-        self.near_pairs_with(&Workers::default(), active, passive, grow, margin)
+/// One side of a proximity relation, as the filters its tables match: a
+/// `Filter`, or several (`AnyOf`), whose tables are those matching any.
+pub trait Tables: 'static {
+    #[doc(hidden)]
+    fn filters(d: &mut Declare<'_>, out: &mut Vec<FilterDecl>);
+}
+
+impl<F: Filter> Tables for F {
+    fn filters(d: &mut Declare<'_>, out: &mut Vec<FilterDecl>) {
+        let mut f = FilterDecl::default();
+        F::declare(d, &mut f);
+        out.push(f);
+    }
+}
+
+/// A side made of several filters, `AnyOf<(F1, F2, ..)>`: the tables that
+/// match any of them. Only a side: a spatial side is a set of tables, where
+/// a query's filter is a conjunction over its rows, so a plain tuple of
+/// filters stays what it is everywhere else, their conjunction.
+pub struct AnyOf<T>(PhantomData<T>);
+
+macro_rules! any_of {
+    ($($f:ident),+) => {
+        impl<$($f: Filter),+> Tables for AnyOf<($($f,)+)> {
+            fn filters(d: &mut Declare<'_>, out: &mut Vec<FilterDecl>) {
+                $(<$f as Tables>::filters(d, out);)+
+            }
+        }
+    };
+}
+
+/// No filters: a side with no tables, as a relation with no passive side
+/// has. (`()` is the filter that passes every table.)
+impl Tables for AnyOf<()> {
+    fn filters(_: &mut Declare<'_>, _: &mut Vec<FilterDecl>) {}
+}
+any_of!(A, B);
+any_of!(A, B, C);
+any_of!(A, B, C, D);
+
+/// The side queries a `Live` reads its key through, one per filter: what
+/// its footprint's reads are, and the guards it holds.
+type SideQuery<'w, K> = Query<'w, &'static K>;
+
+/// Proximity relation `R`, kept current as the rows under it change: a
+/// system parameter. `pairs()` is `near_pairs(active, passive, R::GROW)`
+/// over `R`'s sides, bit for bit, found from what changed since the last
+/// call. Taking it is a write of `R` and a read of `R::Key` in the sides'
+/// tables, so two systems that take one relation are ordered, a system
+/// that only reads the key isn't held up, and different relations, on one
+/// key or not, never conflict.
+pub struct Live<'w, R: Proximity> {
+    pairs: RwLockWriteGuard<'w, LivePairs>,
+    world: &'w World,
+    key: ComponentId,
+    active: Vec<SideQuery<'w, R::Key>>,
+    passive: Vec<SideQuery<'w, R::Key>>,
+}
+
+impl<R: Proximity> Live<'_, R> {
+    /// Every pair of rows whose boxes, grown by `R::GROW`, meet, and at least
+    /// one of which is active: `near_pairs(active, passive, R::GROW)`, bit
+    /// for bit, lesser entity first, sorted.
+    pub fn pairs(&mut self) -> &[(Entity, Entity)] {
+        self.pairs_with(&Workers::default())
     }
 
-    /// `near_pairs`, finding afresh across `workers` when it does.
-    pub fn near_pairs_with(
-        &mut self,
-        workers: &Workers,
-        active: &impl NearSide,
-        passive: &impl NearSide,
-        grow: f32,
-        margin: f32,
-    ) -> &[(Entity, Entity)] {
-        let mut tables = Vec::new();
-        active.spatial_tables(&mut tables);
-        passive.spatial_tables(&mut tables);
-        assert!(
-            tables.iter().all(|t| t.key == self.key),
-            "kept pairs are {}'s, and a side has another key's tables",
-            self.world.name(self.key)
-        );
-        let now = self.world.current_tick();
-        self.pairs.near_pairs(now, workers, (active, passive), (grow, margin, MOST))
+    /// `pairs`, finding afresh across `workers` when it does.
+    pub fn pairs_with(&mut self, workers: &Workers) -> &[(Entity, Entity)] {
+        let Live { pairs, world, key, active, passive } = self;
+        // A side's tables all hold the key, but one that holds two spatial
+        // keys is in the order of the first, which may be another's.
+        let check = |act: &[SideTable<'_>], pas: &[SideTable<'_>]| {
+            assert!(
+                act.iter().chain(pas).all(|t| t.key == *key),
+                "{} is {}'s, and a table of its sides is in another key's order",
+                std::any::type_name::<R>(),
+                world.name(*key)
+            )
+        };
+        let sides = (&active.as_slice(), &passive.as_slice());
+        pairs.near_pairs_of(world.current_tick(), workers, sides, (R::GROW, R::MARGIN, MOST), check)
     }
 
     /// What the last call did.
-    pub fn stats(&self) -> KeptStats {
+    pub fn stats(&self) -> LiveStats {
         self.pairs.stats()
     }
 
-    /// Checks what's kept for these sides against their tables: for tests.
+    /// Checks what's kept against the sides' tables: for tests.
     #[doc(hidden)]
-    pub fn check(&self, active: &impl NearSide, passive: &impl NearSide) -> Result<(), String> {
-        self.pairs.check(active, passive)
+    pub fn check(&self) -> Result<(), String> {
+        self.pairs.check(&self.active.as_slice(), &self.passive.as_slice())
     }
 }
 
-impl<K: Component> Param for Kept<'static, K> {
-    type Item<'w> = Kept<'w, K>;
+impl<R: Proximity> Param for Live<'static, R> {
+    type Item<'w> = Live<'w, R>;
 
+    /// The relation, then a read of the key under each filter, the active
+    /// side's first: a group, so the reads are footprints and guards like
+    /// any query's, and are refused beside a query that writes the key.
     fn declare(d: &mut Declare<'_>) -> ParamDecl {
-        ParamDecl::Kept { key: d.component::<K>() }
+        let key = d.component::<R::Key>();
+        let (mut active, mut passive) = (Vec::new(), Vec::new());
+        R::Active::filters(d, &mut active);
+        R::Passive::filters(d, &mut passive);
+        // By type name: stable across a mod's builds under the one-compiler
+        // rule, where a TypeId isn't promised to be.
+        let name = std::any::type_name::<R>();
+        let relation = d.world.intern_relation(name);
+        let read = |filter: &FilterDecl| {
+            let terms = vec![(key, false)];
+            ParamDecl::Query(QueryDecl { terms, filter: filter.clone(), changes: ChangeDecl::default(), reorders: false })
+        };
+        let sides: Vec<ParamDecl> = active.iter().chain(&passive).map(read).collect();
+        let live = ParamDecl::Live { relation, name, key, active, passive };
+        ParamDecl::Group(std::iter::once(live).chain(sides).collect())
     }
 
-    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Kept<'w, K> {
-        let ParamDecl::Kept { key } = decl else { panic!("kept pairs' declaration") };
-        Kept { pairs: cx.world.kept_pairs(*key).take_write(), world: cx.world, key: *key, _marker: PhantomData }
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Live<'w, R> {
+        let ParamDecl::Group(members) = decl else { panic!("a live relation's declaration") };
+        let Some((ParamDecl::Live { relation, key, active, .. }, sides)) = members.split_first() else {
+            panic!("a live relation's declaration")
+        };
+        let side = |q: &'w ParamDecl| Query::take(cx.world, q.query().expect("a side's read"), cx.log);
+        let (act, pas) = sides.split_at(active.len());
+        Live {
+            pairs: cx.world.live_pairs(*relation).take_write(),
+            world: cx.world,
+            key: *key,
+            active: act.iter().map(side).collect(),
+            passive: pas.iter().map(side).collect(),
+        }
     }
+}
+
+/// Refuses what a live relation would otherwise get wrong in silence, or
+/// fail on mid-frame: a side filter on a sparse component (a row can join
+/// or leave the side with no page changing, so every call would be
+/// afresh), a filter that doesn't require the key (its tables needn't be
+/// in the key's order), a key that isn't spatial, and a relation taken
+/// twice by one system (two write guards on one lock).
+pub(crate) fn check_live(world: &World, name: &str, leaves: &[&ParamDecl]) -> Result<(), String> {
+    let mut taken: Vec<usize> = Vec::new();
+    for p in leaves {
+        let ParamDecl::Live { relation, name: r, key, active, passive } = p else { continue };
+        if taken.contains(relation) {
+            return Err(format!("{name}: takes {r} twice"));
+        }
+        taken.push(*relation);
+        if !world.component(*key).spatial {
+            return Err(format!("{name}: {r}'s key {} isn't a spatial key", world.name(*key)));
+        }
+        for (side, filters) in [("Active", active), ("Passive", passive)] {
+            for (i, f) in filters.iter().enumerate() {
+                if let Some(&c) = f.with.iter().chain(&f.without).find(|&&c| world.storage(c) == Storage::Sparse) {
+                    return Err(format!(
+                        "{name}: {r}'s {side} filter {i} names {}, which is sparse: its rows could change with no page changing",
+                        world.name(c)
+                    ));
+                }
+                if !f.with.contains(key) {
+                    return Err(format!(
+                        "{name}: {r}'s {side} filter {i} doesn't require {}, so it could match tables without it",
+                        world.name(*key)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

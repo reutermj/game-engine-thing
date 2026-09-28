@@ -35,12 +35,13 @@ impl SystemView<'_> {
         ParamDecl::leaves(self.params).into_iter().filter_map(ParamDecl::query)
     }
 
-    /// The keys whose kept pairs it takes, each a write.
-    fn kept(&self) -> Vec<(ComponentId, bool)> {
+    /// The live relations it takes, each a write. Their reads of the key
+    /// are queries, among `queries`.
+    fn live(&self) -> Vec<(usize, bool)> {
         ParamDecl::leaves(self.params)
             .into_iter()
             .filter_map(|p| match p {
-                ParamDecl::Kept { key } => Some((*key, true)),
+                ParamDecl::Live { relation, .. } => Some((*relation, true)),
                 _ => None,
             })
             .collect()
@@ -175,7 +176,7 @@ pub fn bound(world: &World, params: &[ParamDecl]) -> Footprint {
                 }
             }
             ParamDecl::Events { queue, write: true } => fp.add_events(*queue),
-            ParamDecl::Query(_) | ParamDecl::Events { .. } | ParamDecl::Dt | ParamDecl::Kept { .. } => {}
+            ParamDecl::Query(_) | ParamDecl::Events { .. } | ParamDecl::Dt | ParamDecl::Live { .. } => {}
             ParamDecl::Group(_) => unreachable!("leaves are flattened"),
         }
     }
@@ -322,7 +323,7 @@ pub fn systems_overlap(world: &World, x: SystemView<'_>, y: SystemView<'_>) -> b
     }
     if sparse_conflict(&sparse_of(world, x), &sparse_of(world, y))
         || sparse_conflict(&x.events(), &y.events())
-        || sparse_conflict(&x.kept(), &y.kept())
+        || sparse_conflict(&x.live(), &y.live())
     {
         return true;
     }

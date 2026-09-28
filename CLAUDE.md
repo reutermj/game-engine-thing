@@ -99,10 +99,12 @@ changing the ABI, the reload sequence or the Bazel rules.
     and their change log; `EventReader` and `EventWriter`.
   - `graph.rs` — footprints and the overlap rules the schedule's edges
     come from.
-  - `kept.rs` — `Kept<K>`, the pairs a spatial key's broadphase keeps
-    between steps (the world's, a system parameter): `near_pairs`' answer
-    from what changed. See
-    [docs/architecture/kept.md](docs/architecture/kept.md).
+  - `live.rs` — live relations: a `Proximity` a mod declares (a spatial
+    key, its sides as lists of filters, the grow), taken as `Live<R>`, a
+    system parameter whose state is the world's, one per relation:
+    `near_pairs`' answer from what changed. Registration refuses what it
+    can't keep. See
+    [docs/architecture/live.md](docs/architecture/live.md).
   - `spatial.rs` — spatial tables: a key component keeps its tables'
     pages in Z-order with boxes, re-sorted when a `Structural` drops;
     what `Query::in_region` and `near_pairs` walk. See

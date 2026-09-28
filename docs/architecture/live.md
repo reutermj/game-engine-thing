@@ -1,12 +1,14 @@
-# Kept results
+# Live relations
 
-**Status: built for one relation** (2026-09-27, get-emj.36):
-`engine_ecs::Kept<K>` (`engine/ecs/kept.rs`), the proximity pairs of a
-spatial key, kept between steps. Generalizing it is open (get-pmk). This
-doc is the design's home: the problem it solves, how it looks to the
-code that uses it, what it costs storage, how it's tested, where the ideas
-come from, and how it could grow. The measurements behind each of its
-choices are in [spatial-storage.md, "Keeping pairs"](spatial-storage.md#keeping-pairs).
+**Status: built for one kind of relation** (2026-09-27, get-emj.36, get-pmk):
+`engine_ecs::Live<R>` (`engine/ecs/live.rs`), where `R` is a
+`Proximity`, the pairs of a spatial key's rows near each other, kept
+current between steps. Any number of relations, each its own kept set.
+Other kinds of relation are open (get-pmk). This doc is the design's home:
+the problem it solves, how it looks to the code that uses it, what it
+costs storage, how it's tested, where the ideas come from, and how it
+could grow. The measurements behind each of its choices are in
+[spatial-storage.md, "Keeping pairs"](spatial-storage.md#keeping-pairs).
 
 ## The problem
 
@@ -27,7 +29,7 @@ turns up across a game:
   management);
 - what each light touches, what each camera sees.
 
-Before `Kept`, a system had two ways to get such a relation, and both were
+Before `Live`, a system had two ways to get such a relation, and both were
 bad:
 
 1. **Recompute it every frame.** Correct and simple, and it costs the full
@@ -46,65 +48,105 @@ bad:
 
 Databases know the good version as *incremental maintenance of a
 materialized view*: store the derived result, and update it from what
-changed rather than from everything. `Kept` is that, inside the ECS, for
-one relation.
+changed rather than from everything. A *live relation* is that, inside
+the ECS: declared once, kept by the world, and always exact.
 
 ## What using it looks like
 
-`Kept<K>` is a system parameter, like `Query` or `EventWriter`. The system
-declares it, and the scheduler hands it over:
+A relation is declared once, as a type, and taken by a system as a
+parameter, like `Query` or `EventWriter`. The declaration says *what* the
+relation is; the parameter says *how* it's kept:
 
 ```rust
-fn find_contacts(
-    _: &mut Cx,
-    (moving, statics): (Query<(&Position, &Velocity)>, Query<&Position, Without<Velocity>>),
-    mut kept: Kept<Position>,
-) {
-    // Before: near_pairs(&moving, &statics, MARGIN), found fresh every call.
-    let near: &[(Entity, Entity)] = kept.near_pairs(&moving, &statics, MARGIN, FAT);
-    for &(a, b) in near {
+/// Pairs of colliders near each other, one of them awake and able to move.
+struct Contacts;
+impl Proximity for Contacts {
+    type Key = Position;
+    type Active = AnyOf<(
+        (With<(Position, Collider, Body, Velocity)>, Without<Asleep>),
+        (With<(Position, Collider, Body)>, Without<(Velocity, Asleep)>),
+        (With<(Position, Collider, Velocity)>, Without<(Body, Asleep)>),
+    )>;
+    type Passive = AnyOf<((With<(Position, Collider)>, Without<(Body, Velocity)>), With<(Position, Collider, Body, Asleep)>)>;
+    const GROW: f32 = narrow::MARGIN;
+    const MARGIN: f32 = FAT; // optional: the engine's default is 0.02
+}
+
+fn find_contacts(_: &mut Cx, /* the queries it reads data through */ mut near: Live<Contacts>) {
+    for &(a, b) in near.pairs() {
         // ... the narrowphase ...
     }
 }
 ```
 
-The physics mod calls it this way, with tuples of queries on each side
-(`engine/std/physics/lib.rs`, `find_contacts`):
+That is the 2D physics mod's relation (`engine/std/physics/lib.rs`), which
+finds its pairs across workers: `near.pairs_with(&workers)`.
 
-```rust
-let near = kept.near_pairs_with(&workers, &(&moving, &held, &drifting), &(&statics, &asleep), narrow::MARGIN, FAT);
-```
+**The names.** The two halves are named apart on purpose. `Proximity` is
+the *kind* of relation, and it is spatial: pairs of rows of one spatial
+key whose boxes meet. `Live<R>` is the *mechanism*: a result kept current
+as the data under it changes, and always exact. The category is *live
+relations*, so another kind (a join over ordered keys, an aggregate:
+sketch 5) would be declared by its own trait and taken as `Live<R>` too.
+The name it replaced, `Kept<K>`, described the mechanism and named the key,
+which is neither what a system wants nor what tells two uses apart.
 
-**The contract:** `kept.near_pairs(active, passive, grow, margin)` returns
-exactly what `near_pairs(active, passive, grow)` would, bit for bit: every
-pair of rows whose boxes, grown by `grow`, meet, with at least one row
-active, lesser entity first, sorted. `margin` is the only new argument,
-and it can change only the cost, never the answer. So switching a system
-from `near_pairs` to `Kept` is a change of speed, and every test that
-passed before still passes. The result is borrowed from the kept state,
-not copied.
+**The contract:** `near.pairs()` returns exactly what
+`near_pairs(active, passive, R::GROW)` would over the relation's sides, bit
+for bit: every pair of rows whose boxes, grown by `GROW`, meet, with at
+least one row active, lesser entity first, sorted. `MARGIN` can change
+only the cost, never the answer. The result is borrowed from the kept
+state, not copied.
 
-**The rules a user meets:**
+**Sides are lists of filters.** A side is a filter (`With`, `Without` and
+tuples of them, as a query's), or several as `AnyOf<(F1, F2, ..)>`, whose
+tables are those matching any of them; `AnyOf<()>` is a side with none. A
+spatial side already matches whole tables (spatial-storage.md, "Two
+sides"), so a side is a set of tables, and a union of filters is the
+smallest thing that expresses one: physics's active side was three queries
+because a query's filter is a conjunction. The union is only a side:
+`AnyOf` isn't a `Filter`, and a tuple of filters stays their conjunction
+everywhere. A general `Or` in `Query` would also have done it, and was
+rejected: every rule that reads a query's filter assumes it's one list of
+required and one of excluded components (which tables it matches, the
+footprints and overlaps in `graph.rs`, when two queries' guards can't
+meet), so `Or` would reach all of them. A list of filters is a list of
+those, each read as a query of the key, so every rule applies unchanged.
 
-| rule | what happens otherwise |
+**What is refused at registration**, each with a test
+(`live_relations_refuse_what_they_cant_keep`):
+
+| declared | why it would go wrong |
 |---|---|
-| the sides' tables are all `K`'s (the key named in `Kept<K>`) | a panic naming the key |
-| one `Kept` per key per system | the system is refused at registration ("takes P's kept pairs twice") |
-| the same `grow`, `margin` and tables every call | the kept pairs start over: correct, but a full search that call |
-| no side filters by a sparse component | found fresh every call, silently: correct, and as slow as `near_pairs` |
+| a side filter naming a sparse component | a row can join or leave the side with no page changing, so every call would be afresh, silently as slow as `near_pairs` |
+| a filter that doesn't require the key | it could match tables without the key, which aren't in its order. The key isn't added for it, so a filter reads as exactly the tables it covers, as it would in a query |
+| a key that isn't spatial | there are no pages to keep pairs of |
+| one relation taken twice by one system | two write guards on one lock |
+| a relation beside a query that writes its key | its reads of the key would meet the query's write (as two queries' would) |
 
-**Scheduling.** Taking `Kept<K>` is a *write* of `K`'s kept pairs. Two
-systems that take the same key's are ordered like two writers of one
-component. A system that only reads `K` through a query isn't held up by
-one that takes its pairs, and different keys' pairs never conflict. This
-is what the private cache couldn't give: the dependency is visible, so the
-scheduler can order it and, later, run around it.
+What remains a panic is what registration can't see: a table holding two
+spatial keys is in the first one's order, and a side that matches such a
+table for the other key panics at the call, naming the relation.
 
-**What games see.** Nothing directly, today. `Kept` is used by the physics
-mods. Games see its results as physics turns them into entities:
+**Scheduling.** Taking `Live<R>` is a *write* of `R`, and a read of
+`R::Key` in each side's tables, declared as one query per filter. Two
+systems that take one relation are ordered like two writers of one
+component. Two relations on one key are independent, since both only read
+the key; a system that only reads the key isn't held up; and a system that
+writes the key is ordered with every relation on it, since the relation
+reads what it writes. This is what a private cache couldn't give: the
+dependency is visible, so the scheduler can order it and, later, run
+around it.
+
+**The old API**, and why it changed, is in a footnote.[^kept]
+
+**What games see.** Nothing directly, today. Each physics mod declares
+its `Contacts`. Games see its results as physics turns them into entities:
 `ContactPair`/`Manifold` for contacts and `Overlap` for sensors, in
 ordered tables that any system can query ([relationships.md](relationships.md)).
-Sensor overlaps and solid contacts come from the same kept pairs.
+Sensor overlaps and solid contacts come from the same relation. A game
+may declare relations of its own, on physics's `Position` or its own key:
+each is kept apart from physics's.
 
 **The cost model.** What a call costs depends on how much moved since the
 last one (2D, 10 000 bodies, `-c opt`, one thread; from spatial-storage.md):
@@ -117,16 +159,25 @@ last one (2D, 10 000 bodies, `-c opt`, one thread; from spatial-storage.md):
 | some rows leave their fat boxes (up to a tenth) | searches again for those rows only | grows with the rows moving |
 | more than a tenth moving (falling) | finds fresh, then waits 1-16 calls before looking again | 197 (189) |
 
-`kept.stats()` says which of these a call took (`How::Same`, `Few`,
+`near.stats()` says which of these a call took (`How::Same`, `Few`,
 `Kept`, `Rebuilt`, `Afresh`), with counts and timings, for benches and
 tests.
+
+**What declaring it costs:** nothing a call can measure. `live_bench`
+times the same lattice through `Live<R>` and through the state alone,
+and the physics compare ran interleaved against the build before
+`Live` (2026-09-27, 10 000, pairs call µs, settled 2D 106 against 106,
+turning 155 against 156, falling and 3D the same). That took keeping
+the kept state's update out of line (`#[inline(never)]`): inlined into
+`find_contacts` it ran 4% slower, though the work is the same. Fetching
+the parameter takes a query per filter, outside the call.
 
 ## How it works
 
 Five ideas, each of which could be reused for another relation:
 
-1. **The result lives in the world**, in the key's `ComponentInfo`, next
-   to the spatial order it's derived from. Not in a system and not in a
+1. **The result lives in the world**, one kept set per relation, beside
+   the spatial order it's derived from. Not in a system and not in a
    mod: storage owns it, a reload keeps it, and access to it is declared.
 2. **Change detection says where to look.** Each spatial page records the
    world tick its rows last changed at (`SpatialPages::changed`), and each
@@ -163,7 +214,7 @@ records by entity don't notice.
 
 ## What it does to storage
 
-**Added to every spatial table**, whether or not anything uses `Kept`:
+**Added to every spatial table**, whether or not any relation uses it:
 
 - one `u32` tick per page (`changed`), stamped by the re-sort when a page's
   boxes are re-bounded or a row arrives, and by `swap_remove` when a row
@@ -174,10 +225,14 @@ records by entity don't notice.
 That's 4 bytes on a page of 16 rows, plus the stamping. The page layout
 and the re-sort are otherwise unchanged.
 
-**Added to every component's `ComponentInfo`:** an empty `KeptPairs` under
-an `RwLock`. It allocates only when a system first takes it.
+**Added to the world:** a slot per relation (up to 256), made when a
+system taking it is first registered, by the relation's type name: an
+empty `LivePairs` under an `RwLock`, which allocates only when first
+called. One key's relations share its pages' ticks and nothing else: each
+compares the ticks with its own last call. (Until 2026-09-27 the one set
+a key had was in its `ComponentInfo`, in every component's.)
 
-**Once a key's pairs are in use:**
+**Once a relation is in use**, for each one:
 
 | what | size | at 10 000 bodies in 2D |
 |---|---|---|
@@ -192,18 +247,21 @@ the gap. That's the same trade `Slots` makes in physics, and is fine at
 today's scale, but it's worth knowing before a game spawns millions of
 non-physics entities first.
 
-**What storage must now guarantee.** `Kept` is correct only if every
+**What storage must now guarantee.** A live relation is correct only if every
 change to a row's box, and every arrival and departure, stamps the page
 it's on. That's a new invariant of spatial storage: code that ever changes
 a page's lanes without the re-sort (or `swap_remove`) would silently
-break `Kept`. The mutations listed under Testing include removing each
+break every relation. The mutations listed under Testing include removing each
 stamp, and the tests catch it.
 
-**Reload.** `KeptPairs` is plain data of `engine_ecs`'s own types. The
+**Reload.** `LivePairs` is plain data of `engine_ecs`'s own types. The
 loader and every mod link one `engine_ecs` under the one-compiler rule, and
 changing it bumps `API_VERSION`. So a reload keeps it like the rest of the
-world, and nothing mod-built is in it (no vtables, no closures). A change
-to `grow`, `margin` or the set of tables after a reload starts it over.
+world, and nothing mod-built is in it (no vtables, no closures). It is
+found again by the relation's type name, which a mod's builds share under
+the one-compiler rule. A new build that declares another `GROW`,
+`MARGIN` or sides starts it over at its first call: correct, and a full
+search that once.
 
 **Why not somewhere else in storage** (measured, spatial-storage.md
 decision 3):
@@ -218,7 +276,7 @@ decision 3):
 
 ## How it's tested
 
-**`//engine/ecs:kept_test`**, in 2D and 3D:
+**`//engine/ecs:live_test`**, in 2D and 3D:
 
 - **A scripted world, checked every frame against brute force and
   `near_pairs` fresh.** The script covers:
@@ -233,7 +291,7 @@ decision 3):
     out of the spatial tables altogether;
   - despawns with nothing else re-sorting, so only `swap_remove`'s stamp
     can see them.
-- **`KeptPairs::check`, after every call:**
+- **`LivePairs::check` (`Live::check`), after every call:**
   - every row's side, box and fat box against the tables (the fat box
     holding the box, and within `2 * margin` of it);
   - nothing kept of rows that are gone;
@@ -243,42 +301,61 @@ decision 3):
   must be the last answer, nudged the few-changed path, falling fresh,
   then the wait. A fallback that silently always went fresh would pass
   every equality check; this catches it.
-- **`kept_pairs_are_a_footprint_the_scheduler_sees`:** two takers of one
-  key are ordered, a reader of the key isn't held up, other keys are
-  independent, and taking one key's twice is refused.
+- **`live_relations_are_a_footprint_the_scheduler_sees`:** two takers of
+  one relation are ordered, a reader of the key isn't held up, another
+  relation on the same key or another key is independent, and a writer of
+  the key waits for every relation on it.
+- **`two_relations_on_one_key_are_kept_apart`:** two relations on one key,
+  with other sides, grow and margin, called in turn in a frame and alone
+  on frames of their own, through motion and churn: each is its own
+  sides' `near_pairs` every call, checked, and answered as its own history
+  says (the last answer at rest, kept while creeping), where one shared
+  set would start over at every call.
+- **`a_declared_margin_is_the_one_kept`:** every row slid by more than the
+  default margin and less than a declared one leaves every fat box at the
+  default and none at the declared.
+- **`live_relations_refuse_what_they_cant_keep`:** each refusal in the
+  table above, and two relations on one key taken by one system allowed.
 
 **Checked by mutation** (CLAUDE.md, "green has to be earned"): 24
-mutations of `kept.rs`, the footprint rules in `graph.rs` and `query.rs`,
-and the stamps in `spatial.rs` are caught, most by `check`. One survives:
-the slack for rounding in the search, which only matters for coordinates
-around 1e5.
+mutations of the kept state, the footprint rules in `graph.rs` and
+`query.rs`, and the stamps in `spatial.rs` are caught, most by `check`.
+One survives: the slack for rounding in the search, which only matters
+for coordinates around 1e5. The declared relation's code (2026-09-27)
+was checked the same way: 15
+mutations of the declaration, the refusals, the keying by relation, the
+footprint and the sides' split (`live.rs`, `graph.rs`, `world.rs`,
+`query.rs`) are all caught by `live_test`, the shared-state one by the
+two-relations test and the default-margin one by the margin test.
 
 **Through physics,** where it runs every step:
 
 - `:tax` still asserts the ECS step and the same step on plain arrays end
   bit for bit the same.
 - The quality tests bound settling against Box2D, Rapier and Box3D.
-- The physics reload and replay tests run with kept pairs live across a
-  reload.
+- The physics reload and replay tests run with the relation live across
+  a reload.
 
 **Not covered yet:**
 
-- **The world fuzzer** (`//engine/ecs/fuzz:world`) doesn't take `Kept`.
-  Adding it as an operation checked by `check` is the natural next step
-  for coverage.
+- **The world fuzzer** (`//engine/ecs/fuzz:world`) doesn't take a live
+  relation. Adding one as an operation checked by `check` is the natural
+  next step for coverage (get-emj.45).
 - **A reload that changes the key's extent glue** (how boxes are computed)
   without moving any row. Whether the re-sort after the install re-bounds
-  and stamps every page is untested for `Kept`.
+  and stamps every page is untested for live relations (get-emj.46).
 - **The kept path runs on one thread.** Only the fresh path splits across
   workers.
-- **Miri isn't needed:** `kept.rs` has no unsafe code.
+- **Miri isn't needed for its own sake:** `live.rs` has no unsafe code.
+  `live_test` is in the Miri suite anyway (`//engine/ecs:miri`, sized
+  down), for the spatial glue its spawns, despawns and table moves drive.
 
 ## Where it comes from
 
-Nothing in `Kept` is new. What's particular is the combination, and where
+Nothing in a live relation is new. What's particular is the combination, and where
 it sits: inside the world, as a declared parameter, with an exact answer.
 
-| idea | where it comes from | in `Kept` |
+| idea | where it comes from | in `Live` |
 |---|---|---|
 | fat boxes: slack so small motion changes nothing | Box2D's `B2_AABB_MARGIN` and its move buffer; Box3D; Rapier's loosened BVH leaves; Bullet's `btDbvt` broadphase | each row's fat box, plus a second bound (2 × margin) they don't have |
 | a neighbour list with a skin, rebuilt only when something moved more than it | Verlet lists in molecular dynamics (Verlet, 1967): each particle's neighbours within cutoff + skin | the same idea per row: candidates within the fat boxes |
@@ -289,7 +366,7 @@ it sits: inside the world, as a declared parameter, with an exact answer.
 | store a derived result, update it from the changes | materialized views and their incremental maintenance (Gupta and Mumick, 1995); differential dataflow (McSherry et al., 2013); DBSP (Budiu et al., 2023) | the view is the pairs, the changes are page ticks, and a refresh beyond a threshold is a full recompute |
 | a cheap filter, then an exact test | the filter-and-refine spatial join (Brinkhoff, Kriegel, Seeger, 1993), bounding boxes first | candidates by fat box, then the exact grown-box test |
 | a region inside which an object can move without changing a query's answer | safe regions in moving-object databases (Prabhakar et al., 2002) | a fat box is a row's safe region |
-| data physically in the order a query wants | a database's clustered index | spatial tables (spatial-storage.md), which `Kept` searches instead of a tree |
+| data physically in the order a query wants | a database's clustered index | spatial tables (spatial-storage.md), which `Live` searches instead of a tree |
 
 **Where the ECSs we credit stop short.** Flecs's cached queries and EnTT's
 groups keep *which entities match* a query, incrementally. Unity's and
@@ -297,7 +374,7 @@ Bevy's change stamps say *what changed*. None keeps a *relation between
 entities derived from their values*: that stays the user's job, in a
 system or a resource, beside the world. Flecs's relationships make pairs
 first-class entities, which is the "pairs as entities" option we measured
-and rejected for this churn rate. `Kept` sits between the physics engines,
+and rejected for this churn rate. A live relation sits between the physics engines,
 which keep pairs but aren't an ECS, and the ECSs, which keep matches but
 not relations.
 
@@ -307,32 +384,38 @@ Each sketch is a direction, not a plan. The one general rule, from the
 problem statement above: whatever is kept lives in the world, is reached
 through a declared parameter, and answers exactly what recomputing would.
 
-### 1. More than one kept set per key
+### 1. More than one kept set per key (done)
 
-Today a key keeps one set: a second broadphase over the same tables with
-other sides or another `grow` starts over every call. Sensors with a
-wider reach, or an AI's perception radius, would want their own:
+**Built 2026-09-27** (get-pmk), as the relation declared by a type:
 
 ```rust
-// A label type names each set; the footprint is (key, label).
 struct Perception;
-fn perceive(_: &mut Cx, q: Query<&Position, With<Agent>>, all: Query<&Position>, mut seen: Kept<Position, Perception>) {
-    for &(agent, thing) in seen.near_pairs(&q, &all, SIGHT, 0.5) { /* ... */ }
+impl Proximity for Perception {
+    type Key = Position;
+    type Active = With<(Position, Agent)>;
+    type Passive = With<Position>;
+    const GROW: f32 = SIGHT;
+    const MARGIN: f32 = 0.5;
+}
+fn perceive(_: &mut Cx, mut seen: Live<Perception>) {
+    for &(agent, thing) in seen.pairs() { /* ... */ }
 }
 ```
 
-**Storage:** `ComponentInfo` would hold a small map from label to
-`KeptPairs`, created on first use. The page ticks are shared: any number
-of kept sets compare their own last tick against them, which is why a tick
-by page was chosen over Box2D's single-reader move buffer (decision 4).
+The sketch had a label type beside the key (`Kept<Position, Perception>`),
+and the sides, grow and margin still passed at each call; declaring them
+with the label is what let registration check them. The world keeps a
+slot per relation; the page ticks are shared, and any number of relations
+compare their own last tick against them, which is why a tick by page was
+chosen over Box2D's single-reader move buffer (decision 4).
 
 ### 2. Began and ended, as well as the pairs
 
 The kept candidates already know when a pair starts or stops meeting (the
-`met` flags). `Kept` could return the difference too:
+`met` flags). `Live` could return the difference too:
 
 ```rust
-let changes = kept.near_changes(&moving, &statics, MARGIN, FAT);
+let changes = near.changes();
 for &(a, b) in changes.began { /* ... */ }
 for &(a, b) in changes.ended { /* ... */ }
 ```
@@ -344,18 +427,21 @@ call's `near_pairs` and the last's.
 
 ### 3. Sparse filters without going fresh
 
-A side filtered by a sparse component (`With<Asleep>` on a sparse
-`Asleep`) makes every call fresh today, because a row can join or leave
-the side with no page changing. Giving sparse sets a change tick of their
-own, stamped on insert and remove, would let `Kept` see those changes the
-way it sees pages. This matters for sleeping, which is sparse by design.
+A side filtered by a sparse component would go fresh every call, because
+a row can join or leave the side with no page changing; since 2026-09-27
+it is refused at registration instead of allowed to ("What is refused",
+above), which physics doesn't meet: its sides filter by table components
+only. Giving sparse sets a change tick of their own, stamped on insert
+and remove, would let a relation see those changes the way it sees pages,
+and lift the refusal. It would matter for a side filtered by a marker
+that comes and goes often, which is what sparse storage is for.
 
 ### 4. Region membership
 
 Trigger zones, interest management and area effects are a relation
 between a few *regions* and many *entities*: "which entities are inside
 which zone". With zones as the passive side, that's already `near_pairs`,
-and needs only (1) to coexist with physics's set. A dedicated shape could
+and, with (1) built, coexists with physics's relation. A dedicated shape could
 keep, per zone, its members, and return joins and leaves (2), which is
 what a networking layer's interest management needs every tick.
 
@@ -383,13 +469,14 @@ trait Derived: Send + Sync + 'static {
     fn all(inputs: &Self::Inputs) -> Self::Answer;
     fn update(&mut self, inputs: &Self::Inputs, since: Tick) -> Update<Self::Answer>;
 }
-// A system takes it as `Keep<MyRelation>`, a write of the relation.
+// A system takes it as `Live<MyRelation>`, a write of the relation.
 ```
 
 **The design question this raises, and the reason it's deferred:** where
-does the derivation's *code* live? Spatial order, ordered keys and `Kept`
-are kinds built into `engine_ecs`, whose code the loader and every mod
-share. So what `Kept` keeps is plain `engine_ecs` data that survives
+does the derivation's *code* live? Spatial order, ordered keys and
+`Proximity` are kinds built into `engine_ecs`, whose code the loader and
+every mod share: a mod declares a proximity relation's key, sides and
+grow, never its code. So what `Live` keeps is plain `engine_ecs` data that survives
 reload. A relation defined by a mod is different:
 
 - its code reloads with the mod;
@@ -400,13 +487,14 @@ reload. A relation defined by a mod is different:
   test to write.
 
 Until a second relation shows a need, adding kinds to `engine_ecs`, as
-spatial and ordered were added, keeps the guarantees that make `Kept`
-trustworthy.
+spatial and ordered were added, keeps the guarantees that make `Live`
+trustworthy: another kind would be a trait beside `Proximity`, taken as
+`Live<R>` too.
 
 ### 6. Visible to readers
 
-Today the kept pairs are reachable only by whoever takes `Kept<K>` for
-writing. A read-only parameter (`KeptView<K>`, a read lock) would let
+Today a relation's pairs are reachable only by whoever takes `Live<R>`
+for writing. A read-only parameter (`LiveView<R>`, a read lock) would let
 other systems read the last answer without recomputing it, ordered after
 the writer like any reader after a writer. For physics, today's answer is
 the contact entities themselves; for sketches (1) and (4), a view may be
@@ -426,6 +514,22 @@ of parallelism's open work (get-znt.5).
   narrowphase does the same test on every fat pair.
 - **Falling pays a few percent** in the broadphase stage against fresh,
   from a fresh call's fixed cost; not found.
-- **One set a key** (sketch 1), **sparse filters go fresh** (sketch 3),
-  and **no fuzzing yet** (Testing).
-- **Generalizing:** get-pmk.
+- **Sparse filters are refused** (sketch 3), and **no fuzzing yet**
+  (Testing, get-emj.45).
+- **Other kinds of relation:** get-pmk.
+
+[^kept]: **The old API** (2026-09-27, replaced the same day). The world
+    kept one set of pairs per spatial key, taken as `Kept<K>`, and the
+    system passed the sides, the grow and the margin at every call:
+    `kept.near_pairs(&(&moving, &held, &drifting), &(&statics, &asleep),
+    narrow::MARGIN, FAT)`. Sides that differed from the last call's, or
+    another grow or margin, silently started the set over, so a second
+    broadphase over one key made both go fresh every call; a side
+    filtered by a sparse component silently went fresh every call; and a
+    side with another key's tables panicked at the call. The name
+    described the mechanism and named the key. Declaring the relation
+    (`Proximity`) and naming the mechanism apart (`Live`) moved each of
+    those into a declaration registration can check, and made the state
+    the relation's rather than the key's. The kept state itself, and every
+    answer, is unchanged (`KeptPairs` is `LivePairs`, `KeptStats` is
+    `LiveStats`, `ParamDecl::Kept` is `ParamDecl::Live`).
