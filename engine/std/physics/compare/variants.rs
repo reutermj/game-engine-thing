@@ -31,14 +31,16 @@
 //!   stiffness as a share of the substep rate (`STIFFNESS`,
 //!   `STATIC_STIFFNESS`), `block=0` a contact's two points one after the
 //!   other in the relax passes; `scalar=1` one contact at a time
-//!   (`Wide::Off`), `levels=<n>` by level `n` wide (the default, 4),
-//!   `colored=<n>` graph-colored `n` wide (physics.md, "The solver's speed");
-//!   `carry` what a turning contact's points carry to the next step (0 the
-//!   last substep's impulses, the default; 1 the normal's last and the
-//!   tangent's mean; 2 both means, as before get-emj.48; `solver::Carry`);
-//!   `order` the contacts in another order than the pairs': 1 reversed, 2
-//!   shuffled each step, 3 rows from the top down (physics.md, "Why colors
-//!   let the pyramid fall").
+//!   (`Wide::Off`), `levels=<n>` by level `n` wide, `colored=<n>`
+//!   graph-colored `n` wide (the default, 4; physics.md, "The solver's
+//!   speed"); `carry` what a turning contact's points carry to the next step
+//!   (0 the last substep's impulses; 1 the normal's last and the tangent's
+//!   mean, the default; 2 both means, as before get-emj.48;
+//!   `solver::Carry`); `order` the contacts in another order than the
+//!   pairs': 1 reversed, 2 shuffled each step, 3 rows from the top down
+//!   (physics.md, "Why colors let the pyramid fall"), 4 the colors' order
+//!   (`solver::order`), which with `scalar=1` is the default's computation
+//!   solved one contact at a time.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -46,7 +48,9 @@ use std::collections::HashMap;
 use physics::Vec2;
 
 use crate::arrays::Warm;
-use crate::solver::{BOUNCE_THRESHOLD, Carry, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, solve_with};
+use crate::solver::{
+    BOUNCE_THRESHOLD, Carry, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, order, solve_with,
+};
 use crate::split_impulse as old;
 
 /// A solver for the arrays: over bodies some of which may turn and
@@ -139,8 +143,13 @@ pub fn parse(spec: &str) -> Variant {
             v.solve = Box::new(move |b, s, c, p, dt| solve_with(&params, (b, s), c, p, dt));
         } else {
             let seed = RefCell::new(0x9e37_79b9_u32);
-            v.solve =
-                Box::new(move |b, s, c, p, dt| reordered(order, &mut seed.borrow_mut(), c, |c| solve_with(&params, (b, s), c, p, dt)));
+            v.solve = Box::new(move |b, s, c, p, dt| {
+                let at = match order {
+                    4 => solver_order(b, s, c),
+                    _ => shuffled(order, &mut seed.borrow_mut(), c),
+                };
+                reordered(&at, c, |c| solve_with(&params, (b, s), c, p, dt))
+            });
         }
         return v;
     }
@@ -164,15 +173,18 @@ pub fn parse(spec: &str) -> Variant {
     Variant::of(without_points(move |b, c, dt| soft(&s, b, c, dt)))
 }
 
-/// `solve` over the contacts in another order than the pairs' (`rot/order`):
-/// 1 reversed, 2 shuffled afresh each step, 3 by their lower body, highest
-/// first (a pyramid's rows from the top down, each in pair order, and the
-/// ground last: by the higher body, the arrays' immovable body, which is
-/// last, would put the ground first), and back in pair order after, so
-/// the arrays see no difference
-/// but the solve's. The solve by level is the sweep of whatever order it's
-/// given, bit for bit, so this is that order solved one at a time.
-fn reordered(order: u32, seed: &mut u32, contacts: &mut [Constraint], solve: impl FnOnce(&mut [Constraint])) {
+/// The colors' order (`rot/order=4`), as the default solve groups these
+/// contacts.
+fn solver_order(bodies: &[SolverBody], spinning: &[Spinning], contacts: &[Constraint]) -> Vec<usize> {
+    order(Wide::Colored(4), bodies, spinning, contacts)
+}
+
+/// Another order than the pairs' (`rot/order`): 1 reversed, 2 shuffled
+/// afresh each step, 3 by their lower body, highest first (a pyramid's rows
+/// from the top down, each in pair order, and the ground last: by the
+/// higher body, the arrays' immovable body, which is last, would put the
+/// ground first).
+fn shuffled(order: u32, seed: &mut u32, contacts: &[Constraint]) -> Vec<usize> {
     let mut at: Vec<usize> = (0..contacts.len()).collect();
     match order {
         1 => at.reverse(),
@@ -188,6 +200,14 @@ fn reordered(order: u32, seed: &mut u32, contacts: &mut [Constraint], solve: imp
         3 => at.sort_by_key(|&i| std::cmp::Reverse(contacts[i].a.min(contacts[i].b))),
         _ => panic!("rot/order={order}"),
     }
+    at
+}
+
+/// `solve` over the contacts in the order `at`, and back in pair order
+/// after, so the arrays see no difference but the solve's. Solved one at a
+/// time (`scalar=1`) this is that order's sweep; grouped, it is the groups
+/// of that order (levels: the same sweep, bit for bit).
+fn reordered(at: &[usize], contacts: &mut [Constraint], solve: impl FnOnce(&mut [Constraint])) {
     let mut mine: Vec<Constraint> = at.iter().map(|&i| contacts[i]).collect();
     solve(&mut mine);
     for (&i, c) in at.iter().zip(mine) {

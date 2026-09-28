@@ -293,13 +293,14 @@ fn real_piles_rest_as_soon_as_box2d_and_rapier_do() {
 }
 
 /// The same piles, turning: at rest from, Box2D 170, 160, 210, 240, 250
-/// (median 210); Rapier 160, 400, 250, 230, 310 (250); ours 200, 220, 210,
-/// 250, 290. Deepest at the end: Box2D up to 0.136, Rapier 0.099; ours
-/// 0.022. While settling: deepest 0.53 and 0.48 (ours 0.54), mean 0.056
-/// and 0.055 (ours 0.021). Energy at the end: 1.3e-8 and 3.3e-8 (ours
-/// 1.6e-8). Contacts a body 1.90-2.09, 1-3 islands (ours 1.91-1.94, 1).
+/// (median 210); Rapier 160, 400, 250, 230, 310 (250); ours 220, 230, 200,
+/// 210, 260. Deepest at the end: Box2D up to 0.136, Rapier 0.099; ours
+/// 0.024. While settling: deepest 0.53 and 0.48 (ours 0.38), mean 0.056
+/// and 0.055 (ours 0.020). Energy at the end: 1.3e-8 and 3.3e-8 (ours
+/// 1.4e-8). Contacts a body 1.90-2.09, 1-3 islands (ours 1.89-1.96, 1-2).
 /// (Ours before get-emj.48, 2026-09-28: at rest from 230, 220, 400, 440,
-/// 290.)
+/// 290; before get-emj.61's default, the same day: 200, 220, 210, 250,
+/// 290, deepest while settling 0.54.)
 #[test]
 fn real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
@@ -346,8 +347,9 @@ fn pyramids_stand_as_in_box2d_and_rapier() {
     );
 }
 
-/// The same, turning: ours at rest from 10, 20, 20, the top 0.006, 0.010,
-/// 0.016 lower, 0.0008-0.0014 deep, leaning at most 0.1°.
+/// The same, turning: ours at rest from 20, 30, 30, the top 0.006, 0.011,
+/// 0.016 lower, 0.0008-0.0014 deep, leaning at most 0.1°. (Before
+/// get-emj.61's default, 2026-09-28: at rest from 10, 20, 20.)
 #[test]
 fn pyramids_that_turn_stand_as_in_box2d_and_rapier() {
     stand(
@@ -375,7 +377,7 @@ fn stacks_stand_as_in_box2d_and_rapier() {
     );
 }
 
-/// Ten boxes high, turning: ours at rest from 10, the top 0.011 lower,
+/// Ten boxes high, turning: ours at rest from 20, the top 0.012 lower,
 /// leaning 0.1°. The references' energy is the most over the last 200
 /// steps (5.8e-7 and 1.8e-7; at step 700, 6.5e-9 and 8.7e-9).
 #[test]
@@ -420,8 +422,6 @@ fn the_mod_solves_at_the_substeps_its_world_sets() {
     m.step(100);
     at_six.step(100);
     at_five.step(100);
-    let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
-    let differ = |x: &[Dyn], y: &[Dyn]| x.iter().zip(y).filter(|(x, y)| bits(x) != bits(y)).count();
     let mb = m.bodies();
     assert_eq!(differ(&mb, &at_six.bodies()), 0, "the mod isn't the arrays at six substeps");
     assert!(differ(&mb, &at_five.bodies()) > 0, "six substeps solved as five");
@@ -456,61 +456,97 @@ fn the_mod_is_the_arrays_bit_for_bit() {
     });
 }
 
-/// The solve as built, by level in lanes (`solver::Wide::Levels`), is the
-/// solve one contact at a time in pair order bit for bit, well into
-/// settling, on a pile and a pyramid that turn: what lets it stand on every
-/// bound here without any having moved (physics.md, "The solver's speed").
-/// Graph-colored it isn't, which shows that the comparison sees an order.
+/// Bodies whose position, velocity, angle or turn rate differ at all.
+fn differ(x: &[Dyn], y: &[Dyn]) -> usize {
+    let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
+    x.iter().zip(y).filter(|(x, y)| bits(x) != bits(y)).count()
+}
+
+/// The turning pile and pyramid the equivalence tests run, 150 steps in
+/// (well into settling) by each solver of `runs`, every body at the end.
+fn equivalence_runs(runs: &[&dyn Fn(&Scene) -> ecs::Flat]) -> Vec<(Scene, Vec<Vec<Dyn>>)> {
+    [Scene::Pile { n: 400, width: 41.0, stagger: true }, Scene::Pyramid { base: 20 }]
+        .into_iter()
+        .map(|scene| {
+            let bodies = runs
+                .iter()
+                .map(|make| {
+                    let mut f = make(&scene);
+                    f.step(150);
+                    f.bodies()
+                })
+                .collect();
+            (scene, bodies)
+        })
+        .collect()
+}
+
+/// The solve as built, graph-colored in lanes (`solver::Wide::Colored`), is
+/// the same colors' order (`solver::order`) solved one contact at a time
+/// (`rot/scalar=1/order=4`) bit for bit, on a pile and a pyramid that
+/// turn: the lanes change the speed, not the computation, and a parallel
+/// solve over the same colors has to pass this too (physics.md, "The
+/// solver's speed"). In pair order one at a time it isn't, which shows the
+/// comparison sees an order.
+#[test]
+fn the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit() {
+    use solver::{PARAMS, Wide};
+    assert_eq!(PARAMS.wide, Wide::Colored(4), "the default is colored, 4 wide");
+    let built = |s: &Scene| ecs::Flat::new(s, true, Box::new(solver::solve_points), "ours");
+    let one = |s: &Scene| ecs::Flat::variant(s, true, "rot/scalar=1/order=4", "ours, colors' order, one at a time");
+    let pair = |s: &Scene| ecs::Flat::variant(s, true, "rot/scalar=1", "ours, pair order, one at a time");
+    for (scene, runs) in equivalence_runs(&[&built, &one, &pair]) {
+        assert_eq!(differ(&runs[0], &runs[1]), 0, "{}: colored isn't its order one at a time", scene.text());
+        assert!(differ(&runs[0], &runs[2]) > 0, "{}: colored is pair order one at a time", scene.text());
+    }
+}
+
+/// A variant: by level in lanes (`solver::Wide::Levels`), the solve is the
+/// solve one contact at a time in pair order bit for bit, on the same pile
+/// and pyramid (physics.md, "The solver's speed"); graph-colored it isn't,
+/// which shows that the comparison sees an order.
 #[test]
 fn the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit() {
-    use solver::{PARAMS, Params, Wide};
-    let with = |wide: Wide| -> variants::Boxed {
-        let p = Params { wide, ..PARAMS };
-        Box::new(move |b, s, c, pts, dt| solver::solve_with(&p, (b, s), c, pts, dt))
-    };
-    let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);
-    let differ = |x: &[Dyn], y: &[Dyn]| x.iter().zip(y).filter(|(x, y)| bits(x) != bits(y)).count();
-    assert!(matches!(PARAMS.wide, Wide::Levels(_)), "the default is by level: {:?}", PARAMS.wide);
-    for scene in [Scene::Pile { n: 400, width: 41.0, stagger: true }, Scene::Pyramid { base: 20 }] {
-        let run = |wide: Wide| {
-            let mut f = ecs::Flat::new(&scene, true, with(wide), "ours");
-            f.step(150);
-            f.bodies()
-        };
-        let one = run(Wide::Off);
-        assert_eq!(differ(&one, &run(PARAMS.wide)), 0, "{}: by level isn't one at a time", scene.text());
-        assert!(differ(&one, &run(Wide::Colored(4))) > 0, "{}: colored is one at a time", scene.text());
+    let levels = |s: &Scene| ecs::Flat::variant(s, true, "rot/levels=4", "ours, by level");
+    let one = |s: &Scene| ecs::Flat::variant(s, true, "rot/scalar=1", "ours, pair order, one at a time");
+    let colored = |s: &Scene| ecs::Flat::variant(s, true, "rot/colored=4", "ours, colored");
+    for (scene, runs) in equivalence_runs(&[&levels, &one, &colored]) {
+        assert_eq!(differ(&runs[0], &runs[1]), 0, "{}: by level isn't one at a time", scene.text());
+        assert!(differ(&runs[2], &runs[1]) > 0, "{}: colored is one at a time", scene.text());
     }
 }
 
 /// A turning pyramid 40 wide (820 boxes) stands whatever order its
-/// contacts are solved in: in pair order (by level, the default) and row
-/// by row from the top down (`variants.rs`, `rot/order=3`), the worst
-/// order for a stack's first pass. While each step restarted its points
-/// from the substeps' average impulse, only pair order stood: from the top
-/// down it rested from 310, and still moved at 0.003 in its last 200 steps
-/// (get-emj.48; physics.md, "Why colors let the pyramid fall"). Ours now:
-/// at rest from 80 and 170. The references on the same scene (700 steps,
-/// 2026-09-28): Box2D and Rapier at rest from 50 and 110, the top 0.237 and
-/// 0.244 lower, 0.0158 and 0.0138 deep, leaning 0.5° and 0.7°, at most
-/// 9.9e-12 and 1.0e-8 a body over the last 200 steps. Pyramid 50 in these
-/// orders and shuffled is `quality_long.rs`'s: a pyramid 40 is the smallest
-/// that tells the average from the last substep (at 30 the average rests
-/// by 220 in every order), and costs two thirds of the 50.
+/// contacts are solved in: in the default's colors, and in the colors of
+/// its contacts taken row by row from the top down (`variants.rs`,
+/// `rot/order=3`), the worst order for a stack's first pass. While each
+/// step restarted its points from the substeps' average impulse, only pair
+/// order stood: from the top down it rested from 310, and still moved at
+/// 0.003 in its last 200 steps (get-emj.48; physics.md, "Why colors let
+/// the pyramid fall"). Ours now: at rest from 80 and 60 (by level, before
+/// get-emj.61's default: 80 and 170). The references on the same scene
+/// (700 steps, 2026-09-28): Box2D and Rapier at rest from 50 and 110, the
+/// top 0.237 and 0.244 lower, 0.0158 and 0.0138 deep, leaning 0.5° and
+/// 0.7°, at most 9.9e-12 and 1.0e-8 a body over the last 200 steps.
+/// Pyramid 50 in these orders and shuffled is `quality_long.rs`'s: a
+/// pyramid 40 is the smallest that tells the average from the last
+/// substep (at 30 the average rests by 220 in every order), and costs two
+/// thirds of the 50.
 #[test]
 fn a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in() {
     let refs = || from_refs((50, 110), (0.237, 0.244), (0.0158, 0.0138), (0.5, 0.7), (9.9e-12, 1.0e-8));
     pyramid_stands_in(40, refs, &["rot", "rot/order=3"]);
 }
 
-/// Graph-colored as Box2D colors (`rot/colored=4`), the order threads would
-/// share, a turning pyramid 50 wide stands, where it came apart before (the
-/// top 1.19 aside, never at rest), but settles later than pair order and
-/// keeps 7.8e-6 a body over the last 200 steps, ten times what the bound
-/// allows (get-emj.54). The 5050 pyramid colored stands within its bounds
-/// (`quality_long.rs`).
+/// Graph-colored as Box2D colors (`rot/colored=4`, the default), the order
+/// threads share, a turning pyramid 50 wide stands: at rest from 120, the
+/// top 0.063 lower, 5.4e-7 a body over the last 200 steps against a bound
+/// of 8.1e-7. Colored, with both impulses carried from the last substep
+/// (`rot/colored=4/carry=0`), it kept 7.8e-6, ten times the bound, and was
+/// ignored as get-emj.54; with the average of both, as before get-emj.48,
+/// it came apart (the top 1.19 aside, never at rest). The 5050 pyramid
+/// colored is `quality_long.rs`'s.
 #[test]
-#[ignore = "get-emj.54: colored settles this pyramid slower than the references' bounds"]
 fn a_pyramid_that_turns_stands_when_its_contacts_are_colored() {
     pyramid_stands_in(50, pyramid_50_refs, &["rot/colored=4"]);
 }
@@ -518,9 +554,9 @@ fn a_pyramid_that_turns_stands_when_its_contacts_are_colored() {
 /// A turning pyramid 50 wide's bounds, from the references on the same
 /// scene (700 steps, 2026-09-28): Box2D and Rapier at rest from 70 and 220,
 /// the top 0.368 and 0.379 lower, 0.0190 and 0.0173 deep, leaning 0.6° and
-/// 0.9°, at most 4.1e-11 and 8.1e-8 a body over the last 200 steps. Ours
-/// by level: at rest from 150, the top 0.062 lower, 0.0028 deep, leaning
-/// 0.1°.
+/// 0.9°, at most 4.1e-11 and 8.1e-8 a body over the last 200 steps. Ours:
+/// at rest from 120, the top 0.063 lower, 0.0030 deep, leaning 0.15° (by
+/// level, before get-emj.61's default: 150, 0.062, 0.0028, 0.1°).
 fn pyramid_50_refs() -> StandBounds {
     from_refs((70, 220), (0.368, 0.379), (0.0190, 0.0173), (0.6, 0.9), (4.1e-11, 8.1e-8))
 }

@@ -204,8 +204,8 @@ fn a_ball_never_rebounds_higher_than_e_squared() {
 /// and 0.141 deep; at 1000 to 1 both crush the light box flat (the top
 /// 1.0 lower, 0.92-0.93 deep); on the column of five, Box2D topples it and
 /// Rapier crushes one box (0.67 lower). Ours stands every one: the top
-/// 0.0015, 0.014, 0.139, 0.108 and 0.040 lower, 0.0012, 0.011, 0.111, 0.028
-/// and 0.024 deep. The bounds: half the smaller reference's sinking and
+/// 0.0015, 0.014, 0.138, 0.107 and 0.028 lower, 0.0012, 0.011, 0.115, 0.024
+/// and 0.023 deep. The bounds: half the smaller reference's sinking and
 /// depth where they stand, and where they crush it, half a box lower and
 /// a quarter of one deep.
 #[test]
@@ -233,9 +233,8 @@ fn heavy_boxes_stand_on_light_ones_sinking_less_than_in_box2d_and_rapier() {
 /// The same come to rest: Box2D and Rapier at 3 and 2 steps at 10 to 1,
 /// 23 and 23 at 100, 41 and 29 at 1000 (crushed), 253 and 68 on the column
 /// of five, 34 and 33 under the wide box; the bound is twice the later.
-/// Ours rests at 2 and 77, and never under the others: the heavy box and
-/// what it stands on keep moving at up to 0.15 a second at 1000 to 1, 0.06
-/// on the column and 0.5 under the wide box, so they never sleep
+/// Ours rests at 2, 24, 199, 48 and 69: at 1000 to 1 and under the wide
+/// box past the bound, the heavy box and what it stands on jittering
 /// (get-emj.57).
 #[test]
 #[ignore = "get-emj.57: a heavy box on light ones jitters for ever"]
@@ -259,8 +258,11 @@ fn heavy_boxes_on_light_ones_come_to_rest_as_soon_as_in_box2d_and_rapier() {
 /// A box 1000 times as heavy on a column of five: every engine crushes the
 /// column (the top 5 lower), Box2D and Rapier with nothing faster than 4.1
 /// a second in the last second and nothing out of the scene. Ours throws
-/// two light boxes out through the floor, at up to 82 a second
-/// (get-emj.58). The bound is twice the references' fastest.
+/// four light boxes out through the floor, at up to 83 a second
+/// (get-emj.58): with the default's tangent averaged over the substeps
+/// (`solver::Carry::Normal`), as with both averaged; with both carried
+/// from the last substep (`rot/carry=0`) nothing escapes. The bound is
+/// twice the references' fastest.
 #[test]
 #[ignore = "get-emj.58: a heavy box crushing a column throws light boxes through the floor"]
 fn a_heavy_box_crushing_a_column_throws_nothing_through_the_floor() {
@@ -278,9 +280,9 @@ fn a_heavy_box_crushing_a_column_throws_nothing_through_the_floor() {
 /// fastest 3.04 and 3.47, 3.57 and 4.39, 16.8 and 16.5; apart (nothing
 /// deeper than 0.01) at 67 and 46, 56 and 57, 75 and 101; at rest at 55
 /// and 48, 54 and 58, 198 and 241; the 10-wide one topples in both (its top
-/// 5.1 and 3.0 from where it rests, two boxes out in Box2D). Ours: 2.2,
-/// 2.5, 9.4 fast; apart at 20, 31, 43; at rest at 27, 33, 101; its top
-/// within 0.005 of where it rests. The bounds: a quarter over the smaller
+/// 5.1 and 3.0 from where it rests, two boxes out in Box2D). Ours: 3.0,
+/// 3.1, 11.8 fast; apart at 20, 33, 50; at rest at 24, 37, 130; its top
+/// within 0.012 of where it rests. The bounds: a quarter over the smaller
 /// fastest, twice the later step apart and at rest, and half the smaller
 /// reference's top off where they stand (0.1 where they topple).
 #[test]
@@ -377,10 +379,11 @@ fn family_meets(name: &str, long: bool, refs: (usize, usize)) {
 }
 
 /// Box2D's card house at 4 and 5 storeys, leaning 24-26°, friction 0.7
-/// and 0.8 (12 houses): Box2D stands 10, Rapier 7, ours 8; the 5-storey
-/// house at Box2D's own 25° and 0.7 is one Rapier drops two cards of, and
-/// ours did too with the last substep's tangent impulse carried
-/// (get-emj.61). Friction halved, ours stands none.
+/// and 0.8 (12 houses): Box2D stands 10, Rapier 7, ours 11 (8 with both
+/// impulses carried from the last substep); the 5-storey house at Box2D's
+/// own 25° and 0.7 is one Rapier drops two cards of, and ours did too with
+/// the last substep's tangent impulse carried (get-emj.61). Friction
+/// halved, ours stands none.
 #[test]
 fn card_houses_stand_as_often_as_in_box2d_and_rapier() {
     family_meets("cards", false, (10, 7));
@@ -456,7 +459,7 @@ fn a_ladder_stands_on_friction_above_the_hand_calculation_and_slides_below() {
 /// Box2D's 15 dominoes, the first knocked over: every one falls, in order,
 /// the wave running at 2.667 dominoes a second in Box2D and 2.736 in
 /// Rapier, the last lying flat (90°), at rest from 434 and 443. Ours: all
-/// 15 in order at 2.667, flat, at rest from 441. The bounds: every one in
+/// 15 in order at 2.60, flat, at rest from 447. The bounds: every one in
 /// order, the wave within 10% of the references' mean, the last down past
 /// 80°, and twice the later rest.
 #[test]

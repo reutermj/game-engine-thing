@@ -37,15 +37,16 @@ fn big_real_piles_rest_as_soon_as_box2d_and_rapier_do() {
 /// Turning: no engine stays at rest, a body now and then moving over 0.05
 /// again long after the pile came to rest (which sleeping would take in its
 /// stride). At rest from: Box2D 1550, 1760, 2300 (median 1760); Rapier
-/// 2490, 2270, never (2490); ours 370, 310, 360 (before get-emj.48, 330,
-/// 350, 1620). So rest from is bounded by the references' medians
-/// themselves (the worst of ours by the later, the median by the earlier),
-/// and the first look at rest by the rules:
-/// Box2D 330, 470, 280 (median 330), Rapier 240, 430, 520 (430); ours 370,
-/// 310, 360. Deepest at the end: Box2D up to 0.126, Rapier 0.095, ours
-/// 0.024. While settling: 0.47 and 0.45 (ours 0.47), mean 0.052 and 0.052
-/// (ours 0.018). Energy at the end: 4.1e-8 and 6.7e-7 (ours 7.0e-9).
-/// Contacts a body 2.02-2.07, 1-4 islands (ours 1.96-1.97, 1-4).
+/// 2490, 2270, never (2490); ours 350, 320, 1870 (before get-emj.48, 330,
+/// 350, 1620; before get-emj.61's default, 370, 310, 360). So rest from is
+/// bounded by the references' medians themselves (the worst of ours by the
+/// later, the median by the earlier), and the first look at rest by the
+/// rules: Box2D 330, 470, 280 (median 330), Rapier 240, 430, 520 (430);
+/// ours 350, 320, 400. Deepest at the end: Box2D up to 0.126, Rapier
+/// 0.095, ours 0.024. While settling: 0.47 and 0.45 (ours 0.43), mean
+/// 0.052 and 0.052 (ours 0.018). Energy at the end: 4.1e-8 and 6.7e-7
+/// (ours 1.2e-8). Contacts a body 2.02-2.07, 1-4 islands (ours 1.95-1.97,
+/// 3-5).
 #[test]
 fn big_real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
@@ -63,7 +64,8 @@ fn big_real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
 }
 
 /// The pyramid 100 wide (5050 boxes): ours at rest from 150, its top 0.27
-/// lower, 0.006 deep; turning, 450, 0.25, 0.006, leaning 0.3°.
+/// lower, 0.006 deep; turning, 780, 0.26, 0.006, leaning 0.4° (by level,
+/// before get-emj.61's default: 450, 0.25, 0.006, 0.3°).
 #[test]
 fn a_big_pyramid_stands_as_in_box2d_and_rapier() {
     let locked = from_refs((70, 280), (0.834, 0.834), (0.0188, 0.0188), (0.0, 0.0), (4.1e-11, 1.9e-10));
@@ -72,22 +74,26 @@ fn a_big_pyramid_stands_as_in_box2d_and_rapier() {
     stand(&[(Scene::Pyramid { base: 100 }, turning)], true, LONG_STEPS);
 }
 
-/// A turning pyramid 50 wide (1275 boxes) stands in pair order, shuffled
-/// afresh each step, and row by row from the top down (`rot/order`), by
-/// the references' bounds (`pyramid_50_refs`). While each step restarted
-/// its points from the substeps' average impulse, only pair order stood:
-/// shuffled, it rested from 680, and from the top down from 660
-/// (get-emj.48). Ours now: 150, 230, 180.
+/// A turning pyramid 50 wide (1275 boxes) stands in the default's colors,
+/// and in the colors of its contacts shuffled afresh each step and taken
+/// row by row from the top down (`rot/order`), by the references' bounds
+/// (`pyramid_50_refs`). While each step restarted its points from the
+/// substeps' average impulse, only pair order stood: shuffled, it rested
+/// from 680, and from the top down from 660 (get-emj.48). Ours now: 120,
+/// 90, 90 (by level, before get-emj.61's default: 150, 230, 180).
 #[test]
 fn a_pyramid_50_wide_that_turns_stands_whatever_order_its_contacts_are_solved_in() {
     pyramid_stands_in(50, pyramid_50_refs, &["rot", "rot/order=2", "rot/order=3"]);
 }
 
 /// The pyramid 100 wide turning, graph-colored as Box2D colors
-/// (`rot/colored=4`), the order threads would share, by the same bounds:
-/// at rest from 1500, the top 0.30 lower, leaning 0.4°. While each step
-/// restarted its points from the substeps' average impulse it never
-/// rested, its top 5.06 lower and a box leaning 37° (get-emj.48;
+/// (`rot/colored=4`), the order threads share, by the same bounds: at rest
+/// from 780, the top 0.26 lower, leaning 0.4°. Colored is the default, so
+/// this is the turning half of `a_big_pyramid_stands_as_in_box2d_and_rapier`
+/// again, kept so that a `SOLVER` run still sees its colored pyramid. With
+/// both impulses carried from the last substep it rested from 1500; while
+/// each step restarted its points from the substeps' average impulse it
+/// never rested, its top 5.06 lower and a box leaning 37° (get-emj.48;
 /// physics.md, "The solver's speed").
 #[test]
 fn a_big_pyramid_that_turns_stands_when_its_contacts_are_colored() {

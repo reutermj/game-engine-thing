@@ -38,11 +38,13 @@
 //! the same computation bit for bit.
 //!
 //! Where something turns, the passes run four contacts at a time
-//! (`lanes`), grouped by level of the sweep in pair order so that the
-//! result is the sweep's bit for bit (`Wide::Levels`), about twice as
-//! fast as one contact at a time (`solve_all`, which the variants and the
-//! tests still run). Why this and not Box2D's graph coloring: physics.md,
-//! "The solver's speed".
+//! (`lanes`), grouped by Box2D's graph coloring (`Wide::Colored`): about
+//! twice as fast as one contact at a time (`solve_all`, which the variants
+//! and the tests still run), and bit for bit that loop over the contacts in
+//! the colors' order (`order`), which is what a parallel solve over the
+//! same colors has to be too. Grouped by level of the pair-order sweep
+//! (`Wide::Levels`) it is instead the loop in pair order bit for bit, a
+//! variant. Why colors: physics.md, "The solver's speed".
 
 use physics::{Rot, Vec2};
 
@@ -131,17 +133,22 @@ pub struct Params {
 }
 
 /// What a turning contact's points carry out of a step, for the next to
-/// warm-start from (`ContactPoint::jn`). The last substep's impulses is the
-/// default, as Box2D carries them; the others are the comparison's
-/// variants, kept because the choice is open (get-emj.61; physics.md, "Why
-/// colors let the pyramid fall").
+/// warm-start from (`ContactPoint::jn`). The normal's last substep and the
+/// tangent's mean is the default, the only choice that meets every bound
+/// in every order, colors included (get-emj.61; physics.md, "What a
+/// turning point carries: the decision matrix"); the others are the
+/// comparison's variants.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Carry {
-    /// Both impulses as the last substep left them (times the substeps).
+    /// Both impulses as the last substep left them (times the substeps), as
+    /// Box2D carries them: drops more card houses, and colored settles
+    /// pyramids 40 and 50 wide later than their bounds (get-emj.54).
     Last,
-    /// The normal's last, the tangent's mean over the substeps: stands more
-    /// card houses, and some piles later.
+    /// The normal's last, the tangent's mean over the substeps: the
+    /// default. The last normal carries a pyramid's weight from step to
+    /// step without the mean's lag; the mean tangent lets a point that
+    /// swung to its friction limit within a step stick again.
     Normal,
     /// Both means over the substeps, as before get-emj.48: lets a turning
     /// pyramid solved in any order but pair order fall.
@@ -172,13 +179,14 @@ pub enum Wide {
     Off,
     /// By level of the pair-order sweep (`lanes`), that many lanes at once
     /// (1, 4 or 8): `Off`'s computation, bit for bit, at 4 about twice as
-    /// fast. The default, 4 wide: SSE2's width, x86-64's baseline, where 8
-    /// is two registers and gained 2% on a pile and lost on small scenes.
+    /// fast. A variant: its levels are one thread's schedule, hundreds of
+    /// them a pass, too many to share between threads.
     Levels(usize),
-    /// Graph-colored as Box2D v3 colors, that many lanes at once: another
-    /// order, so another computation, and the one threads could share.
-    /// Measured and not the default: it passes the quality tests, but rests
-    /// a turning pyramid of 5050 three times later than pair order.
+    /// Graph-colored as Box2D v3 colors, that many lanes at once: `Off`
+    /// over the contacts in the colors' order (`order`), bit for bit. The
+    /// default, 4 wide (SSE2's width, x86-64's baseline, where 8 is two
+    /// registers): 6 or 7 colors a pass, which threads can share, so a
+    /// parallel solve can be this one's computation exactly.
     Colored(usize),
 }
 
@@ -192,8 +200,8 @@ pub const PARAMS: Params = Params {
     stiffness: STIFFNESS,
     static_stiffness: STATIC_STIFFNESS,
     block: false,
-    wide: Wide::Levels(4),
-    carry: Carry::Last,
+    wide: Wide::Colored(4),
+    carry: Carry::Normal,
 };
 
 impl Params {
@@ -446,6 +454,15 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32) {
 #[allow(dead_code)]
 pub fn solve_points(bodies: &mut [SolverBody], spinning: &mut [Spinning], contacts: &mut [Constraint], points: &mut [Points], dt: f32) {
     solve_with(&PARAMS, (bodies, spinning), contacts, points, dt);
+}
+
+/// The order a step solves contacts in when grouped by `wide` (`Levels` or
+/// `Colored`), as indices into `contacts`: solved one at a time in this
+/// order (`Wide::Off`), a step is the grouped one bit for bit. The tests'
+/// (`variants.rs`, `rot/order=4`).
+#[allow(dead_code)]
+pub fn order(wide: Wide, bodies: &[SolverBody], spinning: &[Spinning], contacts: &[Constraint]) -> Vec<usize> {
+    lanes::order(wide, bodies, spinning, contacts)
 }
 
 /// `solve_points`, with other constants: the comparison's variants.
@@ -908,15 +925,16 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
 /// gathered from one array of body states, each operation a loop over the
 /// lanes, and scattered back.
 ///
-/// The groups are the levels of the pair-order sweep (`group`): a contact
-/// one level past the latest contact before it that shares a body with it.
-/// Solving the levels in turn, every contact sees the bodies as the sweep
-/// in pair order would have left them, so with `pass_points`' arithmetic,
-/// operation for operation, it is that solve bit for bit, whatever the
-/// width; it is level scheduling, as sparse triangular solves are run in
-/// parallel (Anderson and Saad, 1989). Box2D's graph coloring
-/// (`constraint_graph.c`) is the other grouping, `Wide::Colored`. See
-/// physics.md, "The solver's speed".
+/// The groups are Box2D's graph colors (`constraint_graph.c`,
+/// `Wide::Colored`), or the levels of the pair-order sweep (`group`): a
+/// contact one level past the latest contact before it that shares a body
+/// with it, which is level scheduling, as sparse triangular solves are run
+/// in parallel (Anderson and Saad, 1989). Either way no two contacts in a
+/// group share a body that moves, so solving the groups in turn, with
+/// `pass_points`' arithmetic operation for operation, is the sweep one
+/// contact at a time over the groups' order (`order`) bit for bit, whatever
+/// the width; for the levels, that order changes no body's, so it is the
+/// sweep in pair order. See physics.md, "The solver's speed".
 mod lanes {
     use super::*;
     use std::ops::{Add, Mul, Neg, Sub};
@@ -1221,6 +1239,28 @@ mod lanes {
             })
             .collect();
         (g, groups)
+    }
+
+    /// What `solve` solves them in: the overflow's first, then each group's
+    /// in pair order, and last the contacts it leaves unsolved, which change
+    /// no body. Found by `group` over the same bodies, so an order and a
+    /// grouping can't disagree.
+    pub fn order(wide: Wide, bodies: &[SolverBody], spinning: &[Spinning], contacts: &[Constraint]) -> Vec<usize> {
+        let mut inertia = vec![0.0f32; bodies.len()];
+        for sp in spinning {
+            inertia[sp.body as usize] = sp.inv_inertia;
+        }
+        let moves: Vec<bool> = bodies.iter().zip(inertia.iter()).map(|(b, i)| b.inv_mass > 0.0 || *i > 0.0).collect();
+        let (groups, n_groups) = group(contacts, &moves, wide);
+        let rank = |k: u32| match k {
+            OVERFLOW => 0,
+            UNSOLVED => n_groups + 1,
+            k => k as usize + 1,
+        };
+        let mut at: Vec<usize> = (0..contacts.len()).collect();
+        // Stable, so pair order within each.
+        at.sort_by_key(|&i| rank(groups[i]));
+        at
     }
 
     #[inline(always)]
@@ -1787,6 +1827,23 @@ mod tests {
         assert_eq!(Params::of(&physics::Tuning::default()), PARAMS);
         assert_eq!(Params::of(&physics::Tuning::DEFAULT), PARAMS);
         assert_eq!(Params::of(&physics::Tuning { substeps: 6 }), Params { substeps: 6, ..PARAMS });
+    }
+
+    /// The colors are Box2D's rule (`b2AddContactToGraph`): in pair order,
+    /// the lowest color neither moving end has, never color 0 with an end
+    /// that doesn't move. The equivalence tests solve the same order both
+    /// ways, so they can't see a change to it; this can.
+    #[test]
+    fn contacts_are_colored_as_box2d_colors_them() {
+        // Bodies 0-2 move, 3 and 4 are static.
+        let bodies = [falling(0.0), falling(0.0), falling(0.0), ground(), ground()];
+        let pair = |a: u32, b: u32| Constraint { a, b, normal: Vec2::new(0.0, 1.0), ..Default::default() };
+        // Both static: unsolved, last. On a static: color 1. Free: 0. Both
+        // ends taken, 0 and 1: 2. On a static, 0 taken anyway: 1.
+        let contacts = [pair(3, 4), pair(0, 3), pair(1, 2), pair(0, 1), pair(2, 3)];
+        assert_eq!(order(Wide::Colored(4), &bodies, &[], &contacts), [2, 1, 4, 3, 0]);
+        // By level, pair order but for the unsolved.
+        assert_eq!(order(Wide::Levels(4), &bodies, &[], &contacts), [1, 2, 3, 4, 0]);
     }
 
     #[test]

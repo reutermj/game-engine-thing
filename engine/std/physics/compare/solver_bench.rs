@@ -75,14 +75,14 @@ fn solvers() -> Vec<(&'static str, Params)> {
     vec![
         ("one at a time, pair order", at(Wide::Off)),
         ("by level, 1 wide", at(Wide::Levels(1))),
-        ("by level, 4 wide (as built)", PARAMS),
+        ("by level, 4 wide", at(Wide::Levels(4))),
         ("by level, 8 wide", at(Wide::Levels(8))),
         ("colored, 1 wide", at(Wide::Colored(1))),
-        ("colored, 4 wide", at(Wide::Colored(4))),
+        ("colored, 4 wide (as built)", PARAMS),
         ("colored, 8 wide", at(Wide::Colored(8))),
-        ("by level, 4 wide, 6 substeps", Params { substeps: 6, ..PARAMS }),
-        ("by level, 4 wide, 1 relax", Params { relax: 1, ..PARAMS }),
-        ("by level, 4 wide, Box2D's passes (4 substeps, 1 relax)", Params { substeps: 4, relax: 1, ..PARAMS }),
+        ("colored, 4 wide, 6 substeps", Params { substeps: 6, ..PARAMS }),
+        ("colored, 4 wide, 1 relax", Params { relax: 1, ..PARAMS }),
+        ("colored, 4 wide, Box2D's passes (4 substeps, 1 relax)", Params { substeps: 4, relax: 1, ..PARAMS }),
     ]
 }
 

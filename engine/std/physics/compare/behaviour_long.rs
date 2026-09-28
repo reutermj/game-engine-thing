@@ -7,7 +7,8 @@
 use super::*;
 
 /// Card houses of 4, 5 and 6 storeys, leaning 23-27° by halves, friction
-/// 0.65-0.9 (135): Box2D stands 104, Rapier 70, ours 87.
+/// 0.65-0.9 (135): Box2D stands 104, Rapier 70, ours 105 (87 with both
+/// impulses carried from the last substep).
 #[test]
 fn card_houses_stand_as_often_as_in_box2d_and_rapier_over_the_long_grid() {
     family_meets("cards", true, (104, 70));
