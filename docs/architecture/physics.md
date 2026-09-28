@@ -2894,7 +2894,7 @@ something the default shouldn't pay without a decision (get-emj.41):
 | six substeps | 60, 1.3e-4 | 340, 9.0e-11 | 220 / 340 | 10 913 / 9157 (+17%, +23%) |
 | the block solver in the relax passes (`block=1`) | 240, 2.5e-4 | 1130, 1.2e-6 | 280 / 400 | 8343 / 7153 (−10%, −4%) |
 | the block solver in the pushing pass too | 240 | – | the 10-high stack and a pile of 1000 past their energy bounds | – |
-| warm starting from the last substep | 240, 2.9e-4 | – | 250 / 540; a locked pile of 1300 never rests | – |
+| warm starting from the last substep[^last-substep] | 240, 2.9e-4 | – | 250 / 540; a locked pile of 1300 never rests | – |
 | three relax passes | 230 | 510 | – | +40% |
 | contacts at 0.2 (60 Hz) or 0.125 | topples | – | – | – |
 | Rapier | 220, 2.8e-4 | 1100, 8.2e-8 | – | – |
@@ -2944,7 +2944,11 @@ the same computation as before bit for bit, and takes about half the time:
 within 10% of Box2D's at Box2D's number of passes, and 1.7 to 1.8 times it
 at ours, which are a quality choice ([Settling](#settling), [Still at
 rest](#still-at-rest)). Nothing the quality tests bound moved, since
-nothing moved at all.
+nothing moved at all. Graph coloring, the order threads would share, let
+a turning 5050 pyramid fall; that turned out to be a flaw in how a step
+warm-starts turning contacts, found and fixed on 2026-09-28 (get-emj.48,
+[Why colors let the pyramid fall](#why-colors-let-the-pyramid-fall)),
+which did move results, and for the better.
 
 ### Where the time went
 
@@ -3006,7 +3010,7 @@ body's velocity and turn rate against one contact at a time in pair order:
 | by level, 1 lane | 8793 | 5475 | yes |
 | **by level, 4 lanes (built)** | **4485** | **3075** | **yes** |
 | by level, 8 lanes (two SSE2 registers) | 4522 | 3139 | yes |
-| graph-colored as Box2D, 1 / 4 / 8 lanes | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: the pyramid falls |
+| graph-colored as Box2D, 1 / 4 / 8 lanes | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: another order[^colored-fell] |
 
 Then, each alone on 4 lanes by level, bit for bit unless said:
 
@@ -3033,14 +3037,12 @@ Then, each alone on 4 lanes by level, bit for bit unless said:
   level scheduling, as sparse triangular solves run in parallel (Anderson
   and Saad, 1989). A pile of 10 000 has about 420 levels, a 5050 pyramid
   590, and their batches are 97% and 94% full. Colors are 6 or 7 and
-  solve 3% faster, but in another order, so another computation: over 21
-  pile sizes it settles as well (median rest 260 either way), but a
-  turning 5050 pyramid never rests and comes apart (its top 2 to 5 lower,
-  boxes leaning 40°), with Box2D's rule for static contacts, the lowest
-  free color or Rapier's highest, six substeps, or even Box2D's softness
-  and passes; three relaxing passes stand a pyramid 60 wide but not 100
-  (get-emj.48). Pair order walks a pyramid row by row from the ground,
-  which colors scatter.
+  solve 3% faster, but in another order, so another computation. Since
+  get-emj.48 colors pass every quality test, the long ones included, but
+  pair order is still the better order for a pile or a pyramid: it walks
+  them row by row from the ground, which colors scatter, and settles the
+  5050 pyramid from 450 where colors take 1500 ([Why colors let the
+  pyramid fall](#why-colors-let-the-pyramid-fall)).
 - **Four lanes, not eight**: SSE2 is x86-64's baseline, and Box2D was
   measured at SSE2; eight are two registers each, 1% slower on the pile
   and 10% slower on the pyramid of 210.
@@ -3101,9 +3103,9 @@ the one-thread schedule. 420 to 590 of them would be as many barriers a
 pass, where a barrier costs 0.19 µs on one CCD ([Parallel
 solving](#parallel-solving)): 80 to 110 µs a pass, more than the pass. The
 parallel solve is colors, whose batches run the same lanes and layout;
-only the grouping differs. But colors are another order, and at our
-stiffness they let the big turning pyramid fall, which a parallel solve
-has to fix first (get-emj.48).
+only the grouping differs. Colors are another order, and until get-emj.48
+they let the big turning pyramid fall; now it stands, later to rest than
+in pair order (get-emj.54).
 
 **3D** (engine/std/physics3d) has the same structure, rows in pair order,
 and the level schedule applies to it unchanged. Alone, rows reordered by
@@ -3112,6 +3114,159 @@ level one at a time, it gained 1 to 2% (boxes of 10 000 turning 25 072 →
 landed: the gain is the lanes, and 3D's kernel is its own (four points,
 friction on a disc at the centroid, twist, the `Tuning` variants), a
 port, not a change (get-emj.52).
+
+### Why colors let the pyramid fall
+
+**Status: found and fixed** (2026-09-28, get-emj.48). Solved in Box2D's
+colors, a turning 5050 pyramid never came to rest and came apart, its top
+5 lower and boxes leaning 37°, where Box2D's pyramid, solved in the same
+colors, stands. It wasn't the colors. A turning contact's points began
+each step from the average of the last step's substeps' impulses, where
+Box2D's begin from where the last substep left them; the average lags
+two substeps behind, and every order but pair order leaned on it. The
+points now carry out their last substep's impulse (times the substeps,
+so the next step's share of it is that impulse), and colors stand the
+pyramid and pass every quality test.
+
+**Any order but pair order, not colors.** `arrays:rot/order=N`
+(`variants.rs`) solves the contacts in another order one at a time (the
+solve by level is the sweep of whatever order it is given, bit for bit):
+reversed, shuffled afresh each step, or row by row from the top down.
+Turning unless said, before the fix, at rest from (and the top box's
+move):
+
+| order | pyramid 20 | pyramid 50 (1500 steps) | pyramid 100 (2500 steps) |
+|---|---|---|---|
+| pair order (by level) | stands (0.011) | 160 (0.065) | 440 (0.26) |
+| colored | stands (0.011) | never: the top slid 1.29 | never: the top 5.06, boxes 37° |
+| reversed | stands (0.012) | 730: the top slid 0.75 | never: flies apart |
+| shuffled each step | stands (0.011) | 680 (0.065) | never: the top slid 0.73 |
+| rows from the top down | stands (0.013) | 660: the top slid 0.20 | never: the top slid 2.65, boxes toppled |
+| locked: pair / reversed / shuffled / top down | – | 60 / 60 / 80 / 190 (700 steps) | 150 / 150 / 260 / never |
+
+- **It needs size and stiffness, not rotation.** Small pyramids stand in
+  every order; the worse the order, the smaller the one that falls.
+  Locked, only rows from the top down fail, which in a stack's first
+  pass carry nothing down (the top pair both fall at the same speed);
+  turning adds a way to fail (a box sliding on the one below), which is
+  what colors and shuffling found. Ten substeps (as stiff, since
+  stiffness is a share of the substep rate) fell as five.
+- **It starts at once.** The pyramid starts flush and sinks onto soft
+  contacts under its weight, so in the first steps its top bounces at 1
+  to 2 a second in every order. Pair order has it down to 0.04 by step
+  100 on the 50 pyramid; colored, reversed and shuffled keep it at 0.5 to
+  1.7, and it turns into boxes sliding off each other.
+- **What kept it going** (the substeps' normal impulses summed over the
+  pyramid, each substep's total against the step's warm start, printed
+  step by step): the pyramid breathes, slowly (a period of about 40
+  steps), and through the half of a swing where it presses harder, every
+  step's substeps climb the same way: colored, steps 304 to 315 each
+  ended 1.13 to 1.25 times where it started. The next step then starts
+  from their average (at step 307, 1.15 times the last start, where the
+  substeps had got to 1.25): 8% of the load thrown away at every step, a
+  lag of two substeps in the loop that carries a pyramid's weight from
+  step to step.
+  Pair order is a pyramid's best order: one pass from the ground up
+  carries support to the top, so each step nearly converges and the warm
+  start matters little (the gap between the last substep and the average
+  falls to 0.2% by step 400). Any other order carries it a row or two a
+  pass and leans on the warm start, whose lag let the breathing grow.
+- **Box2D** (v3.1.1, read): `b2StoreImpulsesTask` stores each point's
+  accumulated impulse as the last relaxing pass left it (`normalImpulse`,
+  `tangentImpulse`; the step's sum, `totalNormalImpulse`, is kept apart
+  for reporting), and `b2PrepareContactsTask` starts the next step from it
+  at full scale, so the accumulators run on across steps as within them.
+  3D measured the same choice as `Carry::Last` ([Still at
+  rest](#still-at-rest)), and noted the mean's lag of two substeps.
+
+**What else differs from Box2D, checked** (in its `solver.c`,
+`contact_solver.c`, `constraint_graph.c`, `world.c`), none the cause:
+
+- *Overflow*: solved first, one contact at a time, as Box2D's; with 64
+  colors none of these scenes overflows (they take 6 or 7).
+- *Static bodies take no color*, and contacts with one aren't in color 0;
+  the lowest free color and Rapier's highest were measured too, and none
+  stood the pyramid (get-emj.48's first round).
+- *Warm starting* per color, after the substep's gravity and before its
+  pushing pass; *relaxing* after positions move; *restitution* once after
+  the substeps: Box2D's stages, in its order.
+- *Anchors*: fixed for the impulses, turned with the bodies for the
+  separation, as `b2SolveContactsTask`.
+- *The push split across substeps*: one soft pass with `useBias`, rigid
+  relaxing passes without, as Box2D's, but ours relaxes twice and has
+  friction only in the relaxing passes. Box2D's friction in the pushing
+  pass too was measured and is worse: pair order falls with it (the top
+  slid 2.1) and colors fly apart.
+- *Clamping*: the accumulated impulse, never a pass's, in both.
+- *Softness*: Box2D caps moving contacts at an eighth of the substep rate
+  and static ones at a quarter (`world.c`, `contactHertz`); ours are at a
+  quarter and a half. This is the rest of the order sensitivity (below),
+  not its cause.
+
+**The options, measured**, turning (the 5050 pyramid over 2500 steps;
+turning piles 41 wide at 11 sizes, 400-1400, over 700; `:quality_test`
+and `:quality_long_test` with `SOLVER=`):
+
+| option | 5050, pair order: rest, top | 5050, colored: rest, top, lean | piles 400-1400, pair / colored: median, worst | quality tests, pair / colored |
+|---|---|---|---|---|
+| as it was | 440, 0.26 | never, 5.06, 37° | 270, 440 / 270, 700 | pass / fail: the 5050, two piles' energy |
+| **points from the last substep (built)** | **450, 0.25** | **1500, 0.30, 0.4°** | **220, 330 / 230, 380** | **pass / pass** |
+| Box2D's stiffness (an eighth and a quarter) | 300, 0.89 | 590, 0.91, 2.4° | – | the 5050's top past its bound (0.73) |
+| Box2D's stiffness and passes (4 substeps, 1 relax) | – | 1140, 1.54, 1.5° | – | as above |
+| three relaxing passes | – | 1520, 0.30, 0.7° | – | – / fail: the 5050's energy, pile 10 000 never at rest; +25% time |
+| friction in the pushing pass (Box2D's) | never, 2.14 | flies apart | – | – |
+| ten substeps | – | never, 2.69 | – | – |
+| the fix + three relaxing passes | – | 340, 0.24, 0.3° | – | – / fail: pile 9000 never at rest |
+| the fix + stiffness 0.2 and 0.4 | – | 420, 0.37, 0.5° | – | fail: locked scenes past their bounds |
+| the fix + static contacts at a quarter | – | 1360, 0.30, 0.4° | – | – / pass |
+| the fix + the second relaxing pass in reverse order | 830, 0.25 | 930, 0.26, 0.4° | – | – |
+
+- **The fix is the warm start alone.** It costs nothing (a multiply a
+  point at the end of the step: `:solver_bench`'s pile of 10 000 4416 →
+  4482 µs, pyramid 3042 → 3042, noise), and moves only turning contacts'
+  points. A contact whose ends don't turn keeps the average, so a world
+  where nothing turns is bit for bit as before (the games' replays,
+  get-emj.51); it helps there too, measured with a flag since removed,
+  and is get-emj.55. `Constraint::jn`, a contact's impulse over the
+  step, stays the sum (what pressing and sleeping read).
+- **What the tests bound moved, all within bounds, most for the better**
+  (pair order, turning): piles 400-1200 at rest from 230, 220, 400, 440,
+  290 → 200, 220, 210, 250, 290, their energy at the end 1.6e-7 → 1.6e-8 a
+  body at worst, deepest while settling 0.44 → 0.54 (bound 0.66); piles
+  9000-11 000 330, 350, 1620 → 370, 310, 360; pyramids 15-25 10, 20, 30 →
+  10, 20, 20; the 20-high stack at six substeps (the mod) 60 → 30, and at
+  five 580 → 240. Locked: nothing moved.
+- **Order still matters, less.** Reversed still brings the big turning
+  pyramid down (from the top down it rests at 790, its top slid 0.77,
+  past the bound), from the top down the locked one never rests, and
+  colors settle it three times later than pair order. What's left is stiffness against passes:
+  Box2D's softness or three relaxing passes stand every order, but sink
+  the pyramid past its bound or keep a big pile moving. Relaxing
+  symmetrically (the second pass back through the colors, as parallel as
+  forward) helps colors and hurts pair order. The stiffness is a quality
+  choice ([Settling](#settling)); get-emj.54 has the rest.
+
+**Colors as the default, or the parallel path?** Measured, not decided:
+colored now passes every quality test the default does, the long ones
+included, and is 3-5% faster at four lanes (pile 10 000 4338 against
+4482 µs, pyramid 2881 against 3042) and 8-11% at eight (4137, 2709). But
+it rests the 5050 pyramid at 1500 against 450 (Box2D 160, Rapier 1100;
+the bound 2200), the turning piles a little later at worst (380 against
+330), and pyramids 40 and 50 wide later than their bounds allow (40 at
+250 against 220; 50 keeps 7.8e-6 a body against 8.1e-7): an ignored test,
+`a_pyramid_that_turns_stands_when_its_contacts_are_colored`, and
+get-emj.54. For threads, colors are now a solve that stands; as one
+thread's default, pair order settles better for 3% more time.
+
+**The tests.** `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in`
+(`:quality_test`) holds a turning pyramid 50 wide to the references'
+bounds in pair order, shuffled and from the top down;
+`a_big_pyramid_that_turns_stands_when_its_contacts_are_colored`
+(`:quality_long_test`) the 5050 pyramid colored. Planted, the average
+back: shuffled rests from 680 and top down from 660; the last substep's
+impulse without the factor of the substeps: every turning quality test;
+the fix in the lanes and not in the loop one contact at a time:
+`the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`.
 
 ## Open questions
 
@@ -3441,6 +3596,20 @@ frame 508.
     columns read, frame first: falling 910 / 563, broadphase 221 / 201,
     outside the systems 196; settled 1454 / 1279, 227 / 282, 101; at rest
     1384 / 1288, 220 / 283, 25 (medians of three runs).
+
+[^colored-fell]: *(History, 2026-09-27.)* When this table was measured,
+    colors let a turning 5050 pyramid fall, its top 2 to 5 lower and boxes
+    leaning 40°, with Box2D's rule for static contacts, the lowest free
+    color or Rapier's highest, six substeps, or Box2D's softness and
+    passes; three relaxing passes stood a pyramid 60 wide but not 100.
+    The cause was the warm start, not the colors: [Why colors let the
+    pyramid fall](#why-colors-let-the-pyramid-fall).
+
+[^last-substep]: *(History, 2026-09-28.)* Built since, for turning
+    contacts' points only, not rows at their normal: [Why colors let the
+    pyramid fall](#why-colors-let-the-pyramid-fall). Measured here as a
+    stack option, it was set aside for the piles' worst; on the lanes it
+    moved the turning piles' worst from 440 to 330.
 
 [^pair-lanes]: *(History, 2026-09-27.)* `Wide::Pair`, the lanes' layout
     one contact to a batch in pair order, was built to check the layout

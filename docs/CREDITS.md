@@ -93,6 +93,12 @@ one would have to ship those files with it.
       `b2FinalizeBodies`) (`lib.rs`, `fall_asleep`);
     - in the comparison, a turning body's mass set with its shape's inertia
       at mass 1 (`b2Body_SetMassData`, `compare/box2d_shim.c`).
+  - a turning contact's points warm-started from where their last
+    substep left their accumulated impulses, not from the step's sum
+    (2026-09-28, `solver.rs`, `ContactPoint`): Box2D stores the
+    accumulator (`b2StoreImpulsesTask`) and starts the next step from it
+    (`b2PrepareContactsTask`), keeping the sum apart for reporting.
+    Read in v3.1.1's `contact_solver.c`;
   - the turning 2D solve in lanes (2026-09-27, `solver.rs`, `lanes`):
     contacts in batches of four laid out field by field, a one-point
     contact's second point zeros and a batch's empty lanes at a body
