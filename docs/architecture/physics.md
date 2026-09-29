@@ -4245,7 +4245,10 @@ copy, since removed):
   keeps the result a function of the contacts alone; Box2D's colors live
   in storage and change only as contacts begin and end, which is the
   "colors in storage" of [Parallel solving](#parallel-solving), and would
-  make colors state a snapshot must carry.
+  make colors state a snapshot must carry. Measured as a design for the
+  ECS, colors kept in the world and packed again every 60 steps take 41 µs
+  off this solve (879 → 838), and kept without packing nothing, since they
+  fragment: [parallel-relations.md](parallel-relations.md).
 - **Barriers and imbalance, about 110 µs**: the stages took 657 µs at 8
   threads where their one-thread times split eight ways are 546 (the fill
   92 against 60, relaxing 325 against 291, pushing 128 against 101, the

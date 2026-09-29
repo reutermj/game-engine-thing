@@ -25,6 +25,10 @@ monolithic design doc.
   broadphase's pairs, what it costs storage, and how it could grow
 - [relationships.md](relationships.md) — how entities refer to each
   other: contacts, colliders and hierarchy, measured
+- [parallel-relations.md](parallel-relations.md) — systems whose
+  relation rows write the entities they name, across threads in colors:
+  who wants it, what other engines keep in and out of the ECS, colors as
+  world state, and why the solve still copies (proposed)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 - [physics-testing.md](physics-testing.md) — how physics is kept from
