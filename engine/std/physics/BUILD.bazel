@@ -260,6 +260,7 @@ exports_files(
         "narrow.rs",
         "solver.rs",
         "tests/arrays.rs",
+        "tests/pool.rs",
         "tests/split_impulse.rs",
     ],
     visibility = ["//engine/std/physics/compare:__pkg__"],

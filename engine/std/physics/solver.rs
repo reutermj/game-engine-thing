@@ -553,6 +553,47 @@ pub fn solve_with(
     }
 }
 
+/// Threads a solve can share its passes between: the host's executor, which
+/// the mod hands over from its `Workers` (physics.md, "Solving across
+/// threads"). A mod can't own threads (physics.md, "Parallelism"), so this
+/// is only a way to reach the host's.
+pub trait Gang: Sync {
+    /// How many threads run tasks, the caller's included.
+    fn threads(&self) -> usize;
+    /// Runs `f(0)` to `f(tasks - 1)`, each once, on any threads, returning
+    /// once all have. They needn't run at once: a solve waits only on
+    /// work a thread has already taken.
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync));
+}
+
+/// `solve_with`, its passes shared between `gang`'s threads where the step
+/// is graph-colored in lanes (the default where something turns) and there
+/// is more than one: bit for bit `solve_with` at any thread count
+/// (`lanes::solve_across`), so it changes the time a step takes and no
+/// value. Everywhere else, `solve_with`.
+#[allow(dead_code)]
+pub fn solve_across(
+    params: &Params,
+    (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+    contacts: &mut [Constraint],
+    points: &mut [Points],
+    dt: f32,
+    gang: &dyn Gang,
+) {
+    let in_lanes =
+        !(points.is_empty() && spinning.is_empty()) && params.wide != Wide::Off && params.separation == Separation::Turned && !params.block;
+    if gang.threads() > 1 && in_lanes && lanes::shareable(bodies, spinning) {
+        let parts = ((&mut *bodies, &mut *spinning), &mut *contacts, &mut *points);
+        match params.wide {
+            Wide::Colored(8) => return lanes::solve_across::<8>(params, parts.0, parts.1, parts.2, dt, gang),
+            Wide::Colored(4) => return lanes::solve_across::<4>(params, parts.0, parts.1, parts.2, dt, gang),
+            Wide::Colored(_) => return lanes::solve_across::<1>(params, parts.0, parts.1, parts.2, dt, gang),
+            _ => (),
+        }
+    }
+    solve_with(params, (bodies, spinning), contacts, points, dt);
+}
+
 #[inline(always)]
 fn solve_all<const POINTS: bool>(
     params: &Params,
@@ -1015,7 +1056,9 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
 /// sweep in pair order. See physics.md, "The solver's speed".
 mod lanes {
     use super::*;
-    use std::ops::{Add, Mul, Neg, Sub};
+    use std::ops::{Add, Mul, Neg, Range, Sub};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
     /// `N` lanes of `f32`: each operation a loop over the lanes, which LLVM
     /// makes one SIMD instruction a register (SSE2 on x86-64's baseline).
@@ -1122,11 +1165,96 @@ mod lanes {
         w: F<N>,
     }
 
+    /// Where the passes find bodies: the one-thread solve's own array, or
+    /// the same states shared between threads (`Shared`). Each kernel is
+    /// written once over this, so the two are one computation.
+    pub trait Bodies {
+        fn load(&self, i: usize) -> State;
+        /// Its velocity and turn rate alone, for the passes that read no
+        /// more: shared, the loads not made (LLVM keeps an atomic load it
+        /// doesn't use, where it drops a plain one).
+        fn load_v(&self, i: usize) -> (Vec2, f32);
+        fn store_v(&mut self, i: usize, v: Vec2, w: f32);
+    }
+
+    impl Bodies for [State] {
+        #[inline(always)]
+        fn load(&self, i: usize) -> State {
+            self[i]
+        }
+
+        #[inline(always)]
+        fn load_v(&self, i: usize) -> (Vec2, f32) {
+            let b = self[i];
+            (b.v, b.w)
+        }
+
+        #[inline(always)]
+        fn store_v(&mut self, i: usize, v: Vec2, w: f32) {
+            let b = &mut self[i];
+            (b.v, b.w) = (v, w);
+        }
+    }
+
+    /// A `State` threads share, field by field an `f32`'s bits, loaded and
+    /// stored relaxed: on x86 a plain `mov` each, and no unsafe code. Which
+    /// thread writes which body is the colors' business (`solve_across`):
+    /// within a stage no two threads write one field of one body, and a
+    /// stage's writes reach the next through its count (`Count`).
+    #[repr(C, align(32))]
+    pub struct Atom([AtomicU32; 7]);
+
+    impl Atom {
+        fn new(s: &State) -> Atom {
+            Atom([s.v.x, s.v.y, s.w, s.moved.x, s.moved.y, s.turned.c, s.turned.s].map(|x| AtomicU32::new(x.to_bits())))
+        }
+
+        #[inline(always)]
+        fn get(&self, k: usize) -> f32 {
+            f32::from_bits(self.0[k].load(Ordering::Relaxed))
+        }
+
+        #[inline(always)]
+        fn put(&self, k: usize, x: f32) {
+            self.0[k].store(x.to_bits(), Ordering::Relaxed)
+        }
+
+        #[inline(always)]
+        fn state(&self) -> State {
+            let (v, moved) = (Vec2::new(self.get(0), self.get(1)), Vec2::new(self.get(3), self.get(4)));
+            State { v, w: self.get(2), moved, turned: Rot { c: self.get(5), s: self.get(6) } }
+        }
+    }
+
+    /// The bodies as the threads of a solve share them.
+    pub struct Shared<'a>(pub &'a [Atom]);
+
+    impl Bodies for Shared<'_> {
+        #[inline(always)]
+        fn load(&self, i: usize) -> State {
+            self.0[i].state()
+        }
+
+        #[inline(always)]
+        fn load_v(&self, i: usize) -> (Vec2, f32) {
+            let a = &self.0[i];
+            (Vec2::new(a.get(0), a.get(1)), a.get(2))
+        }
+
+        #[inline(always)]
+        fn store_v(&mut self, i: usize, v: Vec2, w: f32) {
+            let a = &self.0[i];
+            a.put(0, v.x);
+            a.put(1, v.y);
+            a.put(2, w);
+        }
+    }
+
     #[inline(always)]
-    fn gather<const N: usize>(s: &[State], at: &[u32; N]) -> (Vel<N>, [F<N>; 4]) {
+    fn gather<const N: usize, S: Bodies + ?Sized>(s: &S, at: &[u32; N]) -> (Vel<N>, [F<N>; 4]) {
         let (mut v, mut pose) = (Vel { x: F::ZERO, y: F::ZERO, w: F::ZERO }, [F::ZERO; 4]);
         for l in 0..N {
-            let b = s[at[l] as usize];
+            let b = s.load(at[l] as usize);
             (v.x.0[l], v.y.0[l], v.w.0[l]) = (b.v.x, b.v.y, b.w);
             (pose[0].0[l], pose[1].0[l], pose[2].0[l], pose[3].0[l]) = (b.moved.x, b.moved.y, b.turned.c, b.turned.s);
         }
@@ -1134,10 +1262,19 @@ mod lanes {
     }
 
     #[inline(always)]
-    fn scatter<const N: usize>(s: &mut [State], at: &[u32; N], v: &Vel<N>) {
+    fn gather_v<const N: usize, S: Bodies + ?Sized>(s: &S, at: &[u32; N]) -> Vel<N> {
+        let mut v = Vel { x: F::ZERO, y: F::ZERO, w: F::ZERO };
         for l in 0..N {
-            let b = &mut s[at[l] as usize];
-            (b.v, b.w) = (Vec2::new(v.x.0[l], v.y.0[l]), v.w.0[l]);
+            let (b, w) = s.load_v(at[l] as usize);
+            (v.x.0[l], v.y.0[l], v.w.0[l]) = (b.x, b.y, w);
+        }
+        v
+    }
+
+    #[inline(always)]
+    fn scatter<const N: usize, S: Bodies + ?Sized>(s: &mut S, at: &[u32; N], v: &Vel<N>) {
+        for l in 0..N {
+            s.store_v(at[l] as usize, Vec2::new(v.x.0[l], v.y.0[l]), v.w.0[l]);
         }
     }
 
@@ -1248,6 +1385,13 @@ mod lanes {
         contact: u32,
         at: u32,
         count: u8,
+        /// Its closing speed: the contact's, which `solve_across` writes
+        /// back after its first stage finds it (`setup` writes it at once).
+        speed: f32,
+    }
+
+    impl Lane {
+        const NONE: Lane = Lane { contact: NONE, at: NONE, count: 0, speed: 0.0 };
     }
 
     const NONE: u32 = u32::MAX;
@@ -1341,14 +1485,27 @@ mod lanes {
         at
     }
 
+    /// What both ways of solving start from: the bodies as states, and
+    /// each contact's group, and how many batches each group takes.
+    struct Head {
+        s: Vec<State>,
+        inertia: Vec<f32>,
+        groups: Vec<u32>,
+        n_groups: usize,
+        count: Vec<usize>,
+        first: Vec<usize>,
+        overflow: usize,
+        batches: usize,
+        nowhere: u32,
+        h: f32,
+        inv_h: f32,
+        share: f32,
+        warm: f32,
+        soft: (Softness, Softness),
+    }
+
     #[inline(always)]
-    pub fn solve<const N: usize>(
-        params: &Params,
-        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
-        contacts: &mut [Constraint],
-        points: &mut [Points],
-        dt: f32,
-    ) {
+    fn head<const N: usize>(params: &Params, (bodies, spinning): (&[SolverBody], &[Spinning]), contacts: &[Constraint], dt: f32) -> Head {
         let substeps = params.substeps;
         let h = dt / substeps as f32;
         let inv_h = 1.0 / h;
@@ -1386,97 +1543,127 @@ mod lanes {
             first[k] = batches;
             batches += count[k].div_ceil(N);
         }
-        let (mut filled, mut overflowed) = (vec![0usize; n_groups], 0);
-        let mut out: Vec<Batch<N>> = vec![Batch::empty(nowhere); batches];
-        let mut lanes: Vec<[Lane; N]> = vec![[Lane { contact: NONE, at: NONE, count: 0 }; N]; batches];
-        let spins = |i: usize| inertia[i] > 0.0 || s[i].w != 0.0;
+        Head { s, inertia, groups, n_groups, count, first, overflow, batches, nowhere, h, inv_h, share, warm, soft: (moving, fixed) }
+    }
 
-        // Each contact in pair order, as the substeps start it, into its
-        // batch's lane: read in the order they're stored, written where
-        // they're solved. (History, 2026-09-27: filled batch by batch
-        // instead, reading contacts in the order they're solved, the
-        // prepare took 1223 µs against 887 on a pile of 10 000.)
-        // Points with the impulses they end with, where they aren't solved.
-        let mut kept: Vec<(usize, [(f32, f32); 2])> = Vec::new();
-        let mut solved: Vec<usize> = Vec::new();
-        for (i, c) in contacts.iter_mut().enumerate() {
-            let (a, b) = (c.a as usize, c.b as usize);
-            let (ma, mb) = (bodies[a].inv_mass, bodies[b].inv_mass);
-            let turns = c.points > 0 && (spins(a) || spins(b));
-            let k = groups[i];
-            let (jn, jt) = (c.jn, c.jt);
-            (c.jn, c.jt) = (0.0, 0.0);
-            let mut pts = [Point::default(); 2];
-            let (at, n_points) = if turns {
-                let at = c.points as usize - 1;
-                let ang = |i: usize| Ang { w: s[i].w, inv_inertia: inertia[i], turned: Rot::IDENTITY, angle: 0.0 };
-                let bounce = (params.closing, dt, c.restitution);
-                let (t, speed) = prepare((&bodies[a], &ang(a)), (&bodies[b], &ang(b)), c.normal, &points[at], at, warm, bounce);
-                c.speed = speed;
-                solved.push(at);
-                pts = t.p;
-                (at as u32, t.count)
-            } else {
-                c.speed = super::closing(params.closing, (&bodies[a], &bodies[b]), c, dt);
-                let k = ma + mb;
-                let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
-                pts[0] = Point {
-                    base: -c.depth,
-                    normal_mass: mass,
-                    tangent_mass: mass,
-                    jn: jn * share,
-                    jt: jt * share,
-                    speed: c.speed,
-                    ..Point::default()
-                };
-                (NONE, 1)
-            };
-            if k == UNSOLVED {
-                // What the solve one contact at a time gives such a
-                // contact: last step's impulse, a substep's share of it
-                // summed, and its points that share times the substeps
-                // (`ContactPoint::jn`).
-                let sum = |x: f32| (0..substeps).fold(0.0, |acc, _| acc + x);
-                if at == NONE {
-                    (c.jn, c.jt) = (sum(pts[0].jn), sum(pts[0].jt));
-                } else {
-                    let (mut j, mut last) = ([(0.0, 0.0); 2], [(0.0, 0.0); 2]);
-                    for ((j, last), p) in j.iter_mut().zip(last.iter_mut()).zip(pts.iter()).take(n_points) {
-                        *j = (sum(p.jn), sum(p.jt));
-                        *last = params.carry.of((p.jn * substeps as f32, p.jt * substeps as f32), *j);
-                    }
-                    c.jn = j[..n_points].iter().map(|j| j.0).sum();
-                    c.jt = j[..n_points].iter().map(|j| j.1).sum();
-                    kept.push((at as usize, last));
-                }
-                continue;
-            }
-            let (batch, l) = if k == OVERFLOW {
-                overflowed += 1;
-                (overflowed - 1, 0)
-            } else {
-                let j = filled[k as usize];
-                filled[k as usize] += 1;
-                (first[k as usize] + j / N, j % N)
-            };
-            let o = &mut out[batch];
-            lanes[batch][l] = Lane { contact: i as u32, at, count: n_points as u8 };
-            let soft = if ma == 0.0 || mb == 0.0 { fixed } else { moving };
-            o.a[l] = a as u32;
-            o.b[l] = b as u32;
-            (o.nx.0[l], o.ny.0[l]) = (c.normal.x, c.normal.y);
-            (o.ma.0[l], o.mb.0[l]) = (ma, mb);
-            (o.ia.0[l], o.ib.0[l]) = (inertia[a], inertia[b]);
-            (o.friction.0[l], o.restitution.0[l]) = (c.friction, c.restitution);
-            (o.rate.0[l], o.soft_mass.0[l], o.soft_impulse.0[l]) = (soft.rate, soft.mass, soft.impulse);
-            (o.two[l], o.linear[l]) = (n_points > 1, at == NONE);
-            for (q, p) in o.p.iter_mut().zip(pts.iter()).take(n_points) {
-                (q.rax.0[l], q.ray.0[l], q.rbx.0[l], q.rby.0[l]) = (p.ra.x, p.ra.y, p.rb.x, p.rb.y);
-                (q.base.0[l], q.normal_mass.0[l], q.tangent_mass.0[l]) = (p.base, p.normal_mass, p.tangent_mass);
-                (q.rna.0[l], q.rnb.0[l], q.rta.0[l], q.rtb.0[l]) = (p.rna, p.rnb, p.rta, p.rtb);
-                (q.jn.0[l], q.jt.0[l], q.speed.0[l]) = (p.jn, p.jt, p.speed);
-            }
+    /// Where the contact grouped `k` goes, the next in its group: its batch
+    /// and lane.
+    #[inline(always)]
+    fn place<const N: usize>(k: u32, hd: &Head, (filled, overflowed): (&mut [usize], &mut usize)) -> (usize, usize) {
+        if k == OVERFLOW {
+            *overflowed += 1;
+            (*overflowed - 1, 0)
+        } else {
+            let j = filled[k as usize];
+            filled[k as usize] += 1;
+            (hd.first[k as usize] + j / N, j % N)
         }
+    }
+
+    /// A contact as the substeps start it: its points (or its row's), where
+    /// they are in `points` (`NONE` for a row at its normal) and how many,
+    /// and its closing speed. `(jn, jt)` are its impulses as the last step
+    /// left them, which it may no longer hold (`setup` clears them).
+    #[inline(always)]
+    fn start(
+        params: &Params,
+        c: &Constraint,
+        (jn, jt): (f32, f32),
+        bodies: &[SolverBody],
+        hd: &Head,
+        points: &[Points],
+        dt: f32,
+    ) -> ([Point; 2], u32, usize, f32) {
+        let (a, b) = (c.a as usize, c.b as usize);
+        let (s, inertia) = (&hd.s, &hd.inertia);
+        let spins = |i: usize| inertia[i] > 0.0 || s[i].w != 0.0;
+        let turns = c.points > 0 && (spins(a) || spins(b));
+        let mut pts = [Point::default(); 2];
+        if turns {
+            let at = c.points as usize - 1;
+            let ang = |i: usize| Ang { w: s[i].w, inv_inertia: inertia[i], turned: Rot::IDENTITY, angle: 0.0 };
+            let bounce = (params.closing, dt, c.restitution);
+            let (t, speed) = prepare((&bodies[a], &ang(a)), (&bodies[b], &ang(b)), c.normal, &points[at], at, hd.warm, bounce);
+            (t.p, at as u32, t.count, speed)
+        } else {
+            let speed = super::closing(params.closing, (&bodies[a], &bodies[b]), c, dt);
+            let k = bodies[a].inv_mass + bodies[b].inv_mass;
+            let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
+            pts[0] = Point {
+                base: -c.depth,
+                normal_mass: mass,
+                tangent_mass: mass,
+                jn: jn * hd.share,
+                jt: jt * hd.share,
+                speed,
+                ..Point::default()
+            };
+            (pts, NONE, 1, speed)
+        }
+    }
+
+    /// A contact into lane `l` of its batch.
+    #[inline(always)]
+    fn put<const N: usize>(
+        o: &mut Batch<N>,
+        l: usize,
+        c: &Constraint,
+        bodies: &[SolverBody],
+        hd: &Head,
+        (pts, at, n_points): (&[Point; 2], u32, usize),
+    ) {
+        let (a, b) = (c.a as usize, c.b as usize);
+        let (ma, mb) = (bodies[a].inv_mass, bodies[b].inv_mass);
+        let (moving, fixed) = hd.soft;
+        let soft = if ma == 0.0 || mb == 0.0 { fixed } else { moving };
+        o.a[l] = a as u32;
+        o.b[l] = b as u32;
+        (o.nx.0[l], o.ny.0[l]) = (c.normal.x, c.normal.y);
+        (o.ma.0[l], o.mb.0[l]) = (ma, mb);
+        (o.ia.0[l], o.ib.0[l]) = (hd.inertia[a], hd.inertia[b]);
+        (o.friction.0[l], o.restitution.0[l]) = (c.friction, c.restitution);
+        (o.rate.0[l], o.soft_mass.0[l], o.soft_impulse.0[l]) = (soft.rate, soft.mass, soft.impulse);
+        (o.two[l], o.linear[l]) = (n_points > 1, at == NONE);
+        for (q, p) in o.p.iter_mut().zip(pts.iter()).take(n_points) {
+            (q.rax.0[l], q.ray.0[l], q.rbx.0[l], q.rby.0[l]) = (p.ra.x, p.ra.y, p.rb.x, p.rb.y);
+            (q.base.0[l], q.normal_mass.0[l], q.tangent_mass.0[l]) = (p.base, p.normal_mass, p.tangent_mass);
+            (q.rna.0[l], q.rnb.0[l], q.rta.0[l], q.rtb.0[l]) = (p.rna, p.rnb, p.rta, p.rtb);
+            (q.jn.0[l], q.jt.0[l], q.speed.0[l]) = (p.jn, p.jt, p.speed);
+        }
+    }
+
+    /// What the solve one contact at a time gives a contact neither end of
+    /// which moves: last step's impulse, a substep's share of it summed, and
+    /// its points that share times the substeps (`ContactPoint::jn`), which
+    /// `kept` keeps for them.
+    #[inline(always)]
+    fn unsolved(
+        params: &Params,
+        c: &mut Constraint,
+        (pts, at, n_points): (&[Point; 2], u32, usize),
+        kept: &mut Vec<(usize, [(f32, f32); 2])>,
+    ) {
+        let substeps = params.substeps;
+        let sum = |x: f32| (0..substeps).fold(0.0, |acc, _| acc + x);
+        if at == NONE {
+            (c.jn, c.jt) = (sum(pts[0].jn), sum(pts[0].jt));
+        } else {
+            let (mut j, mut last) = ([(0.0, 0.0); 2], [(0.0, 0.0); 2]);
+            for ((j, last), p) in j.iter_mut().zip(last.iter_mut()).zip(pts.iter()).take(n_points) {
+                *j = (sum(p.jn), sum(p.jt));
+                *last = params.carry.of((p.jn * substeps as f32, p.jt * substeps as f32), *j);
+            }
+            c.jn = j[..n_points].iter().map(|j| j.0).sum();
+            c.jt = j[..n_points].iter().map(|j| j.1).sum();
+            kept.push((at as usize, last));
+        }
+    }
+
+    /// Every point's impulses cleared, as a step starts them, but for those
+    /// of contacts that aren't solved (`kept`); `solved` those solved at
+    /// their points.
+    #[inline(always)]
+    fn clear(points: &mut [Points], solved: impl IntoIterator<Item = usize>, kept: Vec<(usize, [(f32, f32); 2])>) {
         for p in points.iter_mut() {
             p.solved = false;
             for q in p.point.iter_mut() {
@@ -1491,22 +1678,101 @@ mod lanes {
                 (q.jn, q.jt) = j;
             }
         }
+    }
+
+    /// A step's contacts as the passes solve them on one thread, between
+    /// `setup` and `finish`.
+    struct Solve<const N: usize> {
+        s: Vec<State>,
+        out: Vec<Batch<N>>,
+        lanes: Vec<[Lane; N]>,
+        gravity: Vec<Vec2>,
+        angle: Vec<f32>,
+        h: f32,
+        inv_h: f32,
+        share: f32,
+    }
+
+    #[inline(always)]
+    pub fn solve<const N: usize>(
+        params: &Params,
+        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+        contacts: &mut [Constraint],
+        points: &mut [Points],
+        dt: f32,
+    ) {
+        let mut p = setup::<N>(params, (bodies, spinning), contacts, points, dt);
+        run(&mut p, params, spinning);
+        let Solve { s, out, lanes, angle, .. } = p;
+        finish(params, out.iter().zip(lanes.iter()), (bodies, spinning), (&s[..], angle), contacts, points);
+    }
+
+    /// The substeps' start: bodies into states, contacts colored (or
+    /// levelled) and into their batches' lanes.
+    #[inline(always)]
+    fn setup<const N: usize>(
+        params: &Params,
+        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+        contacts: &mut [Constraint],
+        points: &mut [Points],
+        dt: f32,
+    ) -> Solve<N> {
+        let hd = head::<N>(params, (bodies, spinning), contacts, dt);
+        let (mut filled, mut overflowed) = (vec![0usize; hd.n_groups], 0);
+        let mut out: Vec<Batch<N>> = vec![Batch::empty(hd.nowhere); hd.batches];
+        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; hd.batches];
+
+        // Each contact in pair order, as the substeps start it, into its
+        // batch's lane: read in the order they're stored, written where
+        // they're solved. (History, 2026-09-27: filled batch by batch
+        // instead, reading contacts in the order they're solved, the
+        // prepare took 1223 µs against 887 on a pile of 10 000.)
+        // Points with the impulses they end with, where they aren't solved.
+        let mut kept: Vec<(usize, [(f32, f32); 2])> = Vec::new();
+        let mut solved: Vec<usize> = Vec::new();
+        for (i, c) in contacts.iter_mut().enumerate() {
+            let k = hd.groups[i];
+            let (jn, jt) = (c.jn, c.jt);
+            (c.jn, c.jt) = (0.0, 0.0);
+            let (pts, at, n_points, speed) = start(params, c, (jn, jt), bodies, &hd, points, dt);
+            c.speed = speed;
+            if at != NONE {
+                solved.push(at as usize);
+            }
+            if k == UNSOLVED {
+                unsolved(params, c, (&pts, at, n_points), &mut kept);
+                continue;
+            }
+            let (batch, l) = place::<N>(k, &hd, (&mut filled, &mut overflowed));
+            lanes[batch][l] = Lane { contact: i as u32, at, count: n_points as u8, speed };
+            put(&mut out[batch], l, c, bodies, &hd, (&pts, at, n_points));
+        }
+        clear(points, solved, kept);
+        let Head { mut s, h, inv_h, share, .. } = hd;
         let gravity: Vec<Vec2> = bodies.iter().map(|b| b.gravity).collect();
         for (st, g) in s.iter_mut().zip(gravity.iter()) {
             st.v -= *g;
         }
-        let mut angle = vec![0.0f32; spinning.len()];
+        let angle = vec![0.0f32; spinning.len()];
+        Solve { s, out, lanes, gravity, angle, h, inv_h, share }
+    }
+
+    /// The substeps' passes and restitution, on one thread.
+    #[inline(always)]
+    fn run<const N: usize>(p: &mut Solve<N>, params: &Params, spinning: &[Spinning]) {
+        let Solve { s, out, gravity, angle, h, inv_h, share, .. } = p;
+        let (s, h, inv_h, share, substeps) = (s.as_mut_slice(), *h, *inv_h, *share, params.substeps);
 
         for _ in 0..substeps {
             for (st, g) in s.iter_mut().zip(gravity.iter()) {
                 st.v += *g * share;
             }
             for o in out.iter_mut() {
-                warm_start(o, &mut s);
+                warm_start(o, &mut *s);
             }
             let last = params.relax == 0;
             for o in out.iter_mut() {
-                pass::<N, true, COMPUTE>(o, &mut s, inv_h, last);
+                pass::<N, true, COMPUTE>(o, &mut *s, inv_h, last);
             }
             for st in s.iter_mut() {
                 st.moved += st.v * h;
@@ -1526,11 +1792,11 @@ mod lanes {
                 // others read it.
                 if r == 0 {
                     for o in out.iter_mut() {
-                        pass::<N, false, STORE>(o, &mut s, inv_h, last);
+                        pass::<N, false, STORE>(o, &mut *s, inv_h, last);
                     }
                 } else {
                     for o in out.iter_mut() {
-                        pass::<N, false, LOAD>(o, &mut s, inv_h, last);
+                        pass::<N, false, LOAD>(o, &mut *s, inv_h, last);
                     }
                 }
             }
@@ -1539,37 +1805,501 @@ mod lanes {
         // Restitution, once, as `bounce`.
         for o in out.iter_mut() {
             if o.restitution.0.iter().any(|e| *e != 0.0) {
-                restitute(o, &mut s, params.bounce);
+                restitute(o, &mut *s, params.bounce);
             }
         }
+    }
 
-        for (o, lanes) in out.iter().zip(lanes.iter()) {
+    /// The step's impulses into the contacts and points, from the batches
+    /// and their lanes in order, and the states back into the bodies.
+    #[inline(always)]
+    fn finish<'a, const N: usize>(
+        params: &Params,
+        batches: impl Iterator<Item = (&'a Batch<N>, &'a [Lane; N])>,
+        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+        (s, angle): (&(impl Bodies + ?Sized), Vec<f32>),
+        contacts: &mut [Constraint],
+        points: &mut [Points],
+    ) {
+        let substeps = params.substeps;
+        for (o, lanes) in batches {
             for (l, lane) in lanes.iter().enumerate() {
                 if lane.contact == NONE {
                     continue;
                 }
                 let c = &mut contacts[lane.contact as usize];
-                if lane.at == NONE {
-                    (c.jn, c.jt) = (o.p[0].sum_jn.0[l], o.p[0].sum_jt.0[l]);
-                    continue;
-                }
-                let n = lane.count as usize;
-                let to = &mut points[lane.at as usize];
-                c.jn = o.p[..n].iter().map(|p| p.sum_jn.0[l]).sum();
-                c.jt = o.p[..n].iter().map(|p| p.sum_jt.0[l]).sum();
-                for (q, p) in to.point.iter_mut().zip(o.p.iter()).take(n) {
-                    let last = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
-                    (q.jn, q.jt) = params.carry.of(last, (p.sum_jn.0[l], p.sum_jt.0[l]));
+                (c.jn, c.jt) = impulses(o, l, lane);
+                if lane.at != NONE {
+                    carried(params.carry, substeps, o, l, lane.count as usize, &mut points[lane.at as usize]);
                 }
             }
         }
-        for (b, st) in bodies.iter_mut().zip(s.iter()) {
+        for (i, b) in bodies.iter_mut().enumerate() {
+            let st = s.load(i);
             (b.v, b.moved) = (st.v, st.moved);
         }
         for (sp, angle) in spinning.iter_mut().zip(angle) {
-            let st = s[sp.body as usize];
+            let st = s.load(sp.body as usize);
             (sp.w, sp.turned, sp.angle) = (st.w, st.turned, angle);
         }
+    }
+
+    /// `solve`, its work shared between `gang`'s threads a stage at a time:
+    /// a stage is a group's batches, or the bodies', and every thread takes
+    /// blocks of it until none is left, then waits for the rest to be done
+    /// before the next (`run_across`). No two batches of a group share a
+    /// body that moves, so a stage's blocks can go in any order on any
+    /// thread and the stage's result is the same: this is `solve` bit for
+    /// bit, at any thread count. Coloring the contacts and placing them in
+    /// their lanes stay on the calling thread (Box2D colors as contacts
+    /// begin); filling the lanes is the first stage.
+    ///
+    /// Not where a body that doesn't move carries a negative zero
+    /// (`shareable`), or where an impulse is infinite: batches of one group
+    /// write such a body's velocity back unchanged, which is the same
+    /// value whoever writes last, but for `-0.0 - -0.0`, which is `0.0`,
+    /// and `inf * 0.0`, which is NaN.
+    pub fn solve_across<const N: usize>(
+        params: &Params,
+        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
+        contacts: &mut [Constraint],
+        points: &mut [Points],
+        dt: f32,
+        gang: &dyn Gang,
+    ) {
+        let hd = head::<N>(params, (bodies, spinning), contacts, dt);
+        let (mut filled, mut overflowed) = (vec![0usize; hd.n_groups], 0);
+        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; hd.batches];
+        // `setup`'s loop, but for starting the contacts that are solved,
+        // which is the first stage's: what's left is where each goes, and
+        // which contact each point is, for writing them back.
+        let (mut kept, mut solved) = (Vec::new(), Vec::new());
+        let mut slot = vec![(NONE, 0u32); contacts.len()];
+        let mut owner = vec![NONE; points.len()];
+        for (i, c) in contacts.iter_mut().enumerate() {
+            if c.points > 0 {
+                owner[c.points as usize - 1] = i as u32;
+            }
+            let k = hd.groups[i];
+            if k == UNSOLVED {
+                let (jn, jt) = (c.jn, c.jt);
+                (c.jn, c.jt) = (0.0, 0.0);
+                let (pts, at, n_points, speed) = start(params, c, (jn, jt), bodies, &hd, points, dt);
+                c.speed = speed;
+                if at != NONE {
+                    solved.push(at as usize);
+                }
+                unsolved(params, c, (&pts, at, n_points), &mut kept);
+                continue;
+            }
+            let (batch, l) = place::<N>(k, &hd, (&mut filled, &mut overflowed));
+            lanes[batch][l].contact = i as u32;
+            slot[i] = (batch as u32, l as u32);
+        }
+        let gravity: Vec<Vec2> = bodies.iter().map(|b| b.gravity).collect();
+        let mut angle = vec![0.0f32; spinning.len()];
+        let shared = (&*bodies, &*spinning, &*contacts, &*points);
+        let (atoms, outs) = run_across::<N>(params, shared, (&hd, &gravity, dt), (&mut lanes, &mut angle), gang);
+
+        // What `clear` and `finish` write, split between the threads by
+        // what they write: each task its own run of contacts, points, bodies
+        // and spinning bodies, reading any batch, which nothing writes now.
+        let flat: Vec<&Batch<N>> = outs.iter().flatten().collect();
+        let tasks = gang.threads();
+        let mut work = Vec::with_capacity(tasks);
+        let (mut cs, mut ps, mut bs, mut ss) = (&mut *contacts, &mut *points, &mut *bodies, &mut *spinning);
+        for k in 0..tasks {
+            let cut = |n: usize| n * (k + 1) / tasks - n * k / tasks;
+            let at = |n: usize| n * k / tasks;
+            let (c, rest) = std::mem::take(&mut cs).split_at_mut(cut(slot.len()));
+            cs = rest;
+            let (p, rest) = std::mem::take(&mut ps).split_at_mut(cut(owner.len()));
+            ps = rest;
+            let (b, rest) = std::mem::take(&mut bs).split_at_mut(cut(atoms.len() - 1));
+            bs = rest;
+            let (s, rest) = std::mem::take(&mut ss).split_at_mut(cut(angle.len()));
+            ss = rest;
+            let from = (at(slot.len()), at(owner.len()), at(atoms.len() - 1), at(angle.len()));
+            work.push(Mutex::new((from, c, p, b, s)));
+        }
+        let (substeps, sh) = (params.substeps, Shared(&atoms));
+        gang.run(tasks, &|k| {
+            let mut part = work[k].try_lock().expect("a task's own");
+            let ((c0, p0, b0, s0), cs, ps, bs, ss) = &mut *part;
+            for (i, c) in (*c0..).zip(cs.iter_mut()) {
+                let (batch, l) = slot[i];
+                if batch != NONE {
+                    let lane = &lanes[batch as usize][l as usize];
+                    (c.jn, c.jt) = impulses(flat[batch as usize], l as usize, lane);
+                    c.speed = lane.speed;
+                }
+            }
+            for (p, to) in (*p0..).zip(ps.iter_mut()) {
+                to.solved = false;
+                for q in to.point.iter_mut() {
+                    (q.jn, q.jt) = (0.0, 0.0);
+                }
+                let Some(&(batch, l)) = slot.get(owner[p] as usize) else { continue };
+                if batch != NONE && lanes[batch as usize][l as usize].at as usize == p {
+                    to.solved = true;
+                    let lane = &lanes[batch as usize][l as usize];
+                    carried(params.carry, substeps, flat[batch as usize], l as usize, lane.count as usize, to);
+                }
+            }
+            for (i, b) in (*b0..).zip(bs.iter_mut()) {
+                let st = sh.load(i);
+                (b.v, b.moved) = (st.v, st.moved);
+            }
+            for (j, sp) in (*s0..).zip(ss.iter_mut()) {
+                let st = sh.load(sp.body as usize);
+                (sp.w, sp.turned, sp.angle) = (st.w, st.turned, angle[j]);
+            }
+        });
+        drop(work);
+        // The contacts that aren't solved, as `clear` leaves them.
+        for at in solved {
+            points[at].solved = true;
+        }
+        for (at, j) in kept {
+            for (q, j) in points[at].point.iter_mut().zip(j) {
+                (q.jn, q.jt) = j;
+            }
+        }
+    }
+
+    /// A contact's impulses over the step, from its lane: `finish`'s.
+    #[inline(always)]
+    fn impulses<const N: usize>(o: &Batch<N>, l: usize, lane: &Lane) -> (f32, f32) {
+        if lane.at == NONE {
+            return (o.p[0].sum_jn.0[l], o.p[0].sum_jt.0[l]);
+        }
+        let n = lane.count as usize;
+        (o.p[..n].iter().map(|p| p.sum_jn.0[l]).sum(), o.p[..n].iter().map(|p| p.sum_jt.0[l]).sum())
+    }
+
+    /// What a contact's points carry to the next step, from its lane:
+    /// `finish`'s.
+    #[inline(always)]
+    fn carried<const N: usize>(carry: Carry, substeps: usize, o: &Batch<N>, l: usize, n: usize, to: &mut Points) {
+        for (q, p) in to.point.iter_mut().zip(o.p.iter()).take(n) {
+            let last = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
+            (q.jn, q.jt) = carry.of(last, (p.sum_jn.0[l], p.sum_jt.0[l]));
+        }
+    }
+
+    /// Whether `solve_across` is `solve` bit for bit on these bodies: no
+    /// body that doesn't move has a negative zero where a batch writes it
+    /// back or gravity adds to it (see `solve_across`). Conservative: a body
+    /// that turns but doesn't translate counts as still.
+    pub fn shareable(bodies: &[SolverBody], spinning: &[Spinning]) -> bool {
+        let neg = |x: f32| x.to_bits() == (-0.0f32).to_bits();
+        let still = |b: &SolverBody| b.inv_mass == 0.0;
+        bodies.iter().all(|b| !still(b) || ![b.v.x, b.v.y, b.gravity.x, b.gravity.y].into_iter().any(neg))
+            && spinning.iter().all(|sp| !still(&bodies[sp.body as usize]) || sp.inv_inertia > 0.0 || !neg(sp.w))
+    }
+
+    /// What a stage does to each of its blocks.
+    #[derive(Clone, Copy)]
+    enum Work {
+        /// Filling the batches' lanes: `setup`'s loop, a batch at a time.
+        Prepare,
+        Gravity,
+        Warm,
+        /// The pushing pass; whether it's the substep's last.
+        Push(bool),
+        Move,
+        /// A relaxing pass: whether it's the substep's first (which finds
+        /// the bias) and its last.
+        Relax(bool, bool),
+        Bounce,
+    }
+
+    /// A stage's unit of work, which one thread takes at a time: batches of
+    /// one group with their lanes (the batches filled by the first stage,
+    /// into room made on the calling thread), bodies by index, or bodies
+    /// that turn, with their angles.
+    enum Part<'a, const N: usize> {
+        Batches(Vec<Batch<N>>, &'a mut [[Lane; N]]),
+        Bodies(Range<usize>),
+        Spins(Range<usize>, &'a mut [f32]),
+    }
+
+    /// A block: one past the last stage that took it, and its part. A
+    /// thread takes it for stage `t` by raising the mark to `t + 1`, which
+    /// only one thread can do while it's lower (Box2D's `syncIndex`, taken
+    /// by compare and swap): a thread still in an older stage can't, so it
+    /// never holds a block the current stage needs. The lock is only how
+    /// the taker has the part: nobody else holds it then (`try_lock`).
+    /// Padded to its own lines, as Box2D's blocks aren't, so taking one
+    /// doesn't evict a neighbour another thread is taking.
+    #[repr(align(128))]
+    struct Block<'a, const N: usize> {
+        mark: AtomicUsize,
+        part: Mutex<Part<'a, N>>,
+    }
+
+    fn block<const N: usize>(part: Part<'_, N>) -> Block<'_, N> {
+        Block { mark: AtomicUsize::new(0), part: Mutex::new(part) }
+    }
+
+    /// A block of these lanes' batches, with room made for them here, on
+    /// the calling thread, so the memory is that thread's
+    /// (docs/lore/memory-a-task-allocates-is-its-threads.md).
+    fn batches<const N: usize>(lanes: &mut [[Lane; N]]) -> Block<'_, N> {
+        block(Part::Batches(Vec::with_capacity(lanes.len()), lanes))
+    }
+
+    /// How many of a stage's blocks are done, on its own lines.
+    #[repr(align(128))]
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+
+    /// Set when a thread of the solve panics, so the others stop waiting
+    /// for blocks it won't finish, and the executor can re-raise it.
+    struct Failing<'a>(&'a AtomicBool);
+
+    impl Drop for Failing<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Where thread `w` of `threads` starts in a stage of `n` blocks: its
+    /// share's first, so that with every thread there each takes the same
+    /// blocks stage after stage, and finds them in its cache (Box2D's
+    /// `GetWorkerStartIndex`). With more threads than blocks, Box2D's extra
+    /// workers take none and wait on its main thread; here every thread
+    /// can take any block (the rest start at `w % n`), since none is sure
+    /// to come.
+    fn first_block(w: usize, n: usize, threads: usize) -> usize {
+        if n <= threads {
+            return w % n;
+        }
+        let (per, rest) = (n / threads, n % threads);
+        per * w + rest.min(w)
+    }
+
+    /// `0..n` in blocks of at least `least`, at most four a thread: Box2D's
+    /// block sizes (`b2SolverStage`: four blocks a worker, so a thread that
+    /// starts late has its share taken, and a block a few microseconds).
+    fn blocks_of(n: usize, least: usize, threads: usize) -> impl Iterator<Item = Range<usize>> {
+        let count = if n > least * 4 * threads { 4 * threads } else { n.div_ceil(least) };
+        (0..count).map(move |k| n * k / count..n * (k + 1) / count)
+    }
+
+    /// The stages of `solve_across`, shared by `gang`'s threads: the
+    /// states and every batch, filled, as `run` leaves them. Each thread
+    /// runs every stage in order: takes blocks from its own start forward,
+    /// then back from it, until a block is taken already, adds what it ran
+    /// to the stage's count, and waits for the count to be the stage's
+    /// blocks. Box2D's `b2SolverStage` loop (`solver.c`), without its main
+    /// thread: whichever thread finishes a stage's last block lets every
+    /// waiter on, so a thread that comes late, or never, holds up nobody,
+    /// and one thread alone runs every stage. A thread that comes late
+    /// skips the stages already done.
+    fn run_across<const N: usize>(
+        params: &Params,
+        (bodies, spinning, contacts, points): (&[SolverBody], &[Spinning], &[Constraint], &[Points]),
+        (hd, gravity, dt): (&Head, &[Vec2], f32),
+        (lanes, angle): (&mut [[Lane; N]], &mut [f32]),
+        gang: &dyn Gang,
+    ) -> (Vec<Atom>, Vec<Vec<Batch<N>>>) {
+        let threads = gang.threads();
+        let (h, inv_h, share) = (hd.h, hd.inv_h, hd.share);
+        // `setup`'s states: less the step's gravity, which the substeps
+        // give back a share at a time.
+        let atoms: Vec<Atom> =
+            hd.s.iter()
+                .enumerate()
+                .map(|(i, st)| {
+                    let mut st = *st;
+                    if let Some(g) = gravity.get(i) {
+                        st.v -= *g;
+                    }
+                    Atom::new(&st)
+                })
+                .collect();
+
+        let mut blocks: Vec<Block<N>> = Vec::new();
+        let mut rest: &mut [[Lane; N]] = lanes;
+        // The overflow is one block: its batches share bodies, and are
+        // solved in order, as Box2D solves its overflow on one thread.
+        let overflowed = if hd.overflow > 0 {
+            let (head, tail) = rest.split_at_mut(hd.overflow);
+            rest = tail;
+            blocks.push(batches(head));
+            Some(blocks.len() - 1..blocks.len())
+        } else {
+            None
+        };
+        let mut colors = Vec::new();
+        for k in 0..hd.n_groups {
+            let (mut group, tail) = rest.split_at_mut(hd.count[k].div_ceil(N));
+            rest = tail;
+            let from = blocks.len();
+            for r in blocks_of(group.len(), 4, threads) {
+                let (head, tail) = group.split_at_mut(r.len());
+                group = tail;
+                blocks.push(batches(head));
+            }
+            if blocks.len() > from {
+                colors.push(from..blocks.len());
+            }
+        }
+        let filled = 0..blocks.len();
+        let from = blocks.len();
+        blocks.extend(blocks_of(atoms.len(), 32, threads).map(|r| block(Part::Bodies(r))));
+        let bodies_at = from..blocks.len();
+        let mut turning: &mut [f32] = angle;
+        for r in blocks_of(spinning.len(), 32, threads) {
+            let (head, tail) = turning.split_at_mut(r.len());
+            turning = tail;
+            blocks.push(block(Part::Spins(r, head)));
+        }
+        let moving = bodies_at.start..blocks.len();
+
+        // The stages, in the order `run` makes its passes: in each pass the
+        // overflow, then each group in turn.
+        let mut stages: Vec<(Work, Range<usize>)> = vec![(Work::Prepare, filled)];
+        let pass_of = |stages: &mut Vec<(Work, Range<usize>)>, work: Work| {
+            stages.extend(overflowed.iter().chain(colors.iter()).map(|b| (work, b.clone())));
+        };
+        for _ in 0..params.substeps {
+            stages.push((Work::Gravity, bodies_at.clone()));
+            pass_of(&mut stages, Work::Warm);
+            pass_of(&mut stages, Work::Push(params.relax == 0));
+            stages.push((Work::Move, moving.clone()));
+            for r in 0..params.relax {
+                pass_of(&mut stages, Work::Relax(r == 0, r + 1 == params.relax));
+            }
+        }
+        pass_of(&mut stages, Work::Bounce);
+
+        let exec = |work: Work, part: &mut Part<'_, N>, sh: &mut Shared| match (work, part) {
+            (Work::Prepare, Part::Batches(out, lanes)) => {
+                for ln in lanes.iter_mut() {
+                    let mut o = Batch::empty(hd.nowhere);
+                    for (l, lane) in ln.iter_mut().enumerate() {
+                        if lane.contact == NONE {
+                            continue;
+                        }
+                        let c = &contacts[lane.contact as usize];
+                        let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, hd, points, dt);
+                        put(&mut o, l, c, bodies, hd, (&pts, at, n_points));
+                        (lane.at, lane.count, lane.speed) = (at, n_points as u8, speed);
+                    }
+                    out.push(o);
+                }
+            }
+            (Work::Warm, Part::Batches(b, _)) => b.iter_mut().for_each(|o| warm_start(o, sh)),
+            (Work::Push(last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, true, COMPUTE>(o, sh, inv_h, last)),
+            (Work::Relax(true, last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, false, STORE>(o, sh, inv_h, last)),
+            (Work::Relax(false, last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, false, LOAD>(o, sh, inv_h, last)),
+            (Work::Bounce, Part::Batches(b, _)) => {
+                for o in b.iter_mut() {
+                    if o.restitution.0.iter().any(|e| *e != 0.0) {
+                        restitute(o, sh, params.bounce);
+                    }
+                }
+            }
+            // `run`'s loops over the bodies, a body at a time, the same
+            // operations; the one standing still (last) has no gravity.
+            (Work::Gravity, Part::Bodies(r)) => {
+                let g = &gravity[r.start.min(gravity.len())..r.end.min(gravity.len())];
+                for (a, g) in atoms[r.clone()].iter().zip(g) {
+                    let mut st = a.state();
+                    st.v += *g * share;
+                    a.put(0, st.v.x);
+                    a.put(1, st.v.y);
+                }
+            }
+            (Work::Move, Part::Bodies(r)) => {
+                for a in atoms[r.clone()].iter() {
+                    let mut st = a.state();
+                    st.moved += st.v * h;
+                    a.put(3, st.moved.x);
+                    a.put(4, st.moved.y);
+                }
+            }
+            (Work::Move, Part::Spins(r, angle)) => {
+                for (sp, angle) in spinning[r.clone()].iter().zip(angle.iter_mut()) {
+                    let a = &atoms[sp.body as usize];
+                    let b = a.state();
+                    *angle += h * b.w;
+                    let turned = match params.integrate {
+                        Integrate::Rotation => b.turned.integrate(h * b.w),
+                        Integrate::Angle => Rot::from_angle(*angle),
+                    };
+                    a.put(5, turned.c);
+                    a.put(6, turned.s);
+                }
+            }
+            _ => unreachable!("a stage over another stage's blocks"),
+        };
+
+        let done: Vec<Count> = stages.iter().map(|_| Count::default()).collect();
+        let failed = AtomicBool::new(false);
+        let each = |w: usize| {
+            let _failing = Failing(&failed);
+            let mut sh = Shared(&atoms);
+            for (t, (work, on)) in stages.iter().enumerate() {
+                let (n, count) = (on.len(), &done[t].0);
+                if count.load(Ordering::Acquire) == n {
+                    continue;
+                }
+                let mut take = |k: usize| {
+                    let b = &blocks[on.start + k];
+                    if b.mark.fetch_max(t + 1, Ordering::AcqRel) > t {
+                        return false;
+                    }
+                    exec(*work, &mut b.part.try_lock().expect("a block's taker alone has it"), &mut sh);
+                    true
+                };
+                let (start, mut ran) = (first_block(w, n, threads), 0);
+                let mut k = start;
+                while take(k) {
+                    ran += 1;
+                    k = if k + 1 == n { 0 } else { k + 1 };
+                }
+                let mut k = start;
+                loop {
+                    k = if k == 0 { n - 1 } else { k - 1 };
+                    if !take(k) {
+                        break;
+                    }
+                    ran += 1;
+                }
+                if ran > 0 {
+                    count.fetch_add(ran, Ordering::Release);
+                }
+                // Spinning: a stage is microseconds, and a wake-up tens of
+                // them. Yielding now and then gives a thread holding a
+                // block its core back, on a busy machine.
+                let mut spins = 0u32;
+                while count.load(Ordering::Acquire) < n {
+                    if failed.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::hint::spin_loop();
+                    spins = spins.wrapping_add(1);
+                    if spins.is_multiple_of(1024) {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        };
+        gang.run(threads, &each);
+        let outs = blocks
+            .into_iter()
+            .filter_map(|b| match b.part.into_inner() {
+                Ok(Part::Batches(out, _)) => Some(out),
+                Ok(_) => None,
+                Err(_) => unreachable!("a thread of the solve panicked, and the gang re-raised it"),
+            })
+            .collect();
+        (atoms, outs)
     }
 
     /// The ends' velocities after an impulse `(ix, iy)` on `b` and its
@@ -1586,8 +2316,8 @@ mod lanes {
 
     /// Last substep's impulses again, as the substeps' warm start.
     #[inline(always)]
-    fn warm_start<const N: usize>(o: &mut Batch<N>, s: &mut [State]) {
-        let ((mut va, _), (mut vb, _)) = (gather(s, &o.a), gather(s, &o.b));
+    fn warm_start<const N: usize>(o: &mut Batch<N>, s: &mut (impl Bodies + ?Sized)) {
+        let (mut va, mut vb) = (gather_v(&*s, &o.a), gather_v(&*s, &o.b));
         let (tx, ty) = (-o.ny, o.nx);
         for p in o.p.iter() {
             let i = (o.nx * p.jn + tx * p.jt, o.ny * p.jn + ty * p.jt);
@@ -1602,8 +2332,8 @@ mod lanes {
     /// `pass_points`, lane by lane: soft and pushing out when `PUSH`, else
     /// rigid, with friction; `last`, the substep's last, sums its impulses.
     #[inline(always)]
-    fn pass<const N: usize, const PUSH: bool, const SEP: u8>(o: &mut Batch<N>, s: &mut [State], inv_h: f32, last: bool) {
-        let ((mut va, pa), (mut vb, pb)) = (gather(s, &o.a), gather(s, &o.b));
+    fn pass<const N: usize, const PUSH: bool, const SEP: u8>(o: &mut Batch<N>, s: &mut (impl Bodies + ?Sized), inv_h: f32, last: bool) {
+        let ((mut va, pa), (mut vb, pb)) = (gather(&*s, &o.a), gather(&*s, &o.b));
         let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
         let (nx, ny) = (o.nx, o.ny);
         let one = F::splat(1.0);
@@ -1671,7 +2401,7 @@ mod lanes {
 
     /// `bounce`, lane by lane, and for a row at its normal the solve as
     /// first built's rule: it bounces if it pushed over the step.
-    fn restitute<const N: usize>(o: &mut Batch<N>, s: &mut [State], passes: usize) {
+    fn restitute<const N: usize>(o: &mut Batch<N>, s: &mut (impl Bodies + ?Sized), passes: usize) {
         // Whether a lane's point bounces: a later pass only ever bounces
         // what the first could, so a batch the first can't is left alone.
         let bounces = |o: &Batch<N>, k: usize, l: usize, pass: usize| {
@@ -1683,7 +2413,7 @@ mod lanes {
         if !(0..2).any(|k| (0..N).any(|l| bounces(o, k, l, 0))) {
             return;
         }
-        let ((mut va, _), (mut vb, _)) = (gather(s, &o.a), gather(s, &o.b));
+        let (mut va, mut vb) = (gather_v(&*s, &o.a), gather_v(&*s, &o.b));
         let (nx, ny) = (o.nx, o.ny);
         for pass in 0..passes {
             for k in 0..2 {

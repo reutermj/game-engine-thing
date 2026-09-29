@@ -44,7 +44,9 @@
 //!   contact's closing speed from (0 with the step's gravity in it, 1 before
 //!   it, 2 with half, 3 as the bodies meet, 4 the rebound less the step's
 //!   gravity, 5 with it but gated before it; `solver::Closing`, physics.md,
-//!   "Bounces").
+//!   "Bounces"); `threads=<n>` the default solved across `n` threads
+//!   (`solver::solve_across`), which is it bit for bit, and with `late=1`
+//!   threads that come one at a time, the last first (`Backwards`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -56,6 +58,40 @@ use crate::solver::{
     BOUNCE_THRESHOLD, Carry, Closing, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, order, solve_with,
 };
 use crate::split_impulse as old;
+
+/// The host's executor as the solver takes it: `rot/threads=<n>` solves
+/// across `n` threads spawned for each step (`engine_ecs::Scoped`), which
+/// is the solve on one bit for bit (`solver::solve_across`).
+impl crate::solver::Gang for engine_ecs::Workers {
+    fn threads(&self) -> usize {
+        engine_ecs::Workers::threads(self)
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        engine_ecs::Workers::run(self, tasks, f)
+    }
+}
+
+/// `n` threads spawned for each run, as a solver's `Gang`.
+pub fn scoped(n: usize) -> engine_ecs::Workers {
+    engine_ecs::Workers::new(Some(std::sync::Arc::new(engine_ecs::Scoped(n))))
+}
+
+/// An executor that says it has `n` threads and runs every task on the
+/// caller's, one after another, the last first (`rot/threads=<n>/late=1`):
+/// a solve across threads whose threads come one at a time, each after the
+/// last has left, must still finish, and the same.
+struct Backwards(usize);
+
+impl engine_ecs::Executor for Backwards {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..tasks).rev().for_each(f);
+    }
+}
 
 /// `rot/closing=<n>`: what restitution takes a contact's closing speed from
 /// (`solver::Closing`), by its place here.
@@ -127,6 +163,8 @@ pub fn parse(spec: &str) -> Variant {
     if name == "rot" {
         let mut params = PARAMS;
         let mut order = 0;
+        let mut threads = 0;
+        let mut late = false;
         let mut v = Variant::of(Box::new(|_, _, _, _, _| {}));
         for (k, x) in kvs {
             match k.as_str() {
@@ -145,10 +183,16 @@ pub fn parse(spec: &str) -> Variant {
                 "order" => order = x as u32,
                 "carry" => params.carry = [Carry::Last, Carry::Normal, Carry::Mean][x as usize],
                 "closing" => params.closing = CLOSINGS[x as usize],
+                "threads" => threads = x as usize,
+                "late" => late = x != 0.0,
                 _ => panic!("rot: {k}"),
             }
         }
-        if order == 0 {
+        if threads > 0 {
+            assert_eq!(order, 0, "rot/threads solves in the colors' order");
+            let gang = if late { engine_ecs::Workers::new(Some(std::sync::Arc::new(Backwards(threads)))) } else { scoped(threads) };
+            v.solve = Box::new(move |b, s, c, p, dt| crate::solver::solve_across(&params, (b, s), c, p, dt, &gang));
+        } else if order == 0 {
             v.solve = Box::new(move |b, s, c, p, dt| solve_with(&params, (b, s), c, p, dt));
         } else {
             let seed = RefCell::new(0x9e37_79b9_u32);

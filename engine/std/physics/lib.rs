@@ -27,6 +27,19 @@ use physics::{
 use sleep::Sleepers;
 use solver::{Constraint, ContactPoint, Points, SolverBody, Spinning};
 
+/// The host's threads, as the solver shares its passes between them: bit
+/// for bit the solve on one (`solver::solve_across`). Without an executor,
+/// or with one thread, it is the solve on one.
+impl solver::Gang for Workers {
+    fn threads(&self) -> usize {
+        Workers::threads(self)
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        Workers::run(self, tasks, f)
+    }
+}
+
 #[cfg(not(feature = "v2"))]
 const BUILD: &str = "v1";
 #[cfg(feature = "v2")]
@@ -902,7 +915,7 @@ impl Physics {
         self.time.solve_turning += (t_turning - t_bodies).as_nanos() as u64;
         let config = sleeping_by(&mut config);
         let params = solver::Params::of(&tuning.single(|_, t| *t).unwrap_or(Tuning::DEFAULT));
-        solver::solve_with(&params, (&mut bodies, &mut spinning), &mut constraints, &mut points, dt);
+        solver::solve_across(&params, (&mut bodies, &mut spinning), &mut constraints, &mut points, dt, &workers);
         let after_solver = Instant::now();
 
         // A body's new velocity and position, `Mut`s stamping only what's

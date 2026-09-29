@@ -1214,8 +1214,9 @@ mod threads {
     /// Threads that ran a build's tasks don't keep it mapped once it's
     /// reloaded, nor after its engine is dropped, kept between runs (a
     /// pool) or spawned for each: the same builds are mapped at each point
-    /// as with no threads at all. Tasks run only inside the system that
-    /// made them, and physics's leave nothing on a thread (a thread-local
+    /// as with no threads at all. The bodies turn, so the solver's stages
+    /// are among the tasks (`solver::solve_across`). Tasks run only inside
+    /// the system that made them, and physics's leave nothing on a thread (a thread-local
     /// with a destructor would keep the build mapped until the thread
     /// exits: docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
     #[test]
@@ -1228,7 +1229,7 @@ mod threads {
             let dir = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join(&test);
             let e = game("PILE", &test);
             e.world().set_executor(executor.clone());
-            send(&e, "pile", "drop 400");
+            send(&e, "pile", "drop 400 turning");
             step(&e, 30);
             let loaded = images(&dir);
             assert_eq!(e.load("physics", &path("PHYSICS_V2")).unwrap(), "reloaded physics (generation 1)");
@@ -1253,11 +1254,25 @@ mod threads {
     /// checks the plain pile at 10 000 bodies, this in every test run.
     #[test]
     fn a_pile_on_four_threads_lands_where_it_does_on_one() {
+        on_four_threads_as_on_one("drop 600 staggered", "");
+    }
+
+    /// The same with every body turning, so the solver's passes are shared
+    /// between the threads too (`solver::solve_across`), kept between steps
+    /// and spawned for each: the mod's `Workers` reach the solver, and it is
+    /// the solve on one bit for bit. The colored solve's own test is
+    /// `quality_test`'s `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`.
+    #[test]
+    fn a_turning_pile_on_four_threads_lands_where_it_does_on_one() {
+        on_four_threads_as_on_one("drop 600 staggered turning", "_turning");
+    }
+
+    fn on_four_threads_as_on_one(drop: &str, name: &str) {
         let run = |executor: Option<Arc<dyn Executor>>, test: &str| {
-            let e = game("PILE", test);
+            let e = game("PILE", &format!("{test}{name}"));
             e.world().set_executor(executor);
             send(&e, "pile", "widen 41");
-            send(&e, "pile", "drop 600 staggered");
+            send(&e, "pile", drop);
             send(&e, "pile", "sensing");
             send(&e, "pile", "touching");
             step(&e, 200);
@@ -1274,10 +1289,12 @@ mod threads {
             (all, contacts, overlaps, touching)
         };
         let one = run(None, "one_thread");
-        let four = run(Some(Arc::new(super::pool::Pool::new(4))), "four_threads");
         assert!(one.1.len() > 700, "{} contacts: a pile", one.1.len());
         assert!(one.2.len() > 500 && one.3.iter().filter(|t| t.1[0]).count() > 400, "overlaps, and bodies standing on something");
-        assert!(one.0 == four.0 && one.1 == four.1, "the same bodies where they were, and the same contacts, entities and all");
-        assert!(one.2 == four.2 && one.3 == four.3, "the same overlaps, and sides touched");
+        let kept: Arc<dyn Executor> = Arc::new(super::pool::Pool::new(4));
+        for (four, how) in [(run(Some(kept), "four_threads"), "kept"), (run(Some(Arc::new(Scoped(4))), "four_spawned"), "spawned")] {
+            assert!(one.0 == four.0 && one.1 == four.1, "{how}: the same bodies where they were, and the same contacts, entities and all");
+            assert!(one.2 == four.2 && one.3 == four.3, "{how}: the same overlaps, and sides touched");
+        }
     }
 }

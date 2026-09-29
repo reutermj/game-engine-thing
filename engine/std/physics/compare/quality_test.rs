@@ -504,6 +504,32 @@ fn the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit() {
     }
 }
 
+/// Solved across threads (`solver::solve_across`), the default is the
+/// solve on one thread bit for bit, at 2, 4, 8 and 16 threads, and with
+/// threads that come one at a time, the last first (`late=1`), on the
+/// turning pile and pyramid the equivalence tests run: the colors decide
+/// the computation, not the threads, which is what makes going parallel
+/// speed work alone (physics.md, "Solving across threads"). At one thread
+/// it is the solve on one (it falls back to it). Planted, it fails on a
+/// block that takes the next color's first batch too, and on the colors
+/// solved last first.
+#[test]
+fn the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit() {
+    let specs = ["rot/threads=1", "rot/threads=2", "rot/threads=4", "rot/threads=8", "rot/threads=16", "rot/threads=4/late=1"];
+    let built = |s: &Scene| ecs::Flat::new(s, true, Box::new(solver::solve_points), "ours");
+    let across: Vec<Box<dyn Fn(&Scene) -> ecs::Flat>> = specs
+        .iter()
+        .map(|spec| Box::new(move |s: &Scene| ecs::Flat::variant(s, true, spec, spec)) as Box<dyn Fn(&Scene) -> ecs::Flat>)
+        .collect();
+    let mut runs: Vec<&dyn Fn(&Scene) -> ecs::Flat> = vec![&built];
+    runs.extend(across.iter().map(|f| f.as_ref()));
+    for (scene, runs) in equivalence_runs(&runs) {
+        for (spec, run) in specs.iter().zip(&runs[1..]) {
+            assert_eq!(differ(&runs[0], run), 0, "{}: {spec} isn't the solve on one thread", scene.text());
+        }
+    }
+}
+
 /// A variant: by level in lanes (`solver::Wide::Levels`), the solve is the
 /// solve one contact at a time in pair order bit for bit, on the same pile
 /// and pyramid (physics.md, "The solver's speed"); graph-colored it isn't,
