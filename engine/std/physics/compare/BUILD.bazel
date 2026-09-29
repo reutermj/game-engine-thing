@@ -241,3 +241,60 @@ rust_binary(
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     deps = QUALITY_DEPS,
 )
+
+# SPIKE (docs/architecture/parallel-relations.md): colors kept across steps
+# against colored afresh, the solve on each, and a solve pass over bodies in
+# pages against the copy, measured. Not engine code; kept so the numbers can
+# be taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics/compare:colors_spike
+rust_binary(
+    name = "colors_spike",
+    srcs = [
+        "colors_spike.rs",
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        ":colors_spike_srcs",
+    ],
+    crate_root = "colors_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# The physics files the spike builds over, copied into this package (a
+# generated source moves a crate's sources, and those from another package
+# with them go missing), and solver.rs with one line patched: its coloring
+# taken from the spike when it hands the solve some (`kept_colors`), so the
+# solve can be timed on colors kept across steps. A patch of one line, so
+# it can't drift from solver.rs; the grep fails the build if it stops
+# applying.
+genrule(
+    name = "colors_spike_srcs",
+    srcs = [
+        "//engine/std/physics:narrow.rs",
+        "//engine/std/physics:solver.rs",
+        "//engine/std/physics:tests/arrays.rs",
+        "//engine/std/physics:tests/pool.rs",
+        "//engine/std/physics:tests/split_impulse.rs",
+    ],
+    outs = [
+        "colors_spike_arrays.rs",
+        "colors_spike_narrow.rs",
+        "colors_spike_pool.rs",
+        "colors_spike_solver.rs",
+        "colors_spike_split_impulse.rs",
+    ],
+    cmd = " && ".join([
+        "sed 's/let (groups, n_groups) = group(contacts, &moves, params.wide);/let (groups, n_groups) = crate::kept_colors::take().unwrap_or_else(|| group(contacts, \\&moves, params.wide));/' $(location //engine/std/physics:solver.rs) > $(location colors_spike_solver.rs)",
+        "grep -q kept_colors $(location colors_spike_solver.rs)",
+        "cp $(location //engine/std/physics:narrow.rs) $(location colors_spike_narrow.rs)",
+        "cp $(location //engine/std/physics:tests/arrays.rs) $(location colors_spike_arrays.rs)",
+        "cp $(location //engine/std/physics:tests/pool.rs) $(location colors_spike_pool.rs)",
+        "cp $(location //engine/std/physics:tests/split_impulse.rs) $(location colors_spike_split_impulse.rs)",
+    ]),
+    tags = ["manual"],
+)
