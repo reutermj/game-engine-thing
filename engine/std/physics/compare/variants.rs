@@ -40,7 +40,11 @@
 //!   pairs': 1 reversed, 2 shuffled each step, 3 rows from the top down
 //!   (physics.md, "Why colors let the pyramid fall"), 4 the colors' order
 //!   (`solver::order`), which with `scalar=1` is the default's computation
-//!   solved one contact at a time.
+//!   solved one contact at a time; `closing` what restitution takes a
+//!   contact's closing speed from (0 with the step's gravity in it, 1 before
+//!   it, 2 with half, 3 as the bodies meet, 4 the rebound less the step's
+//!   gravity, 5 with it but gated before it; `solver::Closing`, physics.md,
+//!   "Bounces").
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,9 +53,13 @@ use physics::Vec2;
 
 use crate::arrays::Warm;
 use crate::solver::{
-    BOUNCE_THRESHOLD, Carry, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, order, solve_with,
+    BOUNCE_THRESHOLD, Carry, Closing, Constraint, Integrate, PARAMS, Points, Separation, SolverBody, Spinning, Wide, order, solve_with,
 };
 use crate::split_impulse as old;
+
+/// `rot/closing=<n>`: what restitution takes a contact's closing speed from
+/// (`solver::Closing`), by its place here.
+const CLOSINGS: [Closing; 6] = [Closing::Stepped, Closing::Before, Closing::Half, Closing::Met, Closing::Less, Closing::Gate];
 
 /// A solver for the arrays: over bodies some of which may turn and
 /// contacts some of which may have points, which only
@@ -136,6 +144,7 @@ pub fn parse(spec: &str) -> Variant {
                 "deepest" => v.deepest = x != 0.0,
                 "order" => order = x as u32,
                 "carry" => params.carry = [Carry::Last, Carry::Normal, Carry::Mean][x as usize],
+                "closing" => params.closing = CLOSINGS[x as usize],
                 _ => panic!("rot: {k}"),
             }
         }

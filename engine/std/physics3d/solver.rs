@@ -26,7 +26,7 @@
 //! last step's is projected onto this step's plane.
 
 use crate::narrow::MAX_POINTS;
-use crate::{Anchors, Carry, Inertia, Integrate, Mat3, Quat, Vec3};
+use crate::{Anchors, Carry, Closing, Inertia, Integrate, Mat3, Quat, Vec3};
 pub const DAMPING_RATIO: f32 = 10.0;
 /// The fastest a contact pushes bodies apart.
 pub const MAX_PUSH: f32 = 3.0;
@@ -49,6 +49,7 @@ pub struct Tuning {
     pub inertia: Inertia,
     pub anchors: Anchors,
     pub carry: Carry,
+    pub closing: Closing,
 }
 
 impl Tuning {
@@ -63,6 +64,7 @@ impl Tuning {
             inertia: t.inertia(),
             anchors: t.anchors(),
             carry: t.carry(),
+            closing: t.closing(),
         }
     }
 }
@@ -234,7 +236,7 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, ho
         b.form_inertia(b.q);
     }
     let mut points = Vec::with_capacity(contacts.len() * 2);
-    let mut rows: Vec<Row> = contacts.iter_mut().map(|c| row(bodies, c, &mut points, share, moving, fixed)).collect();
+    let mut rows: Vec<Row> = contacts.iter_mut().map(|c| row(bodies, c, &mut points, share, (moving, fixed), (how.closing, dt))).collect();
     let mut hot: Vec<Hot> =
         bodies.iter().map(|b| Hot { v: b.v - b.gravity, w: b.w, moved: Vec3::ZERO, inv_mass: b.inv_mass, theta: Vec3::ZERO }).collect();
     // Apart from the hot bodies: only `Anchors::Exact` reads it in a pass.
@@ -329,9 +331,36 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, ho
     }
 }
 
+/// A point's closing speed as restitution takes it (`Closing`, as 2D's
+/// `Closing::speed`): from its closing speed with the step's gravity in it
+/// (`c`), the share of that the gravity gave (`g`), its gap as found and
+/// the step.
+#[inline(always)]
+fn closing(how: Closing, c: f32, g: f32, sep: f32, dt: f32) -> f32 {
+    let before = c - g;
+    match how {
+        Closing::Stepped => c,
+        Closing::Before => before,
+        Closing::Half => c - 0.5 * g,
+        Closing::Met if g > 0.0 && sep > 0.0 => {
+            let v = before.max(0.0);
+            let fall = (v * dt + 0.5 * g * dt).min(sep);
+            (v * v + 2.0 * (g / dt) * fall).sqrt()
+        }
+        Closing::Met => before,
+    }
+}
+
 /// A contact as the substeps solve it, from what was found, and its
 /// impulses zeroed to be summed again.
-fn row(bodies: &[SolverBody], c: &mut Constraint, points: &mut Vec<PointRow>, share: f32, moving: Softness, fixed: Softness) -> Row {
+fn row(
+    bodies: &[SolverBody],
+    c: &mut Constraint,
+    points: &mut Vec<PointRow>,
+    share: f32,
+    (moving, fixed): (Softness, Softness),
+    (how, dt): (Closing, f32),
+) -> Row {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let (a, b) = (&bodies[ai], &bodies[bi]);
     let n = c.normal;
@@ -346,7 +375,8 @@ fn row(bodies: &[SolverBody], c: &mut Constraint, points: &mut Vec<PointRow>, sh
         let (rna, rnb) = (ra.cross(n), rb.cross(n));
         let (ia, ib) = (a.inv_i.apply(rna), b.inv_i.apply(rnb));
         let k = m + ia.dot(rna) + ib.dot(rnb);
-        cp.speed = -(b.v - a.v).dot(n) - b.w.dot(rnb) + a.w.dot(rna);
+        let speed = -(b.v - a.v).dot(n) - b.w.dot(rnb) + a.w.dot(rna);
+        cp.speed = closing(how, speed, -(b.gravity - a.gravity).dot(n), -cp.depth, dt);
         // The last step's impulse was over the whole step: a substep's
         // share of it is where each substep starts.
         let jn = cp.jn * share;

@@ -350,6 +350,22 @@ pub enum Carry {
     Last,
 }
 
+/// What restitution bounces a contact back from: 2D's `solver::Closing`,
+/// whose options for get-emj.60 these are (physics.md, "Bounces").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Closing {
+    /// Its closing speed with the step's gravity in it.
+    #[default]
+    Stepped,
+    /// As the step began, before its gravity: Box3D's `relativeVelocity`.
+    Before,
+    /// With half the step's gravity.
+    Half,
+    /// As the step began, grown by gravity over the gap, or over as far as
+    /// the step falls if that's less: the speed as the bodies meet.
+    Met,
+}
+
 /// Substeps a step, and relaxing passes a substep.
 pub const SUBSTEPS: u32 = 5;
 pub const RELAX_ITERATIONS: u32 = 2;
@@ -394,6 +410,7 @@ component! {
         /// (Box3D's contact recycling); 0 finds every pair every step.
         pub recycle: f32,
         pub carry: u8,
+        pub closing: u8,
     }
 }
 
@@ -413,6 +430,7 @@ impl Default for Tuning {
             reduce: Reduce::default() as u8,
             recycle: RECYCLE,
             carry: Carry::default() as u8,
+            closing: Closing::default() as u8,
         }
     }
 }
@@ -451,6 +469,10 @@ impl Tuning {
         code(&[Carry::Mean, Carry::Last], self.carry)
     }
 
+    pub fn closing(&self) -> Closing {
+        code(&[Closing::Stepped, Closing::Before, Closing::Half, Closing::Met], self.closing)
+    }
+
     /// From a list like "sub=4,relax=1,stiff=0.125,warm=cold": how the
     /// bench names a variant. Unknown keys are refused.
     pub fn parse(s: &str) -> Result<Tuning, String> {
@@ -482,6 +504,10 @@ impl Tuning {
                 ("recycle", _) => t.recycle = num()?,
                 ("carry", "last") => t.carry = Carry::Last as u8,
                 ("carry", "mean") => t.carry = Carry::Mean as u8,
+                ("closing", "stepped") => t.closing = Closing::Stepped as u8,
+                ("closing", "before") => t.closing = Closing::Before as u8,
+                ("closing", "half") => t.closing = Closing::Half as u8,
+                ("closing", "met") => t.closing = Closing::Met as u8,
                 _ => return Err(format!("{kv}: unknown")),
             }
         }

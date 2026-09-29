@@ -130,6 +130,63 @@ pub struct Params {
     pub wide: Wide,
     /// What a turning contact's points carry to the next step (`Carry`).
     pub carry: Carry,
+    /// What restitution takes a contact's closing speed from (`Closing`).
+    pub closing: Closing,
+}
+
+/// What restitution bounces a contact back from, and judges against
+/// `BOUNCE_THRESHOLD`: its closing speed as the step found it, before or
+/// after the step's gravity, which `integrate_velocities` has already added
+/// to every body's velocity (`SolverBody::gravity`). The options weighed
+/// for get-emj.56 (physics.md, "Bounces"); the others than the default are
+/// the comparison's variants.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Closing {
+    /// With the step's gravity in it.
+    Stepped,
+    /// As the step began, before its gravity: Box2D's `relativeVelocity`,
+    /// taken at `b2PrepareContactsTask` before its substeps' gravity, as
+    /// Rapier's and Box3D's are.
+    Before,
+    /// With half the step's gravity: the speed half a step on.
+    Half,
+    /// As the step began, grown by gravity over the gap left, or over as
+    /// far as the step falls if that's less (√(v² + 2 a s)): the speed at
+    /// the moment the bodies meet, or as a speculative contact catches them
+    /// short of it.
+    Met,
+    /// With the step's gravity, the rebound less that gravity (e c − g h).
+    Less,
+    /// With the step's gravity, but none if it came in under the threshold
+    /// before it.
+    Gate,
+}
+
+impl Closing {
+    /// The speed restitution bounces a contact back from, from its closing
+    /// speed `c` with the step's gravity in it, the share of that the
+    /// gravity gave (`g`, the ends' difference along the normal), its gap as
+    /// found (`sep`), the step and its restitution.
+    #[inline(always)]
+    pub fn speed(self, c: f32, g: f32, sep: f32, dt: f32, e: f32) -> f32 {
+        let before = c - g;
+        match self {
+            Closing::Stepped => c,
+            Closing::Before => before,
+            Closing::Half => c - 0.5 * g,
+            Closing::Met if g > 0.0 && sep > 0.0 => {
+                let v = before.max(0.0);
+                let fall = (v * dt + 0.5 * g * dt).min(sep);
+                (v * v + 2.0 * (g / dt) * fall).sqrt()
+            }
+            Closing::Met => before,
+            Closing::Less if e > 0.0 => c - g / e,
+            Closing::Less => c,
+            Closing::Gate if before > BOUNCE_THRESHOLD => c,
+            Closing::Gate => 0.0,
+        }
+    }
 }
 
 /// What a turning contact's points carry out of a step, for the next to
@@ -202,6 +259,7 @@ pub const PARAMS: Params = Params {
     block: false,
     wide: Wide::Colored(4),
     carry: Carry::Normal,
+    closing: Closing::Stepped,
 };
 
 impl Params {
@@ -528,12 +586,13 @@ fn solve_all<const POINTS: bool>(
             let turns = POINTS && c.points > 0 && (spins(a) || spins(b));
             let at = if turns {
                 let at = c.points as usize - 1;
-                let (t, speed) = prepare((&bodies[a], &ang[a]), (&bodies[b], &ang[b]), c.normal, &points[at], at, warm);
+                let bounce = (params.closing, dt, c.restitution);
+                let (t, speed) = prepare((&bodies[a], &ang[a]), (&bodies[b], &ang[b]), c.normal, &points[at], at, warm, bounce);
                 c.speed = speed;
                 turning.push(t);
                 (turning.len() - 1) as u32
             } else {
-                c.speed = -(bodies[b].v - bodies[a].v).dot(c.normal);
+                c.speed = closing(params.closing, (&bodies[a], &bodies[b]), c, dt);
                 LINEAR
             };
             // The last step's impulse was over the whole step: a substep's
@@ -652,10 +711,27 @@ fn solve_all<const POINTS: bool>(
     }
 }
 
-/// A turning contact's points for the substeps, warm-started with `warm`
-/// of last step's impulses, and its fastest closing speed.
+/// A contact at its normal's closing speed, as restitution takes it
+/// (`Closing`).
 #[inline(always)]
-fn prepare((a, qa): (&SolverBody, &Ang), (b, qb): (&SolverBody, &Ang), n: Vec2, from: &Points, at: usize, warm: f32) -> (Turning, f32) {
+fn closing(how: Closing, (a, b): (&SolverBody, &SolverBody), c: &Constraint, dt: f32) -> f32 {
+    let (speed, gravity) = (-(b.v - a.v).dot(c.normal), -(b.gravity - a.gravity).dot(c.normal));
+    how.speed(speed, gravity, -c.depth, dt, c.restitution)
+}
+
+/// A turning contact's points for the substeps, warm-started with `warm`
+/// of last step's impulses, and its fastest closing speed as restitution
+/// takes it (`Closing`, with the step and the contact's restitution).
+#[inline(always)]
+fn prepare(
+    (a, qa): (&SolverBody, &Ang),
+    (b, qb): (&SolverBody, &Ang),
+    n: Vec2,
+    from: &Points,
+    at: usize,
+    warm: f32,
+    (how, dt, e): (Closing, f32, f32),
+) -> (Turning, f32) {
     let t = n.perp();
     let (ma, mb, ia, ib) = (a.inv_mass, b.inv_mass, qa.inv_inertia, qb.inv_inertia);
     let mut out = Turning { at, count: from.count as usize, p: [Point::default(); 2] };
@@ -667,7 +743,7 @@ fn prepare((a, qa): (&SolverBody, &Ang), (b, qb): (&SolverBody, &Ang), n: Vec2, 
         let kn = ma + mb + ia * rna * rna + ib * rnb * rnb;
         let kt = ma + mb + ia * rta * rta + ib * rtb * rtb;
         let vr = (b.v + rb.turned_by(qb.w)) - (a.v + ra.turned_by(qa.w));
-        let speed = -vr.dot(n);
+        let speed = how.speed(-vr.dot(n), -(b.gravity - a.gravity).dot(n), cp.separation, dt, e);
         fastest = fastest.max(speed);
         *p = Point {
             ra,
@@ -1332,13 +1408,14 @@ mod lanes {
             let (at, n_points) = if turns {
                 let at = c.points as usize - 1;
                 let ang = |i: usize| Ang { w: s[i].w, inv_inertia: inertia[i], turned: Rot::IDENTITY, angle: 0.0 };
-                let (t, speed) = prepare((&bodies[a], &ang(a)), (&bodies[b], &ang(b)), c.normal, &points[at], at, warm);
+                let bounce = (params.closing, dt, c.restitution);
+                let (t, speed) = prepare((&bodies[a], &ang(a)), (&bodies[b], &ang(b)), c.normal, &points[at], at, warm, bounce);
                 c.speed = speed;
                 solved.push(at);
                 pts = t.p;
                 (at as u32, t.count)
             } else {
-                c.speed = -(bodies[b].v - bodies[a].v).dot(c.normal);
+                c.speed = super::closing(params.closing, (&bodies[a], &bodies[b]), c, dt);
                 let k = ma + mb;
                 let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
                 pts[0] = Point {

@@ -69,6 +69,11 @@ one would have to ship those files with it.
   - a restitution threshold, the closing speed below which nothing
     bounces, at Box2D's default of 1 (`solver.rs`, `BOUNCE_THRESHOLD`;
     Box2D's `b2WorldDef::restitutionThreshold`);
+  - restitution's closing speed taken before the step's gravity, as
+    `b2PrepareContactsTask` stores `relativeVelocity` before
+    `b2_stageIntegrateVelocities`: one of the options weighed for
+    get-emj.56, a variant in 2D and 3D (`solver::Closing::Before`;
+    physics.md, "Bounces");
   - graph coloring for a parallel solve, with contacts on a static body
     kept out of color 0, and SIMD batches of a color's contacts
     (`engine/std/physics/tests/parallel_solver.rs`, measured only; Box2D

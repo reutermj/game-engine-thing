@@ -26,8 +26,8 @@ use std::time::Instant;
 use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
 pub use physics3d::{
-    Anchors, AngularVelocity, Body, BoxBox, Carry, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS, Manifold, Mat3,
-    Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
+    Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS,
+    Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
 };
 use solver::{Constraint, ContactPoint, SolverBody};
 
