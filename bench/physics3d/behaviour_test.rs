@@ -164,11 +164,10 @@ fn a_ball_rebounds_to_about_e_squared_of_its_drop() {
 /// Above e = 0.5, and lossless: Rapier and Box3D rebound to 0.554 and 0.557
 /// at 0.75 (e² = 0.5625), 0.996 and 0.999 at 1, where a lossless ball keeps
 /// 0.96 and 0.998 of its height after 9 bounces (Jolt 0.53, damped). Ours
-/// rebounds to 0.575 and 1.032, and the lossless ball climbs to 1.31 of
-/// its drop in 9, as 2D's does (get-emj.56): each bounce returns a step's
-/// gravity more than it came in with (get-emj.60).
+/// 0.556 and 0.999, keeping 0.995. (History, 2026-09-29: 0.575 and 1.032,
+/// climbing to 1.31, restitution taking the closing speed with the step's
+/// gravity in it; get-emj.60.)
 #[test]
-#[ignore = "get-emj.60: a bounce returns a step's gravity more than it came in with"]
 fn a_ball_never_rebounds_higher_than_e_squared() {
     let cases = [(Kind::Bounce, 75), (Kind::Bounce, 100)];
     let runs = run(&cases);
@@ -217,18 +216,26 @@ fn heavy_cubes_stand_on_light_ones_sinking_less_than_in_rapier_and_box3d() {
 // `behaviour_long.rs`.
 
 /// No bounce of a sphere or a cube leaves with more energy than it came in
-/// with, to 1%, past what the push-out of its deepest overlap lifts it,
-/// nor a cube landing on an edge or a corner, which tips as it bounces
-/// (Rapier and Box3D: 0.000 each on this grid). Ours 0.061 (drops),
-/// 0.068 (rates), 0.046 (angled), and 0.394 tipping: the step's gravity,
-/// as in 2D (get-emj.56).
+/// with, to 1%, past what the push-out of its deepest overlap lifts it
+/// (Rapier and Box3D: 0.000 each on this grid). Ours 0.000; 0.061 (drops),
+/// 0.068 (rates) and 0.046 (angled) with the step's gravity in the closing
+/// speed (get-emj.60).
 #[test]
-#[ignore = "get-emj.60: a bounce returns a step of gravity more than it came in with"]
 fn bounces_leave_with_no_more_energy_than_they_came_in_with() {
     let mut broken = Broken::default();
     for name in ["drops", "rates", "oblique"] {
         broken.stat_most(&bounce_family(name, false), "excess worst", 0.01);
     }
+    broken.assert();
+}
+
+/// Nor does a cube landing on an edge or a corner, which tips as it
+/// bounces: Rapier and Box3D 0.000 on this grid. Ours 0.050, a slow cube
+/// on its edge at e = 1 (get-emj.72; 0.394 with the step's gravity in).
+#[test]
+#[ignore = "get-emj.72: a slow cube landing on an edge at e = 1 tips and leaves with more energy"]
+fn a_tipping_cube_leaves_with_no_more_energy_than_it_came_in_with() {
+    let mut broken = Broken::default();
     broken.stat_most(&bounce_family("drops", false), "excess tipping", 0.01);
     broken.assert();
 }
@@ -236,10 +243,9 @@ fn bounces_leave_with_no_more_energy_than_they_came_in_with() {
 /// A sphere, and a cube landing flat without friction, rebound at e of the
 /// speed they meet at, to 1% of the energy along the normal, and two free
 /// spheres part at e of their closing speed. Box3D 0.001 at most, Rapier
-/// 1.0 (it has no threshold); ours 0.061, 0.068 and 0.062, the pairs
-/// exactly.
+/// 1.0 (it has no threshold); ours 0.000 (0.061, 0.068 and 0.062 with the
+/// step's gravity in), the pairs exactly.
 #[test]
-#[ignore = "get-emj.60: a bounce returns a step of gravity more than it came in with"]
 fn a_bounce_rebounds_at_e_of_the_speed_it_meets_at() {
     let mut broken = Broken::default();
     for name in ["drops", "rates", "oblique", "pairs"] {
@@ -260,8 +266,8 @@ fn nothing_bounces_below_the_threshold() {
 
 /// Losses no worse than the references': Rapier's and Box3D's median
 /// square-on bounces −0.0330 and −0.0367 (drops), −0.0522 and −0.0554
-/// (rates), −0.0065 and −0.0053 (angled), none flat; ours 0.000, +0.0035,
-/// 0.000, none flat.
+/// (rates), −0.0065 and −0.0053 (angled), none flat; ours −0.040, −0.071,
+/// −0.005, none flat.
 #[test]
 fn bounces_lose_no_more_than_in_rapier_and_box3d() {
     let mut broken = Broken::default();
@@ -299,10 +305,10 @@ fn two_free_spheres_keep_their_momentum_through_a_bounce() {
 /// sphere keeps no more than e² of its height a bounce, nor less than the
 /// lower reference's median by a quarter more. Rapier and Box3D: highest
 /// 0.997 and 0.997, most kept 0.998 and 1.005 of e², median 0.978 and
-/// 0.984. Ours climbs to 5.43 of its drop, keeps up to 1.32 of e², a
-/// median 1.08.
+/// 0.984. Ours 0.998, 1.000, 0.984; with the step's gravity in the
+/// closing speed it climbed to 5.43 of its drop, kept up to 1.32 of e², a
+/// median 1.08 (get-emj.60).
 #[test]
-#[ignore = "get-emj.60: a bounce returns a step of gravity more than it came in with"]
 fn a_lossless_sphere_never_rises_and_a_sphere_keeps_e_squared_of_its_height() {
     let f = bounce_family("series", false);
     let mut broken = Broken::default();

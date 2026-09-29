@@ -6,14 +6,14 @@
 #     ./bazel run //engine/std/physics/compare:baseline -- --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
-quality    piles 400-1200 41                 rest_median          210        steps 100 or 20%
-quality    piles 400-1200 41                 first_rest_median    210        steps 130 or 25%
-quality    piles 400-1200 41                 depth_end_median     0.01166    rel 0.45 or 1e-4
-quality    piles 400-1200 41                 depth_end_worst      0.01406    rel 0.45 or 1e-4
-quality    piles 400-1200 41                 depth_during_median  0.2833     rel 0.45 or 1e-4
-quality    piles 400-1200 41                 mean_during_worst    0.0279     rel 0.3 or 1e-4
-quality    piles 400-1200 41                 energy_end_median    1.199e-11  log 10 under 1e-8
-quality    piles 400-1200 41                 contacts_least       1.337      rel 0.03
+quality    piles 400-1200 41                 rest_median          190        steps 100 or 20%
+quality    piles 400-1200 41                 first_rest_median    190        steps 130 or 25%
+quality    piles 400-1200 41                 depth_end_median     0.009499   rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_end_worst      0.0139     rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_during_median  0.2759     rel 0.45 or 1e-4
+quality    piles 400-1200 41                 mean_during_worst    0.02792    rel 0.3 or 1e-4
+quality    piles 400-1200 41                 energy_end_median    1.163e-11  log 10 under 1e-8
+quality    piles 400-1200 41                 contacts_least       1.34       rel 0.03
 quality    piles 400-1200 41                 escaped              0          exact
 quality    pyramid 15                        rest                 10         steps 10
 quality    pyramid 15                        top_moved            0.006166   rel 0.02 or 1e-4
@@ -33,14 +33,14 @@ quality    pyramid 25                        depth_end            0.001469   rel
 quality    pyramid 25                        tilt                 0          rel 0.1 or 0.01
 quality    pyramid 25                        energy_tail          5.503e-11  log 3 under 1e-8
 quality    pyramid 25                        escaped              0          exact
-quality    piles 400-1200 41 turning         rest_median          220        steps 100 or 20%
-quality    piles 400-1200 41 turning         first_rest_median    220        steps 130 or 25%
-quality    piles 400-1200 41 turning         depth_end_median     0.01439    rel 0.45 or 1e-4
-quality    piles 400-1200 41 turning         depth_end_worst      0.02365    rel 0.45 or 1e-4
-quality    piles 400-1200 41 turning         depth_during_median  0.3218     rel 0.45 or 1e-4
-quality    piles 400-1200 41 turning         mean_during_worst    0.0201     rel 0.3 or 1e-4
-quality    piles 400-1200 41 turning         energy_end_median    1.098e-9   log 10 under 1e-8
-quality    piles 400-1200 41 turning         contacts_least       1.89       rel 0.03
+quality    piles 400-1200 41 turning         rest_median          200        steps 100 or 20%
+quality    piles 400-1200 41 turning         first_rest_median    200        steps 130 or 25%
+quality    piles 400-1200 41 turning         depth_end_median     0.01432    rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         depth_end_worst      0.02458    rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         depth_during_median  0.3257     rel 0.45 or 1e-4
+quality    piles 400-1200 41 turning         mean_during_worst    0.02103    rel 0.3 or 1e-4
+quality    piles 400-1200 41 turning         energy_end_median    1.325e-10  log 10 under 1e-8
+quality    piles 400-1200 41 turning         contacts_least       1.915      rel 0.03
 quality    piles 400-1200 41 turning         escaped              0          exact
 quality    pyramid 15 turning                rest                 20         steps 10
 quality    pyramid 15 turning                top_moved            0.005971   rel 0.02 or 1e-4
@@ -102,20 +102,20 @@ quality    pyramid 50 turning rot/colored=4  depth_end            0.002963   rel
 quality    pyramid 50 turning rot/colored=4  tilt                 0.1458     rel 0.1 or 0.01
 quality    pyramid 50 turning rot/colored=4  energy_tail          5.366e-7   log 3 under 1e-8
 quality    pyramid 50 turning rot/colored=4  escaped              0          exact
-quality    pile 1000 41 sleeping             asleep_at            240        steps 60
-quality    pile 1000 41 turning sleeping     asleep_at            240        steps 60
+quality    pile 1000 41 sleeping             asleep_at            260        steps 60
+quality    pile 1000 41 turning sleeping     asleep_at            290        steps 60
 behaviour  ramp 20 0.6 box                   crept                1.152e-4   rel 0.05 or 2e-5
 behaviour  ramp 30 0.2 box                   a                    6.536      rel 0.002
 behaviour  ramp 30 0.6 disc                  a                    6.653      rel 0.002
 behaviour  ramp 30 0.6 disc                  slip                 0.0726     rel 0.03 or 1e-4
 behaviour  ramp 30 0.1 disc                  a                    8.277      rel 0.002
 behaviour  ramp 30 0.1 disc                  slip                 4.808      rel 0.03 or 1e-4
-behaviour  bounce 0.25                       first_apex           0.04373    rel 0.01
-behaviour  bounce 0.5                        first_apex           0.2442     rel 0.01
-behaviour  bounce 0.75                       first_apex           0.5791     rel 0.01
-behaviour  bounce 1                          first_apex           1.048      rel 0.01
-behaviour  bounce 1                          most_apex            1.639      rel 0.01
-behaviour  bounce 1                          last_apex            1.639      rel 0.01
+behaviour  bounce 0.25                       first_apex           0.04068    rel 0.01
+behaviour  bounce 0.5                        first_apex           0.2321     rel 0.01
+behaviour  bounce 0.75                       first_apex           0.552      rel 0.01
+behaviour  bounce 1                          first_apex           1          rel 0.01
+behaviour  bounce 1                          most_apex            1.002      rel 0.01
+behaviour  bounce 1                          last_apex            1.002      rel 0.01
 behaviour  ratio 10 1                        top_sank             0.001548   rel 0.03 or 1e-4
 behaviour  ratio 10 1                        deepest_at_end       0.001238   rel 0.03 or 1e-4
 behaviour  ratio 10 1                        stands               1          exact
@@ -207,23 +207,23 @@ behaviour  family dominoes                   good                 3          wit
 behaviour  family stacks                     good                 1          within 1
 behaviour  family ratios                     good                 2          within 1
 behaviour  family pyramids                   good                 1          within 1
-behaviour  bounces drops                     excess_worst         6.078      rel 0.05 or 0.001
-behaviour  bounces drops                     excess_tipping       0.1301     rel 0.05 or 0.001
-behaviour  bounces drops                     gain_worst           7.078      rel 0.05 or 0.001
-behaviour  bounces drops                     gain_median          0.01868    rel 0.05 or 0.001
-behaviour  bounces drops                     loss_worst           0.2608     rel 0.05 or 0.001
-behaviour  bounces drops                     bounced_below        6          within 4
-behaviour  bounces drops                     flat_above           2          within 4
-behaviour  bounces rates                     excess_worst         0.5553     rel 0.05 or 0.001
-behaviour  bounces rates                     gain_worst           0.5564     rel 0.05 or 0.001
-behaviour  bounces rates                     gain_median          0.04624    rel 0.05 or 0.001
-behaviour  bounces rates                     loss_worst           2.539      rel 0.05 or 0.001
+behaviour  bounces drops                     excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces drops                     excess_tipping       1.192e-7   rel 0.05 or 0.001
+behaviour  bounces drops                     gain_worst           1.355e-6   rel 0.05 or 0.001
+behaviour  bounces drops                     gain_median          -0.02319   rel 0.05 or 0.001
+behaviour  bounces drops                     loss_worst           1.008      rel 0.05 or 0.001
+behaviour  bounces drops                     bounced_below        0          within 4
+behaviour  bounces drops                     flat_above           8          within 4
+behaviour  bounces rates                     excess_worst         -0.001695  rel 0.05 or 0.001
+behaviour  bounces rates                     gain_worst           -0.001695  rel 0.05 or 0.001
+behaviour  bounces rates                     gain_median          -0.08233   rel 0.05 or 0.001
+behaviour  bounces rates                     loss_worst           1.008      rel 0.05 or 0.001
 behaviour  bounces rates                     bounced_below        0          within 2
-behaviour  bounces rates                     flat_above           0          within 2
-behaviour  bounces oblique                   excess_worst         0.08268    rel 0.05 or 0.001
-behaviour  bounces oblique                   gain_worst           0.1106     rel 0.05 or 0.001
-behaviour  bounces oblique                   gain_median          0.00104    rel 0.05 or 0.001
-behaviour  bounces oblique                   loss_worst           1.55e-5    rel 0.05 or 0.001
+behaviour  bounces rates                     flat_above           16         within 2
+behaviour  bounces oblique                   excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces oblique                   gain_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique                   gain_median          -1.55e-5   rel 0.05 or 0.001
+behaviour  bounces oblique                   loss_worst           0.03252    rel 0.05 or 0.001
 behaviour  bounces oblique                   bounced_below        0          within 1
 behaviour  bounces oblique                   flat_above           0          within 1
 behaviour  bounces oblique                   slip_worst           0          rel 0.05 or 0.001
@@ -231,6 +231,6 @@ behaviour  bounces oblique                   tangent_most         0.8268     rel
 behaviour  bounces oblique                   tangent_median       0.6632     rel 0.01 or 1e-4
 behaviour  bounces pairs                     gain_worst           2.384e-7   rel 0.05 or 0.001
 behaviour  bounces pairs                     momentum_worst       2.543e-5   rel 0.5 or 1e-4
-behaviour  bounces series                    rise_worst           10.18      rel 0.01 or 0.001
-behaviour  bounces series                    decay_worst          1.537      rel 0.01 or 0.001
-behaviour  bounces series                    decay_median         1.218      rel 0.01 or 0.001
+behaviour  bounces series                    rise_worst           0.9977     rel 0.01 or 0.001
+behaviour  bounces series                    decay_worst          1          rel 0.01 or 0.001
+behaviour  bounces series                    decay_median         0.983      rel 0.01 or 0.001

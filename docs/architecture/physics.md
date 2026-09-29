@@ -2945,8 +2945,10 @@ looser bound:
   lossless ball climbs to 1.64 of its drop in 12 bounces (3D 1.31 in 9),
   and e = 0.75 passes e². Below 0.5 every engine loses more to the soft
   contact than this adds, so it hides. Pong is spared: its ball has no
-  gravity. Its shape over a family of bounces, and the fixes weighed:
-  [Bounces](#bounces).
+  gravity. Fixed 2026-09-29: restitution takes the closing speed before
+  the step's gravity, as the references do, and the ball at e = 1 rebounds
+  to 1.000 of its drop and keeps 1.002 (3D 0.999 and 0.995); its shape
+  over a family of bounces, and the fixes weighed: [Bounces](#bounces).
 - **A heavy box on light ones comes to rest late** (get-emj.57): at
   1000:1 from 199 where the references rest from 41 and 29, and under the
   wide box from 69 where they rest from 34 and 33; at 100:1 (24) and on
@@ -3007,8 +3009,8 @@ flat on it.
 
 ## Bounces
 
-**Status: the families built; the fix measured, not chosen** (2026-09-29,
-get-emj.56 and get-emj.60). The drop above found that a lossless ball
+**Status: built; restitution takes a contact's closing speed as the step
+began, before its gravity** (2026-09-29, get-emj.56 and get-emj.60).[^bounce] The drop above found that a lossless ball
 climbs to 1.64 of its drop in 2D (1.31 in 3D), but one drop can't say how
 an error scales, and its drops at e ≤ 0.5 hid it. So restitution is judged
 on families: one bounce over a grid of what can decide it, 2D and 3D, ours
@@ -3194,39 +3196,68 @@ the gap (3) every one passes in 2D, and in 3D all but the energy test.
 Restitution ignored (planted: no closing speed at all) fails the losses
 test in 2D and 3D, beside the single drops' own.
 
-### The trade-off, not chosen
+### The decision: before the step's gravity
 
-No option meets every bound, so the default is still option 0 and the
-choice is left open (get-emj.56, .60):
+Restitution takes a contact's closing speed as the step began, before the
+gravity `integrate_velocities` added (`solver::Closing::Before`, and
+physics3d's `Closing::Before`, the default in both). Why:
 
-- **Before the step's gravity** (1), what every reference does. No 2D
-  bounce leaves with energy it didn't bring (0.000 on all 12 780), the
-  lossless ball never rises (0.998), nothing bounces under the threshold.
-  It loses up to a step of gravity, by where in the step it meets, as the
-  references do (the median long drop −0.018, theirs −0.063); but where a
-  step's gravity passes the threshold (30 Hz at gravity 80: 2.67 a step)
-  our wider speculative margin catches a falling body a step earlier than
-  theirs, at a slower speed, and more of its bounces go flat: 16 against 8
+- **It is what every reference does.** Box2D's `relativeVelocity`, Box3D's
+  and Rapier's restitution seed are all taken before the step's gravity.
+- **It can't add energy.** No bounce of the 12 780 in 2D's long grids
+  leaves with more than it came in with past the push-out's lift (0.000),
+  none in 3D's but the tipping cube, the lossless ball never rises (0.998
+  of its drop), and nothing under `BOUNCE_THRESHOLD` bounces. A bounce
+  loses up to a step of gravity instead, by where in the step it meets,
+  as the references' do (the median long drop −0.018 of its energy,
+  theirs −0.063).
+
+What it leaves, each an ignored test naming its bead:
+
+- **Bounces missed near the threshold at large g·dt** (get-emj.71): where
+  a step's gravity is large against the threshold (30 Hz at gravity 80:
+  2.67 a step), more bounces go flat than in the references (16 against 8
   on the short rates grid, 207 against 202 on the long, 25 against 14 in
-  3D.
-- **Grown over the gap** (3), ours. Unbiased (the median long drop
-  −0.001), the fewest flat (148 on the long drops, against Before's 502
-  and the references' 365 and 534), every default-suite bound in 2D met.
-  On the long grid 5 slow flat boxes at gravity 40 and 80 leave with 1.1%
-  past the push-out, 0.1% past the law's tolerance: the soft contact's
-  depth within a step, where the allowance is measured at a step's end.
-- **Both** leave get-emj.69's bounces (the restitution law's failures on
-  the long grids, and 1.08 of e² kept a bounce at 30 Hz and gravity 80)
-  and a slow tipping cube at e = 1 in 3D (0.050 and 0.062 past the
-  push-out, where the references are at 0.000 on the short grid; Box3D is
-  at 0.111 on the long). The games are left as they are by either: pong's
-  ball has no gravity, under which every option is option 0, and nothing
-  in the platformer has restitution.
+  3D's long drops), likely our wider speculative margin catching a body a
+  step early (get-emj.69).
+- **A bounce caught short of the floor** (get-emj.69): the restitution
+  law's failures on the long grids, and 1.08 of e² kept a bounce at 30 Hz
+  and gravity 80.
+- **A slow cube tipping onto its face at e = 1** in 3D (get-emj.72): 0.050
+  past the push-out on the short grid, where the references are at 0.000.
+- **Piles:** a bounce at restitution 0.1 (a pile's) returning a little
+  less is enough to move chaotic piles. Per-size bounds on them flipped
+  under every closing speed weighed, and were replaced by bounds on each
+  family's medians (physics-testing.md, "Families of a law"). Two family
+  medians it moves: the locked piles 401 wide rest from 240 against a bound
+  of 237 (230 before), a bound inside the family's measured spread
+  (get-emj.73; get-emj.67); and more of the locked piles 81 wide rest and
+  then move again (median 310, before 260, both ignored under
+  get-emj.63, where the rests are a clue).
 
-The families' tests hold the default to the laws it meets and are ignored,
-naming get-emj.56 or .60, where it doesn't (`:behaviour_test` and
-`:behaviour_long_test`, 2D and 3D), and every family's statistics are in
-the baselines, so whichever option is chosen shows as the values it moves.
+The games are as they were: pong's ball has no gravity, under which every
+closing speed is the same, and nothing in the platformer has restitution;
+both replay their routes unchanged. The baselines moved on the bounces
+alone (the families' statistics, the single drops' apexes), none of the
+piles' past its band.
+
+**Rejected: grown over the gap** (option 3), ours: the closing speed
+before the step's gravity grown by gravity over the gap left, or the
+step's fall. Unbiased (the median long drop −0.001) and the fewest flat
+(148 on the long drops against 502), but it adds energy where the gap
+isn't the fall: 5 slow flat boxes of the 11 180 long bounces leave 1.1%
+past the push-out, over the energy law, and uncapped it returned up to
+22% where a speculative contact catches a body short. It's also ours
+alone, where no reference does it. It stays a variant (`rot/closing=3`,
+`TUNE=closing=met`), with the others.
+
+[^bounce]: 2026-09-29: until then restitution took a contact's closing
+    speed with the step's gravity already in it (`Closing::Stepped`, still
+    a variant), which returned exactly one step of gravity more than a
+    bounce came in with: a lossless ball climbed to 1.64 of its drop in 2D
+    and 1.31 in 3D, and the bounce families' tests were ignored naming
+    get-emj.56 and .60. The families were built first, with the options
+    measured on them before one was chosen (above).
 
 ## Still at rest
 

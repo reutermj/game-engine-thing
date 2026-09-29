@@ -26,12 +26,21 @@ fn once<T: Clone>(slots: &Slots<T>, key: String, run: impl FnOnce() -> T) -> T {
 }
 
 /// Each of `items` through `f`, in threads of their own, the results in
-/// their order: a test's time is its slowest scene's.
+/// their order: a test's time is its slowest scene's. At most `WIDE` at
+/// once: a long bounce grid is 9900 runs, and several tests spawning that
+/// many side by side ran out of threads.
 pub fn par<A: Sync, T: Send>(items: &[A], f: impl Fn(&A) -> T + Sync) -> Vec<T> {
-    std::thread::scope(|s| {
-        let threads: Vec<_> = items.iter().map(|a| s.spawn(|| f(a))).collect();
-        threads.into_iter().map(|t| t.join().expect("a run panicked")).collect()
-    })
+    const WIDE: usize = 256;
+    let f = &f;
+    items
+        .chunks(WIDE)
+        .flat_map(|chunk| {
+            std::thread::scope(|s| {
+                let threads: Vec<_> = chunk.iter().map(|a| s.spawn(move || f(a))).collect();
+                threads.into_iter().map(|t| t.join().expect("a run panicked")).collect::<Vec<T>>()
+            })
+        })
+        .collect()
 }
 
 /// The variant `SOLVER` names in the environment (`variants.rs`), which

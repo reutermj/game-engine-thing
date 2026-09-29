@@ -73,23 +73,23 @@ quality    planks 2000-5000 turning  mean_during_worst    0.01349    rel 0.35 or
 quality    planks 2000-5000 turning  energy_end_median    1.589e-12  log 10 under 1e-8
 quality    planks 2000-5000 turning  partners_least       4.566      rel 0.25
 quality    planks 2000-5000 turning  escaped              0          exact
-behaviour  bounces drops             excess_worst         4.386      rel 0.05 or 0.001
-behaviour  bounces drops             excess_tipping       0.4117     rel 0.05 or 0.001
-behaviour  bounces drops             gain_worst           5.386      rel 0.05 or 0.001
-behaviour  bounces drops             gain_median          0          rel 0.05 or 0.001
-behaviour  bounces drops             loss_worst           0.4876     rel 0.05 or 0.001
-behaviour  bounces drops             bounced_below        14         within 1
-behaviour  bounces drops             flat_above           1          within 1
-behaviour  bounces rates             excess_worst         0.4234     rel 0.05 or 0.001
-behaviour  bounces rates             gain_worst           0.4234     rel 0.05 or 0.001
-behaviour  bounces rates             gain_median          0.007018   rel 0.05 or 0.001
-behaviour  bounces rates             loss_worst           0.4876     rel 0.05 or 0.001
+behaviour  bounces drops             excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces drops             excess_tipping       0.07883    rel 0.05 or 0.001
+behaviour  bounces drops             gain_worst           3.245e-4   rel 0.05 or 0.001
+behaviour  bounces drops             gain_median          -0.05831   rel 0.05 or 0.001
+behaviour  bounces drops             loss_worst           1.018      rel 0.05 or 0.001
+behaviour  bounces drops             bounced_below        0          within 1
+behaviour  bounces drops             flat_above           25         within 1
+behaviour  bounces rates             excess_worst         -9.324e-4  rel 0.05 or 0.001
+behaviour  bounces rates             gain_worst           -9.325e-4  rel 0.05 or 0.001
+behaviour  bounces rates             gain_median          -0.06128   rel 0.05 or 0.001
+behaviour  bounces rates             loss_worst           0.5758     rel 0.05 or 0.001
 behaviour  bounces rates             bounced_below        0          within 1
 behaviour  bounces rates             flat_above           0          within 1
-behaviour  bounces oblique           excess_worst         0.05817    rel 0.05 or 0.001
-behaviour  bounces oblique           gain_worst           0.06213    rel 0.05 or 0.001
-behaviour  bounces oblique           gain_median          0          rel 0.05 or 0.001
-behaviour  bounces oblique           loss_worst           0.06679    rel 0.05 or 0.001
+behaviour  bounces oblique           excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces oblique           gain_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique           gain_median          -0.004767  rel 0.05 or 0.001
+behaviour  bounces oblique           loss_worst           0.0742     rel 0.05 or 0.001
 behaviour  bounces oblique           bounced_below        0          within 1
 behaviour  bounces oblique           flat_above           0          within 1
 behaviour  bounces oblique           slip_worst           0          rel 0.05 or 0.001
@@ -97,6 +97,6 @@ behaviour  bounces oblique           tangent_most         0.9198     rel 0.01 or
 behaviour  bounces oblique           tangent_median       0.7109     rel 0.01 or 1e-4
 behaviour  bounces pairs             gain_worst           2.384e-7   rel 0.05 or 0.001
 behaviour  bounces pairs             momentum_worst       4.069e-5   rel 0.5 or 1e-4
-behaviour  bounces series            rise_worst           19.79      rel 0.01 or 0.001
-behaviour  bounces series            decay_worst          1.322      rel 0.01 or 0.001
-behaviour  bounces series            decay_median         1.059      rel 0.01 or 0.001
+behaviour  bounces series            rise_worst           0.9988     rel 0.01 or 0.001
+behaviour  bounces series            decay_worst          0.9999     rel 0.01 or 0.001
+behaviour  bounces series            decay_median         0.9779     rel 0.01 or 0.001

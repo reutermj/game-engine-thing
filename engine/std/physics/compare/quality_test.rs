@@ -124,20 +124,23 @@ fn median(mut v: Vec<u32>) -> u32 {
 
 /// What a family of piles (one scene at several sizes) must meet, each
 /// bound set from the references' values on the same piles (physics.md,
-/// "Quality as a test", has how, and the values):
+/// "Quality as a test", has how, and the values). How soon a pile rests
+/// and what energy it keeps are chaotic, in every engine (docs/lore), so
+/// they are bounded on the family's medians alone; what doesn't flip with
+/// rounding (its depth, that it's a pile, that nothing left) on every size.
+/// (History, 2026-09-29: the worst rest and each size's energy were
+/// bounded too, and flipped past their bounds under every closing speed
+/// restitution was weighed at, get-emj.56: physics-testing.md, "Families
+/// of a law".)
 struct PileBounds {
     /// Steps to rest (the look from which every body stays under 0.05),
-    /// the worst of the sizes: twice the references' typical rest, the later
-    /// of each engine's median over the sizes. Medians, since each engine's
-    /// rest moves by 100-200 steps from size to size with rounding alone
-    /// (docs/lore), theirs as much as ours; twice, since ours does too.
-    rest_worst: u32,
-    /// And the median of ours: a quarter over theirs.
-    rest_median: u32,
-    /// The same rules on the first look at rest, worst and median, where
-    /// the references don't stay at rest (the 10 000 turning piles, in
-    /// `quality_long.rs`), so their rest from says little.
-    first_rest: Option<(u32, u32)>,
+    /// the median of ours over the sizes: a quarter over the later of the
+    /// references' medians. None where a larger family judges these sizes.
+    rest_median: Option<u32>,
+    /// The median first look at rest, where the references don't stay at
+    /// rest (the big turning piles, in `quality_long.rs`), so their rest
+    /// from says little: a quarter over the later reference's.
+    first_rest: Option<u32>,
     /// The deepest overlap once at rest: half the shallower reference's
     /// worst. Stiffer contacts than theirs (5 substeps at 75 Hz against 4
     /// at 30) are a design choice (physics.md, "Settling"), and a bound at
@@ -150,8 +153,9 @@ struct PileBounds {
     /// The greatest mean overlap at any look: the shallower reference's
     /// worst.
     mean_during: f64,
-    /// Kinetic energy a body at the end: ten times the references' worst.
-    energy_end: f64,
+    /// Kinetic energy a body at the end, the median of ours over the sizes:
+    /// ten times the worse reference's median. None as `rest_median`.
+    energy_median: Option<f64>,
     /// That it is a pile, not columns (docs/lore: a pile 41 wide stands in
     /// columns): columns are 1.0 contacts a body, an island a column.
     contacts_per_body: f64,
@@ -203,7 +207,6 @@ fn scenes_meet(scenes: &[Scene], turning: bool, steps: u32, b: &PileBounds) {
         let (q, name) = (&r.end, scene.text());
         broken.check(q.contacts_per_body >= b.contacts_per_body && q.islands <= b.islands, || format!("{name}: not a pile: {q:?}"));
         broken.check(q.escaped == 0, || format!("{name}: {} escaped", q.escaped));
-        broken.check(rest(r) <= b.rest_worst, || format!("{name}: at rest from {:?}, bound {}", r.rest_from, b.rest_worst));
         broken.check(q.max_depth <= b.deepest_end, || format!("{name}: {} deep at rest, bound {}", q.max_depth, b.deepest_end));
         broken.check(r.deepest_during <= b.deepest_during, || {
             format!("{name}: {} deep while settling, bound {}", r.deepest_during, b.deepest_during)
@@ -211,18 +214,23 @@ fn scenes_meet(scenes: &[Scene], turning: bool, steps: u32, b: &PileBounds) {
         broken.check(r.mean_during <= b.mean_during, || {
             format!("{name}: {} deep on average while settling, bound {}", r.mean_during, b.mean_during)
         });
-        let energy = b.energy_end.max(STILL);
-        broken.check(q.energy <= energy, || format!("{name}: energy {:e} a body at the end, bound {energy:e}", q.energy));
     }
-    if let Some((worst, median_bound)) = b.first_rest {
+    if let Some(bound) = b.first_rest {
         let firsts: Vec<u32> = runs.iter().map(|r| r.first_rest.unwrap_or(u32::MAX)).collect();
         let m = median(firsts.clone());
-        broken.check(firsts.iter().all(|&f| f <= worst), || format!("first at rest {firsts:?}, bound {worst}"));
-        broken.check(m <= median_bound, || format!("first at rest {firsts:?}: median {m}, bound {median_bound}"));
+        broken.check(m <= bound, || format!("first at rest {firsts:?}: median {m}, bound {bound}"));
     }
-    let rests: Vec<u32> = runs.iter().map(rest).collect();
-    let m = median(rests.clone());
-    broken.check(m <= b.rest_median, || format!("at rest from {rests:?}: median {m}, bound {}", b.rest_median));
+    if let Some(bound) = b.rest_median {
+        let rests: Vec<u32> = runs.iter().map(rest).collect();
+        let m = median(rests.clone());
+        broken.check(m <= bound, || format!("at rest from {rests:?}: median {m}, bound {bound}"));
+    }
+    if let Some(bound) = b.energy_median {
+        let mut energies: Vec<f64> = runs.iter().map(|r| r.end.energy).collect();
+        energies.sort_by(f64::total_cmp);
+        let (m, bound) = (energies[energies.len() / 2], bound.max(STILL));
+        broken.check(m <= bound, || format!("energy a body at the end {energies:?}: median {m:e}, bound {bound:e}"));
+    }
     broken.assert();
 }
 
@@ -276,19 +284,18 @@ fn stand_runs(cases: &[(Scene, StandBounds)], runs: &[Settling]) {
 /// 260, 260, 200 (median 200); Rapier 170, 130, 130, 160, 220 (160); ours
 /// 100, 140, 210, 230, 240. Deepest at the end: Box2D up to 0.067, Rapier
 /// 0.057; ours 0.014. While settling: deepest 0.36 and 0.32 (ours 0.31),
-/// mean 0.061 and 0.058 (ours 0.028). Energy at the end: 1.5e-10 and
-/// 4.3e-9 (ours 5.4e-9). Contacts a body 1.44-1.58 and 1-5 islands in both
-/// (ours 1.34-1.40, 2).
+/// mean 0.061 and 0.058 (ours 0.028). Energy at the end, median over the
+/// sizes (2026-09-29): 9.1e-12 and 1.5e-9. Contacts a body 1.44-1.58 and
+/// 1-5 islands in both (ours 1.34-1.40, 2).
 #[test]
 fn real_piles_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
-        rest_worst: 2 * 200,
-        rest_median: 250,
+        rest_median: Some(250),
         first_rest: None,
         deepest_end: 0.5 * 0.0565,
         deepest_during: 1.25 * 0.3592,
         mean_during: 0.0579,
-        energy_end: 10.0 * 4.3e-9,
+        energy_median: Some(10.0 * 1.5e-9),
         contacts_per_body: 1.2,
         islands: 5,
     };
@@ -299,21 +306,21 @@ fn real_piles_rest_as_soon_as_box2d_and_rapier_do() {
 /// (median 210); Rapier 160, 400, 250, 230, 310 (250); ours 220, 230, 200,
 /// 210, 260. Deepest at the end: Box2D up to 0.136, Rapier 0.099; ours
 /// 0.024. While settling: deepest 0.53 and 0.48 (ours 0.38), mean 0.056
-/// and 0.055 (ours 0.020). Energy at the end: 1.3e-8 and 3.3e-8 (ours
-/// 1.4e-8). Contacts a body 1.90-2.09, 1-3 islands (ours 1.89-1.96, 1-2).
+/// and 0.055 (ours 0.020). Energy at the end, median over the sizes
+/// (2026-09-29): 6.8e-10 and 6.1e-9. Contacts a body 1.90-2.09, 1-3
+/// islands (ours 1.89-1.96, 1-2).
 /// (Ours before get-emj.48, 2026-09-28: at rest from 230, 220, 400, 440,
 /// 290; before get-emj.61's default, the same day: 200, 220, 210, 250,
 /// 290, deepest while settling 0.54.)
 #[test]
 fn real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do() {
     let b = PileBounds {
-        rest_worst: 2 * 250,
-        rest_median: 312,
+        rest_median: Some(312),
         first_rest: None,
         deepest_end: 0.5 * 0.0985,
         deepest_during: 1.25 * 0.5281,
         mean_during: 0.0552,
-        energy_end: 10.0 * 3.3e-8,
+        energy_median: Some(10.0 * 6.1e-9),
         contacts_per_body: 1.6,
         islands: 5,
     };

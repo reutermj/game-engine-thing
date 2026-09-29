@@ -354,10 +354,11 @@ pub enum Carry {
 /// whose options for get-emj.60 these are (physics.md, "Bounces").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Closing {
-    /// Its closing speed with the step's gravity in it.
-    #[default]
+    /// Its closing speed with the step's gravity in it: until 2026-09-29
+    /// (get-emj.60).
     Stepped,
     /// As the step began, before its gravity: Box3D's `relativeVelocity`.
+    #[default]
     Before,
     /// With half the step's gravity.
     Half,

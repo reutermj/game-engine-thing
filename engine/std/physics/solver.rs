@@ -138,16 +138,18 @@ pub struct Params {
 /// `BOUNCE_THRESHOLD`: its closing speed as the step found it, before or
 /// after the step's gravity, which `integrate_velocities` has already added
 /// to every body's velocity (`SolverBody::gravity`). The options weighed
-/// for get-emj.56 (physics.md, "Bounces"); the others than the default are
-/// the comparison's variants.
+/// for get-emj.56 (physics.md, "Bounces"): `Before` is the default, what
+/// every reference does and the one that can't return energy a body didn't
+/// bring; the others are the comparison's variants.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Closing {
-    /// With the step's gravity in it.
+    /// With the step's gravity in it: until 2026-09-29, when it returned a
+    /// step of gravity more than a bounce came in with (get-emj.56).
     Stepped,
     /// As the step began, before its gravity: Box2D's `relativeVelocity`,
     /// taken at `b2PrepareContactsTask` before its substeps' gravity, as
-    /// Rapier's and Box3D's are.
+    /// Rapier's and Box3D's are. The default.
     Before,
     /// With half the step's gravity: the speed half a step on.
     Half,
@@ -259,7 +261,7 @@ pub const PARAMS: Params = Params {
     block: false,
     wide: Wide::Colored(4),
     carry: Carry::Normal,
-    closing: Closing::Stepped,
+    closing: Closing::Before,
 };
 
 impl Params {

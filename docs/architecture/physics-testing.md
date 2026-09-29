@@ -460,7 +460,41 @@ the substeps. What building them taught:
   person rather than one being fitted.
 - **Mind the instances.** A 3D run of ours is an engine with its mods
   loaded; one process ran out of room to map them near its 2300th, so the
-  3D grids are about 1500 runs and the runs go 64 at a time.
+  3D grids are about 1500 runs and the runs go 64 at a time (2D's 256:
+  9900 threads at once ran out).
+
+**Chaotic scenes are bounded on their families alone** (2026-09-29).
+Taking restitution's closing speed before the step's gravity moved every
+pile a little (their bodies bounce at 0.1), and six per-size bounds of the
+2D long suite broke: a pile of 700 at rest from 700 (bound 500), piles of
+8000 and 10 000 401 wide never at rest or from 2500 (2450), one's energy,
+the three big piles' median. They weren't a regression: every other
+closing speed weighed broke a different set of them (two to eight), and
+only the one they were set on passed them all, while the baseline's
+family statistics moved within their bands. So the pile tests
+(`quality_test.rs`, `quality_long.rs`, `PileBounds`) now bound each
+family's median rest (the median first look at rest where piles move
+again), and median energy by ten times the worse reference's median,
+measured again on exactly the families' sizes. Per size they keep only
+what didn't flip under any option: depth, contacts a body and islands,
+nothing escaped. The worst rest is gone everywhere: one pile decides it,
+in the references as in ours (lore, a reference engine's rest is as
+chaotic as ours), and nothing measured showed any reference's worst
+stable. The three-size families are judged by the eight-size ones around
+them. Both defaults were run on the new bounds, so the shape wasn't
+chosen for the new one: the old passes all but one family (81 wide,
+turning, already ignored), the new all but two (below).
+
+**The limit it exposed: a family bound from the references can sit
+inside the chaos band.** The locked piles 401 wide are bounded at 237, a
+quarter over the references' median of 190; ours were 230 and are 240,
+where a family's median moves by up to 90 steps with rounding ("What the
+spread says"). A bound 7 steps from ours can't tell a change from noise
+(get-emj.73, its test ignored). The answer is more sizes or seeds per
+family, so the median itself moves less (get-emj.67), not a looser rule.
+The other family it moved, the locked piles 81 wide (median 310 against
+275, 260 before), is more piles resting and moving again, get-emj.63's
+own mechanism: a clue there, not noise.
 
 ### A time budget for the default suite
 
