@@ -1,8 +1,8 @@
 # Physics regression testing
 
 **Status: the baseline, the calibration tests and the wider families
-built** (2026-09-28, get-emj.62); the sleep scenes and `-c opt` for the
-default suite not yet (get-emj.68, get-emj.66). How physics is kept from
+built** (2026-09-28, get-emj.62), and every build optimized by default
+(get-emj.66); the sleep scenes not yet (get-emj.68). How physics is kept from
 getting worse as it changes, including the changes that are meant to
 improve it: the layers of tests as they stand, and the one added, a
 record of our own accepted results that every change is compared against
@@ -199,13 +199,13 @@ the floor" or "suspiciously better" gets an explicit yes or no.
     looked enough; sizes 10% away moved it 80, and the wider families' by
     up to 250. The bands above hold every run of both.
 - **Regenerating:** one command writes the file from a run:
-  `./bazel run -c opt //engine/std/physics/compare:baseline -- --write`
-  (`--long` for the long file, about a minute at -c opt; 3D's is
+  `./bazel run //engine/std/physics/compare:baseline -- --write`
+  (`--long` for the long file, about a minute; 3D's is
   `//bench/physics3d:baseline`). Bazel runs it with
   `BUILD_WORKSPACE_DIRECTORY` set, so it writes into the source tree.
   Without `--write` it prints the comparison as a table: old, new, band,
   and *better*, *worse* or *moved* for each value past its band (`--all`:
-  every value). Fastbuild and -c opt write the same file (checked: the
+  every value). Unoptimized and optimized builds write the same file (checked: the
   steps are the same arithmetic), the default suite's in 51 s and 1 s.
   `SOLVER=<variant>` (3D: `TUNE=`) compares a variant against the
   baseline, as the tests take it.
@@ -436,28 +436,25 @@ solvers.
   suite running beside it, `:quality_test` takes 66 s. It is over the
   budget, and was before this work (58 s beside the other physics
   targets).
-- **Long suite** (manual targets, `-c opt`): everything else, with its
+- **Long suite** (manual targets): everything else, with its
   own baseline. It runs before merging any change to the solver, the
   narrowphase, sleep or the step, and its baseline diff goes in that
   commit. Measured: `compare:quality_long_test` 80 s,
   `behaviour_long_test` 4 s, `physics3d:quality_long_test` 86-130 s.
-- **Compiling physics tests at `-c opt`, measured (not adopted):** the
-  default targets at `-c opt` run in 1.2 s (`:quality_test`, from 49 s),
-  0.6 s (`:behaviour_test`, from 7.7), 2.0 s (3D's quality, from 17.5)
-  and 0.1 s: forty times less, since the scenes are compute-bound and
-  fastbuild runs them unoptimized. The results are bit for bit
-  the same (the baseline tool writes the same file in both). The cost: a
-  rebuild after a solver edit takes 4.7 s at `-c opt` against 1.5 s, a
-  one-time build of the engine, the loader and the physics mods in a
-  second configuration (the comparisons build it already), and a rule:
-  Bazel can't set `-c opt` per target from a BUILD file, so each physics
-  test would become a small wrapping rule with an outgoing transition on
-  `compilation_mode` (or the `with_cfg.bzl` module's generic one), which
-  forwards the test's runfiles and environment. About 40 lines of
-  Starlark in `engine/defs.bzl` or a `physics_test` macro; the clippy
-  and rustfmt aspects follow the transition. It would bring the default
-  suite well within the budget, and let the long suites' scenes move
-  into the default suite. The decision is the user's (get-emj.66).
+- **Every build is optimized** (`.bazelrc`, 2026-09-28, get-emj.66),
+  with debug assertions and overflow checks kept on, so tests check what
+  they did unoptimized. The default suite runs in about 36 s, a full
+  rebuild included: `:quality_test` 1.0 s (from 49), `physics_test` 2.8 s
+  (from 25), pong's reload test 3.4 s (from 32). The results are bit for
+  bit the same (the baselines pass unchanged; rustc doesn't reorder float
+  arithmetic). The cost is a few seconds per physics rebuild (the physics
+  mod 1.2 s to 3.9 s after a solver edit, 2.1 s to 5.7 s after an ECS
+  edit). One mode everywhere also means a hot reload never loads a mod
+  built in another mode than the engine. Timings go through
+  `--config=bench`, which turns the checks off: with them on, physics's
+  stages run 3-14% slower (narrowphase 1052 against 920 µs on a turning
+  pile of 10 000). This makes the budget above easy to keep, and long
+  suites' scenes can move into the default suite.[^opt]
 
 ### Game acceptance tests
 
@@ -498,8 +495,8 @@ which values moved, which way, and why that's accepted.
 3. ~~Wider families in the long suites, measured in the references.~~
    Done; they found get-emj.63 and get-emj.65, and settled get-emj.62.
 4. The sleep scenes (get-emj.68).
-5. Move the default suite within budget: `-c opt` measured, forty times
-   faster, awaiting a yes (get-emj.66).
+5. ~~Move the default suite within budget~~: every build optimized
+   (get-emj.66).
 6. ~~Runbook 005 and CLAUDE.md: when to regenerate, the merge rule.~~
    Done.
 7. Tighter pile bands from more sizes or seeds per family (get-emj.67).
@@ -515,3 +512,9 @@ which values moved, which way, and why that's accepted.
 - **Who reviews a baseline diff** when an agent makes the change? The
   proposal is that the agent's report leads with the diff's table, and
   merging needs your yes when anything moves the worse way.
+
+[^opt]: 2026-09-28: before, builds were unoptimized (`fastbuild`, Bazel's
+    default), and optimized ones were asked for with `-c opt`. A
+    per-target transition for the physics tests alone was measured
+    (about 40 lines of Starlark, a second build configuration) and
+    passed over for one mode everywhere.

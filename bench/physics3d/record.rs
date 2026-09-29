@@ -18,7 +18,7 @@ pub const DEFAULT: &str = include_str!("baseline.txt");
 pub const LONG: &str = include_str!("baseline_long.txt");
 
 pub const WRITE: &str = "./bazel run //bench/physics3d:baseline -- --write";
-pub const WRITE_LONG: &str = "./bazel run -c opt //bench/physics3d:baseline -- --long --write";
+pub const WRITE_LONG: &str = "./bazel run //bench/physics3d:baseline -- --long --write";
 
 /// The piles of the default suite: `scenes.rs`'s, each size its own seeded
 /// drop, so its own pile, and judged over the four.

@@ -5,9 +5,9 @@
 //! them), set as 2D's are (//engine/std/physics/compare:behaviour_test;
 //! physics.md, "Quality beyond settling"). The values are from
 //!
-//!     ./bazel run -c opt //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
-//!     ./bazel run -c opt //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
-//!     ./bazel run -c opt //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
+//!     ./bazel run --config=bench //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+//!     ./bazel run --config=bench //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
+//!     ./bazel run --config=bench //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
 //!
 //! `TUNE=<variant>` runs ours tuned so, as in `:quality_test`. A test that
 //! finds a real problem stays, ignored, naming its bead.

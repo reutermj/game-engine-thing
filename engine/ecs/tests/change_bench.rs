@@ -1,6 +1,6 @@
 //! What a structural change costs, by part, per change: sparse inserts and
 //! removes against table ones, at 100, 1000 and 10 000 changes a system
-//! run, out of 20 000 rows. `./bazel run -c opt //engine/ecs:change_bench`.
+//! run, out of 20 000 rows. `./bazel run --config=bench //engine/ecs:change_bench`.
 //!
 //! Two ways: a harness frame, timing the system (which logs the changes)
 //! and its apply node (footprint, guards, applying) against the same frame

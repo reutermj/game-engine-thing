@@ -1,7 +1,7 @@
 //! How much of the fire scenario runs at once, per variant: frame times on
 //! one thread and on several, and one frame's timeline.
 //!
-//!   ./bazel run -c opt //engine/ecs:bench
+//!   ./bazel run --config=bench //engine/ecs:bench
 
 use std::time::{Duration, Instant};
 

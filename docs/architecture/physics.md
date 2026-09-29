@@ -405,7 +405,7 @@ it takes 713 on the columns ([Parallel solving](#parallel-solving), timed
 alone; in the step, below, 1428 and 760). The same comparison on the real
 pile is [after the table's causes](#the-real-pile).
 
-2026-09-24. `./bazel run -c opt //engine/std/physics:tax` runs a pile in
+2026-09-24. `./bazel run --config=bench //engine/std/physics:tax` runs a pile in
 the engine to the frame to measure, copies its whole state (bodies, and
 contacts with their impulses) into plain arrays, and runs the same steps
 both ways: the mod in the world, and the same step on arrays, with the same
@@ -462,7 +462,7 @@ What took it there:
   walk with no sparse filters also skips the filter check (`Query::passes`).
   A row of three terms went from 5.4 ns to 2.1 on a spatial table and 1.0
   on 256-row pages, where a `Vec` of the values copies at 0.4 to 1.4
-  (`./bazel run -c opt //engine/ecs:query_bench`).
+  (`./bazel run --config=bench //engine/ecs:query_bench`).
 - **Page walks** (`for_each_page`, `for_each_ordered_page`) hand a system
   each page's columns whole: `&[T]`, or a `ColumnMut<T>` that stamps a
   row's tick on `set` or the whole page's on `write_all`. Merging and
@@ -494,7 +494,7 @@ What took it there:
   separate allocations, so there's no flat index into the world's memory
   to solve over.
   Taken apart one cause at a time, the same solve bit for bit at 10 000
-  settled (`./bazel run -c opt //engine/std/physics:solver_layout`), from
+  settled (`./bazel run --config=bench //engine/std/physics:solver_layout`), from
   791 µs on the copy:
   - *Layout* isn't it. SoA over the same flat index is 780, and the holes
     of spatial pages (9.5 rows in 16) cost nothing: flat arrays indexed
@@ -1128,7 +1128,7 @@ sleeping tests use 1000 for the real pile, and check the count.
 **Status: measured, not built** (2026-09-24, get-emj.30). The solver is
 one thread, sequential impulses over contacts in pair order. How far it
 parallelizes was measured on arrays, outside the mod:
-`./bazel run -c opt //engine/std/physics:parallel_solver` takes the solver's
+`./bazel run --config=bench //engine/std/physics:parallel_solver` takes the solver's
 input from piles run in the engine (and a scene of separate stacks built
 there), and solves it three ways, each checked bit for bit:
 
@@ -1806,7 +1806,7 @@ cuboids. For convex shapes without a routine of their own parry takes the
 general route, GJK for the distance (or that they overlap) and EPA for the
 depth, then clips the faces the normal picks (`contact_manifold_pfm_pfm`).
 Both measured on the same 100 000 pairs of turned boxes, from 0.03 apart
-to sunk 0.12 (`./bazel run -c opt //engine/std/physics:narrow_bench`, two
+to sunk 0.12 (`./bazel run --config=bench //engine/std/physics:narrow_bench`, two
 runs):
 
 | way | ns a pair | contacts |
@@ -2496,7 +2496,7 @@ rest](#still-at-rest)).
 
 ### Against the others, turning
 
-`./bazel run -c opt //bench/physics3d:bench -- all 1000,10000 all --rotate`
+`./bazel run --config=bench //bench/physics3d:bench -- all 1000,10000 all --rotate`
 (and without `--rotate` for locked). One thread, sleeping off, every engine
 at its defaults (Rapier 4 substeps at 30 Hz; Jolt 10 velocity and 2
 position iterations; Box3D 4 substeps at 30 Hz; ours 5 substeps at 60 Hz, 2
@@ -2791,7 +2791,7 @@ neither end of our contact turns, it keeps no point, only a normal and a
 depth, and the view puts one on the smaller body's face (a square). It is
 test and bench code: nothing renders in the physics mod.
 
-    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run -c opt //engine/std/physics/compare
+    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run --config=bench //engine/std/physics/compare
 
 (runbook 005, "The debug view"). Behaviour scenes are drawn turning, as
 they run; `TURN=1` turns the others; `ENGINES` picks the columns.
@@ -2848,7 +2848,7 @@ sliding.
 
 ### Results, 2D
 
-`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare`
+`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/compare`
 (2026-09-28; Box2D v3.1.1, continuous on; Rapier 0.36 as shipped, its CCD
 changing nothing here; ours re-run on get-emj.61's default the same day).
 Deterministic, one run. The mod and the arrays agree on every scene to
@@ -2900,7 +2900,7 @@ the paddle's 48. Box2D sweeps fast bodies against statics
 
 ### Results, 3D
 
-`./bazel run -c opt //bench/physics3d:bench -- <scene> <n> all --rotate --behave`
+`./bazel run --config=bench //bench/physics3d:bench -- <scene> <n> all --rotate --behave`
 (2026-09-28; Rapier 3D 0.36, Jolt 5.6, Box3D 0.1, each at its defaults).
 
 | scene | expected | ours | Rapier | Jolt | Box3D |
@@ -3217,7 +3217,7 @@ is speed work alone.[^levels-default]
 ### Where the time went
 
 The solver alone, on the same inputs, timed by stage
-(`./bazel run -c opt //engine/std/physics/compare:solver_bench`, which
+(`./bazel run --config=bench //engine/std/physics/compare:solver_bench`, which
 captures the solver's input from the comparison's turning scenes at the
 steps it times; the stages by clocks put in a copy, since removed). µs
 per step, one thread, the turning pile of 10 000 (22 136 contacts, every

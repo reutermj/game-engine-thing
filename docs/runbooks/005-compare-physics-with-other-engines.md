@@ -15,7 +15,7 @@ one for the other differently.
 ## Resolution
 
 ```sh
-./bazel run -c opt //engine/std/physics/compare > compare.md
+./bazel run --config=bench //engine/std/physics/compare > compare.md
 ```
 
 About 25 minutes with `LONG=1`, 12 without, on this machine. It prints,
@@ -25,14 +25,14 @@ settled, each engine's own stages, and whether the arrays agreed with the
 mod bit for bit (they must, but for rain). Narrower runs:
 
 ```sh
-ONLY="pile 10000" REPS=5 ./bazel run -c opt //engine/std/physics/compare
-ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run -c opt //engine/std/physics/compare
-SLEEP=1 ./bazel run -c opt //engine/std/physics/compare   # each engine's default sleeping
-SETTLE=1500 ./bazel run -c opt //engine/std/physics/compare  # how soon each comes to rest
-VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run -c opt //engine/std/physics/compare
-TURN=1 ./bazel run -c opt //engine/std/physics/compare   # only bodies that turn
-TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run -c opt //engine/std/physics/compare
-./bazel run -c opt //engine/std/physics/compare:solver_bench   # the 2D solver alone, each way of solving
+ONLY="pile 10000" REPS=5 ./bazel run --config=bench //engine/std/physics/compare
+ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run --config=bench //engine/std/physics/compare
+SLEEP=1 ./bazel run --config=bench //engine/std/physics/compare   # each engine's default sleeping
+SETTLE=1500 ./bazel run --config=bench //engine/std/physics/compare  # how soon each comes to rest
+VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run --config=bench //engine/std/physics/compare
+TURN=1 ./bazel run --config=bench //engine/std/physics/compare   # only bodies that turn
+TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run --config=bench //engine/std/physics/compare
+./bazel run --config=bench //engine/std/physics/compare:solver_bench   # the 2D solver alone, each way of solving
 ```
 
 Every case runs twice by default: with rotation locked (every engine), as
@@ -83,9 +83,9 @@ says (a pile standing in columns, a body through a wall, a card house
 built wrong) measures as confidently as one that is.
 
 ```sh
-VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp ./bazel run -c opt //engine/std/physics/compare
-VIEW="ratio 1000 5" VIEW_STEPS=0,60,120 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run -c opt //engine/std/physics/compare
-TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run -c opt //engine/std/physics/compare
+VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp ./bazel run --config=bench //engine/std/physics/compare
+VIEW="ratio 1000 5" VIEW_STEPS=0,60,120 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run --config=bench //engine/std/physics/compare
+TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run --config=bench //engine/std/physics/compare
 ```
 
 - `VIEW` is any scene `Scene::parse` reads (`scene.rs`): the settling
@@ -111,13 +111,13 @@ TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run -c opt //engin
 ## The behaviour scenes
 
 ```sh
-BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare > behave.md
-SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run -c opt //engine/std/physics/compare
-FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run -c opt //engine/std/physics/compare   # the edge-of-stability families, short grids
-FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run -c opt //engine/std/physics/compare   # a long grid
-./bazel run -c opt //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
-./bazel run -c opt //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
-./bazel run -c opt //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
+BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/compare > behave.md
+SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run --config=bench //engine/std/physics/compare
+FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # the edge-of-stability families, short grids
+FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # a long grid
+./bazel run --config=bench //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+./bazel run --config=bench //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
+./bazel run --config=bench //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
 ```
 
 A table a scene of what each engine did (`behave.rs` in each), about a
@@ -144,11 +144,11 @@ better or worse.
   commit message or the report:
 
   ```sh
-  ./bazel run -c opt //engine/std/physics/compare:baseline          # 2D default, 1 s
-  ./bazel run -c opt //engine/std/physics/compare:baseline -- --long  # 2D long, about a minute
-  ./bazel run -c opt //bench/physics3d:baseline                    # 3D default, seconds
-  ./bazel run -c opt //bench/physics3d:baseline -- --long            # 3D long, about 90 s
-  SOLVER=rot/carry=0 ./bazel run -c opt //engine/std/physics/compare:baseline   # a variant against the baseline
+  ./bazel run //engine/std/physics/compare:baseline          # 2D default, 1 s
+  ./bazel run //engine/std/physics/compare:baseline -- --long  # 2D long, about a minute
+  ./bazel run //bench/physics3d:baseline                    # 3D default, seconds
+  ./bazel run //bench/physics3d:baseline -- --long            # 3D long, about 90 s
+  SOLVER=rot/carry=0 ./bazel run //engine/std/physics/compare:baseline   # a variant against the baseline
   ```
 
   Every value that moved past its band, with old, new, band and which
@@ -188,13 +188,13 @@ them again and set each bound by the rules in physics.md:
 
 ```sh
 # 2D, the default suite's scenes, and the long ones
-ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run -c opt //engine/std/physics/compare
-ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run -c opt //engine/std/physics/compare
+ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run --config=bench //engine/std/physics/compare
+ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run --config=bench //engine/std/physics/compare
 # 3D
-./bazel run -c opt //bench/physics3d:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
-./bazel run -c opt //bench/physics3d:bench -- boxes 200,300,400,500 all --runs=1
-./bazel run -c opt //bench/physics3d:bench -- stack 5,10,15,20 all --rotate --runs=1
-./bazel run -c opt //bench/physics3d:bench -- boxes,planks 10000 all --rotate --runs=1
+./bazel run --config=bench //bench/physics3d:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
+./bazel run --config=bench //bench/physics3d:bench -- boxes 200,300,400,500 all --runs=1
+./bazel run --config=bench //bench/physics3d:bench -- stack 5,10,15,20 all --rotate --runs=1
+./bazel run --config=bench //bench/physics3d:bench -- boxes,planks 10000 all --rotate --runs=1
 ```
 
 The quality numbers are deterministic, so one run each; about 5 minutes

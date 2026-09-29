@@ -1,5 +1,5 @@
 //! How far the solver parallelizes:
-//! `./bazel run -c opt //engine/std/physics:parallel_solver`
+//! `./bazel run --config=bench //engine/std/physics:parallel_solver`
 //! (`PIN=1` pins thread `i` to CPU `i`, `PIN=ccd` fills one CCD first;
 //! `QUICK=1` skips the settling runs; `ONLY=<text>` runs only the scenes
 //! whose names contain it; `DIAG=1` shows where colored solves wait).

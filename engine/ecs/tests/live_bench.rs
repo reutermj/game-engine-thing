@@ -4,7 +4,7 @@
 //! does, one row in a hundred flying, and everything falling. The state
 //! alone (`LivePairs`, whose margin and threshold the arguments set), and
 //! the same through a declared relation, `Live<R>`, at the defaults.
-//! `./bazel run -c opt //engine/ecs:live_bench [-- margin most]`.
+//! `./bazel run --config=bench //engine/ecs:live_bench [-- margin most]`.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};

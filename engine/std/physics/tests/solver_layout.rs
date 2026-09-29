@@ -1,5 +1,5 @@
 //! Why `solve` copies bodies out of the world, measured one cause at a
-//! time: `./bazel run -c opt //engine/std/physics:solver_layout`.
+//! time: `./bazel run --config=bench //engine/std/physics:solver_layout`.
 //!
 //! A pile of 10 000 runs in the engine to 400 steps (settled), then this
 //! takes the solver's input as the mod would gather it (bodies in the

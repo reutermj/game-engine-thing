@@ -1,5 +1,5 @@
 //! The turned-box narrowphase two ways, on the same pairs:
-//! `./bazel run -c opt //engine/std/physics:narrow_bench`.
+//! `./bazel run --config=bench //engine/std/physics:narrow_bench`.
 //!
 //! - **SAT and clipping**, Box2D's `b2CollidePolygons`: the face of least
 //!   separation on either box, the other box's most opposed face clipped to

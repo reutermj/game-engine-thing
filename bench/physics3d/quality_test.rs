@@ -9,7 +9,7 @@
 //! settling is chaotic; depth at half the shallower reference's. The values
 //! are from
 //!
-//!     ./bazel run -c opt //bench/physics3d:bench -- boxes 200,300,400,500 all --rotate --runs=1
+//!     ./bazel run --config=bench //bench/physics3d:bench -- boxes 200,300,400,500 all --rotate --runs=1
 //!
 //! `TUNE=<variant>` in the environment (`physics3d::Tuning::parse`) runs
 //! ours tuned so, which is how the bounds were checked to fail on the

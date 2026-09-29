@@ -6,7 +6,7 @@
 //! v3.1.1 and Rapier 2D 0.36 do on the same scene, recorded beside it and
 //! measured with
 //!
-//!     BEHAVE=1 VARIANTS=rapier:ccd ./bazel run -c opt //engine/std/physics/compare
+//!     BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/compare
 //!
 //! (runbook 005; physics.md, "Quality beyond settling", has the tables and
 //! says how each bound was set). Ours runs as the step on arrays, bit for

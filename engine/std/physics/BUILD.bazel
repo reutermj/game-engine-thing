@@ -147,7 +147,7 @@ rust_test(
     ],
 )
 
-#   ./bazel run -c opt //engine/std/physics:bench
+#   ./bazel run --config=bench //engine/std/physics:bench
 rust_binary(
     name = "bench",
     srcs = ["tests/bench.rs"],
@@ -162,12 +162,12 @@ rust_binary(
 
 # The ECS's cost over the same step on plain arrays, checked to be the same
 # computation bit for bit:
-#   ./bazel run -c opt //engine/std/physics:tax
+#   ./bazel run --config=bench //engine/std/physics:tax
 # and split across 1 to 16 threads, each checked bit for bit against one
 # (REPS and THREADS=1,2,.. in the environment override the defaults;
 # STICKY, SPIN_US and TASK_ALLOC change the pool and the arrays' lists: see
 # tests/pool.rs and tests/tax_par.rs):
-#   ./bazel run -c opt //engine/std/physics:tax -- parallel
+#   ./bazel run --config=bench //engine/std/physics:tax -- parallel
 rust_binary(
     name = "tax",
     srcs = [
@@ -191,7 +191,7 @@ rust_binary(
 
 # The turned-box narrowphase by SAT and clipping (as it is) against GJK and
 # EPA, on the same pairs (see the source):
-#   ./bazel run -c opt //engine/std/physics:narrow_bench
+#   ./bazel run --config=bench //engine/std/physics:narrow_bench
 rust_binary(
     name = "narrow_bench",
     srcs = [
@@ -205,7 +205,7 @@ rust_binary(
 # Why `solve` copies bodies out of the world: the same solve over the same
 # pile's contacts with bodies kept each way (layout, pages, derived inverse
 # mass, order, in the world's own pages), each checked bit for bit:
-#   ./bazel run -c opt //engine/std/physics:solver_layout
+#   ./bazel run --config=bench //engine/std/physics:solver_layout
 rust_binary(
     name = "solver_layout",
     srcs = [
@@ -227,7 +227,7 @@ rust_binary(
 # and over islands, on 1 to 32 threads, against `solver::solve`, over a
 # 10 000 pile's contacts and a scene of separate stacks; checked bit for
 # bit across thread counts, and for how well the pile settles:
-#   ./bazel run -c opt //engine/std/physics:parallel_solver
+#   ./bazel run --config=bench //engine/std/physics:parallel_solver
 rust_binary(
     name = "parallel_solver",
     srcs = [

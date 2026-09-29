@@ -1,5 +1,5 @@
 //! The step split across threads, stage by stage, in the ECS and on arrays:
-//! `./bazel run -c opt //engine/std/physics:tax -- parallel`.
+//! `./bazel run --config=bench //engine/std/physics:tax -- parallel`.
 //!
 //! Both sides run the same parallel algorithm: work in contiguous chunks
 //! (pages of a query, or ranges of an array), a few per thread, whose

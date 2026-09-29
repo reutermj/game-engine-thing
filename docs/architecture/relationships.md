@@ -109,7 +109,7 @@ persisting contact in the pass, not through `Query::with` by an index, and
 the solver reads contacts in order instead of sorting them.
 
 **In the physics mod**, the 1000-body pile's settled frame went from 0.348
-to 0.38 ms (`./bazel run -c opt //engine/std/physics:bench`), on a
+to 0.38 ms (`./bazel run --config=bench //engine/std/physics:bench`), on a
 simulation that comes out the same bit for bit, as do both games'
 replays:
 - `find_contacts` is a little faster (172–182 → 165 µs), since its merge

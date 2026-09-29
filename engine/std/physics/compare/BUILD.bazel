@@ -9,7 +9,7 @@ load("//engine:defs.bzl", "engine_game", "engine_mod")
 # See docs/architecture/physics.md, "Against other engines", and
 # docs/runbooks/005-compare-physics-with-other-engines.md.
 #
-#   ./bazel run -c opt //engine/std/physics/compare
+#   ./bazel run --config=bench //engine/std/physics/compare
 
 package(default_visibility = ["//visibility:private"])
 
@@ -135,7 +135,7 @@ rust_test(
 )
 
 # The same at 10 000 bodies: minutes, so manual, and meant for -c opt:
-#   ./bazel test -c opt //engine/std/physics/compare:quality_long_test
+#   ./bazel test //engine/std/physics/compare:quality_long_test
 rust_test(
     name = "quality_long_test",
     srcs = QUALITY_SRCS + ["quality_long.rs"],
@@ -168,7 +168,7 @@ rust_test(
 
 # The edge-of-stability families on their long grids (family.rs): minutes,
 # so manual, and meant for -c opt:
-#   ./bazel test -c opt //engine/std/physics/compare:behaviour_long_test
+#   ./bazel test //engine/std/physics/compare:behaviour_long_test
 rust_test(
     name = "behaviour_long_test",
     srcs = BEHAVIOUR_SRCS + ["behaviour_long.rs"],
@@ -185,7 +185,7 @@ rust_test(
 # every value the baseline records, run and compared with the file, the
 # ones that moved past their band printed; --write writes the file.
 #   ./bazel run //engine/std/physics/compare:baseline [-- --write]
-#   ./bazel run -c opt //engine/std/physics/compare:baseline -- --long [--write]
+#   ./bazel run //engine/std/physics/compare:baseline -- --long [--write]
 # The tests that check it are the quality and behaviour tests themselves,
 # whose runs it is recorded from (their test "baseline"): a target of its
 # own would run every scene a second time.
@@ -218,7 +218,7 @@ test_suite(
 
 # The 2D solver alone, on inputs captured from the comparison's turning
 # scenes: each way of solving that was weighed, timed on the same work.
-#   ./bazel run -c opt //engine/std/physics/compare:solver_bench
+#   ./bazel run --config=bench //engine/std/physics/compare:solver_bench
 rust_binary(
     name = "solver_bench",
     srcs = [

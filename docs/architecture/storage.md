@@ -508,7 +508,7 @@ beyond the equivalence tests.
 2026-09-23, `spike/ecs` (get-znt.10): tables in pages, sparse sets, typed
 structural buffers, apply nodes, and a thread pool running the plan with
 no barriers, on the walkthrough's scenario plus spawning, reaping and an
-unrelated `ui` system. `./bazel run -c opt //engine/ecs:bench` (the
+unrelated `ui` system. `./bazel run --config=bench //engine/ecs:bench` (the
 spike's, ported) prints the numbers and timelines below.
 
 **What held up:**

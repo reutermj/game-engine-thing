@@ -101,7 +101,7 @@ rust_binary(
 # --write writes it. The quality and behaviour tests check it, from their
 # own runs (their test "baseline").
 #   ./bazel run //bench/physics3d:baseline [-- --write]
-#   ./bazel run -c opt //bench/physics3d:baseline -- --long [--write]
+#   ./bazel run //bench/physics3d:baseline -- --long [--write]
 rust_binary(
     name = "baseline",
     srcs = ["baseline_main.rs"],
@@ -157,7 +157,7 @@ rust_test(
 )
 
 # The same at 1000 and 10 000 bodies: minutes, so manual, and meant for -c opt:
-#   ./bazel test -c opt //bench/physics3d:quality_long_test
+#   ./bazel test //bench/physics3d:quality_long_test
 rust_test(
     name = "quality_long_test",
     srcs = [

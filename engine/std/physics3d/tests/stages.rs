@@ -1,6 +1,6 @@
 //! Where a 3D pile's step goes, by stage, in the engine (the physics3d mod
 //! on pile3d's scenes, lockstep, one thread):
-//! `./bazel run -c opt //engine/std/physics3d:stages -- [n] [spheres|boxes|planks|rain] [locked]`.
+//! `./bazel run --config=bench //engine/std/physics3d:stages -- [n] [spheres|boxes|planks|rain] [locked]`.
 //! The comparison with other engines is //bench/physics3d; this is the
 //! breakdown behind it.
 

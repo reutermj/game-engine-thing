@@ -6,7 +6,7 @@
 //! 0.36 meet on the same scenes. The references aren't linked here: their
 //! values are recorded beside each bound, measured with
 //!
-//!     ENGINES=arrays,box2d,rapier SETTLE=700 SCENES=... ./bazel run -c opt //engine/std/physics/compare
+//!     ENGINES=arrays,box2d,rapier SETTLE=700 SCENES=... ./bazel run --config=bench //engine/std/physics/compare
 //!
 //! (runbook 005), and physics.md, "Quality as a test", says how each bound
 //! was set from them and how to refresh them.

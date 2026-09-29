@@ -6,7 +6,7 @@
 //! so the times are the solver stage of its "turning" cases without the
 //! rest of the step. What it measured: physics.md, "The solver's speed".
 //!
-//!     ./bazel run -c opt //engine/std/physics/compare:solver_bench
+//!     ./bazel run --config=bench //engine/std/physics/compare:solver_bench
 //!
 //! `ONLY=<scene text>` runs one scene; `REPS` (9) solves each input that
 //! many times, reporting the median.

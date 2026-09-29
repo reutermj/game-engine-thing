@@ -4,6 +4,20 @@ common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 
 try-import %workspace%/user.bazelrc
 
+# Optimized by default, tests and games alike. The physics tests are pure
+# number-crunching and run about 40 times faster (quality_test 49 s to about
+# 1 s, results bit for bit the same: rustc doesn't reorder float arithmetic),
+# and a game's physics is only realistic optimized. The cost is a few seconds
+# more per physics rebuild (the physics mod 1.2 s to 3.9 s after a solver
+# edit). One mode for the engine, its mods and its tests also means a hot
+# reload never loads a mod built in another mode than the engine it joins.
+# Debug assertions and overflow checks stay on, so tests check what they did
+# in fastbuild. --config=bench turns them off, for timings that match what
+# ships (the list setting, unlike extra_rustc_flag, is replaced, not added to).
+common --compilation_mode=opt
+common --@rules_rust//rust/settings:extra_rustc_flags=-Cdebug-assertions=on,-Coverflow-checks=on
+common:bench --@rules_rust//rust/settings:extra_rustc_flags=
+
 # rustc surfaces clang's "unused --unwindlib" note from the hermetic linker as a warning.
 common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker_messages
 common --@rules_rust//rust/settings:extra_exec_rustc_flag=-Alinker_messages

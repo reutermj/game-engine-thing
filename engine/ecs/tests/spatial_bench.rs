@@ -1,6 +1,6 @@
 //! The re-sort after writers (every row moved a hair, and 1% moved), and
 //! `near_pairs` and `in_region` on a pile-like layout, without physics:
-//! `./bazel run -c opt //engine/ecs:spatial_bench`.
+//! `./bazel run --config=bench //engine/ecs:spatial_bench`.
 
 use std::sync::Mutex;
 use std::time::Instant;

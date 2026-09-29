@@ -1,5 +1,5 @@
 //! //engine/std/physics against Box2D v3 and Rapier 2D, like for like, on
-//! one thread: `./bazel run -c opt //engine/std/physics/compare`.
+//! one thread: `./bazel run --config=bench //engine/std/physics/compare`.
 //!
 //! Every engine builds the same scenes from `scene.rs` (the same bodies,
 //! sizes, masses, friction, restitution and mixing, gravity and step, and

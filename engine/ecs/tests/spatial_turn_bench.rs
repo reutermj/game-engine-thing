@@ -1,5 +1,5 @@
 //! How a body's rotation reaches spatial storage, measured five ways on
-//! the same rows: `./bazel run -c opt //engine/ecs:spatial_turn_bench`.
+//! the same rows: `./bazel run --config=bench //engine/ecs:spatial_turn_bench`.
 //! A rotated box's bounds depend on its position, its rotation and its
 //! shape, where `SpatialKey` once took one key and one extent. The ways:
 //!

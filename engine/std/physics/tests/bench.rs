@@ -1,5 +1,5 @@
 //! Time per frame for piles of bodies, and where it goes, on the lockstep
-//! bootstrap: `./bazel run -c opt //engine/std/physics:bench`.
+//! bootstrap: `./bazel run --config=bench //engine/std/physics:bench`.
 
 use std::path::PathBuf;
 use std::time::Instant;

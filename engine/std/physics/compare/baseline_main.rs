@@ -5,7 +5,7 @@
 //!
 //!     ./bazel run //engine/std/physics/compare:baseline
 //!     ./bazel run //engine/std/physics/compare:baseline -- --write
-//!     ./bazel run -c opt //engine/std/physics/compare:baseline -- --long --write
+//!     ./bazel run //engine/std/physics/compare:baseline -- --long --write
 //!
 //! `--write` writes the file into the source tree (`bazel run` sets
 //! `BUILD_WORKSPACE_DIRECTORY`), after printing what it changes;

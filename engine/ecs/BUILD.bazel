@@ -84,7 +84,7 @@ rust_test(
 )
 
 # Frame times and timelines for the game scenario, sequential and parallel:
-# `./bazel run -c opt //engine/ecs:bench`, with `WORK=0` for the framework's
+# `./bazel run --config=bench //engine/ecs:bench`, with `WORK=0` for the framework's
 # own cost. Test-only because the scenario is.
 rust_binary(
     name = "bench",
@@ -118,14 +118,14 @@ rust_test(
     deps = [":ecs"],
 )
 
-#   ./bazel run -c opt //engine/ecs:live_bench [-- margin most]
+#   ./bazel run --config=bench //engine/ecs:live_bench [-- margin most]
 rust_binary(
     name = "live_bench",
     srcs = ["tests/live_bench.rs"],
     deps = [":ecs"],
 )
 
-#   ./bazel run -c opt //engine/ecs:spatial3d_bench
+#   ./bazel run --config=bench //engine/ecs:spatial3d_bench
 rust_binary(
     name = "spatial3d_bench",
     srcs = ["tests/spatial3d_bench.rs"],
@@ -134,14 +134,14 @@ rust_binary(
 
 # How rotation reaches spatial storage, five ways on the same rows (see the
 # source):
-#   ./bazel run -c opt //engine/ecs:spatial_turn_bench
+#   ./bazel run --config=bench //engine/ecs:spatial_turn_bench
 rust_binary(
     name = "spatial_turn_bench",
     srcs = ["tests/spatial_turn_bench.rs"],
     deps = [":ecs"],
 )
 
-#   ./bazel run -c opt //engine/ecs:spatial_bench
+#   ./bazel run --config=bench //engine/ecs:spatial_bench
 rust_binary(
     name = "spatial_bench",
     srcs = ["tests/spatial_bench.rs"],
@@ -164,7 +164,7 @@ rust_test(
 )
 
 # A query's cost per row, by how it's walked:
-#   ./bazel run -c opt //engine/ecs:query_bench
+#   ./bazel run --config=bench //engine/ecs:query_bench
 rust_binary(
     name = "query_bench",
     srcs = ["tests/query_bench.rs"],
@@ -172,7 +172,7 @@ rust_binary(
 )
 
 # What a structural change costs, by part, sparse against tables:
-#   ./bazel run -c opt //engine/ecs:change_bench
+#   ./bazel run --config=bench //engine/ecs:change_bench
 rust_binary(
     name = "change_bench",
     srcs = ["tests/change_bench.rs"],

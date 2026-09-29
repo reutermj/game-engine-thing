@@ -1,4 +1,4 @@
-//! ./bazel run -c opt //bench/physics3d:bench -- [scenes] [sizes] [backends] [flags]
+//! ./bazel run --config=bench //bench/physics3d:bench -- [scenes] [sizes] [backends] [flags]
 //!
 //! Each positional argument is a comma-separated list or "all" (the default):
 //! scenes are spheres, boxes, planks and rain; sizes are body counts (default

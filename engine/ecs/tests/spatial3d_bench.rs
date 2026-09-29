@@ -1,5 +1,5 @@
 //! Spatial storage in 3D against 2D, without physics:
-//! `./bazel run -c opt //engine/ecs:spatial3d_bench`. A dense pile (touching
+//! `./bazel run --config=bench //engine/ecs:spatial3d_bench`. A dense pile (touching
 //! bodies on a lattice) in 2D and in 3D, a 2D pile kept through a 3D key at
 //! z = 0 (what 2D would cost if storage were always 3D), and the re-sort
 //! with every row creeping and falling, each in both dimensions.

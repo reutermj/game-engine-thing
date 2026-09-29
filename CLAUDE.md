@@ -187,6 +187,12 @@ changing the ABI, the reload sequence or the Bazel rules.
 
 ## Working conventions
 
+- **Every build is optimized** (`.bazelrc`: `-c opt`, with debug
+  assertions and overflow checks kept on), tests and games alike: the
+  physics tests run about forty times faster than unoptimized, and one
+  mode everywhere means a hot reload never mixes modes. Time things with
+  `--config=bench`, which turns the checks off
+  ([physics-testing.md](docs/architecture/physics-testing.md)).
 - **Build and run through `./bazel`**, never `cargo build`/`cargo test`:
   Cargo uses a different toolchain and resolution path, so it can pass
   while the Bazel build is red. `cargo` is only for regenerating
@@ -234,7 +240,7 @@ changing the ABI, the reload sequence or the Bazel rules.
   behaviour tests (2D and 3D) check our own accepted results in
   `baseline.txt` beside their scenes, each within a band set from
   measured noise: a change that moves a value past its band, better or
-  worse, fails until `./bazel run -c opt //engine/std/physics/compare:baseline
+  worse, fails until `./bazel run //engine/std/physics/compare:baseline
   -- --write` (and `//bench/physics3d:baseline`, and `--long` for the long
   suites) writes it again in the same commit, whose message says why.
   After merging physics branches, regenerate on the merged tree and

@@ -4,7 +4,7 @@
 //!
 //!     ./bazel run //bench/physics3d:baseline
 //!     ./bazel run //bench/physics3d:baseline -- --write
-//!     ./bazel run -c opt //bench/physics3d:baseline -- --long --write
+//!     ./bazel run //bench/physics3d:baseline -- --long --write
 //!
 //! `--write` writes the file into the source tree; `--long` is the long
 //! suite's, `baseline_long.txt`; `--all` prints every value, moved or

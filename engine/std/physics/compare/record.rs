@@ -23,7 +23,7 @@ pub const LONG: &str = include_str!("baseline_long.txt");
 
 /// What writes them, which a failing test names.
 pub const WRITE: &str = "./bazel run //engine/std/physics/compare:baseline -- --write";
-pub const WRITE_LONG: &str = "./bazel run -c opt //engine/std/physics/compare:baseline -- --long --write";
+pub const WRITE_LONG: &str = "./bazel run //engine/std/physics/compare:baseline -- --long --write";
 
 /// Steps every default scene is settled: past the latest bound on rest (a
 /// turning pile's, 500), so "at rest from" means it stayed so for a while.

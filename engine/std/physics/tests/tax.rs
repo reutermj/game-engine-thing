@@ -1,5 +1,5 @@
 //! What physics in the ECS costs over the same step on plain arrays:
-//! `./bazel run -c opt //engine/std/physics:tax`.
+//! `./bazel run --config=bench //engine/std/physics:tax`.
 //!
 //! A pile runs in the engine (the physics mod, on the lockstep bootstrap)
 //! until the frame to measure. Its state is then copied out (bodies, and

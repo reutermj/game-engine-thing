@@ -518,7 +518,7 @@ bit the arrays'. The alternative, one 3D storage with 2D at z = 0, costs
 against 409 µs at 10 000, 27 against 31 at 1000; regions the same) and a
 fifth more memory in lanes (704 bytes a page against 576).
 
-`./bazel run -c opt //engine/ecs:spatial3d_bench`, µs, one thread, touching
+`./bazel run --config=bench //engine/ecs:spatial3d_bench`, µs, one thread, touching
 bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
 3%:
 
@@ -574,7 +574,7 @@ boxes, however they were made. It is as generic over dimensions as the rest
 (3D's is `(Collider, Rotation)`, a quaternion).
 
 The ways rotation could reach storage, measured on the same rows
-(`./bazel run -c opt //engine/ecs:spatial_turn_bench`: 10 000 boxes 0.8
+(`./bazel run --config=bench //engine/ecs:spatial_turn_bench`: 10 000 boxes 0.8
 across a unit apart, so axis-aligned they are out of reach and turned they
 meet; µs a frame, the writer / the re-sort after it / `near_pairs`, and the
 pairs found; median of 3):
