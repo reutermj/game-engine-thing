@@ -51,7 +51,7 @@ engine_api::mod_state! {
         /// its n, once built: its bodies are regenerated from them (the
         /// same every time) by each build.
         kind: Vec<u8>,
-        n: u32,
+        n: u64,
         /// Steps `arrive` has run since the build.
         tick: u32,
         /// What `build` has added, in the order the scene adds them.
@@ -130,7 +130,7 @@ impl Pile {
             return Err("build <scene> <n>".into());
         };
         let kind = Kind::parse(kind).ok_or_else(|| format!("no scene {kind:?}"))?;
-        let n: u32 = n.parse().map_err(|e| format!("{n:?}: {e}"))?;
+        let n: u64 = n.parse().map_err(|e| format!("{n:?}: {e}"))?;
         if !self.kind.is_empty() {
             return Err("a scene is built already".into());
         }
@@ -139,6 +139,14 @@ impl Pile {
         let s = self.scene().expect("just built");
         for b in &s.statics {
             world.spawn(spec_static(b));
+        }
+        // A bounce's own gravity, as a game sets it.
+        if s.gravity != scenes::EARTH {
+            let mut was = Vec::new();
+            world.for_each::<&Gravity>(|e, _| was.push(e));
+            was.into_iter().for_each(|e| world.despawn(e));
+            let [x, y, z] = s.gravity;
+            world.spawn((Gravity { x, y, z },));
         }
         let statics = s.statics.len();
         *scene = Some(s);

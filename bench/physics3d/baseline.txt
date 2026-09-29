@@ -79,3 +79,30 @@ behaviour  ratio 1000              stands               0          exact
 behaviour  ratio 1000              escaped              0          exact
 behaviour  ratio 1000              at_rest_from         316        steps 10
 behaviour  ratio 1000              jitter               1.215e-7   rel 0.03 or 1e-4
+behaviour  bounces drops           excess_worst         0.0613     rel 0.05 or 0.001
+behaviour  bounces drops           excess_tipping       0.394      rel 0.05 or 0.001
+behaviour  bounces drops           gain_worst           0.0613     rel 0.05 or 0.001
+behaviour  bounces drops           gain_median          0          rel 0.05 or 0.001
+behaviour  bounces drops           loss_worst           0.4876     rel 0.05 or 0.001
+behaviour  bounces drops           bounced_below        0          within 1
+behaviour  bounces drops           flat_above           0          within 1
+behaviour  bounces rates           excess_worst         0.06821    rel 0.05 or 0.001
+behaviour  bounces rates           gain_worst           0.06821    rel 0.05 or 0.001
+behaviour  bounces rates           gain_median          0.003469   rel 0.05 or 0.001
+behaviour  bounces rates           loss_worst           0.4876     rel 0.05 or 0.001
+behaviour  bounces rates           bounced_below        0          within 1
+behaviour  bounces rates           flat_above           0          within 1
+behaviour  bounces oblique         excess_worst         0.04642    rel 0.05 or 0.001
+behaviour  bounces oblique         gain_worst           0.06213    rel 0.05 or 0.001
+behaviour  bounces oblique         gain_median          0          rel 0.05 or 0.001
+behaviour  bounces oblique         loss_worst           0.06679    rel 0.05 or 0.001
+behaviour  bounces oblique         bounced_below        0          within 1
+behaviour  bounces oblique         flat_above           0          within 1
+behaviour  bounces oblique         slip_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique         tangent_most         0.8276     rel 0.01 or 1e-4
+behaviour  bounces oblique         tangent_median       0.7109     rel 0.01 or 1e-4
+behaviour  bounces pairs           gain_worst           2.384e-7   rel 0.05 or 0.001
+behaviour  bounces pairs           momentum_worst       2.384e-5   rel 0.5 or 1e-4
+behaviour  bounces series          rise_worst           5.431      rel 0.01 or 0.001
+behaviour  bounces series          decay_worst          1.322      rel 0.01 or 0.001
+behaviour  bounces series          decay_median         1.078      rel 0.01 or 0.001

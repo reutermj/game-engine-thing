@@ -102,7 +102,7 @@ extern "C" JoltWorld* p3_jolt_create(const P3Config* config) {
 	if (config->position_iters > 0) settings.mNumPositionSteps = uint(config->position_iters);
 	settings.mAllowSleeping = config->allow_sleep != 0;
 	w->physics.SetPhysicsSettings(settings);
-	w->physics.SetGravity(Vec3(0.0f, -9.81f, 0.0f));
+	w->physics.SetGravity(Vec3(config->gravity[0], config->gravity[1], config->gravity[2]));
 	w->physics.SetContactListener(&w->counter);
 	w->allow_sleep = config->allow_sleep != 0;
 	w->rotate = config->rotate != 0;

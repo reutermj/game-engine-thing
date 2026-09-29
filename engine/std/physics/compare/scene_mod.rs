@@ -137,6 +137,16 @@ impl Mod for Scenes {
                 for s in &specs {
                     spawn(&mut world, s);
                 }
+                // A bounce's own gravity and substeps, as a game sets them.
+                if scene.gravity() != GRAVITY {
+                    let mut was = Vec::new();
+                    world.for_each::<&Gravity>(|e, _| was.push(e));
+                    was.into_iter().for_each(|e| world.despawn(e));
+                    world.spawn((Gravity { x: 0.0, y: scene.gravity() },));
+                }
+                if let Some(n) = scene.substeps() {
+                    world.spawn((Tuning { substeps: n },));
+                }
                 if let Scene::Rain { n, width } = scene {
                     self.rain = vec![n as f32, width];
                 }

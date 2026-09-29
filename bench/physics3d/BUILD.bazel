@@ -54,6 +54,7 @@ rust_library(
     name = "physics3d",
     srcs = [
         "behave.rs",
+        "bounces.rs",
         "box3d.rs",
         "ffi.rs",
         "jolt.rs",
@@ -119,7 +120,10 @@ test_suite(
 test_suite(
     name = "baseline_long_test",
     tags = ["manual"],
-    tests = [":quality_long_test"],
+    tests = [
+        ":behaviour_long_test",
+        ":quality_long_test",
+    ],
 )
 
 # The measures' own tests: each on bodies placed where its value is known
@@ -153,6 +157,21 @@ rust_test(
 rust_test(
     name = "behaviour_test",
     srcs = ["behaviour_test.rs"],
+    deps = [":physics3d"],
+)
+
+# The bounce families on their long grids (bounces.rs): a few minutes, so
+# manual:
+#   ./bazel test //bench/physics3d:behaviour_long_test
+rust_test(
+    name = "behaviour_long_test",
+    srcs = [
+        "behaviour_long.rs",
+        "behaviour_test.rs",
+    ],
+    crate_features = ["long"],
+    crate_root = "behaviour_test.rs",
+    tags = ["manual"],
     deps = [":physics3d"],
 )
 

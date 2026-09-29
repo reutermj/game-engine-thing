@@ -7,8 +7,9 @@
 //! (physics.md, "Quality beyond settling").
 
 use crate::quality;
-use crate::scene::{self, DT, GRAVITY, Scene};
+use crate::scene::{self, DT, GRAVITY, Hit, Scene, Target};
 use crate::settle::REST;
+use crate::solver;
 use crate::{Dyn, Sim};
 
 /// One engine on one scene: named values, in the order they were found.
@@ -90,6 +91,9 @@ pub fn steps(scene: &Scene) -> u32 {
         Scene::Ramp { .. } => 120,
         Scene::Bounce { e } if e >= 1.0 => 1200,
         Scene::Bullet { .. } => 60,
+        Scene::Hit(h) if h.secs > 0.0 => (h.secs * h.hz) as u32,
+        // To the contact, and long enough after for a slow bounce to leave.
+        Scene::Hit(h) => h.flight().0 + 45,
         Scene::Cards { .. } | Scene::Dominoes { .. } | Scene::Stack { .. } | Scene::Pyramid { .. } | Scene::PyramidAt { .. } => 600,
         _ => 300,
     }
@@ -162,6 +166,8 @@ pub fn behave(sim: &mut dyn Sim, scene: &Scene, turning: bool) -> Behaviour {
             b.put("needs mu", Scene::ladder_mu(deg) as f64);
         }
         Scene::Dominoes { n, .. } => dominoes(&mut b, &t, n),
+        Scene::Hit(h) if h.secs > 0.0 => series(&mut b, &t, &h),
+        Scene::Hit(h) => hit(&mut b, &t, &h),
         // The families' stacks and pyramids (`family.rs`): whether the top
         // box stayed within half a box of where it began.
         Scene::Stack { .. } | Scene::Pyramid { .. } | Scene::PyramidAt { .. } => {
@@ -233,6 +239,166 @@ fn bounce(b: &mut Behaviour, t: &[Vec<Dyn>], e: f32) {
     b.put("bounces", apexes.len() as f64);
     b.put("most apex", apexes.iter().copied().fold(0.0, f32::max) as f64);
     b.put("last apex", apexes.last().copied().unwrap_or(0.0) as f64);
+}
+
+/// A body's moment of inertia over its mass: a disc's r² / 2, a box's
+/// (hx² + hy²) / 3.
+fn inertia(d: &Dyn) -> f32 {
+    if d.circle { 0.5 * d.hx * d.hx } else { (d.hx * d.hx + d.hy * d.hy) / 3.0 }
+}
+
+/// How far below its centre a body reaches (y down), turned as it is.
+fn reach(d: &Dyn) -> f32 {
+    if d.circle { d.hx } else { d.hx * d.angle.sin().abs() + d.hy * d.angle.cos().abs() }
+}
+
+/// How far above the floor its centre is when it lies flat.
+fn flat(d: &Dyn) -> f32 {
+    if d.circle { d.hx } else { d.hy }
+}
+
+/// Whether a body flew free from state `a` to the next, `z`: gravity alone
+/// changed its velocity, and nothing its spin. How the bounce measures find
+/// the contact from positions and velocities alone, in every engine: the
+/// step before the first that isn't free is where it came in, and the first
+/// free one after is where it left.
+fn free(a: &Dyn, z: &Dyn, g: f32, dt: f32) -> bool {
+    let tol = 1e-4 * (1.0 + a.vy.abs().max(z.vy.abs()) + a.vx.abs());
+    (z.vy - a.vy - g * dt).abs() <= tol && (z.vx - a.vx).abs() <= tol && (z.w - a.w).abs() <= 1e-4 * (1.0 + a.w.abs())
+}
+
+/// One bounce (`Scene::Hit`), from the state before the first step a
+/// contact acted in to the first after which every body flew free again (or
+/// the last, if one never did: it came to rest). Against a floor, per unit
+/// mass: the energy it came in with, the gravity it would gain over the gap
+/// included (so where in a step it meets doesn't count), against what it
+/// left with, from the height it met at; `normal` the rebound speed over
+/// the impact speed along the normal from those, which restitution sets to
+/// e; `gain` the energy ratio past what restitution gives (e² along the
+/// normal, and for a corner the single impact's 1 − (1 − e²) m_eff / m of
+/// it), none below `BOUNCE_THRESHOLD`, and past what the push-out of its
+/// deepest overlap lifts it by (`excess`, of the whole energy, the same
+/// past none). Between two free bodies, the same of
+/// their closing speed, and the momentum lost, over the impulse scale.
+fn hit(b: &mut Behaviour, t: &[Vec<Dyn>], h: &Hit) {
+    let (g, dt) = (h.g, h.dt());
+    let n = t[0].len();
+    let all_free = |i: usize| (0..n).all(|k| free(&t[i][k], &t[i + 1][k], g, dt));
+    let Some(first) = (0..t.len() - 1).find(|&i| !all_free(i)) else {
+        panic!("hit {h:?}: nothing met");
+    };
+    // Left: free, and moving apart (up, off a floor), since a speculative
+    // contact may slow a body in the step before it meets.
+    let apart = |i: usize| if h.target.floor() { t[i][0].vy < 0.0 } else { t[i][1].vy > t[i][0].vy };
+    let left = (first + 1..t.len() - 1).find(|&i| all_free(i) && apart(i));
+    let after = left.unwrap_or(t.len() - 1);
+    let e = if h.v > solver::BOUNCE_THRESHOLD { h.e } else { 0.0 };
+    b.put("expected e", e as f64);
+    if !h.target.floor() {
+        let (a0, b0, a1, b1) = (t[first][0], t[first][1], t[after][0], t[after][1]);
+        let (ma, mb) = (1.0, h.ratio);
+        let (closing, parting) = (a0.vy - b0.vy, b1.vy - a1.vy);
+        let rel = parting / closing;
+        b.put("bounced", (left.is_some() && rel > 0.01) as u8 as f64);
+        b.put("rel", rel as f64);
+        b.put("gain", (rel.max(0.0).powi(2) - e * e) as f64);
+        let moved = (after - first) as f32 * dt;
+        let lost = (ma * a1.vy + mb * b1.vy) - (ma * a0.vy + mb * b0.vy) - (ma + mb) * g * moved;
+        let sideways = (ma * a1.vx + mb * b1.vx) - (ma * a0.vx + mb * b0.vx);
+        let scale = ma * mb / (ma + mb) * closing;
+        b.put("momentum", (lost.hypot(sideways) / scale) as f64);
+        return;
+    }
+    let (a, z) = (t[first][0], t[after][0]);
+    let k = inertia(&a);
+    // y is down: the gap closes as y grows, and height is gained as it falls.
+    let gap = -(a.y + reach(&a));
+    let met = a.y + gap;
+    let (normal_in, normal_out) = (0.5 * a.vy * a.vy + g * gap, 0.5 * z.vy * z.vy + g * (met - z.y));
+    // The whole energy, its height from where it lies flat: a corner's tilt
+    // is height it may turn into speed as it tips, which a share of what it
+    // came in with alone would count as gained.
+    let whole = |d: &Dyn| 0.5 * (d.vx * d.vx + d.vy * d.vy) + 0.5 * k * d.w * d.w + g * (-d.y - flat(d));
+    let energy_in = whole(&a);
+    let energy = whole(&z) / energy_in;
+    let normal = (normal_out.max(0.0) / normal_in).sqrt();
+    // A soft contact pushes an overlap out through positions, which lifts
+    // the body without costing its speed (as Box2D's does): up to gravity
+    // times its deepest overlap, the energy a bounce may leave with past
+    // what it came in with, beyond which it is energy from nowhere.
+    let deepest = t.iter().map(|s| s[0].y + reach(&s[0])).fold(0.0, f32::max);
+    b.put("excess", (energy - 1.0 - g * deepest / energy_in) as f64);
+    b.put("bounced", (left.is_some() && z.vy < -0.05) as u8 as f64);
+    // The speed toward the floor at the start of the step it met in, and
+    // at the moment it met: what an engine can take restitution from.
+    b.put("came in", a.vy as f64);
+    b.put("impact", (2.0 * normal_in).sqrt() as f64);
+    // Under the surface already at the step it met in: it passed it in a
+    // free step (the speculative margin missed it), gravity speeding it on
+    // over the overlap, which the push-out gives back as height.
+    b.put("through", (gap < -1e-3) as u8 as f64);
+    b.put("energy", energy as f64);
+    b.put("normal", normal as f64);
+    let gain = if h.target == Target::Corner {
+        // The lowest corner's arm across the normal, as the body came in.
+        let (s, c) = a.angle.sin_cos();
+        let arm = c * s.signum() * a.hx - s * c.signum() * a.hy;
+        let share = 1.0 / (1.0 + arm * arm / k);
+        let expected = 1.0 - (1.0 - e * e) * share * normal_in / energy_in;
+        b.put("expected", expected as f64);
+        energy - expected - g * deepest / energy_in
+    } else {
+        b.put("expected", (e * e) as f64);
+        normal * normal - e * e - g * deepest / normal_in
+    };
+    b.put("gain", gain as f64);
+    if h.along != 0.0 {
+        b.put("tangent", (z.vx / a.vx) as f64);
+    }
+    b.put("spin", z.w as f64);
+}
+
+/// Many bounces (a `Scene::Hit` with `secs`): each apex of its lowest point
+/// over the height it fell from, the most, and each apex over the one
+/// before against e², while the bounce is well above `BOUNCE_THRESHOLD` (a
+/// rebound faster than 2): the median and the most. A lossless ball's never
+/// rises; one of restitution e keeps e² of its height a bounce. A height is
+/// the energy's, its height and its speed up over 2g, which free flight
+/// keeps: the highest step would read an apex low by up to g (dt / 2)² / 2
+/// (3% of a low bounce at gravity 80), and their ratios so pass e².
+fn series(b: &mut Behaviour, t: &[Vec<Dyn>], h: &Hit) {
+    // Its centre's, which free flight keeps whatever it turns.
+    let height = |d: &Dyn| -d.y - flat(d) + 0.5 * d.vy * d.vy / h.g;
+    let drop = height(&t[0][0]);
+    let (mut apexes, mut rising, mut top) = (Vec::new(), false, 0f32);
+    for st in &t[1..] {
+        let d = st[0];
+        if !rising && d.vy < 0.0 {
+            (rising, top) = (true, height(&d));
+        } else if rising {
+            if d.vy < 0.0 {
+                top = top.max(height(&d));
+            }
+            if d.vy > 0.0 {
+                apexes.push(top / drop);
+                rising = false;
+            }
+        }
+    }
+    let e2 = h.e * h.e;
+    let fast = |a: f32| (2.0 * h.g * a * drop).sqrt() > 2.0;
+    let mut ratios: Vec<f64> = std::iter::once(1.0)
+        .chain(apexes.iter().copied())
+        .collect::<Vec<f32>>()
+        .windows(2)
+        .filter(|w| fast(w[0]) && fast(w[1]))
+        .map(|w| (w[1] / w[0] / e2) as f64)
+        .collect();
+    b.put("apexes", apexes.len() as f64);
+    b.put("rise most", apexes.iter().copied().fold(0.0, f32::max) as f64);
+    ratios.sort_by(f64::total_cmp);
+    b.put("decay median", ratios.get(ratios.len() / 2).copied().unwrap_or(f64::NAN));
+    b.put("decay most", ratios.last().copied().unwrap_or(f64::NAN));
 }
 
 /// Each domino's step past 45°: how many fell, whether in order, how fast

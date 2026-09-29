@@ -3,73 +3,100 @@
 # (docs/architecture/physics-testing.md, "The baseline"). Group quality
 # is checked by the quality tests, behaviour by the behaviour tests.
 # Written by
-#     ./bazel run -c opt //bench/physics3d:baseline -- --long --write
+#     ./bazel run //bench/physics3d:baseline -- --long --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
-quality  boxes 1000 turning        depth_end            0.007258   rel 0.6 or 1e-4
-quality  boxes 1000 turning        mean_during          0.006733   rel 0.25 or 1e-4
-quality  boxes 1000 turning        energy_end           5.766e-10  log 10 under 1e-8
-quality  boxes 1000 turning        partners             3.524      rel 0.15
-quality  boxes 1000 turning        escaped              0          exact
-quality  boxes 10000 turning       depth_end            0.0134     rel 0.6 or 1e-4
-quality  boxes 10000 turning       mean_during          0.01816    rel 0.25 or 1e-4
-quality  boxes 10000 turning       energy_end           9.877e-9   log 10 under 1e-8
-quality  boxes 10000 turning       partners             3.305      rel 0.15
-quality  boxes 10000 turning       escaped              0          exact
-quality  planks 1000 turning       depth_end            0.0136     rel 0.6 or 1e-4
-quality  planks 1000 turning       mean_during          0.01242    rel 0.25 or 1e-4
-quality  planks 1000 turning       energy_end           1.059e-12  log 10 under 1e-8
-quality  planks 1000 turning       partners             4.545      rel 0.15
-quality  planks 1000 turning       escaped              0          exact
-quality  planks 10000 turning      depth_end            0.03453    rel 0.6 or 1e-4
-quality  planks 10000 turning      mean_during          0.01436    rel 0.25 or 1e-4
-quality  planks 10000 turning      energy_end           6.132e-10  log 10 under 1e-8
-quality  planks 10000 turning      partners             4.892      rel 0.15
-quality  planks 10000 turning      escaped              0          exact
-quality  boxes 200-1000 turning    rest_median          189        steps 90 or 30%
-quality  boxes 200-1000 turning    depth_end_median     0.005343   rel 0.5 or 1e-4
-quality  boxes 200-1000 turning    depth_during_median  0.06094    rel 0.35 or 1e-4
-quality  boxes 200-1000 turning    mean_during_worst    0.007059   rel 0.35 or 1e-4
-quality  boxes 200-1000 turning    energy_end_median    2.681e-10  log 10 under 1e-8
-quality  boxes 200-1000 turning    partners_least       2.687      rel 0.25
-quality  boxes 200-1000 turning    escaped              0          exact
-quality  boxes 200-1000            rest_median          69         steps 90 or 30%
-quality  boxes 200-1000            depth_end_median     6.106e-4   rel 0.5 or 1e-4
-quality  boxes 200-1000            depth_during_median  0.03264    rel 0.35 or 1e-4
-quality  boxes 200-1000            mean_during_worst    0.005314   rel 0.35 or 1e-4
-quality  boxes 200-1000            energy_end_median    4.731e-12  log 10 under 1e-8
-quality  boxes 200-1000            partners_least       2.637      rel 0.25
-quality  boxes 200-1000            escaped              0          exact
-quality  planks 200-1000 turning   rest_median          288        steps 90 or 30%
-quality  planks 200-1000 turning   depth_end_median     0.007446   rel 0.5 or 1e-4
-quality  planks 200-1000 turning   depth_during_median  0.2855     rel 0.35 or 1e-4
-quality  planks 200-1000 turning   mean_during_worst    0.01366    rel 0.35 or 1e-4
-quality  planks 200-1000 turning   energy_end_median    5.612e-13  log 10 under 1e-8
-quality  planks 200-1000 turning   partners_least       3.325      rel 0.25
-quality  planks 200-1000 turning   escaped              0          exact
-quality  mixed 200-1000 turning    rest_median          never      steps 90 or 30%
-quality  mixed 200-1000 turning    depth_end_median     0.006758   rel 0.5 or 1e-4
-quality  mixed 200-1000 turning    depth_during_median  0.1321     rel 0.35 or 1e-4
-quality  mixed 200-1000 turning    mean_during_worst    0.005051   rel 0.35 or 1e-4
-quality  mixed 200-1000 turning    energy_end_median    2.012e-5   log 10 under 1e-8
-quality  mixed 200-1000 turning    partners_least       4.61       rel 0.25
-quality  mixed 200-1000 turning    escaped              0          exact
-quality  mixed 200-1000            rest_median          297        steps 90 or 30%
-quality  mixed 200-1000            depth_end_median     0.003691   rel 0.5 or 1e-4
-quality  mixed 200-1000            depth_during_median  0.1277     rel 0.35 or 1e-4
-quality  mixed 200-1000            mean_during_worst    0.007876   rel 0.35 or 1e-4
-quality  mixed 200-1000            energy_end_median    2.18e-12   log 10 under 1e-8
-quality  mixed 200-1000            partners_least       2.362      rel 0.25
-quality  mixed 200-1000            escaped              0          exact
-quality  boxes 2000-5000 turning   depth_end_median     0.009447   rel 0.5 or 1e-4
-quality  boxes 2000-5000 turning   depth_during_median  0.08587    rel 0.35 or 1e-4
-quality  boxes 2000-5000 turning   mean_during_worst    0.01147    rel 0.35 or 1e-4
-quality  boxes 2000-5000 turning   energy_end_median    1.569e-9   log 10 under 1e-8
-quality  boxes 2000-5000 turning   partners_least       3.493      rel 0.25
-quality  boxes 2000-5000 turning   escaped              0          exact
-quality  planks 2000-5000 turning  depth_end_median     0.01862    rel 0.5 or 1e-4
-quality  planks 2000-5000 turning  depth_during_median  0.3877     rel 0.35 or 1e-4
-quality  planks 2000-5000 turning  mean_during_worst    0.01349    rel 0.35 or 1e-4
-quality  planks 2000-5000 turning  energy_end_median    1.589e-12  log 10 under 1e-8
-quality  planks 2000-5000 turning  partners_least       4.566      rel 0.25
-quality  planks 2000-5000 turning  escaped              0          exact
+quality    boxes 1000 turning        depth_end            0.007258   rel 0.6 or 1e-4
+quality    boxes 1000 turning        mean_during          0.006733   rel 0.25 or 1e-4
+quality    boxes 1000 turning        energy_end           5.766e-10  log 10 under 1e-8
+quality    boxes 1000 turning        partners             3.524      rel 0.15
+quality    boxes 1000 turning        escaped              0          exact
+quality    boxes 10000 turning       depth_end            0.0134     rel 0.6 or 1e-4
+quality    boxes 10000 turning       mean_during          0.01816    rel 0.25 or 1e-4
+quality    boxes 10000 turning       energy_end           9.877e-9   log 10 under 1e-8
+quality    boxes 10000 turning       partners             3.305      rel 0.15
+quality    boxes 10000 turning       escaped              0          exact
+quality    planks 1000 turning       depth_end            0.0136     rel 0.6 or 1e-4
+quality    planks 1000 turning       mean_during          0.01242    rel 0.25 or 1e-4
+quality    planks 1000 turning       energy_end           1.059e-12  log 10 under 1e-8
+quality    planks 1000 turning       partners             4.545      rel 0.15
+quality    planks 1000 turning       escaped              0          exact
+quality    planks 10000 turning      depth_end            0.03453    rel 0.6 or 1e-4
+quality    planks 10000 turning      mean_during          0.01436    rel 0.25 or 1e-4
+quality    planks 10000 turning      energy_end           6.132e-10  log 10 under 1e-8
+quality    planks 10000 turning      partners             4.892      rel 0.15
+quality    planks 10000 turning      escaped              0          exact
+quality    boxes 200-1000 turning    rest_median          189        steps 90 or 30%
+quality    boxes 200-1000 turning    depth_end_median     0.005343   rel 0.5 or 1e-4
+quality    boxes 200-1000 turning    depth_during_median  0.06094    rel 0.35 or 1e-4
+quality    boxes 200-1000 turning    mean_during_worst    0.007059   rel 0.35 or 1e-4
+quality    boxes 200-1000 turning    energy_end_median    2.681e-10  log 10 under 1e-8
+quality    boxes 200-1000 turning    partners_least       2.687      rel 0.25
+quality    boxes 200-1000 turning    escaped              0          exact
+quality    boxes 200-1000            rest_median          69         steps 90 or 30%
+quality    boxes 200-1000            depth_end_median     6.106e-4   rel 0.5 or 1e-4
+quality    boxes 200-1000            depth_during_median  0.03264    rel 0.35 or 1e-4
+quality    boxes 200-1000            mean_during_worst    0.005314   rel 0.35 or 1e-4
+quality    boxes 200-1000            energy_end_median    4.731e-12  log 10 under 1e-8
+quality    boxes 200-1000            partners_least       2.637      rel 0.25
+quality    boxes 200-1000            escaped              0          exact
+quality    planks 200-1000 turning   rest_median          288        steps 90 or 30%
+quality    planks 200-1000 turning   depth_end_median     0.007446   rel 0.5 or 1e-4
+quality    planks 200-1000 turning   depth_during_median  0.2855     rel 0.35 or 1e-4
+quality    planks 200-1000 turning   mean_during_worst    0.01366    rel 0.35 or 1e-4
+quality    planks 200-1000 turning   energy_end_median    5.612e-13  log 10 under 1e-8
+quality    planks 200-1000 turning   partners_least       3.325      rel 0.25
+quality    planks 200-1000 turning   escaped              0          exact
+quality    mixed 200-1000 turning    rest_median          never      steps 90 or 30%
+quality    mixed 200-1000 turning    depth_end_median     0.006758   rel 0.5 or 1e-4
+quality    mixed 200-1000 turning    depth_during_median  0.1321     rel 0.35 or 1e-4
+quality    mixed 200-1000 turning    mean_during_worst    0.005051   rel 0.35 or 1e-4
+quality    mixed 200-1000 turning    energy_end_median    2.012e-5   log 10 under 1e-8
+quality    mixed 200-1000 turning    partners_least       4.61       rel 0.25
+quality    mixed 200-1000 turning    escaped              0          exact
+quality    mixed 200-1000            rest_median          297        steps 90 or 30%
+quality    mixed 200-1000            depth_end_median     0.003691   rel 0.5 or 1e-4
+quality    mixed 200-1000            depth_during_median  0.1277     rel 0.35 or 1e-4
+quality    mixed 200-1000            mean_during_worst    0.007876   rel 0.35 or 1e-4
+quality    mixed 200-1000            energy_end_median    2.18e-12   log 10 under 1e-8
+quality    mixed 200-1000            partners_least       2.362      rel 0.25
+quality    mixed 200-1000            escaped              0          exact
+quality    boxes 2000-5000 turning   depth_end_median     0.009447   rel 0.5 or 1e-4
+quality    boxes 2000-5000 turning   depth_during_median  0.08587    rel 0.35 or 1e-4
+quality    boxes 2000-5000 turning   mean_during_worst    0.01147    rel 0.35 or 1e-4
+quality    boxes 2000-5000 turning   energy_end_median    1.569e-9   log 10 under 1e-8
+quality    boxes 2000-5000 turning   partners_least       3.493      rel 0.25
+quality    boxes 2000-5000 turning   escaped              0          exact
+quality    planks 2000-5000 turning  depth_end_median     0.01862    rel 0.5 or 1e-4
+quality    planks 2000-5000 turning  depth_during_median  0.3877     rel 0.35 or 1e-4
+quality    planks 2000-5000 turning  mean_during_worst    0.01349    rel 0.35 or 1e-4
+quality    planks 2000-5000 turning  energy_end_median    1.589e-12  log 10 under 1e-8
+quality    planks 2000-5000 turning  partners_least       4.566      rel 0.25
+quality    planks 2000-5000 turning  escaped              0          exact
+behaviour  bounces drops             excess_worst         4.386      rel 0.05 or 0.001
+behaviour  bounces drops             excess_tipping       0.4117     rel 0.05 or 0.001
+behaviour  bounces drops             gain_worst           5.386      rel 0.05 or 0.001
+behaviour  bounces drops             gain_median          0          rel 0.05 or 0.001
+behaviour  bounces drops             loss_worst           0.4876     rel 0.05 or 0.001
+behaviour  bounces drops             bounced_below        14         within 1
+behaviour  bounces drops             flat_above           1          within 1
+behaviour  bounces rates             excess_worst         0.4234     rel 0.05 or 0.001
+behaviour  bounces rates             gain_worst           0.4234     rel 0.05 or 0.001
+behaviour  bounces rates             gain_median          0.007018   rel 0.05 or 0.001
+behaviour  bounces rates             loss_worst           0.4876     rel 0.05 or 0.001
+behaviour  bounces rates             bounced_below        0          within 1
+behaviour  bounces rates             flat_above           0          within 1
+behaviour  bounces oblique           excess_worst         0.05817    rel 0.05 or 0.001
+behaviour  bounces oblique           gain_worst           0.06213    rel 0.05 or 0.001
+behaviour  bounces oblique           gain_median          0          rel 0.05 or 0.001
+behaviour  bounces oblique           loss_worst           0.06679    rel 0.05 or 0.001
+behaviour  bounces oblique           bounced_below        0          within 1
+behaviour  bounces oblique           flat_above           0          within 1
+behaviour  bounces oblique           slip_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique           tangent_most         0.9198     rel 0.01 or 1e-4
+behaviour  bounces oblique           tangent_median       0.7109     rel 0.01 or 1e-4
+behaviour  bounces pairs             gain_worst           2.384e-7   rel 0.05 or 0.001
+behaviour  bounces pairs             momentum_worst       4.069e-5   rel 0.5 or 1e-4
+behaviour  bounces series            rise_worst           19.79      rel 0.01 or 0.001
+behaviour  bounces series            decay_worst          1.322      rel 0.01 or 0.001
+behaviour  bounces series            decay_median         1.059      rel 0.01 or 0.001

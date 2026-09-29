@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use crate::behave::{self, Behaviour};
 use crate::scene::Scene;
 use crate::settle::{self, Settling};
-use crate::{Sim, ecs, solver};
+use crate::{Sim, ecs};
 
 type Slots<T> = LazyLock<Mutex<HashMap<String, Arc<OnceLock<T>>>>>;
 
@@ -56,11 +56,8 @@ pub fn with_solver(spec: &str) -> String {
 /// what `SOLVER` names).
 pub fn ours(scene: &Scene, turning: bool, spec: &str) -> ecs::Flat {
     let spec = if spec.is_empty() { solver().unwrap_or_default() } else { spec.to_string() };
-    if spec.is_empty() {
-        ecs::Flat::new(scene, turning, Box::new(solver::solve_points), "ours")
-    } else {
-        ecs::Flat::variant(scene, turning, &spec, &format!("ours ({spec})"))
-    }
+    let label = if spec.is_empty() { "ours".to_string() } else { format!("ours ({spec})") };
+    ecs::Flat::ours(scene, turning, &spec, &label)
 }
 
 /// The physics mod in the engine on `scene`, with sleeping or not.

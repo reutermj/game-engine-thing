@@ -32,12 +32,15 @@
 //! as text; every engine `ENGINES` leaves, side by side (runbook 005, "The
 //! debug view"). `FAMILIES=<names>` (`all`) measures each engine's share of
 //! the edge-of-stability families (`family.rs`), `FAMILY_LONG=1` their
-//! long grids.
+//! long grids; `BOUNCES=<names>` (`all`) the bounce families' statistics
+//! (`bounces.rs`), `BOUNCE_LONG=1` on their long grids, `BOUNCE_RUNS=1`
+//! with every run's values.
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
 mod behave;
+mod bounces;
 mod box2d;
 mod ecs;
 mod family;
@@ -173,10 +176,7 @@ fn main() {
     // By name, which `ENGINES` picks from before any is built.
     let mut engines: Vec<(String, Make)> = vec![("ours (ECS)".into(), Box::new(|s, t| Box::new(ecs::Ecs::new(&manifest, s, sleep, t))))];
     if !sleep {
-        engines.push((
-            "ours (arrays)".into(),
-            Box::new(|s, t| Box::new(ecs::Flat::new(s, t, Box::new(solver::solve_points), "ours (arrays)"))),
-        ));
+        engines.push(("ours (arrays)".into(), Box::new(|s, t| Box::new(ecs::Flat::ours(s, t, "", "ours (arrays)")))));
     }
     engines.push(("Box2D".into(), Box::new(move |s, t| Box::new(box2d::Box2d::new(s, 4, sleep, t)))));
     engines.push(("Rapier".into(), Box::new(move |s, t| Box::new(rapier::Rapier::new(s, 4, sleep, t, false)))));
@@ -184,7 +184,7 @@ fn main() {
         if let Some(spec) = v.strip_prefix("arrays:") {
             let label = format!("ours (arrays) {spec}");
             let spec = spec.to_string();
-            engines.push((label.clone(), Box::new(move |s, t| Box::new(ecs::Flat::variant(s, t, &spec, &label)))));
+            engines.push((label.clone(), Box::new(move |s, t| Box::new(ecs::Flat::ours(s, t, &spec, &label)))));
             continue;
         }
         if v == "rapier:ccd" {
@@ -210,6 +210,10 @@ fn main() {
     }
     if let Some(names) = env("FAMILIES") {
         families(&names, env("FAMILY_LONG").is_some(), &engines);
+        return;
+    }
+    if let Some(names) = env("BOUNCES") {
+        bounce_families(&names, env("BOUNCE_LONG").is_some(), env("BOUNCE_RUNS").is_some(), &engines);
         return;
     }
     if env("BEHAVE").is_some() {
@@ -317,6 +321,29 @@ fn families(names: &str, long: bool, engines: &[(String, Make)]) {
             let runs: Vec<behave::Behaviour> = f.scenes.iter().map(|s| behave::behave(make(s, true).as_mut(), s, true)).collect();
             let (yes, marks) = family::share(&f, &runs);
             println!("family {} ({}), {}: {yes} of {} {marks}", f.name, if long { "long" } else { "short" }, runs[0].label, runs.len());
+        }
+    }
+}
+
+/// `BOUNCES`: each engine's statistics on each bounce family's grid
+/// (`bounces.rs`), and with `runs` every run's values: what the bounce
+/// tests' bounds are set from. The mod in the engine is left out: it steps
+/// at 60 Hz only, and the arrays are it bit for bit.
+fn bounce_families(names: &str, long: bool, runs: bool, engines: &[(String, Make)]) {
+    for f in bounces::families(long) {
+        if names != "all" && !names.split(",").any(|n| n == f.name) {
+            continue;
+        }
+        for (label, make) in engines.iter().filter(|(label, _)| !label.contains("ECS")) {
+            let all: Vec<behave::Behaviour> = f.scenes.iter().map(|s| behave::behave(make(s, true).as_mut(), s, true)).collect();
+            if runs {
+                for (s, r) in f.scenes.iter().zip(&all) {
+                    let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k}={v:.6}")).collect();
+                    println!("run {} {label} | {} | {}", f.name, s.text(), values.join(" "));
+                }
+            }
+            let stats: Vec<String> = bounces::stats(&f, &all).iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
+            println!("bounces {} ({}, {} runs), {label}: {}", f.name, if long { "long" } else { "short" }, all.len(), stats.join(", "));
         }
     }
 }

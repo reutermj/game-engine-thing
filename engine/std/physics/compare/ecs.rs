@@ -11,7 +11,7 @@ use engine_loader::engine::Engine;
 use physics::{Asleep, Body, Collider, ContactPair, ContactPoints, DYNAMIC, Manifold, Position, Rot, Rotation, Spin, Vec2, Velocity};
 
 use crate::arrays::{Arrays, Stages};
-use crate::scene::{GRAVITY, Scene, Spec};
+use crate::scene::{DT, Scene, Spec};
 use crate::sim::Mark;
 use crate::{Dyn, Sim};
 
@@ -67,6 +67,8 @@ impl Ecs {
         engine.load_batch(&manifest.mods).expect("loading the scene");
         // The mod reads the scene back from its text.
         assert_eq!(Scene::parse(&scene.text()), Some(*scene));
+        // Its phase is fixed-rate: only the arrays step at another.
+        assert_eq!(scene.dt(), DT, "the mod steps at 60 Hz, not as {} asks", scene.text());
         engine.send("scene", &format!("build {}", scene.text())).unwrap();
         let mut label = "ours (ECS)".to_string();
         if turning {
@@ -247,6 +249,22 @@ fn body(s: &Spec) -> Body {
 }
 
 impl Flat {
+    /// Ours on `scene`: the variant `spec`, or with "" ours as built, at
+    /// the substeps the scene sets (a `rot` variant's `sub`), if it does.
+    pub fn ours(scene: &Scene, turning: bool, spec: &str, label: &str) -> Flat {
+        let spec = match (scene.substeps(), spec) {
+            (None, _) => spec.to_string(),
+            (Some(n), "") => format!("rot/sub={n}"),
+            (Some(n), s) if s.starts_with("rot") => format!("{s}/sub={n}"),
+            (Some(_), s) => panic!("{s} has no substeps to set, as {} asks", scene.text()),
+        };
+        if spec.is_empty() {
+            Flat::new(scene, turning, Box::new(crate::solver::solve_points), label)
+        } else {
+            Flat::variant(scene, turning, &spec, label)
+        }
+    }
+
     /// One of the variants of `variants.rs` (`arrays:<spec>`): a solver, and
     /// how its points are warm-started.
     pub fn variant(scene: &Scene, turning: bool, spec: &str, label: &str) -> Flat {
@@ -265,8 +283,9 @@ impl Flat {
             specs.iter().map(collider).collect(),
             specs.iter().map(body).collect(),
             (statics as u32..specs.len() as u32).collect(),
-            Vec2::new(0.0, GRAVITY),
+            Vec2::new(0.0, scene.gravity()),
         );
+        arrays.dt = scene.dt();
         for (v, s) in arrays.vel.iter_mut().zip(&specs) {
             *v = Vec2::new(s.vx, s.vy);
         }

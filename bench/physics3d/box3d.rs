@@ -13,13 +13,16 @@ impl Box3d {
     pub fn new(config: &Config) -> Self {
         let c = ffi::P3Config {
             max_bodies: config.max_bodies,
-            velocity_iters: match config.iters {
-                Iters::Default => 0,
-                Iters::Eight => 8,
+            // Box3D's substeps: a scene's where it sets them.
+            velocity_iters: match (config.substeps, config.iters) {
+                (n, _) if n > 0 => n as i32,
+                (_, Iters::Default) => 0,
+                (_, Iters::Eight) => 8,
             },
             position_iters: 0,
             allow_sleep: config.sleep as i32,
             rotate: config.rotate as i32,
+            gravity: config.gravity,
         };
         // SAFETY: the shim copies what it needs from the config.
         let world = unsafe { ffi::p3_box3d_create(&c) };

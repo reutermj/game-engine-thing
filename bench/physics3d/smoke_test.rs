@@ -8,7 +8,15 @@ fn settles(kind: Kind, rotate: bool) {
     let mut scene = scenes::build(kind, 20);
     scene.steps = 240;
     for name in BACKENDS {
-        let config = Config { iters: Iters::Default, sleep: false, max_bodies: 64, rotate, tune: "" };
+        let config = Config {
+            iters: Iters::Default,
+            sleep: false,
+            max_bodies: 64,
+            rotate,
+            tune: "",
+            gravity: physics3d_bench::scenes::EARTH,
+            substeps: 0,
+        };
         let mut backend = make_backend(name, &config).unwrap();
         let run = measure::run(&scene, backend.as_mut());
         let q = &run.quality;
@@ -48,7 +56,15 @@ fn rain(rotate: bool) {
     let mut scene = scenes::build(Kind::Rain, 20);
     scene.steps = scene.spawn.len() + 200;
     for name in BACKENDS {
-        let config = Config { iters: Iters::Default, sleep: false, max_bodies: 64, rotate, tune: "" };
+        let config = Config {
+            iters: Iters::Default,
+            sleep: false,
+            max_bodies: 64,
+            rotate,
+            tune: "",
+            gravity: physics3d_bench::scenes::EARTH,
+            substeps: 0,
+        };
         let mut backend = make_backend(name, &config).unwrap();
         let q = measure::run(&scene, backend.as_mut()).quality;
         assert_eq!((q.bodies, q.escaped), (20, 0), "{name}: {q:?}");

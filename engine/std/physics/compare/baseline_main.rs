@@ -24,6 +24,7 @@ mod arrays;
 mod baseline;
 #[allow(dead_code)] // The label, which the comparison prints.
 mod behave;
+mod bounces;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
 mod family;

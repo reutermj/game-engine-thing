@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use crate::scene::{DT, GRAVITY, Scene, Spec};
+use crate::scene::{Scene, Spec};
 use crate::sim::Mark;
 use crate::{Dyn, Sim};
 
@@ -76,6 +76,7 @@ pub struct Box2d {
     world: *mut World,
     label: String,
     substeps: i32,
+    dt: f32,
     /// Handles of the dynamic bodies, in the order they were added.
     dynamic: VecDeque<(i32, Spec)>,
     alive: usize,
@@ -92,9 +93,12 @@ impl Box2d {
         // bodies moving fast against statics, which nothing here does after
         // the first frames of rain.
         // SAFETY: plain values in, a world the shim allocated out, freed in Drop.
-        let world = unsafe { bx_new(0.0, GRAVITY, sleep as i32, 1) };
+        let world = unsafe { bx_new(0.0, scene.gravity(), sleep as i32, 1) };
         let label = if substeps == 4 { "Box2D".to_string() } else { format!("Box2D, {substeps} substeps") };
-        let mut b = Box2d { world, label, substeps, dynamic: VecDeque::new(), alive: 0, turning, profile: [0.0; 22] };
+        // A scene that sets its substeps sets them in every engine.
+        let substeps = scene.substeps().map_or(substeps, |n| n as i32);
+        let dt = scene.dt();
+        let mut b = Box2d { world, label, substeps, dt, dynamic: VecDeque::new(), alive: 0, turning, profile: [0.0; 22] };
         let mut n = [0f32; 22];
         // SAFETY: `n` is 22 floats long and the shim writes at most `len`.
         let have = unsafe { bx_profile(world, n.as_mut_ptr(), 22) };
@@ -171,7 +175,7 @@ impl Sim for Box2d {
         for _ in 0..n {
             // SAFETY: the world is live, `p` is 22 floats.
             unsafe {
-                bx_step(self.world, DT, self.substeps);
+                bx_step(self.world, self.dt, self.substeps);
                 bx_profile(self.world, p.as_mut_ptr(), 22);
             }
             for (sum, ms) in self.profile.iter_mut().zip(p) {

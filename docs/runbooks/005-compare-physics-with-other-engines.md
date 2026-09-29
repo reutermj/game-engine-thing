@@ -127,6 +127,29 @@ scene, measure again and set each bound by the rules in physics.md,
 "Quality beyond settling". As with the quality tests, a bound ours no
 longer meets is a bead and an ignored test.
 
+## The bounce families
+
+```sh
+BOUNCES=all BOUNCE_RUNS=1 ./bazel run //engine/std/physics/compare > bounces.txt              # short grids, every engine, every run
+BOUNCES=drops,rates BOUNCE_LONG=1 ./bazel run //engine/std/physics/compare                    # long grids, statistics only
+BOUNCES=all ENGINES=closing VARIANTS=arrays:rot/closing=1,arrays:rot/closing=3 ./bazel run //engine/std/physics/compare   # options of ours
+VIEW="hit corner e=1 v=5 g=20" VIEW_STEPS=0,15,16,22 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run //engine/std/physics/compare
+./bazel run //bench/physics3d:bench -- ours,rapier,box3d --bounces --each > bounces3d.txt    # 3D, short grids
+./bazel run //bench/physics3d:bench -- ours --bounces --long --tune=closing=before           # 3D, long grids, an option
+```
+
+Each family's statistics per engine (`bounces ... : excess worst ...`), and
+with `BOUNCE_RUNS` (3D `--each`) every run's values, one line a run (`run
+<family> <engine> | <scene> | <values>`), which is what to read when a
+statistic moves: the families' worsts are one run's (physics-testing.md,
+"Families of a law"). A bounce is a scene like any other (`hit <target>
+e=.. v=.. g=..`; `Scene::Hit`), so `VIEW` and `SCENES` take it. The mod in
+the engine is left out of `BOUNCES`, since it steps at 60 Hz only; the
+arrays are it bit for bit. The 2D long grids take about two minutes with
+every option, the 3D ones about five. The families' tests record the
+references' statistics beside their bounds; after bumping a library,
+measure again on exactly the tests' grids.
+
 ## The baseline
 
 Our own accepted results, per scene and measure, in four files:

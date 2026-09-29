@@ -21,6 +21,7 @@ impl Jolt {
             position_iters: iters,
             allow_sleep: config.sleep as i32,
             rotate: config.rotate as i32,
+            gravity: config.gravity,
         };
         // SAFETY: the shim copies what it needs from the config.
         let world = unsafe { ffi::p3_jolt_create(&c) };

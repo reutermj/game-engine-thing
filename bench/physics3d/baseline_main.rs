@@ -52,9 +52,7 @@ fn main() {
 
     let t = std::time::Instant::now();
     let mut entries = record::quality(long);
-    if !long {
-        entries.extend(record::behaviour());
-    }
+    entries.extend(record::behaviour(long));
     eprintln!("{} values in {:.0} s", entries.len(), t.elapsed().as_secs_f64());
 
     let rows = baseline::compare(&file, &GROUPS, &entries, all);

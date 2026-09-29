@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::baseline::{Band, Better, Entry};
 use crate::behave::{self, Behaviour};
+use crate::bounces;
 use crate::family;
 use crate::runs;
 use crate::scene::Scene;
@@ -400,9 +401,26 @@ fn bullets() -> Vec<(f32, f32, Vec<Scene>)> {
     v
 }
 
+/// A bounce family's statistic (`bounces::stats`): its band and which way
+/// is better. Shares of energy move by 5% of themselves or a thousandth; a
+/// count by one run in fifty, as an edge family's; what is kept of a speed
+/// or a height by 1%; the momentum lost, rounding in the fourth decimal, by
+/// half of itself.
+fn bounce_band(name: &str, runs: usize) -> (Band, Better) {
+    match name {
+        "gain median" => (Band::Rel(0.05, 1e-3), Better::Toward(0.0)),
+        "bounced below" | "flat above" => (family_band(runs), Better::Lower),
+        "tangent most" | "tangent median" => (Band::Rel(0.01, 1e-4), Better::Neither),
+        "rise worst" | "decay worst" | "decay median" => (Band::Rel(0.01, 1e-3), Better::Toward(1.0)),
+        "momentum worst" => (Band::Rel(0.5, 1e-4), Better::Lower),
+        _ => (Band::Rel(0.05, 1e-3), Better::Lower),
+    }
+}
+
 /// The behaviour group: every behaviour scene of `:behaviour_test`, the
-/// ignored tests' too, and the families on their short grids; with `long`,
-/// the families on their long grids (`:behaviour_long_test`).
+/// ignored tests' too, the families on their short grids and the bounce
+/// families' statistics on theirs; with `long`, the families on their long
+/// grids (`:behaviour_long_test`).
 pub fn behaviour(long: bool) -> Vec<Entry> {
     const G: &str = "behaviour";
     let singles: Vec<Scene> = if long {
@@ -412,9 +430,11 @@ pub fn behaviour(long: bool) -> Vec<Entry> {
     };
     let bullets = if long { Vec::new() } else { bullets() };
     let families = family::families(long);
+    let bouncing = bounces::families(long);
     let mut all = singles.clone();
     all.extend(bullets.iter().flat_map(|(_, _, s)| s.iter().copied()));
     all.extend(families.iter().flat_map(|f| f.scenes.iter().copied()));
+    all.extend(bouncing.iter().flat_map(|f| f.scenes.iter().copied()));
     // Each run once, all at once; below they are read from `runs`.
     runs::par(&all, |&s| runs::behaved(s));
     let mut v = Vec::new();
@@ -429,6 +449,13 @@ pub fn behaviour(long: bool) -> Vec<Entry> {
         let runs: Vec<Behaviour> = f.scenes.iter().map(|&s| runs::behaved(s)).collect();
         let (yes, _) = family::share(f, &runs);
         v.push(Entry::new(G, format!("family {}", f.name), "good", yes as f64, family_band(runs.len()), Better::Higher));
+    }
+    for f in &bouncing {
+        let runs: Vec<Behaviour> = f.scenes.iter().map(|&s| runs::behaved(s)).collect();
+        for (name, value) in bounces::stats(f, &runs) {
+            let (band, better) = bounce_band(name, runs.len());
+            v.push(Entry::new(G, format!("bounces {}", f.name), name.replace(' ', "_"), value, band, better));
+        }
     }
     v
 }

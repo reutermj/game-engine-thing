@@ -105,6 +105,9 @@ pub struct Arrays {
     /// Indices of the bodies with a `Body`: what the solver moves.
     pub moving: Vec<u32>,
     pub gravity: Vec2,
+    /// The step: the mod's `DT`, but where the comparison's bounce families
+    /// step at another rate, which the mod can't (its phase is fixed-rate).
+    pub dt: f32,
     pub contacts: Vec<Cached>,
     /// Indices by the left edge of their boxes, kept across steps: the
     /// broadphase re-sorts it by insertion, nearly free once sorted.
@@ -197,6 +200,7 @@ impl Arrays {
             by_x: (0..entity.len() as u32).collect(),
             entity,
             gravity,
+            dt: DT,
             contacts,
             time_fresh_sweep: true,
             rot,
@@ -223,6 +227,7 @@ impl Arrays {
             body,
             moving,
             gravity,
+            dt: DT,
             contacts: Vec::new(),
             by_x: (0..n).collect(),
             time_fresh_sweep: false,
@@ -270,8 +275,8 @@ impl Arrays {
         for &i in &self.moving {
             let (b, v) = (&self.body[i as usize], &mut self.vel[i as usize]);
             if b.kind == DYNAMIC {
-                v.x += self.gravity.x * b.gravity_scale * DT;
-                v.y += self.gravity.y * b.gravity_scale * DT;
+                v.x += self.gravity.x * b.gravity_scale * self.dt;
+                v.y += self.gravity.y * b.gravity_scale * self.dt;
             }
         }
         let gravity = Instant::now();
@@ -377,7 +382,7 @@ impl Arrays {
             // The gravity just added, the solver's to spread over its
             // substeps, computed as it was added.
             let (inv_mass, g) = if b.kind == DYNAMIC { (b.inv_mass, self.gravity) } else { (0.0, Vec2::ZERO) };
-            let gravity = Vec2::new(g.x * b.gravity_scale * DT, g.y * b.gravity_scale * DT);
+            let gravity = Vec2::new(g.x * b.gravity_scale * self.dt, g.y * b.gravity_scale * self.dt);
             let v = self.vel[i as usize];
             // As the mod's `Turning` walk fills them in: a body with a
             // rotation and a spin turns, pushed round if it's dynamic.
@@ -421,7 +426,7 @@ impl Arrays {
             })
             .collect();
         let solve_gather = Instant::now();
-        solve.solve((&mut bodies, &mut spinning), &mut constraints, &mut points, DT);
+        solve.solve((&mut bodies, &mut spinning), &mut constraints, &mut points, self.dt);
         let solved = Instant::now();
 
         for (s, &i) in self.moving.iter().enumerate() {
@@ -430,7 +435,7 @@ impl Arrays {
                 continue;
             }
             self.vel[i as usize] = b.v;
-            let step = if body.kind == KINEMATIC { b.v * DT } else { b.displacement(DT) };
+            let step = if body.kind == KINEMATIC { b.v * self.dt } else { b.displacement(self.dt) };
             self.pos[i as usize] = Vec2::new(self.pos[i as usize].x + step.x, self.pos[i as usize].y + step.y);
         }
         for b in &spinning {

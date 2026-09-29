@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 use rapier2d::prelude::*;
 
-use crate::scene::{GRAVITY, Scene, Spec};
+use crate::scene::{Scene, Spec};
 use crate::sim::Mark;
 use crate::{Dyn, Sim};
 
@@ -27,8 +27,12 @@ impl Rapier {
     /// `iterations` is `num_solver_iterations`, 4 by default.
     pub fn new(scene: &Scene, iterations: usize, sleep: bool, turning: bool, ccd: bool) -> Rapier {
         let mut world = PhysicsWorld::new();
-        world.gravity = Vector::new(0.0, GRAVITY);
+        world.gravity = Vector::new(0.0, scene.gravity());
+        world.integration_parameters.dt = scene.dt();
         let defaults = world.integration_parameters.num_solver_iterations;
+        // A scene that sets its substeps sets them in every engine: Rapier's
+        // solver iterations are its substeps.
+        let iterations = scene.substeps().map_or(iterations, |n| n as usize);
         world.integration_parameters.num_solver_iterations = iterations;
         world.physics_pipeline.counters.enable();
         let mut label = if iterations == defaults { "Rapier".to_string() } else { format!("Rapier, {iterations} iterations") };

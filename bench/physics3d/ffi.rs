@@ -42,6 +42,7 @@ pub struct P3Config {
     pub position_iters: i32,
     pub allow_sleep: i32,
     pub rotate: i32,
+    pub gravity: [f32; 3],
 }
 
 #[repr(C)]

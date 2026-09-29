@@ -35,6 +35,8 @@ mod arrays;
 mod baseline;
 #[allow(dead_code)] // The behaviour group's, which `:behaviour_test` checks.
 mod behave;
+#[allow(dead_code)] // The behaviour group's.
+mod bounces;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
 #[allow(dead_code)]

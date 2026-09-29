@@ -44,9 +44,16 @@ impl Ours {
         let dir = std::env::temp_dir().join(format!("physics3d-bench-{}-{run}", std::process::id()));
         let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
         engine.load_batch(&manifest.mods).expect("loading pile3d");
-        let ours = Ours { engine, dir, dynamic: RefCell::default(), total_us: 0.0, config: *config };
-        if !config.tune.is_empty() {
-            ours.send("pile3d", &format!("tune {}", config.tune));
+        // A bounce's substeps, as a game sets them: in the world's Tuning.
+        let tune = match (config.tune, config.substeps) {
+            (t, 0) => t.to_string(),
+            ("", n) => format!("sub={n}"),
+            (t, n) => format!("{t},sub={n}"),
+        };
+        let ours =
+            Ours { engine, dir, dynamic: RefCell::default(), total_us: 0.0, config: Config { tune: tune.clone().leak(), ..*config } };
+        if !tune.is_empty() {
+            ours.send("pile3d", &format!("tune {tune}"));
         }
         // One setting for iterations: the soft step has its own substeps,
         // whatever the harness asks of the others.

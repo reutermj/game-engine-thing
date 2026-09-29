@@ -13,6 +13,7 @@
 #[path = "../../engine/std/physics/compare/baseline.rs"]
 pub mod baseline;
 pub mod behave;
+pub mod bounces;
 pub mod box3d;
 mod ffi;
 pub mod jolt;
@@ -58,6 +59,20 @@ pub struct Config {
     /// A variant of ours (`physics3d::Tuning::parse`), or "" for the
     /// defaults.
     pub tune: &'static str,
+    /// y is up: `scenes::EARTH` but for a bounce (`Scene::gravity`).
+    pub gravity: [f32; 3],
+    /// The substeps a bounce sets in every engine that has them (ours,
+    /// Rapier's solver iterations, Box3D's), or 0 for each engine's own.
+    pub substeps: u32,
+}
+
+impl Config {
+    /// Each engine's defaults on `scene`, as `runs` makes them: its gravity
+    /// and substeps, turning or not, and ours tuned as `tune` says.
+    pub fn of(scene: &scenes::Scene, rotate: bool, tune: &'static str) -> Config {
+        let max_bodies = (scene.spawn.iter().map(Vec::len).sum::<usize>() + scene.statics.len() + 16) as u32;
+        Config { iters: Iters::Default, sleep: false, max_bodies, rotate, tune, gravity: scene.gravity, substeps: scene.substeps }
+    }
 }
 
 /// A dynamic body as the harness reads it back.

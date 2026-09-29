@@ -33,6 +33,8 @@ typedef struct P3Config {
 	int32_t allow_sleep;
 	// 0 locks every dynamic body's rotation; 1 lets bodies turn.
 	int32_t rotate;
+	// y is up; the comparison's is (0, -9.81, 0).
+	float gravity[3];
 } P3Config;
 
 typedef struct JoltWorld JoltWorld;

@@ -3,7 +3,7 @@
 # (docs/architecture/physics-testing.md, "The baseline"). Group quality
 # is checked by the quality tests, behaviour by the behaviour tests.
 # Written by
-#     ./bazel run -c opt //engine/std/physics/compare:baseline -- --long --write
+#     ./bazel run //engine/std/physics/compare:baseline -- --long --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
 quality    piles 9000-11000 401            rest_median          230        steps 250 or 30%
@@ -204,3 +204,30 @@ behaviour  family dominoes_fine            good                 25         withi
 behaviour  family stacks_fine              good                 9          within 1
 behaviour  family ratios_fine              good                 60         within 1
 behaviour  family pyramids_fine            good                 11         within 1
+behaviour  bounces drops                   excess_worst         12.37      rel 0.05 or 0.001
+behaviour  bounces drops                   excess_tipping       0.1481     rel 0.05 or 0.001
+behaviour  bounces drops                   gain_worst           13.37      rel 0.05 or 0.001
+behaviour  bounces drops                   gain_median          0.001143   rel 0.05 or 0.001
+behaviour  bounces drops                   loss_worst           0.26       rel 0.05 or 0.001
+behaviour  bounces drops                   bounced_below        278        within 198
+behaviour  bounces drops                   flat_above           68         within 198
+behaviour  bounces rates                   excess_worst         2.045      rel 0.05 or 0.001
+behaviour  bounces rates                   gain_worst           2.483      rel 0.05 or 0.001
+behaviour  bounces rates                   gain_median          0.01933    rel 0.05 or 0.001
+behaviour  bounces rates                   loss_worst           9.432      rel 0.05 or 0.001
+behaviour  bounces rates                   bounced_below        0          within 25
+behaviour  bounces rates                   flat_above           74         within 25
+behaviour  bounces oblique                 excess_worst         0.1273     rel 0.05 or 0.001
+behaviour  bounces oblique                 gain_worst           0.1366     rel 0.05 or 0.001
+behaviour  bounces oblique                 gain_median          0          rel 0.05 or 0.001
+behaviour  bounces oblique                 loss_worst           0.03008    rel 0.05 or 0.001
+behaviour  bounces oblique                 bounced_below        0          within 32
+behaviour  bounces oblique                 flat_above           0          within 32
+behaviour  bounces oblique                 slip_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique                 tangent_most         0.9747     rel 0.01 or 1e-4
+behaviour  bounces oblique                 tangent_median       0.681      rel 0.01 or 1e-4
+behaviour  bounces pairs                   gain_worst           2.384e-7   rel 0.05 or 0.001
+behaviour  bounces pairs                   momentum_worst       1.007e-4   rel 0.5 or 1e-4
+behaviour  bounces series                  rise_worst           42.56      rel 0.01 or 0.001
+behaviour  bounces series                  decay_worst          1.877      rel 0.01 or 0.001
+behaviour  bounces series                  decay_median         1.218      rel 0.01 or 0.001

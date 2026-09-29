@@ -25,7 +25,7 @@ struct Box3dWorld {
 Box3dWorld* p3_box3d_create(const P3Config* config) {
 	Box3dWorld* w = calloc(1, sizeof(Box3dWorld));
 	b3WorldDef def = b3DefaultWorldDef();
-	def.gravity = (b3Vec3){0.0f, -9.81f, 0.0f};
+	def.gravity = (b3Vec3){config->gravity[0], config->gravity[1], config->gravity[2]};
 	def.workerCount = 1;
 	def.enableSleep = config->allow_sleep != 0;
 	def.capacity.dynamicBodyCount = (int)config->max_bodies;

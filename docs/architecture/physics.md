@@ -2945,7 +2945,8 @@ looser bound:
   lossless ball climbs to 1.64 of its drop in 12 bounces (3D 1.31 in 9),
   and e = 0.75 passes e². Below 0.5 every engine loses more to the soft
   contact than this adds, so it hides. Pong is spared: its ball has no
-  gravity.
+  gravity. Its shape over a family of bounces, and the fixes weighed:
+  [Bounces](#bounces).
 - **A heavy box on light ones comes to rest late** (get-emj.57): at
   1000:1 from 199 where the references rest from 41 and 29, and under the
   wide box from 69 where they rest from 34 and 33; at 100:1 (24) and on
@@ -3003,6 +3004,151 @@ overlap (at rest 0.014 deep at most, against their 0.057-0.067) over some
 mass ratio fails: "ratio 1000 5" buckles sideways by step 60 and has two
 light boxes under the floor by step 120 in ours, where Box2D's column lies
 flat on it.
+
+## Bounces
+
+**Status: the families built** (2026-09-29,
+get-emj.56 and get-emj.60). The drop above found that a lossless ball
+climbs to 1.64 of its drop in 2D (1.31 in 3D), but one drop can't say how
+an error scales, and its drops at e ≤ 0.5 hid it. So restitution is judged
+on families: one bounce over a grid of what can decide it, 2D and 3D, ours
+and the references on exactly the same grid (`compare/bounces.rs`,
+`bench/physics3d/bounces.rs`; a bounce is `Scene::Hit`, in 3D a
+`Kind::Hit` with the bounce packed into its n).
+
+### The families
+
+| family | what | short grid (default suite) | long grid (long suite) |
+|---|---|---|---|
+| drops | a ball, a box landing flat, a box turned 30° landing on a corner (3D: a sphere, a cube flat, on an edge, on a corner), onto a static floor | e 0, 0.5, 1; impact 0.8 (under the threshold), 1.5, 5, 14 (3D 0.8, 3, 9.9); gravity 0, 20, 80 (3D 0, 9.81, 40); where in a step it meets 0 and ½ (3D 0): 216 runs (3D 108) | e by tenths (3D 0, ½, 1); 15 impacts 0.5 to 40 (3D 11 to 20); gravity 0, 10, 20, 40, 80 (3D 0, 9.81, 20, 40); four phases (3D two): 9900 (3D 1056) |
+| rates | a ball and a flat box at 60 and 30 Hz, 5 and 6 substeps in every engine | e ½, 1; impact 3, 14; gravity 20, 80: 128 (3D 32, 5 and 6 substeps only) | e by quarters, five impacts, four phases: 1280 (3D 160) |
+| oblique | angled bounces, 30° and 60° from the normal, friction 0, 0.3 and 1 | impact 5 and 14, gravity 0 and 20: 96 (3D 48) | 15° to 75°, two phases: 1600 (3D 144) |
+| pairs | a ball onto a ball equal and three times as heavy, and onto a free box (3D: two spheres), square on | e 0, ½, 1; closing 2, 14; gravity 0, 20: 72 (3D 24) | to 28, ratio 10: 1000 (3D 96) |
+| series | 20 s of bounces of a ball and a flat box | e ½, 0.75, 0.9, 1; gravity 20, 80: 16 (3D 16) | three drops, 30 Hz too: 96 (3D 48) |
+
+3D has no step axis: physics3d is a mod, stepped at the simulation's fixed
+rate, where 2D's arrays step at any. Jolt is left out of the 3D families:
+its default damping changes every free step, so its contacts can't be found
+from its states.
+
+**How a bounce is measured** (`behave::hit`, the same code for every
+engine):
+
+- *From free flight.* The contact is the first step whose velocity changed
+  by more than gravity (or whose spin changed), the bounce's end the first
+  after it free again and moving apart. What an engine does in between
+  (substeps, speculative contacts, push-out) is its own; what it came in
+  and left with is measured the same.
+- *The whole energy, its height from where the body lies flat,* over what
+  it came in with: a corner's tilt is height it turns into speed as it
+  tips, which counted from the corner would read as gained.
+- *Past the push-out.* A soft contact pushes an overlap out through
+  positions, lifting a body without costing its speed, in every engine:
+  up to gravity times the deepest overlap may leave with the bounce. Past
+  that, energy is from nowhere (`excess`).
+- *Restitution's own measure* (`gain`): the rebound's energy along the
+  normal over the impact's, past e² (and the push-out), for the bodies
+  that meet square on: a ball, a box flat without friction. A corner
+  tips, and a box friction tips turns speed along the floor into speed off
+  it.
+- *Over time,* each apex by the centre's energy height, which free flight
+  keeps whatever the body turns; a box's apexes against each other aren't
+  judged, since its turn trades with its height at every bounce.
+
+**Bounds.** The analytic answer where there is one: no bounce leaves with
+more energy than it came in with (1%, past the push-out); square-on ones
+rebound at e of their impact speed (1% of the energy); nothing under
+`BOUNCE_THRESHOLD` bounces; two free bodies keep their momentum (a
+thousandth of the impulse); a lossless ball never rises past its drop (1%),
+and no bounce keeps more than e² of the last one's height. The references
+otherwise, by the rule for a single bounce above: the median square-on
+bounce no more than a quarter further under e² than the lower reference's,
+no more of them flat than the reference that misses most, what's kept of a
+speed along the floor or of a height a quarter further from all of it than
+the lower reference's.
+
+**Checked in the debug view** (`VIEW="hit corner e=1 v=5 g=20"` and the
+others): the corner meets the floor on its corner, a point pressed there,
+and leaves turned toward flat; the ball meets the free box square on and
+both part; an angled box slides as it meets.
+
+### What it showed, before any fix
+
+**Only against something gravity doesn't move.** At gravity 0 every engine
+bounces exactly (a gain of 0.000000 on every drop); between two free bodies
+too (1000 pairs, momentum to 0.0001), since gravity moves both alike. Every
+gain is off the floor, under gravity.
+
+**Exactly one step of gravity.** Restitution restored e times the closing
+speed with the step's gravity already in it (`integrate_velocities` adds it
+before contacts are found). Measured as the rebound over e less the speed
+at the step's start, in steps of gravity, on the square-on bounces that met
+at the surface, impact 1.1 to 7 (long grids):
+
+| | gravity 10 | 20 | 40 | 80 | 30 Hz, 20 | 30 Hz, 80 |
+|---|---|---|---|---|---|---|
+| ours | +1.008 | +1.001 | +1.000 | +1.000 | +1.000 | +0.999 |
+| Box2D | −0.043 | −0.035 | −0.020 | −0.014 | −0.017 | −0.009 |
+| Rapier | −0.054 | −0.034 | −0.010 | −0.012 | −0.012 | −0.006 |
+
+**So it scales as g dt over the impact speed.** The median square-on
+bounce's gain (its energy past e², a share of what it came in with) grows
+with gravity (+0.006, +0.010, +0.014 at 10, 20, 40) and the step (+0.025
+at 30 Hz against +0.016 at 60, gravity 20), shrinks with speed (+0.038 at
+1.1, +0.021 at 3, +0.002 at 14, gravity 20), and grows with e (+0.001 at
+0.2, +0.041 at 1), where the references lose (−0.036 to −0.17); balls,
+flat boxes and corners alike. Under the threshold it bounced what
+shouldn't once a step's gravity took the closing speed past it: 278 of the
+long drops under it (at gravity 80 a step's is 1.33); Box2D none. Over 20
+s a lossless ball climbs to 10.2 of its drop (short grid) and 42.6 (long:
+30 Hz, gravity 80), and a ball keeps a median 1.22 e² of its height a
+bounce. In 3D the same: 0.061 energy past the push-out on the short drops
+(0.39 a cube on its edge), a lossless sphere to 5.4 of its drop.
+
+**What else the families found, not this bug:**
+
+- *A speculative contact catches a falling body short of the floor*
+  (get-emj.69): the last substep's relax pass limits a body within the
+  margin (0.05) to what closes the gap in the next substep, which marks the
+  point pushed, and restitution bounces it from up to a substep's travel
+  above the floor (lore). It never leaves with more than it came in with,
+  but a slow bounce at low e keeps that height too: 9% of its impact
+  energy past e² at worst. Box2D's speculative distance is 0.02, so its
+  contact isn't there a step early.
+- *Through the margin.* A body faster than the margin a step passes the
+  surface in a free step and meets under it, having fallen the overlap
+  too, and the push-out gives the overlap back as height. Every engine
+  does (Box2D 58 of the long drops, Rapier 71, ours 66 once the step's
+  gravity is out): the push-out allowance is what keeps it from reading as
+  energy from nowhere.
+- *Rapier has no restitution threshold* (lore): it bounces a contact's
+  first step at any speed, and at e ≥ 1 every step: 535 of the long drops
+  under the threshold bounce, and a lossless ball rises to 1.2 of its drop.
+- *Box2D's single restitution pass* over a flat box's two points returns
+  0.88 of e, 22.6% of the energy lost; ours passes four times
+  (`BOUNCE_ITERATIONS`).
+- *A cube on an edge at e = 1 in 3D* tips, slaps its face and leaves with
+  up to 11% more than it came in with in Box3D (8% in ours once the step's
+  gravity is out): the one pass of restitution over its points.
+
+### How the references take it (read in their fetched source)
+
+- **Box2D v3.1.1** (`contact_solver.c`): `b2PrepareContactsTask` stores
+  each point's `relativeVelocity`, the normal speed of `vB + wB × rB` less
+  `vA + wA × rA`, before `b2_stageIntegrateVelocities` adds any substep's
+  gravity; `b2ApplyRestitution` skips a point whose `relativeVelocity` is
+  over −`restitutionThreshold` or whose `totalNormalImpulse` is 0, and
+  drives its normal speed to −e times it.
+- **Box3D 0.1** the same (`contact_solver.c`: `relativeVelocity` at
+  prepare, the same test in its restitution).
+- **Rapier 0.36** (`generic_contact_constraint.rs`): the restitution seed
+  is e times the normal speed `(vel1 − vel2) · n` when the constraint is
+  built, before its substeps' gravity; `is_bouncy` (`contact_pair.rs`)
+  bounces a new contact at e > 0 and an old one only at e ≥ 1, with no
+  speed threshold.
+- **Ours** took it in the solver's prepare from `SolverBody::v`, which the
+  step's gravity is already in: the solver takes it back out for the
+  substeps (`SolverBody::gravity`), but didn't for this.
 
 ## Still at rest
 

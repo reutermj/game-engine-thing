@@ -139,6 +139,164 @@ pub enum Scene {
     /// Mass 1 all, as every settling scene has it, so the measures read
     /// alike. A game's pile is mixed.
     Mixed { n: u32, width: f32 },
+    /// One bounce of the bounce families (`bounces.rs`): a body meeting a
+    /// floor or another body at a chosen speed, restitution, gravity,
+    /// angle, friction, step and substeps (`Hit`).
+    Hit(Hit),
+}
+
+/// What a `Scene::Hit` throws, and at what.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    /// A ball of radius 0.5 onto the static floor.
+    Circle,
+    /// A unit box landing flat on it: two points.
+    Box,
+    /// A unit box turned `CORNER`, landing on a corner and set turning.
+    Corner,
+    /// A ball of radius 0.5 onto another, both free, the second `ratio`
+    /// times as heavy: the first coming down onto the second coming up.
+    Balls,
+    /// A ball onto a free unit box `ratio` times as heavy, square on.
+    BallBox,
+}
+
+const TARGETS: [(Target, &str); 5] =
+    [(Target::Circle, "circle"), (Target::Box, "box"), (Target::Corner, "corner"), (Target::Balls, "balls"), (Target::BallBox, "ballbox")];
+
+impl Target {
+    pub fn name(self) -> &'static str {
+        TARGETS.iter().find(|(t, _)| *t == self).unwrap().1
+    }
+
+    /// Whether it lands on the static floor, not on a second body.
+    pub fn floor(self) -> bool {
+        !matches!(self, Target::Balls | Target::BallBox)
+    }
+}
+
+/// How far `Target::Corner`'s box is turned: its lowest corner 0.18 to the
+/// side of its centre, so a bounce sets it turning.
+pub const CORNER: f32 = std::f32::consts::FRAC_PI_6;
+
+/// A bounce (`Scene::Hit`): a body arriving at a floor, or at a second
+/// body, at a closing speed `v` along the normal (and `along` it, the
+/// floor's way), `phase` of a step after a whole number of steps (where in
+/// a step it meets), restitution `e` and friction `mu` on both, under
+/// gravity `g`, stepped at `hz` with `sub` substeps in every engine (0:
+/// each engine's own), for `secs` seconds, or (0) the one bounce.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub target: Target,
+    pub e: f32,
+    pub v: f32,
+    pub phase: f32,
+    pub g: f32,
+    pub along: f32,
+    pub mu: f32,
+    pub ratio: f32,
+    pub hz: f32,
+    pub sub: u32,
+    pub secs: f32,
+}
+
+/// What a `Hit` is where a family doesn't say: a lossless ball dropped
+/// from 4.9 onto a frictionless floor, at the comparison's gravity and step.
+pub const HIT: Hit =
+    Hit { target: Target::Circle, e: 1.0, v: 14.0, phase: 0.0, g: GRAVITY, along: 0.0, mu: 0.0, ratio: 1.0, hz: 60.0, sub: 0, secs: 0.0 };
+
+impl Hit {
+    pub fn dt(&self) -> f32 {
+        1.0 / self.hz
+    }
+
+    /// The flight to the contact: the steps it takes, rounded up, its time,
+    /// and the speed toward it and the gap at the start. Under gravity it falls
+    /// from as high as leaves it at rest, the fall shortened to a whole
+    /// number of steps and `phase` of one more (so it starts moving a little
+    /// where that isn't a whole fall); without, or between two free bodies
+    /// (which gravity moves alike), it closes the gap in 3 steps and
+    /// `phase`.
+    pub fn flight(&self) -> (u32, f32, f32, f32) {
+        let dt = self.dt();
+        let g = if self.target.floor() { self.g } else { 0.0 };
+        let t = if g > 0.0 {
+            let most = self.v / g;
+            let whole = (most / dt - self.phase).floor().max(0.0);
+            ((whole + self.phase) * dt).min(most)
+        } else {
+            (3.0 + self.phase) * dt
+        };
+        let u0 = self.v - g * t;
+        ((t / dt).ceil() as u32, t, u0, u0 * t + 0.5 * g * t * t)
+    }
+
+    fn text(&self) -> String {
+        let mut s = format!("hit {}", self.target.name());
+        let keys: [(&str, f32, f32); 10] = [
+            ("e", self.e, HIT.e),
+            ("v", self.v, HIT.v),
+            ("phase", self.phase, HIT.phase),
+            ("g", self.g, HIT.g),
+            ("along", self.along, HIT.along),
+            ("mu", self.mu, HIT.mu),
+            ("ratio", self.ratio, HIT.ratio),
+            ("hz", self.hz, HIT.hz),
+            ("sub", self.sub as f32, HIT.sub as f32),
+            ("secs", self.secs, HIT.secs),
+        ];
+        for (k, x, default) in keys {
+            if x != default {
+                s += &format!(" {k}={x}");
+            }
+        }
+        s
+    }
+
+    fn parse(words: &[&str]) -> Option<Hit> {
+        let target = TARGETS.iter().find(|(_, n)| Some(n) == words.first())?.0;
+        let mut h = Hit { target, ..HIT };
+        for kv in &words[1..] {
+            let (k, x) = kv.split_once('=')?;
+            let x: f32 = x.parse().ok()?;
+            match k {
+                "e" => h.e = x,
+                "v" => h.v = x,
+                "phase" => h.phase = x,
+                "g" => h.g = x,
+                "along" => h.along = x,
+                "mu" => h.mu = x,
+                "ratio" => h.ratio = x,
+                "hz" => h.hz = x,
+                "sub" => h.sub = x as u32,
+                "secs" => h.secs = x,
+                _ => return None,
+            }
+        }
+        Some(h)
+    }
+
+    fn build(&self) -> Vec<Spec> {
+        let (_, t, u0, s) = self.flight();
+        let material = |spec: Spec| Spec { friction: self.mu, restitution: self.e, ..spec };
+        if !self.target.floor() {
+            // The second body still at the origin, the first above it,
+            // closing at `v` with no momentum between them.
+            let m = 1.0 + self.ratio;
+            let hb = 0.5;
+            let a = Spec { circle: true, y: -(0.5 + hb + s), vy: self.v * self.ratio / m, ..SPEC };
+            let b = Spec { circle: self.target == Target::Balls, vy: -self.v / m, mass: self.ratio, ..SPEC };
+            return vec![material(a), material(b)];
+        }
+        let floor = material(wall(0.0, 0.5, 50.0, 0.5));
+        let (angle, reach) = match self.target {
+            Target::Corner => (CORNER, 0.5 * (CORNER.sin() + CORNER.cos())),
+            _ => (0.0, 0.5),
+        };
+        // Where it meets the floor, x = 0, sliding `along`.
+        let body = Spec { circle: self.target == Target::Circle, x: -self.along * t, y: -s - reach, vx: self.along, vy: u0, angle, ..SPEC };
+        vec![floor, material(body)]
+    }
 }
 
 /// How far above the floor `Scene::Bounce` drops its ball's bottom.
@@ -182,6 +340,7 @@ impl Scene {
             "cards" => Some(Scene::Cards { rows: num(1)? as u32, lean: num(2).unwrap_or(25.0), mu: num(3).unwrap_or(0.7) }),
             "ladder" => Some(Scene::Ladder { deg: num(1)?, mu: num(2)? }),
             "dominoes" => Some(Scene::Dominoes { n: num(1)? as u32, spacing: num(2).unwrap_or(1.0), mu: num(3).unwrap_or(0.6) }),
+            "hit" => Some(Scene::Hit(Hit::parse(&words[1..])?)),
             _ => None,
         }
     }
@@ -222,6 +381,32 @@ impl Scene {
             Scene::Dominoes { n, spacing, mu } if (*spacing, *mu) == (1.0, 0.6) => format!("dominoes {n}"),
             Scene::Dominoes { n, spacing, mu } => format!("dominoes {n} {spacing} {mu}"),
             Scene::PyramidAt { base, mu } => format!("pyramid {base} {mu}"),
+            Scene::Hit(h) => h.text(),
+        }
+    }
+
+    /// Gravity, down: the comparison's, but where a bounce sets its own.
+    pub fn gravity(&self) -> f32 {
+        match self {
+            Scene::Hit(h) => h.g,
+            _ => GRAVITY,
+        }
+    }
+
+    /// The step: the comparison's, but where a bounce sets its own.
+    pub fn dt(&self) -> f32 {
+        match self {
+            Scene::Hit(h) => h.dt(),
+            _ => DT,
+        }
+    }
+
+    /// The substeps every engine solves at, where a bounce sets them; else
+    /// each engine's own.
+    pub fn substeps(&self) -> Option<u32> {
+        match self {
+            Scene::Hit(h) if h.sub > 0 => Some(h.sub),
+            _ => None,
         }
     }
 
@@ -355,6 +540,7 @@ impl Scene {
                     Spec { x, y, hx, hy, friction: mu, angle: a, ..SPEC },
                 ]
             }
+            Scene::Hit(h) => h.build(),
             Scene::Dominoes { n, spacing, mu } => {
                 let mut v = vec![Spec { friction: mu, ..wall(0.0, 1.0, 100.0, 1.0) }];
                 let x0 = -0.5 * n as f32 * spacing;
@@ -410,6 +596,7 @@ impl Scene {
             Scene::Ramp { .. } | Scene::Bullet { .. } => false,
             Scene::Bounce { .. } | Scene::Ratio { .. } | Scene::Overlap { .. } | Scene::Ladder { .. } => y > 0.0 || x.abs() > 10.0,
             Scene::BigOnSmall | Scene::Cards { .. } | Scene::Dominoes { .. } => y > 0.0 || x.abs() > 40.0,
+            Scene::Hit(h) => h.target.floor() && (y > 0.0 || x.abs() > 50.0),
         }
     }
 }

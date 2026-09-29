@@ -23,12 +23,21 @@ fn once<T>(slots: &Slots<T>, key: String, run: impl FnOnce() -> T) -> Arc<T> {
 }
 
 /// Each of `items` through `f`, in threads of their own, the results in
-/// their order.
+/// their order: at most `WIDE` at once, since each of ours is an engine
+/// with its mods loaded, and a long bounce grid's thousands at once run
+/// out of address space to map them in.
 pub fn par<A: Sync, T: Send>(items: &[A], f: impl Fn(&A) -> T + Sync) -> Vec<T> {
-    std::thread::scope(|s| {
-        let threads: Vec<_> = items.iter().map(|a| s.spawn(|| f(a))).collect();
-        threads.into_iter().map(|t| t.join().expect("a run panicked")).collect()
-    })
+    const WIDE: usize = 64;
+    let f = &f;
+    items
+        .chunks(WIDE)
+        .flat_map(|chunk| {
+            std::thread::scope(|s| {
+                let threads: Vec<_> = chunk.iter().map(|a| s.spawn(move || f(a))).collect();
+                threads.into_iter().map(|t| t.join().expect("a run panicked")).collect::<Vec<T>>()
+            })
+        })
+        .collect()
 }
 
 /// The variant of ours `TUNE` names in the environment
@@ -40,7 +49,7 @@ pub fn tune() -> &'static str {
 }
 
 fn config(max_bodies: usize, rotate: bool) -> Config {
-    Config { iters: Iters::Default, sleep: false, max_bodies: max_bodies as u32, rotate, tune: tune() }
+    Config { iters: Iters::Default, sleep: false, max_bodies: max_bodies as u32, rotate, tune: tune(), gravity: scenes::EARTH, substeps: 0 }
 }
 
 /// Ours on `kind` at `n`, bodies turning or locked.
@@ -51,9 +60,15 @@ pub fn ours(kind: Kind, n: usize, rotate: bool) -> Arc<Run> {
     })
 }
 
+/// Ours on a bounce (`Kind::Hit`).
+pub fn hit(h: &scenes::Hit) -> Arc<Behaviour> {
+    behaved(Kind::Hit, h.pack())
+}
+
 /// Ours on a behaviour scene, bodies turning.
 pub fn behaved(kind: Kind, n: usize) -> Arc<Behaviour> {
     once(&BEHAVED, format!("{} {n} {}", kind.name(), tune()), || {
-        behave::behave(&scenes::build(kind, n), make_backend("ours", &config(16, true)).unwrap().as_mut())
+        let scene = scenes::build(kind, n);
+        behave::behave(&scene, make_backend("ours", &Config::of(&scene, true, tune())).unwrap().as_mut())
     })
 }

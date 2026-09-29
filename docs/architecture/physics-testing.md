@@ -110,8 +110,9 @@ the floor" or "suspiciously better" gets an explicit yes or no.
 
 - **Where:** four files, next to the scenes:
   `engine/std/physics/compare/baseline.txt` (2D, the default suite's
-  scenes: 201 values) and `baseline_long.txt` (the long suite's: 198),
-  `bench/physics3d/baseline.txt` (73) and `baseline_long.txt` (67).
+  scenes: 228 values, 27 of them the bounce families') and
+  `baseline_long.txt` (the long suite's: 225),
+  `bench/physics3d/baseline.txt` (100) and `baseline_long.txt` (94).
   `baseline.rs` is the format and the comparison, shared; `record.rs` in
   each says what is recorded and with which band; `runs.rs` in each runs
   every scene once per test binary.
@@ -161,6 +162,7 @@ the floor" or "suspiciously better" gets an explicit yes or no.
   | a hand calculation (ramp acceleration); a bounce's apex | rel 0.002; rel 0.01 | 0; 0 |
   | an edge family's count | within one run, or 2% of a long grid | one (dominoes 3 → 4 of 4, cards 105 → 106 of 135) |
   | escapes, a heavy box standing, dominoes in order | exact | 0 |
+  | a bounce family (2D and 3D): its shares of energy; its counts; what's kept of a speed or a height; the momentum lost | rel 0.05 or 1e-3; one run in 50 (3D: one); rel 0.01 or 1e-3; rel 0.5 or 1e-4 | not yet measured: set by the kind of value (get-emj.70) |
   | 3D: a pile family's median rest; depth; landing and mean; partners | 90 or 30%; rel 0.5; rel 0.35; rel 0.25 | 84; 41%; 31%; 20% |
   | 3D: one big pile (the long suite's 1000 and 10 000): depth, mean overlap, partners; energy | rel 0.6, 0.25, 0.15; a factor of 10 | 55%, 19%, 14%; 6.6 |
   | 3D: a stack: rest; top and depth; tilt; energy | 10 steps; rel 0.15; rel 0.1 or 0.05°; a factor of 3 | 0; 9%; 0.014° (the measure's resolution is 0.02°); 1.13 |
@@ -422,6 +424,43 @@ solvers.
   of 2000, 81 wide, creeps at 0.07 mid-pile from step 1140 to the end),
   and 3D's turning cubes at 2000-5000 (get-emj.65, four sizes, just past
   the noise).
+
+### Families of a law
+
+**Built** (2026-09-29, get-emj.56 and .60: physics.md, "Bounces"). A
+family is a grid for a behaviour with an analytic answer too, not only for
+one at an edge: the bounce families put restitution over impact speed,
+restitution, gravity, shape, angle, two free bodies, time, the step and
+the substeps. What building them taught:
+
+- **Measure the event from free flight, not from the engine.** Each
+  engine's contact starts and ends at its own substep, margin and push-out;
+  the steps where a body's velocity changed by more than gravity are the
+  same test for all of them.
+- **Normalize by what can turn into what.** Counted from its contact
+  height, a box landing on a corner reads as gaining the energy of tipping
+  flat; counted from where it lies flat, it doesn't. Counted from the
+  highest step, an apex reads 3% low at gravity 80; counted by its energy
+  height, it doesn't.
+- **Allow for what the method gives back, and say so.** A soft contact's
+  push-out lifts a body by its overlap at no cost to its speed, in every
+  engine; a law of "no energy from nowhere" that doesn't allow it fails
+  the references on every fast impact.
+- **A worst over a grid is one mechanism's.** The first "worst gain" was a
+  corner tipping, then a ball passing the margin, then a speculative
+  contact catching a ball short: each a separate finding. Split a
+  statistic by mechanism (square on, tipping) before bounding it, and look
+  at the runs that decide it.
+- **The references have the artefacts too** (Box2D and Rapier gain 9% on
+  a corner, Box3D 11% on a slow edge, Rapier has no threshold), which is
+  why a law's bound stays analytic even where they break it, and a
+  reference bound is theirs on the same grid, not a guess at it.
+- **A family can't choose for you.** Every option was measured on every
+  grid; where none met every bound the table and the trade-off went to a
+  person rather than one being fitted.
+- **Mind the instances.** A 3D run of ours is an engine with its mods
+  loaded; one process ran out of room to map them near its 2300th, so the
+  3D grids are about 1500 runs and the runs go 64 at a time.
 
 ### A time budget for the default suite
 

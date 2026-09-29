@@ -3,7 +3,7 @@
 
 use rapier3d::prelude::*;
 
-use crate::{Backend, Config, GRAVITY, Iters, Shape, Spec, State};
+use crate::{Backend, Config, Iters, Shape, Spec, State};
 
 pub struct Rapier {
     world: PhysicsWorld,
@@ -16,9 +16,13 @@ pub struct Rapier {
 impl Rapier {
     pub fn new(config: &Config) -> Self {
         let mut world = PhysicsWorld::new();
-        world.gravity = Vector::new(GRAVITY[0], GRAVITY[1], GRAVITY[2]);
+        world.gravity = Vector::new(config.gravity[0], config.gravity[1], config.gravity[2]);
         if config.iters == Iters::Eight {
             world.integration_parameters.num_solver_iterations = 8;
+        }
+        // Rapier's solver iterations are its substeps.
+        if config.substeps > 0 {
+            world.integration_parameters.num_solver_iterations = config.substeps as usize;
         }
         // Needs the crate's `profiler` feature, or every timer reads zero.
         world.physics_pipeline.counters.enable();

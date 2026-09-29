@@ -42,6 +42,7 @@ rust_binary(
     name = "compare",
     srcs = [
         "behave.rs",
+        "bounces.rs",
         "box2d.rs",
         "compare.rs",
         "ecs.rs",
@@ -90,6 +91,7 @@ exports_files(
 MEASURE_SRCS = [
     "baseline.rs",
     "behave.rs",
+    "bounces.rs",
     "ecs.rs",
     "family.rs",
     "quality.rs",

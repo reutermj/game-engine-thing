@@ -1682,6 +1682,7 @@ fn clone_arrays(a: &Arrays) -> Arrays {
         body: a.body.clone(),
         moving: a.moving.clone(),
         gravity: a.gravity,
+        dt: a.dt,
         contacts: a.contacts.clone(),
         by_x: a.by_x.clone(),
         time_fresh_sweep: false,

@@ -109,6 +109,215 @@ pub enum Kind {
     /// two frictions by different rules (Rapier the mean, the others the
     /// geometric mean), which a pile of mixed materials would measure.
     Mixed,
+    /// One bounce of the bounce families (bench/physics3d, `bounces.rs`):
+    /// n is a `Hit`, packed (`Hit::pack`).
+    Hit,
+}
+
+/// What a `Kind::Hit` throws, and at what.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A sphere of radius 0.5 onto the floor.
+    Sphere,
+    /// A unit cube landing flat: four points.
+    Cube,
+    /// A unit cube turned `TILT` about z, landing on an edge.
+    Edge,
+    /// A unit cube turned `TILT` about z and again about x, landing on a
+    /// corner.
+    Corner,
+    /// A sphere onto another, both free, the second `ratio` times as heavy:
+    /// the first coming down onto the second coming up.
+    Spheres,
+}
+
+pub const TARGETS: [Target; 5] = [Target::Sphere, Target::Cube, Target::Edge, Target::Corner, Target::Spheres];
+
+impl Target {
+    pub fn name(self) -> &'static str {
+        ["sphere", "cube", "edge", "corner", "spheres"][self as usize]
+    }
+
+    /// Whether it lands on the static floor, not on a second body.
+    pub fn floor(self) -> bool {
+        self != Target::Spheres
+    }
+}
+
+/// How far `Target::Edge`'s and `Corner`'s cubes are turned, each way.
+pub const TILT: f32 = std::f32::consts::FRAC_PI_6;
+
+/// y is up: the comparison's gravity, and every scene's but a bounce's.
+pub const EARTH: [f32; 3] = [0.0, -9.81, 0.0];
+
+/// A bounce (`Kind::Hit`), as 2D's `Scene::Hit`: a body arriving at the
+/// floor, or at a second body, at closing speed `v` along the normal and
+/// `along` it the floor's way (x), `phase` of a step after a whole number
+/// of steps, restitution `e` and friction `mu` on both, under gravity `g`
+/// (down), at `sub` substeps in every engine (0: each its own), over 20 s
+/// when `series`, or the one bounce. Packed into a scene's n (`pack`), each
+/// field rounded to what the families use: e to hundredths, v, along and
+/// mu to tenths, phase to quarters, and g one of `GRAVITIES`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub target: Target,
+    pub e: f32,
+    pub v: f32,
+    pub phase: f32,
+    pub g: f32,
+    pub along: f32,
+    pub mu: f32,
+    pub ratio: f32,
+    pub sub: u32,
+    pub series: bool,
+}
+
+/// A `Hit` where a family doesn't say: a lossless sphere dropped from 5
+/// onto a frictionless floor, at the comparison's gravity.
+pub const HIT: Hit =
+    Hit { target: Target::Sphere, e: 1.0, v: 9.9, phase: 0.0, g: 9.81, along: 0.0, mu: 0.0, ratio: 1.0, sub: 0, series: false };
+
+/// Each field's digits in a packed `Hit`, lowest first: 17, as many as a
+/// usize holds with room.
+const WIDTHS: [u32; 10] = [1, 3, 3, 1, 1, 3, 2, 1, 1, 1];
+
+/// The gravities a `Hit` can have, by their place: none, the comparison's,
+/// and others.
+pub const GRAVITIES: [f32; 6] = [0.0, 9.81, 40.0, 5.0, 20.0, 80.0];
+
+impl Hit {
+    pub fn pack(&self) -> usize {
+        let fields = [
+            self.target as usize,
+            (self.e * 100.0).round() as usize,
+            (self.v * 10.0).round() as usize,
+            (self.phase * 4.0).round() as usize,
+            GRAVITIES.iter().position(|g| *g == self.g).unwrap_or_else(|| panic!("no gravity {} in GRAVITIES", self.g)),
+            (self.along * 10.0).round() as usize,
+            (self.mu * 10.0).round() as usize,
+            self.ratio.round() as usize,
+            self.sub as usize,
+            self.series as usize,
+        ];
+        let (mut n, mut scale) = (0usize, 1usize);
+        for (f, w) in fields.iter().zip(WIDTHS) {
+            assert!(*f < 10usize.pow(w), "a field of {self:?} is too big to pack");
+            n += f * scale;
+            scale *= 10usize.pow(w);
+        }
+        n
+    }
+
+    pub fn unpack(mut n: usize) -> Hit {
+        let mut f = [0usize; 10];
+        for (x, w) in f.iter_mut().zip(WIDTHS) {
+            *x = n % 10usize.pow(w);
+            n /= 10usize.pow(w);
+        }
+        Hit {
+            target: TARGETS[f[0]],
+            e: f[1] as f32 / 100.0,
+            v: f[2] as f32 / 10.0,
+            phase: f[3] as f32 / 4.0,
+            g: GRAVITIES[f[4]],
+            along: f[5] as f32 / 10.0,
+            mu: f[6] as f32 / 10.0,
+            ratio: f[7] as f32,
+            sub: f[8] as u32,
+            series: f[9] != 0,
+        }
+    }
+
+    /// The flight to the contact, as 2D's `Hit::flight`: the steps it takes,
+    /// rounded up, its time, and the speed toward it and the gap at the
+    /// start, at the comparison's step.
+    pub fn flight(&self, dt: f32) -> (usize, f32, f32, f32) {
+        let g = if self.target.floor() { self.g } else { 0.0 };
+        let t = if g > 0.0 {
+            let most = self.v / g;
+            let whole = (most / dt - self.phase).floor().max(0.0);
+            ((whole + self.phase) * dt).min(most)
+        } else {
+            (3.0 + self.phase) * dt
+        };
+        let u0 = self.v - g * t;
+        ((t / dt).ceil() as usize, t, u0, u0 * t + 0.5 * g * t * t)
+    }
+
+    /// A one-line name, for the families' tables.
+    pub fn text(&self) -> String {
+        let mut s = format!("{} e={} v={} g={}", self.target.name(), self.e, self.v, self.g);
+        for (k, x, default) in [("phase", self.phase, 0.0), ("along", self.along, 0.0), ("mu", self.mu, 0.0), ("ratio", self.ratio, 1.0)] {
+            if x != default {
+                s += &format!(" {k}={x}");
+            }
+        }
+        if self.sub > 0 {
+            s += &format!(" sub={}", self.sub);
+        }
+        if self.series {
+            s += " series";
+        }
+        s
+    }
+}
+
+/// `q` (x, y, z, w) turning `v`.
+pub fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let (u, w) = ([q[0], q[1], q[2]], q[3]);
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let t = cross(u, v).map(|x| 2.0 * x);
+    let ut = cross(u, t);
+    [0, 1, 2].map(|k| v[k] + w * t[k] + ut[k])
+}
+
+/// The rotation turning by `a`, then by `b`.
+fn then(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let (x1, y1, z1, w1) = (b[0], b[1], b[2], b[3]);
+    let (x2, y2, z2, w2) = (a[0], a[1], a[2], a[3]);
+    [
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+    ]
+}
+
+/// The corners of a cube of half extent `h` turned by `q`, from its centre.
+pub fn corners(q: [f32; 4], h: f32) -> [[f32; 3]; 8] {
+    std::array::from_fn(|i| rotate(q, [1, 2, 4].map(|bit| if i / bit % 2 == 1 { h } else { -h })))
+}
+
+fn hit(n: usize) -> Scene {
+    let h = Hit::unpack(n);
+    let dt = 1.0 / 60.0;
+    let (steps, t, u0, s) = h.flight(dt);
+    let material = |spec: Spec| Spec { friction: h.mu, restitution: h.e, ..spec };
+    let gravity = [0.0, -h.g, 0.0];
+    let len = if h.series { 1200 } else { steps + 45 };
+    if !h.target.floor() {
+        let m = 1.0 + h.ratio;
+        let a = Spec { vel: [0.0, -h.v * h.ratio / m, 0.0], ..Spec::new(Shape::Sphere(RADIUS), [0.0, 2.0 * RADIUS + s, 0.0], false) };
+        let b = Spec { vel: [0.0, h.v / m, 0.0], mass: h.ratio, ..Spec::new(Shape::Sphere(RADIUS), [0.0; 3], false) };
+        let anywhere = ([-100.0, f32::MIN, -100.0], [100.0, f32::MAX, 100.0]);
+        return Scene { gravity, substeps: h.sub, bounds: anywhere, ..one(Kind::Hit, n, vec![], vec![material(a), material(b)], len) };
+    }
+    let half = |a: f32| [0.0, 0.0, (a / 2.0).sin(), (a / 2.0).cos()];
+    let about_x = [(TILT / 2.0).sin(), 0.0, 0.0, (TILT / 2.0).cos()];
+    let (shape, rot) = match h.target {
+        Target::Sphere => (Shape::Sphere(RADIUS), [0.0, 0.0, 0.0, 1.0]),
+        Target::Cube => (Shape::Box([HALF; 3]), [0.0, 0.0, 0.0, 1.0]),
+        Target::Edge => (Shape::Box([HALF; 3]), half(TILT)),
+        _ => (Shape::Box([HALF; 3]), then(half(TILT), about_x)),
+    };
+    let reach = match shape {
+        Shape::Sphere(r) => r,
+        Shape::Box(_) => corners(rot, HALF).iter().map(|c| -c[1]).fold(0.0, f32::max),
+    };
+    let body = Spec { rot, vel: [h.along, -u0, 0.0], ..Spec::new(shape, [-h.along * t, s + reach, 0.0], false) };
+    let floor = Spec { friction: h.mu, restitution: h.e, ..fixed_box([0.0, -0.5, 0.0], [100.0, 0.5, 100.0]) };
+    let above = ([-100.0, -0.1, -100.0], [100.0, f32::MAX, 100.0]);
+    Scene { gravity, substeps: h.sub, bounds: above, ..one(Kind::Hit, n, vec![floor], vec![material(body)], len) }
 }
 
 impl Kind {
@@ -125,6 +334,7 @@ impl Kind {
             Kind::Bounce => "bounce",
             Kind::Ratio => "ratio",
             Kind::Mixed => "mixed",
+            Kind::Hit => "hit",
         }
     }
 
@@ -145,7 +355,7 @@ impl Kind {
 
 /// Every kind, in an order that only grows: the scene mod keeps a kind as
 /// its place here.
-pub const KINDS: [Kind; 11] = [
+pub const KINDS: [Kind; 12] = [
     Kind::SpherePile,
     Kind::BoxPile,
     Kind::PlankPile,
@@ -157,6 +367,7 @@ pub const KINDS: [Kind; 11] = [
     Kind::Bounce,
     Kind::Ratio,
     Kind::Mixed,
+    Kind::Hit,
 ];
 
 /// How far above the floor `Kind::Bounce` drops its ball.
@@ -174,6 +385,11 @@ pub struct Scene {
     /// A dynamic body outside this box at the end has escaped (tunnelled
     /// through a wall or the floor, or fallen off it).
     pub bounds: ([f32; 3], [f32; 3]),
+    /// `EARTH` but for a bounce.
+    pub gravity: [f32; 3],
+    /// The substeps every engine solves at, where a bounce sets them; 0
+    /// for each engine's own.
+    pub substeps: u32,
 }
 
 pub const RADIUS: f32 = 0.5;
@@ -191,6 +407,7 @@ pub fn build(kind: Kind, n: usize) -> Scene {
         Kind::Bounce => bounce(n),
         Kind::Ratio => ratio(n),
         Kind::Mixed => pile(kind, n, mixed),
+        Kind::Hit => hit(n),
     }
 }
 
@@ -219,6 +436,8 @@ fn one(kind: Kind, n: usize, statics: Vec<Spec>, bodies: Vec<Spec>, steps: usize
         steps,
         phases: vec![("all", 1..steps)],
         bounds: ([-50.0, -0.1, -50.0], [50.0, f32::MAX, 50.0]),
+        gravity: EARTH,
+        substeps: 0,
     }
 }
 
@@ -316,6 +535,8 @@ fn pile(kind: Kind, n: usize, shape: impl Fn(usize) -> Shape) -> Scene {
         // is in no window.
         phases: vec![("falling", 1..61), ("settling", 300..400), ("settled", steps - 100..steps)],
         bounds: ([-half_inner - 0.1, -0.1, -half_inner - 0.1], [half_inner + 0.1, f32::MAX, half_inner + 0.1]),
+        gravity: EARTH,
+        substeps: 0,
     }
 }
 
@@ -376,6 +597,8 @@ fn rain(n: usize) -> Scene {
         steps,
         phases: vec![("raining", 1..last_spawn), ("after rain", last_spawn..steps), ("settled", steps - 100..steps)],
         bounds: ([-floor, -0.1, -floor], [floor, f32::MAX, floor]),
+        gravity: EARTH,
+        substeps: 0,
     }
 }
 
@@ -391,5 +614,7 @@ fn stack(n: usize) -> Scene {
         steps,
         phases: vec![("standing", 1..steps)],
         bounds: ([-10.0, -0.1, -10.0], [10.0, f32::MAX, 10.0]),
+        gravity: EARTH,
+        substeps: 0,
     }
 }

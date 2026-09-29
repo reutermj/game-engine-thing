@@ -28,6 +28,7 @@ mod baseline;
 mod behave;
 #[cfg(feature = "long")]
 mod behaviour_long;
+mod bounces;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
 mod family;
@@ -102,9 +103,50 @@ impl Broken {
         self.check(scene, v >= bound, || format!("{name} {v}, at least {bound}"));
     }
 
+    /// A bounce family's statistic `name` (`bounces::stats`) at most `bound`.
+    fn stat_most(&mut self, f: &(Scene, Stats), name: &str, bound: f64) {
+        let v = bounces::stat(&f.1, name);
+        self.check(&f.0, v <= bound, || format!("{name} {v}, bound {bound}"));
+    }
+
+    /// ... at least `bound`.
+    fn stat_least(&mut self, f: &(Scene, Stats), name: &str, bound: f64) {
+        let v = bounces::stat(&f.1, name);
+        self.check(&f.0, v >= bound, || format!("{name} {v}, at least {bound}"));
+    }
+
     fn assert(self) {
         assert!(self.0.is_empty(), "{} bounds broken:\n{}", self.0.len(), self.0.join("\n"));
     }
+}
+
+type Stats = Vec<(&'static str, f64)>;
+
+/// A bounce family (`bounces.rs`) on its short or long grid, run by ours
+/// (each run once in the binary, `runs.rs`, which the baseline reads too),
+/// and its statistics, printed: its first scene names it where a bound
+/// breaks.
+fn bounce_family(name: &str, long: bool) -> (Scene, Stats) {
+    let f = bounces::families(long).into_iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no bounce family {name}"));
+    let runs = runs::par(&f.scenes, |&s| runs::behaved(s));
+    let stats = bounces::stats(&f, &runs);
+    let values: Vec<String> = stats.iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
+    println!("bounces {name} ({} runs, {}): {}", runs.len(), runs[0].label, values.join(", "));
+    (f.scenes[0], stats)
+}
+
+/// A family's median bounce, as a share of its impact energy past what
+/// restitution gives, may be a quarter further under it than the lower of
+/// Box2D's and Rapier's, as a single bounce may (physics.md, "Quality beyond
+/// settling"), and a rounding's 0.002 under nothing where they lose nothing.
+fn under(lower: f64) -> f64 {
+    1.25 * lower.min(0.0) - 0.002
+}
+
+/// A share of something kept (speed along the floor, height a bounce) may
+/// be a quarter further from all of it than the lower reference's.
+fn kept(lower: f64) -> f64 {
+    1.0 - 1.25 * (1.0 - lower) - 0.002
 }
 
 /// Measured over expected, less one.
@@ -192,6 +234,121 @@ fn a_ball_never_rebounds_higher_than_e_squared() {
     broken.most(&scenes[0], &runs[0], "first apex", 1.01 * 0.5625);
     broken.most(&scenes[1], &runs[1], "most apex", 1.01);
     broken.least(&scenes[1], &runs[1], "last apex", 0.9 * 0.9194);
+    broken.assert();
+}
+
+// The bounce families (`bounces.rs`; physics.md, "Bounces"): one bounce
+// over a grid of what decides it, the analytic answer bounding what it has
+// one for and Box2D's and Rapier's statistics on exactly the same grid the
+// rest, measured with `BOUNCES=all BOUNCE_RUNS=1` in the comparison
+// (2026-09-29). The long grids' are `behaviour_long.rs`.
+
+/// No bounce leaves with more energy than it came in with, to 1%, past what
+/// the push-out of its deepest overlap lifts it (`behave::hit`): drops,
+/// rates and angled bounces, and apart a box landing on its corner, which
+/// tips as it bounces. Box2D and Rapier: at most 0.000 on each. Ours 6.08
+/// (drops; 0.130 a corner), 0.555 (rates), 0.083 (angled): restitution
+/// takes a contact's closing speed with the step's gravity already in it,
+/// so a bounce off something that doesn't fall returns a step's gravity
+/// more than it came in with, to the step (1.00 steps of it over the speed
+/// the step began with, at every gravity and rate).
+#[test]
+#[ignore = "get-emj.56: a bounce gives back a step of gravity more than it came in with"]
+fn bounces_leave_with_no_more_energy_than_they_came_in_with() {
+    let mut broken = Broken::default();
+    for name in ["drops", "rates", "oblique"] {
+        broken.stat_most(&bounce_family(name, false), "excess worst", 0.01);
+    }
+    broken.stat_most(&bounce_family("drops", false), "excess tipping", 0.01);
+    broken.assert();
+}
+
+/// A ball, and a box landing flat without friction, rebound at e of the
+/// speed they meet at, to 1% of the energy along the normal (past the
+/// push-out's lift, as above), and two free bodies part at e of the speed
+/// they close at: the analytic answer, which Box2D meets to 0.0004 and
+/// Rapier but for bounces under the threshold (it has none: 1.0). Ours
+/// returns up to 7.08 more (drops), 0.556 (rates), 0.111 (angled), the
+/// step's gravity again; the pairs exactly, since gravity moves two free
+/// bodies alike.
+#[test]
+#[ignore = "get-emj.56: a bounce gives back a step of gravity more than it came in with"]
+fn a_bounce_rebounds_at_e_of_the_speed_it_meets_at() {
+    let mut broken = Broken::default();
+    for name in ["drops", "rates", "oblique", "pairs"] {
+        broken.stat_most(&bounce_family(name, false), "gain worst", 0.01);
+    }
+    broken.assert();
+}
+
+/// Nothing meeting a floor under `BOUNCE_THRESHOLD` bounces: resting
+/// bodies settle. Box2D none; Rapier bounces 15 (it has no threshold, only
+/// a contact's first step bouncing). Ours bounces 6: at gravity 80 a
+/// step's is 1.33, past the threshold with the step's gravity in it.
+#[test]
+#[ignore = "get-emj.56: a bounce gives back a step of gravity more than it came in with"]
+fn nothing_bounces_below_the_threshold() {
+    let mut broken = Broken::default();
+    broken.stat_most(&bounce_family("drops", false), "bounced below", 0.0);
+    broken.assert();
+}
+
+/// Bounces lose no more than Box2D's and Rapier's: the median square-on
+/// bounce above the threshold no more than a quarter further under e² than
+/// the lower reference's (`under`), and no more of them flat than the
+/// reference with the most. Box2D and Rapier: medians −0.0986 and −0.0985
+/// (drops), −0.172 and −0.162 (rates), −0.0025 and −0.0025 (angled); flat
+/// 8 and 8, 8 and 8, 0 and 0. Ours +0.019, +0.046, +0.001; 2, 0, 0.
+#[test]
+fn bounces_lose_no_more_than_in_box2d_and_rapier() {
+    let mut broken = Broken::default();
+    for (name, lower, flat) in [("drops", -0.098620, 8.0), ("rates", -0.172374, 8.0), ("oblique", -0.002531, 0.0)] {
+        let f = bounce_family(name, false);
+        broken.stat_least(&f, "gain median", under(lower));
+        broken.stat_most(&f, "flat above", flat);
+    }
+    broken.assert();
+}
+
+/// An angled bounce keeps its speed along the floor with no friction (to
+/// 1%), never gains any with it, and keeps no less of it than a quarter
+/// further from all of it than the lower reference: Box2D and Rapier keep
+/// a median 0.664 with friction, the most 0.827; ours 0.663 and 0.827,
+/// none lost without.
+#[test]
+fn an_angled_bounce_keeps_its_speed_along_the_floor_but_what_friction_takes() {
+    let f = bounce_family("oblique", false);
+    let mut broken = Broken::default();
+    broken.stat_most(&f, "slip worst", 0.01);
+    broken.stat_most(&f, "tangent most", 1.01);
+    broken.stat_least(&f, "tangent median", kept(0.664435));
+    broken.assert();
+}
+
+/// Two free bodies keep their momentum through a bounce, to a thousandth
+/// of the impulse: Box2D and Rapier lose 0.00006 and 0.00005, ours 0.00003.
+#[test]
+fn two_free_bodies_keep_their_momentum_through_a_bounce() {
+    let mut broken = Broken::default();
+    broken.stat_most(&bounce_family("pairs", false), "momentum worst", 1e-3);
+    broken.assert();
+}
+
+/// Over 20 s a lossless ball, or box, never rises past its drop (to 1%),
+/// and a ball of restitution e keeps no more than e² of its height a
+/// bounce, and no less than a quarter further under it than the lower
+/// reference. Box2D and Rapier: highest 0.995 and 1.197 (Rapier bounces a
+/// ball at rest, its contact new each step it leaves), most kept 0.998 and
+/// 0.998 of e², median 0.966. Ours climbs to 10.2 of its drop, keeps up to
+/// 1.54 of e² a bounce, a median 1.22.
+#[test]
+#[ignore = "get-emj.56: a bounce gives back a step of gravity more than it came in with"]
+fn a_lossless_ball_never_rises_and_a_ball_keeps_e_squared_of_its_height() {
+    let f = bounce_family("series", false);
+    let mut broken = Broken::default();
+    broken.stat_most(&f, "rise worst", 1.01);
+    broken.stat_most(&f, "decay worst", 1.01);
+    broken.stat_least(&f, "decay median", kept(0.966338));
     broken.assert();
 }
 

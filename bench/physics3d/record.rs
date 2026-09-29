@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::baseline::{Band, Better, Entry};
+use crate::behave::Behaviour;
+use crate::bounces;
 use crate::measure::Run;
 use crate::runs;
 use crate::scenes::Kind;
@@ -209,10 +211,41 @@ pub fn quality(long: bool) -> Vec<Entry> {
     runs::par(&jobs, |j| j()).concat()
 }
 
+/// A bounce family's statistic: 2D's bands (its `record::bounce_band`),
+/// but a count's, whose grids here are no more than 3000.
+fn bounce_band(name: &str) -> (Band, Better) {
+    match name {
+        "gain median" => (Band::Rel(0.05, 1e-3), Better::Toward(0.0)),
+        "bounced below" | "flat above" => (Band::Abs(1.0), Better::Lower),
+        "tangent most" | "tangent median" => (Band::Rel(0.01, 1e-4), Better::Neither),
+        "rise worst" | "decay worst" | "decay median" => (Band::Rel(0.01, 1e-3), Better::Toward(1.0)),
+        "momentum worst" => (Band::Rel(0.5, 1e-4), Better::Lower),
+        _ => (Band::Rel(0.05, 1e-3), Better::Lower),
+    }
+}
+
+/// The bounce families' statistics (`bounces.rs`), on the short grids or
+/// the long.
+fn bouncing(group: &'static str, long: bool) -> Vec<Entry> {
+    let mut v = Vec::new();
+    for f in bounces::families(long) {
+        let runs: Vec<Behaviour> = runs::par(&f.hits, |h| (*runs::hit(h)).clone());
+        for (name, value) in bounces::stats(&f, &runs) {
+            let (band, better) = bounce_band(name);
+            v.push(Entry::new(group, format!("bounces {}", f.name), name.replace(' ', "_"), value, band, better));
+        }
+    }
+    v
+}
+
 /// The behaviour group: every scene `:behaviour_test` bounds, the ignored
-/// tests' too.
-pub fn behaviour() -> Vec<Entry> {
+/// tests' too, and the bounce families on their short grids; with `long`,
+/// on their long ones alone (`:behaviour_long_test`).
+pub fn behaviour(long: bool) -> Vec<Entry> {
     const G: &str = "behaviour";
+    if long {
+        return bouncing(G, true);
+    }
     let cases = [
         (Kind::RampHold, 1),
         (Kind::RampSlide, 1),
@@ -258,5 +291,6 @@ pub fn behaviour() -> Vec<Entry> {
             ]),
         }
     }
+    v.extend(bouncing(G, false));
     v
 }

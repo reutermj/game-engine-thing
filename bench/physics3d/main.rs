@@ -17,10 +17,19 @@
 //!     bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
 //!     bench -- bounce 25,50,75,100 all --rotate --behave
 //!     bench -- ratio 10,100,1000 all --rotate --behave
+//!
+//! --bounces[=names] measures the bounce families instead (`bounces.rs`;
+//! physics.md, "Bounces"), each engine's statistics on each family's grid,
+//! the backends the first positional list (Jolt left out: its default
+//! damping changes every free step, so a bounce's contact can't be found
+//! from the states); --long on their long grids, --each with every run's
+//! values:
+//!
+//!     bench -- ours,rapier,box3d --bounces --each
 
 use physics3d_bench::measure::{self, Run};
 use physics3d_bench::scenes::{self, Kind, Scene};
-use physics3d_bench::{BACKENDS, Config, Iters, make_backend};
+use physics3d_bench::{BACKENDS, Config, Iters, behave, bounces, make_backend, runs};
 
 fn list<'a>(arg: Option<&'a String>, all: &[&'a str]) -> Vec<&'a str> {
     match arg.map(String::as_str) {
@@ -38,8 +47,13 @@ fn main() {
     let mut runs = None;
     let mut tune = "";
     let mut behave = false;
+    let (mut bounces, mut long, mut each) = (None, false, false);
     for f in flags {
         match f.as_str() {
+            "--bounces" => bounces = Some("all".to_string()),
+            f if f.starts_with("--bounces=") => bounces = Some(f["--bounces=".len()..].to_string()),
+            "--long" => long = true,
+            "--each" => each = true,
             "--iters8" => iters = Iters::Eight,
             "--sleep" => sleep = true,
             "--rotate" => rotate = true,
@@ -48,6 +62,11 @@ fn main() {
             f if f.starts_with("--tune=") => tune = f["--tune=".len()..].to_string().leak(),
             f => panic!("unknown flag {f}"),
         }
+    }
+    if let Some(names) = bounces {
+        let backends = list(positional.first().copied(), &["ours", "rapier", "box3d"]);
+        bounce_families(&names, long, each, &backends, tune);
+        return;
     }
     let scenes = list(positional.first().copied(), &["spheres", "boxes", "planks", "rain"]);
     let sizes: Vec<usize> = list(positional.get(1).copied(), &["1000", "10000"]).iter().map(|s| s.parse().expect("size")).collect();
@@ -59,7 +78,15 @@ fn main() {
         for &n in &sizes {
             let scene = scenes::build(kind, n);
             let runs = runs.unwrap_or(if n <= 2000 { 3 } else { 1 });
-            let config = Config { iters, sleep, max_bodies: (n + scene.statics.len() + 16) as u32, rotate, tune };
+            let config = Config {
+                iters,
+                sleep,
+                max_bodies: (n + scene.statics.len() + 16) as u32,
+                rotate,
+                tune,
+                gravity: scene.gravity,
+                substeps: scene.substeps,
+            };
             if behave {
                 behaviour(&scene, &config, &backends);
                 continue;
@@ -81,6 +108,34 @@ fn main() {
                 results.push((all.swap_remove(0), medians));
             }
             report(&scene, runs, &results);
+        }
+    }
+}
+
+/// `--bounces`: each engine's statistics on each bounce family, and with
+/// `each` every run's values: what the bounce tests' bounds are set from.
+fn bounce_families(names: &str, long: bool, each: bool, backends: &[&str], tune: &'static str) {
+    for f in bounces::families(long) {
+        if names != "all" && !names.split(',').any(|n| n == f.name) {
+            continue;
+        }
+        for b in backends {
+            let one = |h: &scenes::Hit| {
+                let scene = scenes::build(Kind::Hit, h.pack());
+                let config = Config::of(&scene, true, tune);
+                behave::behave(&scene, make_backend(b, &config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut())
+            };
+            // Box3D's worlds, made in threads side by side, crash it: the
+            // C engines one at a time.
+            let all = if *b == "box3d" { f.hits.iter().map(one).collect() } else { runs::par(&f.hits, one) };
+            if each {
+                for (h, r) in f.hits.iter().zip(&all) {
+                    let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k}={v:.6}")).collect();
+                    println!("run {} {b} | {} | {}", f.name, h.text(), values.join(" "));
+                }
+            }
+            let stats: Vec<String> = bounces::stats(&f, &all).iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
+            println!("bounces {} ({}, {} runs), {b}: {}", f.name, if long { "long" } else { "short" }, all.len(), stats.join(", "));
         }
     }
 }
