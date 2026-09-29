@@ -254,7 +254,13 @@ The four steps, of which this document is the first:
    and its page walks, whose chunks' changes join in walk order; a task
    context of just its chunk, so no spawns or events from tasks yet. What
    it showed, and who owns the threads:
-   [physics.md](physics.md#parallelism).
+   [physics.md](physics.md#parallelism). The physics solver's passes are
+   split this way too, a stage at a time within one run
+   ([physics.md](physics.md#solving-across-threads)): tasks of a run may
+   wait for work another task has taken, never for a task to start, since
+   an executor promises that every task runs, not that they run at once.
+   What that measured of the host's pool (kept threads, placed on one CCD,
+   warm) is get-znt.5's to build.
 4. **Pipeline parallelism.** The next frame's simulation during this
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.

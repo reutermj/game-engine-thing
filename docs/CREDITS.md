@@ -145,6 +145,21 @@ one would have to ship those files with it.
     Read in v3.1.1's source. Ours also lets a fat box go when it is more
     than twice the margin past its box, and finds new pairs among the
     spatial pages rather than a tree (spatial-storage.md, "Keeping pairs").
+  - the colored solve across threads (2026-09-29, `solver.rs`,
+    `lanes::run_across`; physics.md, "Solving across threads"): Box2D's
+    solver stages, read in v3.1.1's `solver.c` (`b2SolverStage`,
+    `b2ExecuteStage`, `b2SolverTask`): its stages in its order, a stage a
+    color, a stage's blocks four batches or four a worker
+    (`blocksPerWorker`), each worker starting at its share
+    (`GetWorkerStartIndex`) and taking blocks forward, then back, until one
+    is taken, a stage done when its completion count is its blocks, and
+    waiting workers spinning and yielding now and then; over Box2D's graph
+    colors (`b2AddContactToGraph`), the turning default's grouping since
+    get-emj.61. Ours has no main thread and takes a block by raising a mark
+    rather than by compare and swap of its sync index. The comparison runs
+    Box2D's own multithreaded step (`THREADS` in its `VARIANTS`) on a task
+    system of ours for its `enqueueTask` and `finishTask`
+    (`compare/box2d_shim.c`).
 
 ## Rapier
 
@@ -189,6 +204,14 @@ one would have to ship those files with it.
   parry uses for convex shapes without a dedicated routine; for boxes it
   uses SAT, `contact_manifold_cuboid_cuboid`), in
   `//engine/std/physics:narrow_bench`.
+- **Read, for the solve across threads** (2026-09-29, physics.md,
+  "Solving across threads"): 0.36.0's staged island solver
+  (`dynamics/solver/staged_island_solver/`): stages that advance on work
+  completed rather than on threads arrived, so a thread that comes late
+  fast-forwards (`sync.rs`, `StageSync`), which ours does too
+  (`solver.rs`, `lanes::run_across`); and its bodies shared between
+  workers by raw pointers (`SharedCtx`, `unsafe impl Sync`), which ours
+  aren't: relaxed atomics, measured against a raw-pointer spike like it.
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
   `bench/physics3d/Cargo.toml`, the comparison engine in `//bench/physics3d`
   (single-threaded, rotations locked). Its license text is fetched pinned by

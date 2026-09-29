@@ -44,7 +44,10 @@
 //! the colors' order (`order`), which is what a parallel solve over the
 //! same colors has to be too. Grouped by level of the pair-order sweep
 //! (`Wide::Levels`) it is instead the loop in pair order bit for bit, a
-//! variant. Why colors: physics.md, "The solver's speed".
+//! variant. Why colors: physics.md, "The solver's speed". Colored, the
+//! passes can be shared between the host's threads a color at a time
+//! (`solve_across`), which is the solve on one thread bit for bit:
+//! physics.md, "Solving across threads".
 
 use physics::{Rot, Vec2};
 
@@ -2098,7 +2101,9 @@ mod lanes {
     /// thread: whichever thread finishes a stage's last block lets every
     /// waiter on, so a thread that comes late, or never, holds up nobody,
     /// and one thread alone runs every stage. A thread that comes late
-    /// skips the stages already done.
+    /// skips the stages already done, as a straggler fast-forwards in
+    /// Rapier 0.36's staged solver (`StageSync`, which also advances a
+    /// stage on work done, not threads arrived).
     fn run_across<const N: usize>(
         params: &Params,
         (bodies, spinning, contacts, points): (&[SolverBody], &[Spinning], &[Constraint], &[Points]),

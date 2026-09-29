@@ -385,7 +385,9 @@ to be the same computation bit for bit, the ECS is within 5% settled, even
 at rest, and 1.28× falling; what's left has known causes that need no
 change of design (below), on a real pile as on the columns first measured
 (see below). The open risks: parallelism, measured on this machine
-(the solver's colored solve is 6 to 9 times today's on one CCD,
+(the solver's colored solve is 6 to 9 times today's on one CCD, and
+since built about 4.5 at 8 threads in the step, [Solving across
+threads](#solving-across-threads),
 [Parallel solving](#parallel-solving); the rest of the step, split as
 built, gets slower in the ECS where it gets faster on arrays, for reasons
 mostly unbuilt, [Parallelism](#parallelism)); contact churn (the contacts'
@@ -762,10 +764,11 @@ stealing, which this pool doesn't do.
 - an ordered table that splices what changed instead of rebuilding;
 - an executor with affinity (chunks to the threads that had them) and
   work stealing, owned by the scheduler;
-- the colored solver of [Parallel solving](#parallel-solving), with the
-  gather and write-back done by its own threads, each gathering what it
-  solves, so the bodies don't cross cores between the stages. It would
-  make the gather's coloring pass part of the step, as that section says.
+- the colored solver of [Parallel solving](#parallel-solving): built
+  (2026-09-29) for the turning default, [Solving across
+  threads](#solving-across-threads), its batches filled and written back
+  by its own threads; the gather from the world into the solver's arrays
+  is still the system's, on one thread.
 
 ## Sleeping
 
@@ -1125,7 +1128,10 @@ sleeping tests use 1000 for the real pile, and check the count.
 
 ## Parallel solving
 
-**Status: measured, not built** (2026-09-24, get-emj.30). The solver is
+**Status: measured, then built** (2026-09-24, get-emj.30; built
+2026-09-29 for the turning default, on its colors and lanes: [Solving
+across threads](#solving-across-threads)). What follows is the prototype
+on arrays, before rotation and lanes. The solver was
 one thread, sequential impulses over contacts in pair order. How far it
 parallelizes was measured on arrays, outside the mod:
 `./bazel run --config=bench //engine/std/physics:parallel_solver` takes the solver's
@@ -3644,6 +3650,8 @@ default: the same batches, lanes and layout, so threads taking a color's
 batches between them compute what one thread does, and
 `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
 is the test they have to pass.
+Built since: [Solving across threads](#solving-across-threads), which
+passes it, and its own test against one thread.
 
 **3D** (engine/std/physics3d) has the same structure, rows in pair order,
 and the level schedule applies to it unchanged. Alone, rows reordered by
@@ -3984,6 +3992,285 @@ variants: `rot/levels=4/carry=0` is A to the bit, `rot/carry=2` C colored.
   since the rain falls otherwise); the whole step 6690 → 6589, 4560 →
   4462, 6369 → 6499: 2% and 4% faster where contacts press, as the
   solver alone measured colors (3-5%), and rain about the same a contact.
+
+## Solving across threads
+
+**Status: built** (2026-09-29, get-znt.5, get-emj.32). The turning
+default's colored solve runs across the host's threads
+(`solver::solve_across`, `lanes::run_across`), bit for bit the solve on
+one thread at any thread count, so going parallel moves no value a test
+bounds, and whatever holds the one-thread solve holds it. The mod hands
+the solver its `Workers`; with no executor, or one thread, it is
+`solve_with` itself. On one CCD with kept threads, the solver alone is 4.9
+times faster at 8 threads on the turning pile of 10 000 and the 5050
+pyramid, and 4.1 on rain, where Box2D's own multithreaded solver gains 5.0,
+5.2 and 4.2 on the same scenes. What stops it: the solve's serial part
+(coloring and placing, about 16% at 8 threads), a barrier a color, the
+second CCD, and in the step the stages around the solver. What it needs
+from the host, which the running engine doesn't have yet (get-znt.5), is a
+pool that keeps its threads, places them on one CCD and keeps them warm:
+measured below, and each needs unsafe code or a crate, which is the
+user's decision.[^across-first]
+
+### The profile
+
+The colored solve on one thread by stage (`solver_bench`, `--config=bench`,
+clocks put in a copy, since removed), µs, medians of 21 solves over 3
+captured inputs:
+
+| stage | passes a step | pile 10 000 (22 012 contacts) | pyramid 5050 (14 950) |
+|---|---|---|---|
+| bodies into states | 1 | 20 | 10 |
+| coloring | 1 | 43 | 29 |
+| filling the batches (97 of it allocating them) | 1 | 481 | 361 |
+| gravity | 5 | 19 | 9 |
+| warm start | 5 × colors | 588 | 378 |
+| pushing pass | 5 × colors | 806 | 531 |
+| moving bodies | 5 | 113 | 57 |
+| relaxing passes | 10 × colors | 2332 | 1582 |
+| restitution | colors | 32 | 4 |
+| writing back | 1 | 82 | 47 |
+| **all** | | **4522** | **3009** |
+
+- **Colors.** The pile has 7 a pass, of 4906, 4968, 4566, 3991, 2713, 853
+  and 15 contacts, the pyramid 6 of 2401 to 2575; neither overflows. A
+  step is then 158 stages (the fill; five substeps of gravity, 7 warm
+  starts, 7 pushes, a move and 14 relaxes; 7 restitutions), the pyramid's
+  137. It is the one-thread solve's share that is split: 86% of it is
+  passes over colors or bodies.
+- **The budget.** At 8 threads the passes would be about 490 µs with
+  nothing lost. A barrier costs 0.19 to 0.24 µs on one CCD ([Parallel
+  solving](#parallel-solving)), so 158 of them are 30 to 40 µs, 6 to 8%
+  of that: affordable only as a spin on a shared counter. A wake-up, tens
+  of µs, at each stage would cost more than the solve, so threads spin
+  within a solve, and a solve is one run of the executor.
+- **How Box2D runs its stages** (v3.1.1's `solver.c`, read in the fetched
+  source): the same stages (`b2SolverStage`: prepare, integrate
+  velocities, a warm start a color, solve, integrate positions, relax,
+  restitution, store), each cut into blocks, four a worker
+  (`blocksPerWorker`); a worker starts at its share (`GetWorkerStartIndex`),
+  takes blocks forward and then back, each by compare and swap on its
+  sync index, until one is taken, and adds what it ran to the stage's
+  completion count. A main thread (worker 0) runs each stage, waits for its
+  count and publishes the next (`atomicSyncBits`); the other workers spin
+  on that, yielding now and then. Its colors persist across steps (a
+  contact is colored when it begins), so its per-step serial work is a few
+  µs (`prepareStages`).
+
+### What's built
+
+- **Stages as Box2D's, without a main thread.** Every thread runs every
+  stage in order: it takes blocks from its start forward and then back,
+  adds what it ran to the stage's count, and spins (yielding every 1024
+  turns) until the count is the stage's blocks. Whichever thread finishes a
+  stage's last block lets the others on, so no one thread is needed: one
+  alone runs every stage, and one that comes late skips what's done, as
+  Rapier 0.36's staged solver lets a straggler fast-forward
+  (`staged_island_solver/sync.rs`). A block is taken by raising an atomic
+  mark to one past the stage (`fetch_max`), which a thread still in an
+  older stage can't; a thread past a small stage's blocks starts at
+  `w % n`. Without either the first version could hang, and did
+  ([lore](../lore/a-stage-loop-without-a-main-thread-must-let-any-thread-take-any-block.md)).
+  Blocks are Box2D's size: four batches, or four blocks a thread; bodies
+  32. A panic in one thread ends the others' waits, and the executor
+  re-raises it.
+- **Who owns what.** A block owns its batches and their lanes behind a
+  lock only its taker holds (`try_lock`, which a stage that didn't wait
+  trips at once); the bodies are shared as relaxed atomics, an `f32`'s
+  bits each (`lanes::Atom`), which on x86 are plain loads and stores, so
+  there is no unsafe code. Within a color no two batches share a body that
+  moves, so no field of a moving body is written by two threads in one
+  stage, and a stage's writes reach the next through its count (released
+  by each thread adding to it, acquired by each seeing it full).
+- **What stays on the calling thread.** The bodies' states, the coloring
+  (greedy in pair order: sequential, and what makes the result a function
+  of the contacts alone), placing each contact in its lane, and the few
+  contacts nothing moves. Filling the batches is the first stage, each
+  block into room made on the calling thread
+  ([lore](../lore/memory-a-task-allocates-is-its-threads.md)); writing the
+  results back is a second run, each task its own run of contacts, points
+  and bodies, reading any batch.
+- **Why it's bit for bit.** A stage's blocks are independent, so any split
+  of them over any threads gives every batch the same inputs and the same
+  arithmetic as on one thread: the kernels are one generic function over
+  the plain states and the shared ones (`lanes::Bodies`). Two cases would
+  break that. A body that doesn't move, which batches of one color all
+  write back as they read it, gets the same value whoever writes last but
+  for a negative zero (`-0.0 - -0.0` is `0.0`), so `lanes::shareable`
+  sends a step where a still body has one to the one-thread solve; and an
+  infinite impulse (`inf * 0.0` is NaN) is a solve already lost.
+- **The one-thread solve** is the same computation, split into its head,
+  setup, run and finish so that both paths share the per-contact code: 5%
+  faster for it (the pile 4506 → 4243 µs, the pyramid 2989 → 2847), and no
+  baseline value moved.
+
+**The tests.** `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`
+(`:quality_test`) holds the solve across 2, 4, 8 and 16 threads, and
+across 4 that come one at a time, the last first (`rot/threads=4/late=1`),
+to the default on one thread, bit for bit on the turning pile and pyramid
+of the other equivalence tests over 150 steps. Planted, it fails on a
+race (each color's stage given the next color's first block), on the
+colors solved last first, and on a stage that doesn't wait for its count
+(which the block lock catches as a panic). In the mod, `physics_test`'s
+`a_turning_pile_on_four_threads_lands_where_it_does_on_one` runs a turning
+pile of 600 on kept and on spawned threads against one, and fails on the
+colors reversed; `threads_that_ran_a_builds_tasks_do_not_keep_it_mapped`
+now drops turning bodies, so the solver's tasks are among those it checks.
+
+### The options, measured
+
+How threads can share the bodies, each on the solver bench's inputs, µs;
+the one-thread solve is 4265-4287 on the pile and 2776-2850 on the
+pyramid. "All on one thread" is the shared path with every task run one
+after another on the calling thread (`POOL=late`): what sharing costs with
+nothing shared.
+
+| how | safe | all on one thread, pile / pyramid | 8 threads, one CCD | 16, one CCD with SMT |
+|---|---|---|---|---|
+| **relaxed atomics (built)** | yes | 4678-4708 / 3083-3117 (+9%) | 871 / 581 | 824 / 555 |
+| a plain array behind a raw pointer (a spike, reverted) | no | 4345 / 2806 (+1-2%) | 849 / 563 | 791 / 534 |
+| Rapier 0.36's (`SharedCtx`: raw pointers, `unsafe impl Sync`, workers in a rayon scope) | no | the spike's | | |
+| each color's results kept in its batches, then applied to the bodies by a stage of their own | yes | not built | | |
+| bodies ordered so each task writes a range it owns | – | not possible | | |
+
+- **Atomics cost what unsafe code would save: about 3%** at 8 threads
+  (2.5% on the pile, 3% on the pyramid, 4% at 16). A relaxed load is a
+  `mov` and a `movd` where a plain one is a `movss`, and the arithmetic
+  still vectorizes: 274 `mulps` to 38 `mulss` in the shared kernels, 345
+  to 61 in the one-thread solve
+  ([lore](../lore/relaxed-atomic-floats-still-vectorize-at-a-movd-a-load.md)).
+  The spike's 3% doesn't pay for unsafe code whose soundness depends on
+  the stage protocol, which would need Miri and fuzzing of concurrent
+  schedules to be trusted ([storage.md](storage.md#where-the-unsafe-is-and-isnt));
+  nothing of it landed.
+- **Per-color deltas** would keep bodies read-only within a color, and
+  apply its results in a stage after: twice the stages (30-40 µs more of
+  barriers at 8 threads), and a pass over every lane's ends a color, about
+  the traffic of the scatter it replaces. Not built: it costs more than the
+  atomics it avoids.
+- **Partitioning** can't work: a color's contacts reach bodies anywhere,
+  a different set in each color, so no order of the bodies gives each
+  task a range, and one order a color would be a copy a color.
+- **Tried, and no faster:** listing each color's contacts as the coloring
+  finds them, so that the first stage finds each lane's contact and
+  placing goes: the coloring then took 120-142 µs where coloring and
+  placing took 76 and 42 (8 threads, pile: 873-880 against 871).
+
+### The host's threads
+
+The threads are the host's: `Workers` reaches whatever executor the world
+has. In the engine that is nothing yet: `engine_ecs` has only `Scoped`,
+threads spawned for each run, because keeping threads that run a borrowed
+closure takes unsafe code whose soundness depends on concurrency
+([Parallelism](#parallelism)); the benchmarks use `tests/pool.rs`'s kept
+threads. What such a pool has to be, on the pile of 10 000 (the solver
+alone, µs; one thread 4270):
+
+| threads | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|
+| kept, on one CCD (`taskset -c 0-7`; 16: `0-7,16-23`) | 2508 | 1397 | 882 | 829 |
+| kept, spinning until the next solve | 2475 | 1405 | 877 | – |
+| kept, parking at once | 2501 | 1412 | 884 | – |
+| kept, not warmed first | 2509 | 1420 | 1116 | – |
+| spawned for each solve (`Scoped`), one CCD | 2779 | 1531 | 994 | – |
+| kept, both CCDs, a thread a core (`0-15`) | – | – | 1765 | 1512 |
+| kept, placed by the scheduler (`0-31`) | 3968 | 2418 | 1797 | 1534 |
+| spawned for each solve, placed by the scheduler | – | – | 2049 | 2236 |
+
+- **Placement is most of it.** Left to the scheduler, a pool's threads
+  land on both CCDs and the solve runs at half the speed: two threads
+  anywhere are 1.08 times one, and sixteen cores over both CCDs are slower
+  than eight on one
+  ([lore](../lore/the-scheduler-spreads-a-pool-over-both-ccds-and-a-colored-solve-halves.md)).
+  Box2D's step loses the same way (below). A host pool has to pin its
+  threads, one CCD first, with `sched_setaffinity`: an FFI call, or a
+  crate's.
+- **Kept, not spawned**: spawning 8 threads for each solve costs about 110
+  µs. **Warm**: threads idle before a solve run it at the idle clock, 230
+  µs more at 8 ([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md));
+  a game's workers would be cold every frame unless the pool keeps them
+  busy, which is the pool's question (get-znt.5), not the solver's.
+- **Spinning between solves doesn't matter**: a solve is one run of the
+  executor, so one wake-up; the spinning that matters is between its
+  stages, and that is the solve's own.
+- **SMT gains 5%**: 16 threads on 8 cores and their siblings, against 8.
+
+### How it scales
+
+The solver alone (`solver_bench` with `THREADS`, kept threads on one CCD,
+warmed; 16 is the CCD's 8 cores and their SMT siblings), µs a solve and
+the speedup over one thread, every result checked bit for bit against one
+thread's:
+
+| threads | pile 10 000 (22 012 contacts) | pyramid 5050 (14 950) | rain 10 000 (17 010) | pile 1000 (2189) | pyramid 210 (590) |
+|---|---|---|---|---|---|
+| 1 | 4266 | 2836 | 3405 | 407 | 112 |
+| 2 | 2494 (1.71×) | 1650 (1.72×) | 2111 (1.61×) | 262 (1.55×) | 92 (1.21×) |
+| 4 | 1400 (3.05×) | 925 (3.07×) | 1281 (2.66×) | 179 (2.28×) | 74 (1.51×) |
+| 8 | 871 (4.90×) | 581 (4.89×) | 823 (4.14×) | 152 (2.67×) | 75 (1.50×) |
+| 16 | 824 (5.17×) | 555 (5.11×) | 785 (4.34×) | 173 (2.36×) | 98 (1.15×) |
+
+Against Box2D's multithreaded step on the same scenes (the comparison,
+`VARIANTS=threads:<n>`: the mod on kept threads, Box2D on the shim's
+task system, kept threads spinning as ours; `--config=bench`, one CCD,
+turning, medians of 3 runs), µs, the step / the solver stage:
+
+| threads | pile 10 000 settled: ours | Box2D | pyramid 5050: ours | Box2D | rain 10 000: ours | Box2D |
+|---|---|---|---|---|---|---|
+| 1 | 6690 / 4467 | 4348 / 2599 | 4429 / 2933 | 2930 / 1722 | 6418 / 3579 | 5010 / 1963 |
+| 2 | 4383 / 2717 | 2557 / 1580 | 2772 / 1709 | 1527 / 909 | 4855 / 2368 | 3214 / 1345 |
+| 4 | 2909 / 1618 | 1418 / 902 | 1771 / 981 | 888 / 537 | 3627 / 1439 | 1908 / 751 |
+| 8 | 2115 / 994 | 805 / 522 | 1352 / 629 | 527 / 332 | 2991 / 906 | 1247 / 470 |
+| 16 | 2452 / 957 | 720 / 495 | 1643 / 622 | 518 / 358 | 3379 / 861 | 1151 / 500 |
+| 16 over both CCDs | 5063 / 1954 | 1324 / 982 | 3257 / 1131 | 782 / 561 | 6388 / 1892 | 2290 / 1175 |
+
+- **The solver scales as Box2D's does, a little less**: 4.5, 4.7 and 4.0
+  times at 8 threads against Box2D's 5.0, 5.2 and 4.2. Box2D's is 1.7 to
+  1.9 times faster at every count, from 12 passes to our 20 (a quality
+  choice: [Still at rest](#still-at-rest)) and a prepare half ours
+  (get-emj.50).
+- **The step doesn't**: 3.2, 3.3 and 2.1 times at 8 against Box2D's 5.4,
+  5.6 and 4.0. The stages around the solver gain little (below), and at 16
+  threads the step gets slower (SMT siblings in stages that don't
+  compute).
+
+**Where the solve stops scaling, and why**, from the stages' own clocks at
+8 threads on the pile (thread 0's, at each stage's end; clocks put in a
+copy, since removed):
+
+- **Its serial part, about 140 µs**: the states (20), the coloring (43),
+  counting and placing (55), the atoms (15) and a second run's fork. At 8
+  threads that's 16% of the solve, and Amdahl's limit about 7 times.
+  Coloring in pair order is sequential by construction, and it is what
+  keeps the result a function of the contacts alone; Box2D's colors live
+  in storage and change only as contacts begin and end, which is the
+  "colors in storage" of [Parallel solving](#parallel-solving), and would
+  make colors state a snapshot must carry.
+- **Barriers and imbalance, about 110 µs**: the stages took 657 µs at 8
+  threads where their one-thread times split eight ways are 546 (the fill
+  92 against 60, relaxing 325 against 291, pushing 128 against 101, the
+  warm start 71 against 74), about 0.7 µs a stage over its share. The
+  small colors are the worst of it: the pile's seventh color, 15 contacts,
+  is one block, one thread's while seven wait.
+- **SMT and the other CCD**: 16 threads on one CCD are 5% over 8; on both
+  CCDs half the speed of 8 on one (above).
+- **Not memory bandwidth**: a pile's batches are 4.6 MB, in one CCD's 32
+  MB of L3, and the passes weren't bound by memory on one thread either
+  ([The solver's speed](#the-solvers-speed)).
+
+**The rest of the step** (get-emj.32): measured again with
+`:tax -- parallel` on one CCD (`taskset -c 0-7`), kept threads warmed by
+the arrays' run before the ECS's, the pile of 10 000, 401 wide, settled
+(the tax pile doesn't turn, so its solver stays on one thread): the
+stages but the solver, ECS / arrays, 375 / 719 µs on one thread, 439 /
+540 at 2, 376 / 367 at 4, 348 / 322 at 8. The ECS's stages no longer lose
+across threads, as get-emj.30 measured them unplaced (0.8×), but gain
+only 1.08×, where the arrays gain 2.2×: since the broadphase keeps its
+pairs (21 µs settled, from 407 then) its stages are small, and what's
+left of them is gathering and copying for one consumer, which
+[Parallelism](#parallelism) found moves data between cores more than it
+saves. The frame: 1393 → 1349 µs (ECS), 1674 → 1273 (arrays). Threads
+spawned for each run instead: 2034 / 2013 at 8.
 
 ## Open questions
 
@@ -4353,3 +4640,13 @@ frame 508.
     levels of one lane checked the same; so were three rules for colored
     contacts with a static end (`Statics`: the lowest free color, not
     color 0, the highest), since none stood the 5050 pyramid.
+
+[^across-first]: *(History, 2026-09-29.)* The first version shared only the
+    passes, filling the batches and writing back on the calling thread:
+    3.5 times one at 8 threads on the pile (1291 µs, 670 of it serial).
+    With the fill a stage, 4.3 times (997 µs, 318 serial), and with the
+    write-back a second run, 4.9 (871). It took blocks by
+    `try_lock` with a mark inside, and gave a thread past a small stage's
+    blocks no start, as Box2D does; either can leave a stage waiting on a
+    block nobody takes, and the second hung the determinism test
+    ([lore](../lore/a-stage-loop-without-a-main-thread-must-let-any-thread-take-any-block.md)).
