@@ -16,7 +16,9 @@
 //! against the solve on one: body, point and contact, every value. The
 //! threads are kept between solves (`tests/pool.rs`, whose `SPIN_US` says
 //! how long they spin before parking), or with `POOL=scoped` spawned for
-//! each (`engine_ecs::Scoped`); each count's threads are kept busy for
+//! each (`engine_ecs::Scoped`), or with `POOL=late` all on the calling
+//! thread, one after another (what sharing costs with nothing shared:
+//! `variants::Backwards`); each count's threads are kept busy for
 //! `WARM_MS` (300) first, so the cores are clocked up
 //! (docs/lore/idle-cores-run-a-parallel-solve-at-half-speed.md). Which
 //! cores they run on is `taskset`'s: `taskset -c 0-7` is one CCD here
@@ -163,7 +165,7 @@ fn bits(i: &Input) -> Vec<u32> {
 /// `THREADS`: the default across threads against it on one (see the
 /// module's docs).
 fn across(inputs: &[Input], reps: usize, counts: &[usize]) {
-    let scoped = std::env::var("POOL").is_ok_and(|p| p == "scoped");
+    let pool = std::env::var("POOL").unwrap_or_default();
     let warm_ms: u64 = std::env::var("WARM_MS").ok().and_then(|r| r.parse().ok()).unwrap_or(300);
     let bases: Vec<Vec<u32>> = inputs
         .iter()
@@ -178,7 +180,11 @@ fn across(inputs: &[Input], reps: usize, counts: &[usize]) {
     println!("|---|---|---|---|");
     println!("| one thread, `solve_with` | {one:.0} | 1.00× | – |");
     for &n in counts {
-        let exec: Arc<dyn engine_ecs::Executor> = if scoped { Arc::new(engine_ecs::Scoped(n)) } else { Arc::new(pool::Pool::new(n)) };
+        let exec: Arc<dyn engine_ecs::Executor> = match pool.as_str() {
+            "scoped" => Arc::new(engine_ecs::Scoped(n)),
+            "late" => Arc::new(variants::Backwards(n)),
+            _ => Arc::new(pool::Pool::new(n)),
+        };
         let gang = engine_ecs::Workers::new(Some(exec));
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(warm_ms) {

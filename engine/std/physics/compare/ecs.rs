@@ -83,6 +83,15 @@ impl Ecs {
         }
         Ecs { engine, dir, label, wall: 0.0, ticks: 0 }
     }
+
+    /// On the threads of `executor`, the host's, as physics.md, "Solving
+    /// across threads", measures them.
+    #[allow(dead_code)] // The comparison sets it; the quality tests don't.
+    pub fn on_threads(mut self, executor: std::sync::Arc<dyn engine_ecs::Executor>) -> Ecs {
+        self.label += &format!(", {} threads", executor.threads());
+        self.engine.world().set_executor(Some(executor));
+        self
+    }
 }
 
 impl Ecs {

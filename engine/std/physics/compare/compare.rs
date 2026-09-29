@@ -17,8 +17,10 @@
 //! comma-separated words), `SLEEP=1` (each engine's default sleeping
 //! instead of none, the arrays left out), `LONG=1` (the piles also 4000
 //! steps in, at rest), `VARIANTS` (more settings, comma-separated:
-//! `box2d:<substeps>`, `rapier:<iterations>`, and `arrays:<solver>`, our
-//! step with another solver from `variants.rs`), `SETTLE=<steps>` (how
+//! `box2d:<substeps>`, `rapier:<iterations>`, `arrays:<solver>`, our
+//! step with another solver from `variants.rs`, and `threads:<n>`, the
+//! mod on `n` kept threads (`tests/pool.rs`) and Box2D's multithreaded
+//! step on as many, the shim's task system's), `SETTLE=<steps>` (how
 //! soon each comes to rest instead of the timings; `TRACE=1` names what
 //! moves again; `SCENES=pile 800 41,stack 10` other scenes). What it found: docs/architecture/physics.md, "Against
 //! other engines" and "Settling".
@@ -46,6 +48,9 @@ mod ecs;
 mod family;
 #[path = "../narrow.rs"]
 mod narrow;
+#[allow(dead_code)]
+#[path = "../tests/pool.rs"]
+mod pool;
 mod quality;
 mod rapier;
 mod scene;
@@ -185,6 +190,17 @@ fn main() {
             let label = format!("ours (arrays) {spec}");
             let spec = spec.to_string();
             engines.push((label.clone(), Box::new(move |s, t| Box::new(ecs::Flat::ours(s, t, &spec, &label)))));
+            continue;
+        }
+        if let Some(n) = v.strip_prefix("threads:") {
+            let n: usize = n.parse().expect("threads:<n>");
+            let manifest = &manifest;
+            let ours = move |s: &Scene, t| {
+                let ecs = ecs::Ecs::new(manifest, s, sleep, t);
+                Box::new(ecs.on_threads(std::sync::Arc::new(pool::Pool::new(n)))) as Box<dyn Sim>
+            };
+            engines.push((format!("ours (ECS), {n} threads"), Box::new(ours)));
+            engines.push((format!("Box2D, {n} threads"), Box::new(move |s, t| Box::new(box2d::Box2d::on_threads(s, 4, sleep, t, n)))));
             continue;
         }
         if v == "rapier:ccd" {

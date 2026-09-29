@@ -14,7 +14,7 @@ struct World {
 }
 
 unsafe extern "C" {
-    fn bx_new(gx: f32, gy: f32, sleep: i32, continuous: i32) -> *mut World;
+    fn bx_new_threads(gx: f32, gy: f32, sleep: i32, continuous: i32, workers: i32) -> *mut World;
     fn bx_free(w: *mut World);
     fn bx_add(
         w: *mut World,
@@ -89,12 +89,22 @@ impl Box2d {
     /// `substeps` is Box2D's own: 4 by default, as its samples and
     /// benchmarks step.
     pub fn new(scene: &Scene, substeps: i32, sleep: bool, turning: bool) -> Box2d {
+        Box2d::on_threads(scene, substeps, sleep, turning, 1)
+    }
+
+    /// On `threads` threads, the caller's included: Box2D's own
+    /// multithreaded step, with the shim's task system (kept threads, as
+    /// ours are: `bx_new_threads`).
+    pub fn on_threads(scene: &Scene, substeps: i32, sleep: bool, turning: bool, threads: usize) -> Box2d {
         // Continuous collision is left on, Box2D's default: it only acts for
         // bodies moving fast against statics, which nothing here does after
         // the first frames of rain.
         // SAFETY: plain values in, a world the shim allocated out, freed in Drop.
-        let world = unsafe { bx_new(0.0, scene.gravity(), sleep as i32, 1) };
-        let label = if substeps == 4 { "Box2D".to_string() } else { format!("Box2D, {substeps} substeps") };
+        let world = unsafe { bx_new_threads(0.0, scene.gravity(), sleep as i32, 1, threads as i32) };
+        let mut label = if substeps == 4 { "Box2D".to_string() } else { format!("Box2D, {substeps} substeps") };
+        if threads > 1 {
+            label += &format!(", {threads} threads");
+        }
         // A scene that sets its substeps sets them in every engine.
         let substeps = scene.substeps().map_or(substeps, |n| n as i32);
         let dt = scene.dt();

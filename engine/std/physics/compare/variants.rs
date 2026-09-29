@@ -81,7 +81,7 @@ pub fn scoped(n: usize) -> engine_ecs::Workers {
 /// caller's, one after another, the last first (`rot/threads=<n>/late=1`):
 /// a solve across threads whose threads come one at a time, each after the
 /// last has left, must still finish, and the same.
-struct Backwards(usize);
+pub struct Backwards(pub usize);
 
 impl engine_ecs::Executor for Backwards {
     fn threads(&self) -> usize {

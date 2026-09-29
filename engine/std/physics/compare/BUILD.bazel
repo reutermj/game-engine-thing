@@ -58,6 +58,7 @@ rust_binary(
         "//engine/std/physics:solver.rs",
         "//engine/std/physics:tests/split_impulse.rs",
         "//engine/std/physics:tests/arrays.rs",
+        "//engine/std/physics:tests/pool.rs",
     ],
     crate_root = "compare.rs",
     # The two libraries' licenses travel with the binary that contains
