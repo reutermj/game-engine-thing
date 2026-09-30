@@ -1,7 +1,7 @@
 //! The scenes, as plain data: statics, the bodies present at step 0, the
 //! bodies each later step adds, and the phases a run is timed in. Built from
 //! a seeded RNG so every engine gets the identical scene. Shared by the
-//! comparison (//bench/physics3d, which builds them in each engine) and the
+//! comparison (//engine/std/physics3d/compare, which builds them in each engine) and the
 //! scene mod `pile3d` (which builds them in ours, in the engine, from this
 //! same code).
 
@@ -109,7 +109,7 @@ pub enum Kind {
     /// two frictions by different rules (Rapier the mean, the others the
     /// geometric mean), which a pile of mixed materials would measure.
     Mixed,
-    /// One bounce of the bounce families (bench/physics3d, `bounces.rs`):
+    /// One bounce of the bounce families (engine/std/physics3d/compare, `bounces.rs`):
     /// n is a `Hit`, packed (`Hit::pack`).
     Hit,
 }

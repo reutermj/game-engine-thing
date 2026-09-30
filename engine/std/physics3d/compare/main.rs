@@ -1,8 +1,8 @@
-//! ./bazel run --config=bench //bench/physics3d:bench -- [scenes] [sizes] [backends] [flags]
+//! ./bazel run --config=bench //engine/std/physics3d/compare:bench -- [scenes] [sizes] [backends] [flags]
 //!
 //! Each positional argument is a comma-separated list or "all" (the default):
 //! scenes are spheres, boxes, planks and rain; sizes are body counts (default
-//! 1000,10000); backends are those in physics3d_bench::BACKENDS. Flags:
+//! 1000,10000); backends are those in physics3d_compare::BACKENDS. Flags:
 //! --iters8 sets every engine's iteration knob to 8, --rotate lets bodies
 //! turn (locked by default), --sleep lets bodies
 //! sleep, --runs N repeats each run and reports the median phase times
@@ -27,9 +27,9 @@
 //!
 //!     bench -- ours,rapier,box3d --bounces --each
 
-use physics3d_bench::measure::{self, Run};
-use physics3d_bench::scenes::{self, Kind, Scene};
-use physics3d_bench::{BACKENDS, Config, Iters, behave, bounces, make_backend, runs};
+use physics3d_compare::measure::{self, Run};
+use physics3d_compare::scenes::{self, Kind, Scene};
+use physics3d_compare::{BACKENDS, Config, Iters, behave, bounces, make_backend, runs};
 
 fn list<'a>(arg: Option<&'a String>, all: &[&'a str]) -> Vec<&'a str> {
     match arg.map(String::as_str) {
@@ -145,7 +145,9 @@ fn behaviour(scene: &Scene, config: &Config, backends: &[&str]) {
     println!("## {} {}, {} steps\n", scene.kind.name(), scene.n, scene.steps);
     let runs: Vec<_> = backends
         .iter()
-        .map(|b| physics3d_bench::behave::behave(scene, make_backend(b, config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut()))
+        .map(|b| {
+            physics3d_compare::behave::behave(scene, make_backend(b, config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut())
+        })
         .collect();
     let names: Vec<&str> = runs[0].values.iter().map(|(k, _)| *k).collect();
     println!("| engine | {} |", names.join(" | "));

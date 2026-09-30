@@ -3,7 +3,7 @@
 # (docs/architecture/physics-testing.md, "The baseline"). Group quality
 # is checked by the quality tests, behaviour by the behaviour tests.
 # Written by
-#     ./bazel run //bench/physics3d:baseline -- --long --write
+#     ./bazel run //engine/std/physics3d/compare:baseline -- --long --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
 quality    boxes 1000 turning        depth_end            0.007258   rel 0.6 or 1e-4

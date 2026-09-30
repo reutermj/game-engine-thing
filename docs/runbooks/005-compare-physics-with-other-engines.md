@@ -115,9 +115,9 @@ BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/com
 SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run --config=bench //engine/std/physics/compare
 FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # the edge-of-stability families, short grids
 FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # a long grid
-./bazel run --config=bench //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
-./bazel run --config=bench //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
-./bazel run --config=bench //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- bounce 25,50,75,100 all --rotate --behave
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- ratio 10,100,1000 all --rotate --behave
 ```
 
 A table a scene of what each engine did (`behave.rs` in each), about a
@@ -134,8 +134,8 @@ BOUNCES=all BOUNCE_RUNS=1 ./bazel run //engine/std/physics/compare > bounces.txt
 BOUNCES=drops,rates BOUNCE_LONG=1 ./bazel run //engine/std/physics/compare                    # long grids, statistics only
 BOUNCES=all ENGINES=closing VARIANTS=arrays:rot/closing=1,arrays:rot/closing=3 ./bazel run //engine/std/physics/compare   # options of ours
 VIEW="hit corner e=1 v=5 g=20" VIEW_STEPS=0,15,16,22 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run //engine/std/physics/compare
-./bazel run //bench/physics3d:bench -- ours,rapier,box3d --bounces --each > bounces3d.txt    # 3D, short grids
-./bazel run //bench/physics3d:bench -- ours --bounces --long --tune=closing=before           # 3D, long grids, an option
+./bazel run //engine/std/physics3d/compare:bench -- ours,rapier,box3d --bounces --each > bounces3d.txt    # 3D, short grids
+./bazel run //engine/std/physics3d/compare:bench -- ours --bounces --long --tune=closing=before           # 3D, long grids, an option
 ```
 
 Each family's statistics per engine (`bounces ... : excess worst ...`), and
@@ -154,7 +154,7 @@ measure again on exactly the tests' grids.
 
 Our own accepted results, per scene and measure, in four files:
 `engine/std/physics/compare/baseline.txt` and `baseline_long.txt` (2D),
-`bench/physics3d/baseline.txt` and `baseline_long.txt` (3D)
+`engine/std/physics3d/compare/baseline.txt` and `baseline_long.txt` (3D)
 (physics-testing.md, "The baseline"). The quality and behaviour tests
 check them, from their own runs (the test `baseline` in each, and
 `baseline_long` in the long ones), both ways: a value past its band fails,
@@ -169,8 +169,8 @@ better or worse.
   ```sh
   ./bazel run //engine/std/physics/compare:baseline          # 2D default, 1 s
   ./bazel run //engine/std/physics/compare:baseline -- --long  # 2D long, about a minute
-  ./bazel run //bench/physics3d:baseline                    # 3D default, seconds
-  ./bazel run //bench/physics3d:baseline -- --long            # 3D long, about 90 s
+  ./bazel run //engine/std/physics3d/compare:baseline                    # 3D default, seconds
+  ./bazel run //engine/std/physics3d/compare:baseline -- --long            # 3D long, about 90 s
   SOLVER=rot/carry=0 ./bazel run //engine/std/physics/compare:baseline   # a variant against the baseline
   ```
 
@@ -206,7 +206,7 @@ better or worse.
 The quality tests (physics.md, "Quality as a test") hold ours to bounds
 set from the references' values on the same scenes, recorded beside each
 bound in `quality_test.rs` and `quality_long.rs` here and in
-`//bench/physics3d`. After bumping a library, or changing a scene, measure
+`//engine/std/physics3d/compare`. After bumping a library, or changing a scene, measure
 them again and set each bound by the rules in physics.md:
 
 ```sh
@@ -214,10 +214,10 @@ them again and set each bound by the rules in physics.md:
 ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run --config=bench //engine/std/physics/compare
 ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run --config=bench //engine/std/physics/compare
 # 3D
-./bazel run --config=bench //bench/physics3d:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
-./bazel run --config=bench //bench/physics3d:bench -- boxes 200,300,400,500 all --runs=1
-./bazel run --config=bench //bench/physics3d:bench -- stack 5,10,15,20 all --rotate --runs=1
-./bazel run --config=bench //bench/physics3d:bench -- boxes,planks 10000 all --rotate --runs=1
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes 200,300,400,500 all --runs=1
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- stack 5,10,15,20 all --rotate --runs=1
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes,planks 10000 all --rotate --runs=1
 ```
 
 The quality numbers are deterministic, so one run each; about 5 minutes

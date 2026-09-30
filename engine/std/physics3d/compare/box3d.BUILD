@@ -1,6 +1,6 @@
 # Box3D, built from its sources with the hermetic llvm toolchain, as its
 # src/CMakeLists.txt builds the library (no Tracy, no validation).
-load("@@//bench/physics3d:copts.bzl", "BOX3D_COPTS")
+load("@@//engine/std/physics3d/compare:copts.bzl", "BOX3D_COPTS")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 cc_library(

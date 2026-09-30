@@ -7,7 +7,7 @@ source, not from memory.
 
 None of them is part of the engine or of any game: each is linked only
 into a comparison bench (`//engine/std/physics/compare` for 2D,
-`//bench/physics3d` for 3D), so our own solvers can be measured against
+`//engine/std/physics3d/compare` for 3D), so our own solvers can be measured against
 established ones on identical scenes. Flecs and EnTT, last, were read
 for the ECS's design, and aren't built at all.
 
@@ -213,7 +213,7 @@ one would have to ship those files with it.
   workers by raw pointers (`SharedCtx`, `unsafe impl Sync`), which ours
   aren't: relaxed atomics, measured against a raw-pointer spike like it.
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
-  `bench/physics3d/Cargo.toml`, the comparison engine in `//bench/physics3d`
+  `engine/std/physics3d/compare/Cargo.toml`, the comparison engine in `//engine/std/physics3d/compare`
   (single-threaded, rotations locked). Its license text is fetched pinned by
   sha256 from the v0.36.0 tag (`@rapier_license`, MODULE.bazel) and put in
   that bench's runfiles. It brings parry3d, nalgebra, simba and approx
@@ -243,8 +243,8 @@ one would have to ship those files with it.
   the project's contributors.
 - **Licence:** MIT (LICENSE at the root of the release archive, exported as
   `@jolt//:LICENSE`).
-- **What we use it for:** comparison only. `//bench/physics3d` builds it from
-  source (`bench/physics3d/jolt.BUILD`) behind a small C shim and runs the
+- **What we use it for:** comparison only. `//engine/std/physics3d/compare` builds it from
+  source (`engine/std/physics3d/compare/jolt.BUILD`) behind a small C shim and runs the
   same scenes on `JobSystemSingleThreaded` with translation-only bodies.
 - **Ideas our 3D code adopts:** none; it is the yardstick. (Read for the
   kept broadphase, 2026-09-27: Jolt finds its active bodies' pairs afresh
@@ -272,8 +272,8 @@ one would have to ship those files with it.
 - **Authors:** Erin Catto ("Copyright (c) 2026 Erin Catto", LICENSE).
 - **Licence:** MIT (LICENSE at the root of the release archive, exported as
   `@box3d//:LICENSE`).
-- **What we use it for:** comparison only. `//bench/physics3d` builds it from
-  source (`bench/physics3d/box3d.BUILD`) behind a small C shim and runs the
+- **What we use it for:** comparison only. `//engine/std/physics3d/compare` builds it from
+  source (`engine/std/physics3d/compare/box3d.BUILD`) behind a small C shim and runs the
   same scenes with one worker and all three angular motion locks.
 - **Ideas our 3D code adopts** (read in the fetched v0.1.0 source, and
   named where our code has them):

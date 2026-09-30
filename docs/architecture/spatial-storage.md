@@ -485,7 +485,7 @@ most of it.
 physics asks of the storage core before more is built on 2D alone. The
 storage is generic over the dimensions; a translation-only 3D step
 (`//engine/std/physics3d`, spheres and axis-aligned boxes) runs on it, and
-`//bench/physics3d` compares it with Rapier 3D, Jolt and Box3D
+`//engine/std/physics3d/compare` compares it with Rapier 3D, Jolt and Box3D
 ([physics.md](physics.md#3d-translation-only-spike)).
 
 **What changed in `engine_ecs`.** Everything that knows the axes takes a
@@ -726,7 +726,7 @@ exactly, and our narrowphase costs more per pair than a box test).
 
 **Decisions, each measured** (µs a step, one thread, `-c opt`, 10 000
 bodies unless said; 2D the real pile of `//engine/std/physics/compare`,
-3D `//bench/physics3d`'s boxes turning; `live_bench` the lattice without
+3D `//engine/std/physics3d/compare`'s boxes turning; `live_bench` the lattice without
 physics):
 
 1. **The margin.** A settled pile creeps less than any margin tried, so
@@ -829,7 +829,7 @@ physics mod's own. `:tax` (ECS / arrays, bit for bit as before):
 | frame, before | 1558 / 1666 | 1559 / 1664 | 10530 / 12325 | 10562 / 12557 | 871-883 / 837-862 |
 | frame, after | 1437 / 1692 | 1450 / 1706 | 10408 / 13091 | 10164 / 11277 | 870-889 / 831-863 |
 
-In 3D (`//bench/physics3d`, boxes turning, broadphase µs by phase: falling
+In 3D (`//engine/std/physics3d/compare`, boxes turning, broadphase µs by phase: falling
 1-61, settling 300-400, settled; 10 000 one run, 1000 the median of 3):
 
 | | ours before | ours after | Rapier | Box3D |

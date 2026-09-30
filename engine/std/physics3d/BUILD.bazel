@@ -6,7 +6,7 @@ load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
 # a mod, as //engine/std/physics is, with every piece of state in the world
 # or its state, so the step hot-reloads under a running simulation. See
 # lib.rs and docs/architecture/physics.md, "Rotation in 3D". The comparison
-# with Rapier, Jolt and Box3D is //bench/physics3d.
+# with Rapier, Jolt and Box3D is //engine/std/physics3d/compare.
 
 engine_mod(
     name = "physics3d",
@@ -41,19 +41,19 @@ engine_mod(
     crate_root = "tests/pile.rs",
     mod_deps = [":physics3d"],
     twin = True,
-    visibility = ["//bench/physics3d:__pkg__"],
+    visibility = ["//engine/std/physics3d/compare:__pkg__"],
 )
 
 engine_game(
     name = "pile3d_game",
     bootstrap = "//engine/std/lockstep",
     mods = [":pile3d"],
-    visibility = ["//bench/physics3d:__pkg__"],
+    visibility = ["//engine/std/physics3d/compare:__pkg__"],
 )
 
 exports_files(
     ["tests/scenes.rs"],
-    visibility = ["//bench/physics3d:__pkg__"],
+    visibility = ["//engine/std/physics3d/compare:__pkg__"],
 )
 
 # The components' own tests, in the interface crate.
@@ -122,7 +122,7 @@ rust_test(
 
 # Where a 3D pile's step goes, by stage, in the engine:
 #   ./bazel run --config=bench //engine/std/physics3d:stages -- [n] [spheres|boxes|planks|rain] [locked]
-# The comparison with other engines is //bench/physics3d; this is the
+# The comparison with other engines is //engine/std/physics3d/compare; this is the
 # breakdown behind it.
 rust_binary(
     name = "stages",

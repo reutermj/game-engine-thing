@@ -1,7 +1,7 @@
 # Jolt Physics, built from its sources with the hermetic llvm toolchain.
 # Jolt only ships CMake; this mirrors Jolt/Jolt.cmake with every optional
 # backend (GPU compute, CPU compute shaders) left out.
-load("@@//bench/physics3d:copts.bzl", "JOLT_COPTS")
+load("@@//engine/std/physics3d/compare:copts.bzl", "JOLT_COPTS")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 cc_library(

@@ -1,8 +1,8 @@
 //! Every backend links, runs a small pile to rest and keeps it above the
 //! floor, measured by the harness's own geometry. Small enough for fastbuild.
 
-use physics3d_bench::scenes::{self, Kind};
-use physics3d_bench::{BACKENDS, Config, Iters, make_backend, measure};
+use physics3d_compare::scenes::{self, Kind};
+use physics3d_compare::{BACKENDS, Config, Iters, make_backend, measure};
 
 fn settles(kind: Kind, rotate: bool) {
     let mut scene = scenes::build(kind, 20);
@@ -14,7 +14,7 @@ fn settles(kind: Kind, rotate: bool) {
             max_bodies: 64,
             rotate,
             tune: "",
-            gravity: physics3d_bench::scenes::EARTH,
+            gravity: physics3d_compare::scenes::EARTH,
             substeps: 0,
         };
         let mut backend = make_backend(name, &config).unwrap();
@@ -62,7 +62,7 @@ fn rain(rotate: bool) {
             max_bodies: 64,
             rotate,
             tune: "",
-            gravity: physics3d_bench::scenes::EARTH,
+            gravity: physics3d_compare::scenes::EARTH,
             substeps: 0,
         };
         let mut backend = make_backend(name, &config).unwrap();

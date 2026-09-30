@@ -5,7 +5,7 @@
 //! band fails, better or worse, until the file is written again in the
 //! same commit, so the file's diff is the record of what a change did to
 //! physics. This is the format and the comparison, shared by 2D
-//! (`record.rs` beside this file) and 3D (`//bench/physics3d:record.rs`),
+//! (`record.rs` beside this file) and 3D (`//engine/std/physics3d/compare:record.rs`),
 //! which each say what they record and with which bands.
 //!
 //! A line is a group (the test binary that checks it), a scene, a measure,

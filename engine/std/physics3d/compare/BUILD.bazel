@@ -51,7 +51,7 @@ filegroup(
 )
 
 rust_library(
-    name = "physics3d",
+    name = "physics3d_compare",
     srcs = [
         "behave.rs",
         "bounces.rs",
@@ -72,7 +72,6 @@ rust_library(
         "baseline.txt",
         "baseline_long.txt",
     ],
-    crate_name = "physics3d_bench",
     # Ours is the physics3d mod in the engine, on pile3d's scenes.
     data = [
         ":licenses",
@@ -94,19 +93,19 @@ rust_binary(
     name = "bench",
     srcs = ["main.rs"],
     data = [":licenses"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 # The baseline's tool, 2D's for 3D (physics-testing.md, "The baseline";
 # runbook 005): every value the baseline records, compared with the file;
 # --write writes it. The quality and behaviour tests check it, from their
 # own runs (their test "baseline").
-#   ./bazel run //bench/physics3d:baseline [-- --write]
-#   ./bazel run //bench/physics3d:baseline -- --long [--write]
+#   ./bazel run //engine/std/physics3d/compare:baseline [-- --write]
+#   ./bazel run //engine/std/physics3d/compare:baseline -- --long [--write]
 rust_binary(
     name = "baseline",
     srcs = ["baseline_main.rs"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 test_suite(
@@ -130,13 +129,13 @@ test_suite(
 # (physics-testing.md, "Measurements that are themselves tested").
 rust_test(
     name = "measure_test",
-    crate = ":physics3d",
+    crate = ":physics3d_compare",
 )
 
 rust_test(
     name = "smoke_test",
     srcs = ["smoke_test.rs"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 # Quality as a test: how soon piles of the physics3d mod come to rest, how
@@ -147,7 +146,7 @@ rust_test(
     name = "quality_test",
     srcs = ["quality_test.rs"],
     crate_root = "quality_test.rs",
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 # Quality beyond settling, in 3D: a cube on a ramp, a sphere rolling, a ball
@@ -157,12 +156,12 @@ rust_test(
 rust_test(
     name = "behaviour_test",
     srcs = ["behaviour_test.rs"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 # The bounce families on their long grids (bounces.rs): a few minutes, so
 # manual:
-#   ./bazel test //bench/physics3d:behaviour_long_test
+#   ./bazel test //engine/std/physics3d/compare:behaviour_long_test
 rust_test(
     name = "behaviour_long_test",
     srcs = [
@@ -172,11 +171,11 @@ rust_test(
     crate_features = ["long"],
     crate_root = "behaviour_test.rs",
     tags = ["manual"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )
 
 # The same at 1000 and 10 000 bodies: minutes, so manual, and meant for -c opt:
-#   ./bazel test //bench/physics3d:quality_long_test
+#   ./bazel test //engine/std/physics3d/compare:quality_long_test
 rust_test(
     name = "quality_long_test",
     srcs = [
@@ -186,5 +185,5 @@ rust_test(
     crate_features = ["long"],
     crate_root = "quality_test.rs",
     tags = ["manual"],
-    deps = [":physics3d"],
+    deps = [":physics3d_compare"],
 )

@@ -142,20 +142,23 @@ changing the ABI, the reload sequence or the Bazel rules.
   both publish); `sequential`, the default scheduler; and `physics`, 2D
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
-  `physics/compare` runs it beside Box2D and Rapier, fetched for that
-  package alone (runbook 005, [docs/CREDITS.md](docs/CREDITS.md)); its
-  `:quality_test` (and 3D's in `bench/physics3d`) bounds how soon ours
-  settles and how deep it sinks by what they meet (physics.md, "Quality
-  as a test").
   `physics3d` is experimental: 3D spheres and boxes that turn, a mod like
   `physics` (its settings, `Gravity` and `Tuning`, in the world), on 3D
   spatial storage, with `pile3d`, a scene mod that builds the comparison's
   scenes, and a reload replay (physics.md, "Rotation in 3D").
-- `bench/physics3d/` — the 3D comparison: the physics3d mod in the engine
-  against Rapier 3D, Jolt and Box3D on the same scenes
-  (`engine/std/physics3d/tests/scenes.rs`), the C/C++ engines pinned by
-  sha256 and built as `cc_library`s. Credits and licences in
-  [docs/CREDITS.md](docs/CREDITS.md).
+  Each has its comparison and test harness beside it, `compare/` (runbook
+  005, [docs/architecture/physics-testing.md](docs/architecture/physics-testing.md)):
+  - `physics/compare` runs the 2D mod beside Box2D and Rapier 2D, fetched
+    for that package alone.
+  - `physics3d/compare` runs the physics3d mod in the engine beside Rapier
+    3D, Jolt and Box3D on the same scenes
+    (`engine/std/physics3d/tests/scenes.rs`), the C/C++ engines pinned by
+    sha256 and built as `cc_library`s.
+
+  Each one's `:quality_test` and `:behaviour_test` bound how soon ours
+  settles, how deep it sinks and how it bounces by what the references
+  meet (physics.md, "Quality as a test"), and hold it to its baseline.
+  Credits and licences in [docs/CREDITS.md](docs/CREDITS.md).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's
@@ -241,7 +244,7 @@ changing the ABI, the reload sequence or the Bazel rules.
   `baseline.txt` beside their scenes, each within a band set from
   measured noise: a change that moves a value past its band, better or
   worse, fails until `./bazel run //engine/std/physics/compare:baseline
-  -- --write` (and `//bench/physics3d:baseline`, and `--long` for the long
+  -- --write` (and `//engine/std/physics3d/compare:baseline`, and `--long` for the long
   suites) writes it again in the same commit, whose message says why.
   After merging physics branches, regenerate on the merged tree and
   compare against both parents. Never edit a baseline by hand (runbook

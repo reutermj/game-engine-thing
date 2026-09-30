@@ -8,5 +8,5 @@ members = [
     "engine/loader",
     # The physics comparisons: Rapier 2D and 3D, bench-only.
     "engine/std/physics/compare",
-    "bench/physics3d",
+    "engine/std/physics3d/compare",
 ]

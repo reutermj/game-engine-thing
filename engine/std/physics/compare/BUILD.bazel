@@ -82,7 +82,7 @@ rust_binary(
 # The baseline's format and comparison, which 3D's shares.
 exports_files(
     ["baseline.rs"],
-    visibility = ["//bench/physics3d:__pkg__"],
+    visibility = ["//engine/std/physics3d/compare:__pkg__"],
 )
 
 # What the quality and behaviour tests share: the comparison's scenes,

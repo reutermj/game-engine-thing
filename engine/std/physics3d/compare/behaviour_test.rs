@@ -5,9 +5,9 @@
 //! them), set as 2D's are (//engine/std/physics/compare:behaviour_test;
 //! physics.md, "Quality beyond settling"). The values are from
 //!
-//!     ./bazel run --config=bench //bench/physics3d:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
-//!     ./bazel run --config=bench //bench/physics3d:bench -- bounce 25,50,75,100 all --rotate --behave
-//!     ./bazel run --config=bench //bench/physics3d:bench -- ratio 10,100,1000 all --rotate --behave
+//!     ./bazel run --config=bench //engine/std/physics3d/compare:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
+//!     ./bazel run --config=bench //engine/std/physics3d/compare:bench -- bounce 25,50,75,100 all --rotate --behave
+//!     ./bazel run --config=bench //engine/std/physics3d/compare:bench -- ratio 10,100,1000 all --rotate --behave
 //!
 //! `TUNE=<variant>` runs ours tuned so, as in `:quality_test`. A test that
 //! finds a real problem stays, ignored, naming its bead.
@@ -17,9 +17,9 @@ use std::sync::Arc;
 #[cfg(feature = "long")]
 mod behaviour_long;
 
-use physics3d_bench::behave::Behaviour;
-use physics3d_bench::scenes::Kind;
-use physics3d_bench::{baseline, bounces, record, runs};
+use physics3d_compare::behave::Behaviour;
+use physics3d_compare::scenes::Kind;
+use physics3d_compare::{baseline, bounces, record, runs};
 
 /// Ours on each scene, bodies turning, in threads of their own (each run
 /// once in the binary, `runs.rs`, which the baseline reads too), each

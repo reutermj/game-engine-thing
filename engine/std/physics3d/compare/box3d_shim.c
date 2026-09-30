@@ -1,7 +1,7 @@
 // Box3D behind the C ABI in shim.h. workerCount 1 with no task callbacks is
 // Box3D's single-threaded mode: it creates no threads (types.h, b3WorldDef).
 
-#include "bench/physics3d/shim.h"
+#include "engine/std/physics3d/compare/shim.h"
 
 #include "box3d/box3d.h"
 

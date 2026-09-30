@@ -1,7 +1,7 @@
 // Jolt behind the C ABI in shim.h: one PhysicsSystem per world, run on
 // JobSystemSingleThreaded so every Jolt number is one core's.
 
-#include "bench/physics3d/shim.h"
+#include "engine/std/physics3d/compare/shim.h"
 
 #include <Jolt/Jolt.h>
 

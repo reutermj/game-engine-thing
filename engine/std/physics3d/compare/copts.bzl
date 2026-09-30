@@ -27,11 +27,11 @@ JOLT_COPTS = [
     # release mutexes across functions, which the analysis can't follow.
     "-Wno-thread-safety-analysis",
 ] + select({
-    Label("//bench/physics3d:jolt_simd_sse2"): _SSE2,
+    Label("//engine/std/physics3d/compare:jolt_simd_sse2"): _SSE2,
     "//conditions:default": _AVX2,
 }) + select({
     # Jolt's CMake Release is -O3; the toolchain's opt is -O2.
-    Label("//bench/physics3d:opt"): ["-O3"],
+    Label("//engine/std/physics3d/compare:opt"): ["-O3"],
     "//conditions:default": [],
 })
 
@@ -46,6 +46,6 @@ JOLT_COPTS = [
 # (src/core.h), the same baseline as the Rust code, so no -m flags.
 BOX3D_COPTS = ["-std=gnu17", "-ffp-contract=off"] + select({
     # CMake's Release for C is -O3 -DNDEBUG.
-    Label("//bench/physics3d:opt"): ["-O3"],
+    Label("//engine/std/physics3d/compare:opt"): ["-O3"],
     "//conditions:default": [],
 })

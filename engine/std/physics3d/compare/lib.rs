@@ -10,7 +10,7 @@
 //! 1/60 s step, mass 1, friction 0.5, restitution 0.
 
 // The baseline's format and comparison, 2D's.
-#[path = "../../engine/std/physics/compare/baseline.rs"]
+#[path = "../../physics/compare/baseline.rs"]
 pub mod baseline;
 pub mod behave;
 pub mod bounces;
@@ -23,7 +23,7 @@ pub mod rapier;
 pub mod record;
 pub mod runs;
 // The scene mod builds the same scenes in the engine, from this file.
-#[path = "../../engine/std/physics3d/tests/scenes.rs"]
+#[path = "../tests/scenes.rs"]
 pub mod scenes;
 
 pub use scenes::{Shape, Spec};

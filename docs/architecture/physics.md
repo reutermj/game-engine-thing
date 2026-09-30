@@ -2112,8 +2112,8 @@ stay put. Left out: layers, sensors, kinematic bodies, sleeping, events,
 parallelism.
 
 **Against Rapier 3D, Jolt and Box3D** (`./bazel run -c opt
-//bench/physics3d:bench`; the harness, scenes and how each engine is
-brought in are in `bench/physics3d`, credits in [CREDITS.md](../CREDITS.md)).
+//engine/std/physics3d/compare:bench`; the harness, scenes and how each engine is
+brought in are in `engine/std/physics3d/compare`, credits in [CREDITS.md](../CREDITS.md)).
 One thread, rotations locked, sleep off, every engine at its own defaults
 (Rapier 0.36: 4 iterations; Jolt 5.6: 10 velocity and 2 position steps;
 Box3D 0.1: 4 substeps; ours 8 + 8), ms per step over the whole run, 10 000
@@ -2502,7 +2502,7 @@ rest](#still-at-rest)).
 
 ### Against the others, turning
 
-`./bazel run --config=bench //bench/physics3d:bench -- all 1000,10000 all --rotate`
+`./bazel run --config=bench //engine/std/physics3d/compare:bench -- all 1000,10000 all --rotate`
 (and without `--rotate` for locked). One thread, sleeping off, every engine
 at its defaults (Rapier 4 substeps at 30 Hz; Jolt 10 velocity and 2
 position iterations; Box3D 4 substeps at 30 Hz; ours 5 substeps at 60 Hz, 2
@@ -2644,8 +2644,8 @@ and a solver that crept for thousands of steps passed them
 |---|---|---|
 | `//engine/std/physics/compare:quality_test` | 2D: piles 400-1200, pyramids 15-50, stacks 10 and 20, sleeping, the mod bit for bit the arrays, the baseline | 49 s (fastbuild; 1.2 s at `-c opt`), 2026-09-28 |
 | `//engine/std/physics/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid, and the wider families (piles 21-401 wide, mixed piles, pyramids 30-120; physics-testing.md, "Wider families") | 80 s at `-c opt` |
-| `//bench/physics3d:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 5-20, the baseline | 17.5 s (fastbuild; 2.0 s at `-c opt`) |
-| `//bench/physics3d:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000, and the wider families (200-1000 and 2000-5000, mixed piles) | 86-130 s at `-c opt` |
+| `//engine/std/physics3d/compare:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 5-20, the baseline | 17.5 s (fastbuild; 2.0 s at `-c opt`) |
+| `//engine/std/physics3d/compare:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000, and the wider families (200-1000 and 2000-5000, mixed piles) | 86-130 s at `-c opt` |
 
 **And our own results, both ways.** The floor is upper bounds from the
 references; every value these tests bound is also held to our last
@@ -2778,7 +2778,7 @@ them.
 | target | what | runtime |
 |---|---|---|
 | `//engine/std/physics/compare:behaviour_test` | 2D: ramps, bounces, mass ratios, overlap, bullets, the card house, the ladder, dominoes; the mod bit for bit the arrays on them | 2-5 s (fastbuild) |
-| `//bench/physics3d:behaviour_test` | 3D: ramps, bounces, mass ratios | under 1 s |
+| `//engine/std/physics3d/compare:behaviour_test` | 3D: ramps, bounces, mass ratios | under 1 s |
 
 ### The debug view
 
@@ -2906,7 +2906,7 @@ the paddle's 48. Box2D sweeps fast bodies against statics
 
 ### Results, 3D
 
-`./bazel run --config=bench //bench/physics3d:bench -- <scene> <n> all --rotate --behave`
+`./bazel run --config=bench //engine/std/physics3d/compare:bench -- <scene> <n> all --rotate --behave`
 (2026-09-28; Rapier 3D 0.36, Jolt 5.6, Box3D 0.1, each at its defaults).
 
 | scene | expected | ours | Rapier | Jolt | Box3D |
@@ -3021,7 +3021,7 @@ climbs to 1.64 of its drop in 2D (1.31 in 3D), but one drop can't say how
 an error scales, and its drops at e ≤ 0.5 hid it. So restitution is judged
 on families: one bounce over a grid of what can decide it, 2D and 3D, ours
 and the references on exactly the same grid (`compare/bounces.rs`,
-`bench/physics3d/bounces.rs`; a bounce is `Scene::Hit`, in 3D a
+`engine/std/physics3d/compare/bounces.rs`; a bounce is `Scene::Hit`, in 3D a
 `Kind::Hit` with the bounce packed into its n).
 
 ### The families

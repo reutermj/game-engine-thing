@@ -2,9 +2,9 @@
 //! 005), as 2D's: runs every scene the baseline records (`record.rs`) and
 //! prints every value that moved past its band from `baseline.txt`.
 //!
-//!     ./bazel run //bench/physics3d:baseline
-//!     ./bazel run //bench/physics3d:baseline -- --write
-//!     ./bazel run //bench/physics3d:baseline -- --long --write
+//!     ./bazel run //engine/std/physics3d/compare:baseline
+//!     ./bazel run //engine/std/physics3d/compare:baseline -- --write
+//!     ./bazel run //engine/std/physics3d/compare:baseline -- --long --write
 //!
 //! `--write` writes the file into the source tree; `--long` is the long
 //! suite's, `baseline_long.txt`; `--all` prints every value, moved or
@@ -12,7 +12,7 @@
 //! drop), under the size's name, to measure spread (it never writes).
 //! `TUNE=<variant>` compares a tuning of ours against the baseline.
 
-use physics3d_bench::{baseline, record, runs};
+use physics3d_compare::{baseline, record, runs};
 
 const GROUPS: [&str; 2] = ["quality", "behaviour"];
 
@@ -46,7 +46,7 @@ fn main() {
     record::set_offset(offset);
     let name = if long { "baseline_long.txt" } else { "baseline.txt" };
     let workspace = std::env::var("BUILD_WORKSPACE_DIRECTORY").ok();
-    let path = workspace.as_ref().map(|w| std::path::Path::new(w).join("bench/physics3d").join(name));
+    let path = workspace.as_ref().map(|w| std::path::Path::new(w).join("engine/std/physics3d/compare").join(name));
     let built_in = if long { record::LONG } else { record::DEFAULT };
     let file = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| built_in.to_string());
 

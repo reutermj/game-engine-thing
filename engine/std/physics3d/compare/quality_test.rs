@@ -9,7 +9,7 @@
 //! settling is chaotic; depth at half the shallower reference's. The values
 //! are from
 //!
-//!     ./bazel run --config=bench //bench/physics3d:bench -- boxes 200,300,400,500 all --rotate --runs=1
+//!     ./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes 200,300,400,500 all --rotate --runs=1
 //!
 //! `TUNE=<variant>` in the environment (`physics3d::Tuning::parse`) runs
 //! ours tuned so, which is how the bounds were checked to fail on the
@@ -18,10 +18,10 @@
 
 use std::sync::Arc;
 
-use physics3d_bench::measure::Run;
-use physics3d_bench::record::{SIZES, STILL};
-use physics3d_bench::scenes::Kind;
-use physics3d_bench::{baseline, record, runs};
+use physics3d_compare::measure::Run;
+use physics3d_compare::record::{SIZES, STILL};
+use physics3d_compare::scenes::Kind;
+use physics3d_compare::{baseline, record, runs};
 
 /// Our step on `kind` at each of `sizes`, in threads of their own, each
 /// printed so a failing run shows every number.

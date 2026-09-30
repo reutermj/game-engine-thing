@@ -43,12 +43,12 @@ the fourth.
 | layer | what it compares | direction | targets | catches | misses |
 |---|---|---|---|---|---|
 | **Equivalence** | two implementations of the same step: the ECS against plain arrays (`:tax`), the mod against the arrays, the solver's colored four-lane path (the default) against its colors' order solved one contact at a time, which a parallel solve over the colors will have to pass too, and the level path (a variant) against pair order, a replay after a reload or at another frame rate | exact, bit for bit | `//engine/std/physics:tax`, `compare:quality_test` (`the_mod_is_the_arrays_bit_for_bit`, `the_colored_solve_…`, `the_solve_by_level_…`), `physics_test` (replays), reload tests | the plumbing changing physics | nothing about quality: both sides change together |
-| **Physical law** | a measured quantity against a formula | both ways, within a tolerance | `compare:behaviour_test`, `physics3d:behaviour_test` (landing with the card-house fix) | wrong friction, rolling, restitution; bleeding energy; sticky or slippery contacts | only the scenes with a formula |
-| **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `compare:quality_test`, `quality_long_test`, `physics3d:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
+| **Physical law** | a measured quantity against a formula | both ways, within a tolerance | `compare:behaviour_test`, `physics3d/compare:behaviour_test` (landing with the card-house fix) | wrong friction, rolling, restitution; bleeding energy; sticky or slippery contacts | only the scenes with a formula |
+| **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `compare:quality_test`, `quality_long_test`, `physics3d/compare:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
 | **Scene sanity** | contacts per body, islands, nothing escaped | lower and upper | inside the floor tests | a scene that isn't what we think (the columns pile) | – |
 | **Unit behaviour** | single contacts and bodies against hand-checked outcomes | exact or tight | `physics:core_test`, `physics3d:core_test`, the solver's and narrowphase's unit tests | a landing that bounces, a friction limit, a feature id that jumps, a contact colored against Box2D's rule (which the equivalence tests can't see, solving the same order on both sides) | whole-scene behaviour |
 | **Baseline** | our values against our last accepted ones, per scene and measure, a band each set from measured noise | both ways | the `baseline` test in `compare:quality_test`, `behaviour_test` and 3D's, and `baseline_long` in the long ones | drift within the floor; a result suspiciously better | a pile family's median rest moving under 100 steps |
-| **Calibration** | each measure on bodies placed where its value is known | exact | `quality.rs`'s and `settle.rs`'s tests (2D), `physics3d:measure_test` | a measure that reads zero or the wrong thing | – |
+| **Calibration** | each measure on bodies placed where its value is known | exact | `quality.rs`'s and `settle.rs`'s tests (2D), `physics3d/compare:measure_test` | a measure that reads zero or the wrong thing | – |
 | **Game acceptance** | routes an agent played, replayed: "YOU WIN at frame 255, deaths 0" | exact outcome | `pong:pong_test`, `platformer:platformer_test`, their reload tests | a physics change that breaks a game | why: a changed outcome says nothing about better or worse |
 
 How bounds are set is in [physics.md, "Quality as a test"](physics.md#quality-as-a-test),
@@ -112,7 +112,7 @@ the floor" or "suspiciously better" gets an explicit yes or no.
   `engine/std/physics/compare/baseline.txt` (2D, the default suite's
   scenes: 228 values, 27 of them the bounce families') and
   `baseline_long.txt` (the long suite's: 225),
-  `bench/physics3d/baseline.txt` (100) and `baseline_long.txt` (94).
+  `engine/std/physics3d/compare/baseline.txt` (100) and `baseline_long.txt` (94).
   `baseline.rs` is the format and the comparison, shared; `record.rs` in
   each says what is recorded and with which band; `runs.rs` in each runs
   every scene once per test binary.
@@ -203,7 +203,7 @@ the floor" or "suspiciously better" gets an explicit yes or no.
 - **Regenerating:** one command writes the file from a run:
   `./bazel run //engine/std/physics/compare:baseline -- --write`
   (`--long` for the long file, about a minute; 3D's is
-  `//bench/physics3d:baseline`). Bazel runs it with
+  `//engine/std/physics3d/compare:baseline`). Bazel runs it with
   `BUILD_WORKSPACE_DIRECTORY` set, so it writes into the source tree.
   Without `--write` it prints the comparison as a table: old, new, band,
   and *better*, *worse* or *moved* for each value past its band (`--all`:
@@ -283,7 +283,7 @@ every upper bound on it (gap 3):
   by side and one alone, and just past touching); escapes; rest (an
   engine scripted to move until step 130, again from 300 to 350, and to
   the end); a top's move (0.3 and 0.4 from where it began).
-- **3D** (`measure.rs`, `//bench/physics3d:measure_test`): depth (a cube
+- **3D** (`measure.rs`, `//engine/std/physics3d/compare:measure_test`): depth (a cube
   sunk 0.03, one turned a quarter, a ball); energy (moving, and a cube and
   a ball turning); tilt; partners and columns (a cube on a cube, straight
   above and set 0.3 aside); escapes; rest (a scripted backend: at rest
@@ -381,7 +381,7 @@ did what they should:
 | a box 10-1000 times as heavy on 1-6 (84) | 60 | 33 | 49 |
 | a pyramid 20 wide at friction 0-0.8, finest near 0 (12) | 11 | 11 | 11 |
 
-**3D** (`record::WIDE` in `//bench/physics3d`), against Rapier and Box3D
+**3D** (`record::WIDE` in `//engine/std/physics3d/compare`), against Rapier and Box3D
 (Jolt beside them): at rest from, median (worst):
 
 | family | ours | Rapier | Box3D | Jolt | bounds |
@@ -503,8 +503,8 @@ own mechanism: a clue there, not noise.
   wall time when run in parallel. A scene goes in the default suite if
   it's fast and covers something no other default scene does. Measured
   (2026-09-28, each target alone): `compare:quality_test` 49 s,
-  `compare:behaviour_test` 7.7 s, `physics3d:quality_test` 17.5 s,
-  `physics3d:behaviour_test` 0.3 s, the same with the baseline tests
+  `compare:behaviour_test` 7.7 s, `physics3d/compare:quality_test` 17.5 s,
+  `physics3d/compare:behaviour_test` 0.3 s, the same with the baseline tests
   skipped (it costs nothing: its runs are the other tests'). With the whole
   suite running beside it, `:quality_test` takes 66 s. It is over the
   budget, and was before this work (58 s beside the other physics
@@ -513,7 +513,7 @@ own mechanism: a clue there, not noise.
   own baseline. It runs before merging any change to the solver, the
   narrowphase, sleep or the step, and its baseline diff goes in that
   commit. Measured: `compare:quality_long_test` 80 s,
-  `behaviour_long_test` 4 s, `physics3d:quality_long_test` 86-130 s.
+  `behaviour_long_test` 4 s, `physics3d/compare:quality_long_test` 86-130 s.
 - **Every build is optimized** (`.bazelrc`, 2026-09-28, get-emj.66),
   with debug assertions and overflow checks kept on, so tests check what
   they did unoptimized. The default suite runs in about 36 s, a full

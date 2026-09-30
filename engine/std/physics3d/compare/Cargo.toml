@@ -1,5 +1,5 @@
 [package]
-name = "physics3d_bench"
+name = "physics3d_compare"
 version = "0.0.0"
 edition = "2024"
 # Keep in step with the toolchain version in MODULE.bazel (see
