@@ -1,7 +1,7 @@
 # Physics in 2D and 3D: what to share
 
 **Status: proposed** (2026-09-29; its beads get-emj.77 to get-emj.87). Nothing here is
-built. `//engine/std/physics` (2D) and `//engine/std/physics3d` (3D) share
+built. `//engine/std/physics2d` (2D) and `//engine/std/physics3d` (3D) share
 no physics code: each has its own math, narrowphase, solver, settings and
 contact handling, over one ECS whose spatial storage (`const D`) and live
 relations (`Live<R>`) are generic over the dimension. Features have moved
@@ -95,7 +95,7 @@ Lines are code lines: neither blank nor a `//` comment, outside
 `#[cfg(test)]` modules.[^count] 2D is 3890 of them in seven files, 3D 1926
 in six.
 
-### 2D (`engine/std/physics`, 3890)
+### 2D (`engine/std/physics2d`, 3890)
 
 | piece | where | lines | class |
 |---|---|---|---|
@@ -234,7 +234,7 @@ What each costs us, in the terms this engine cares about:
 
 - **The ECS-first design.** Components are dimension-specific types in
   each mod's interface (`component!` has no generics, and a component's
-  name is its mod's: `physics::Asleep`, `physics3d::Asleep`). Interfaces
+  name is its mod's: `physics2d::Asleep`, `physics3d::Asleep`). Interfaces
   are digested per mod, and a mod depending on physics reloads when its
   interface changes (mod-deps.md). A 2D interface change rebuilds 72
   actions and reloads 23 game mods; a 3D one, 17 and none of them
@@ -410,9 +410,9 @@ the same reason; 2D as constrained 3D (Jolt's way), which costs 2D 13-16%
 in the broadphase before any of the solver.
 
 The test harnesses (the comparisons' scenes, measures, families and
-baselines, today copies in `engine/std/physics/compare` and
-`bench/physics3d`) are the testing side of the same problem, being merged
-into a shared test kit apart from this doc.
+baselines, once copies in `engine/std/physics/compare` and
+`bench/physics3d`) are the testing side of the same problem, now merged
+into a shared test kit (`//engine/std/physics_testkit`) apart from this doc.
 
 ## Open questions
 
