@@ -31,6 +31,11 @@ monolithic design doc.
   world state, and why the solve still copies (proposed)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
+- [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods
+  side by side: a parity table from the code, what each piece is
+  (dimension-independent, the same algorithm over other math, or its own),
+  how Rapier, Box2D and Box3D, Jolt and Avian share 2D and 3D, and a shared
+  implementation crate in phases (proposed)
 - [physics-testing.md](physics-testing.md) — how physics is kept from
   regressing: equivalence, physical law, the reference floor, and a
   baseline of our own accepted results
