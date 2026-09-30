@@ -8,6 +8,8 @@
 //! scene is a `Kind::Hit`, the bounce packed into its n; `--bounces` in the
 //! bench measures every engine on them (`--long`, the long grids).
 
+use physics_testkit::bounces::Bounce;
+
 use crate::behave::Behaviour;
 use crate::scenes::{HIT, Hit, Target};
 
@@ -101,68 +103,35 @@ pub fn families(long: bool) -> Vec<Family> {
     v
 }
 
-fn median(mut v: Vec<f64>) -> f64 {
-    if v.is_empty() {
-        return f64::NAN;
+/// What the test kit's statistics read of a 3D bounce: a sphere is round,
+/// and a cube landing on an edge or a corner tips.
+impl Bounce for Hit {
+    fn e(&self) -> f32 {
+        self.e
     }
-    v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
-}
-
-fn most(v: impl Iterator<Item = f64>) -> f64 {
-    v.fold(f64::NEG_INFINITY, f64::max)
+    fn speed(&self) -> f32 {
+        self.v
+    }
+    fn mu(&self) -> f32 {
+        self.mu
+    }
+    fn round(&self) -> bool {
+        self.target == Target::Sphere
+    }
+    fn flat(&self) -> bool {
+        self.target == Target::Cube
+    }
+    fn tips(&self) -> bool {
+        matches!(self.target, Target::Edge | Target::Corner)
+    }
 }
 
 /// A family's statistics over its runs, by the names and rules of 2D's
-/// `bounces::stats`; square on here is a sphere, or a cube landing flat
-/// without friction.
+/// (`physics_testkit::bounces::stats`), at physics3d's threshold.
 pub fn stats(f: &Family, runs: &[Behaviour]) -> Vec<(&'static str, f64)> {
-    let both = |keep: &dyn Fn(&Hit, &Behaviour) -> bool, value: &dyn Fn(&Behaviour) -> f64| -> Vec<f64> {
-        f.hits.iter().zip(runs).filter(|(h, b)| keep(h, b)).map(|(_, b)| value(b)).collect()
-    };
-    let mut v = Vec::new();
-    if f.name == "series" {
-        v.push(("rise worst", most(both(&|h, _| h.e >= 1.0, &|b| b.get("rise most")).into_iter())));
-        // A box that tips as it lands turns in flight, trading its turn for
-        // height at the next bounce: each apex against the last is a
-        // round body's.
-        let round = |h: &Hit| h.target == Target::Sphere;
-        v.push(("decay worst", most(both(&|h, _| round(h), &|b| b.get("decay most")).into_iter())));
-        v.push(("decay median", median(both(&|h, _| round(h) && h.e < 1.0, &|b| b.get("decay median")))));
-        return v;
-    }
-    if f.name == "pairs" {
-        v.push(("gain worst", most(both(&|_, _| true, &|b| b.get("gain")).into_iter())));
-        v.push(("momentum worst", most(both(&|_, _| true, &|b| b.get("momentum")).into_iter())));
-        return v;
-    }
-    let threshold = crate::behave::BOUNCE_THRESHOLD;
-    // A box landing on a corner tips as it bounces, and its energy then
-    // turns between height, speed and spin: bounded apart.
-    let tips = |h: &Hit| matches!(h.target, Target::Edge | Target::Corner);
-    v.push(("excess worst", most(both(&|h, _| !tips(h), &|b| b.get("excess")).into_iter())));
-    if f.hits.iter().any(tips) {
-        v.push(("excess tipping", most(both(&|h, _| tips(h), &|b| b.get("excess")).into_iter())));
-    }
-    let square = |h: &Hit, _: &Behaviour| h.target == Target::Sphere || (h.target == Target::Cube && h.mu == 0.0);
-    let bounces = |h: &Hit, b: &Behaviour| square(h, b) && h.v > threshold && h.e > 0.0;
-    let gains = both(&bounces, &|b| b.get("gain"));
-    v.push(("gain worst", most(both(&square, &|b| b.get("gain")).into_iter())));
-    v.push(("gain median", median(gains.clone())));
-    v.push(("loss worst", most(gains.iter().map(|g| -g))));
-    v.push(("bounced below", both(&|h, b| square(h, b) && h.v < threshold && b.get("bounced") == 1.0, &|_| 1.0).len() as f64));
-    let flat = |h: &Hit, b: &Behaviour| bounces(h, b) && h.e >= 0.25 && b.get("bounced") == 0.0;
-    v.push(("flat above", both(&flat, &|_| 1.0).len() as f64));
-    if f.name == "oblique" {
-        v.push(("slip worst", most(both(&|h, _| h.mu == 0.0, &|b| (b.get("tangent") - 1.0).abs()).into_iter())));
-        v.push(("tangent most", most(both(&|h, _| h.mu > 0.0, &|b| b.get("tangent")).into_iter())));
-        v.push(("tangent median", median(both(&|h, _| h.mu > 0.0, &|b| b.get("tangent")))));
-    }
-    v
+    physics_testkit::bounces::stats(f.name, &f.hits, runs, crate::behave::BOUNCE_THRESHOLD)
 }
 
 /// A statistic by name.
-#[allow(dead_code)] // The tests read statistics by name; the bench and the baseline take them all.
-pub fn stat(stats: &[(&'static str, f64)], name: &str) -> f64 {
-    stats.iter().find(|(k, _)| *k == name).unwrap_or_else(|| panic!("no {name} in {stats:?}")).1
-}
+#[allow(unused_imports)] // The tests read statistics by name; the bench and the baseline take them all.
+pub use physics_testkit::bounces::stat;

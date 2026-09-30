@@ -12,26 +12,9 @@ use crate::settle::REST;
 use crate::solver;
 use crate::{Dyn, Sim};
 
-/// One engine on one scene: named values, in the order they were found.
-#[derive(Clone, Debug, Default)]
-pub struct Behaviour {
-    pub label: String,
-    pub values: Vec<(&'static str, f64)>,
-}
-
-impl Behaviour {
-    #[allow(dead_code)] // The tests read values by name; the comparison prints them all.
-    pub fn get(&self, name: &str) -> f64 {
-        self.values.iter().find(|(k, _)| *k == name).map(|(_, v)| *v).unwrap_or_else(|| panic!("no {name} in {:?}", self.values))
-    }
-
-    fn put(&mut self, name: &'static str, v: f64) {
-        self.values.push((name, v));
-    }
-}
-
-/// Never at rest, or never toppled: past any bound.
-pub const NEVER: f64 = f64::INFINITY;
+/// A run's named values, and never at rest: the test kit's, which 3D's
+/// `behave.rs` fills by the same names.
+pub use physics_testkit::{Behaviour, NEVER};
 
 /// Speeds the bullet scenes fire at, a unit a second: from a sixth of a
 /// unit a step to Box2D's speed cap (400), closer about where ours starts
@@ -219,26 +202,10 @@ fn ramp(b: &mut Behaviour, t: &[Vec<Dyn>], deg: f32, mu: f32, circle: bool) {
 /// e², and over many bounces, the most and the last (a lossless ball
 /// gaining height gains energy).
 fn bounce(b: &mut Behaviour, t: &[Vec<Dyn>], e: f32) {
-    // The ball's bottom above the floor's top, at y = 0.
-    let height = |d: &Dyn| -d.y - d.hx;
-    let (mut apexes, mut rising, mut top) = (Vec::new(), false, 0f32);
-    for s in &t[1..] {
-        let d = s[0];
-        if !rising && d.vy < 0.0 {
-            (rising, top) = (true, height(&d));
-        } else if rising {
-            top = top.max(height(&d));
-            if d.vy > 0.0 {
-                apexes.push(top / scene::DROP);
-                rising = false;
-            }
-        }
-    }
-    b.put("expected", (e * e) as f64);
-    b.put("first apex", apexes.first().copied().unwrap_or(0.0) as f64);
-    b.put("bounces", apexes.len() as f64);
-    b.put("most apex", apexes.iter().copied().fold(0.0, f32::max) as f64);
-    b.put("last apex", apexes.last().copied().unwrap_or(0.0) as f64);
+    // The ball's bottom above the floor's top, at y = 0, and its speed up
+    // (y is down).
+    let steps = t[1..].iter().map(|s| (-s[0].y - s[0].hx, -s[0].vy));
+    physics_testkit::behaviour::bounce(b, e, scene::DROP, steps);
 }
 
 /// A body's moment of inertia over its mass: a disc's r² / 2, a box's
@@ -358,47 +325,14 @@ fn hit(b: &mut Behaviour, t: &[Vec<Dyn>], h: &Hit) {
     b.put("spin", z.w as f64);
 }
 
-/// Many bounces (a `Scene::Hit` with `secs`): each apex of its lowest point
-/// over the height it fell from, the most, and each apex over the one
-/// before against e², while the bounce is well above `BOUNCE_THRESHOLD` (a
-/// rebound faster than 2): the median and the most. A lossless ball's never
-/// rises; one of restitution e keeps e² of its height a bounce. A height is
-/// the energy's, its height and its speed up over 2g, which free flight
-/// keeps: the highest step would read an apex low by up to g (dt / 2)² / 2
-/// (3% of a low bounce at gravity 80), and their ratios so pass e².
+/// Many bounces (a `Scene::Hit` with `secs`): the apexes of its lowest
+/// point over the height it fell from, by the energy's height
+/// (`physics_testkit::behaviour::series` says what, and why).
 fn series(b: &mut Behaviour, t: &[Vec<Dyn>], h: &Hit) {
     // Its centre's, which free flight keeps whatever it turns.
     let height = |d: &Dyn| -d.y - flat(d) + 0.5 * d.vy * d.vy / h.g;
-    let drop = height(&t[0][0]);
-    let (mut apexes, mut rising, mut top) = (Vec::new(), false, 0f32);
-    for st in &t[1..] {
-        let d = st[0];
-        if !rising && d.vy < 0.0 {
-            (rising, top) = (true, height(&d));
-        } else if rising {
-            if d.vy < 0.0 {
-                top = top.max(height(&d));
-            }
-            if d.vy > 0.0 {
-                apexes.push(top / drop);
-                rising = false;
-            }
-        }
-    }
-    let e2 = h.e * h.e;
-    let fast = |a: f32| (2.0 * h.g * a * drop).sqrt() > 2.0;
-    let mut ratios: Vec<f64> = std::iter::once(1.0)
-        .chain(apexes.iter().copied())
-        .collect::<Vec<f32>>()
-        .windows(2)
-        .filter(|w| fast(w[0]) && fast(w[1]))
-        .map(|w| (w[1] / w[0] / e2) as f64)
-        .collect();
-    b.put("apexes", apexes.len() as f64);
-    b.put("rise most", apexes.iter().copied().fold(0.0, f32::max) as f64);
-    ratios.sort_by(f64::total_cmp);
-    b.put("decay median", ratios.get(ratios.len() / 2).copied().unwrap_or(f64::NAN));
-    b.put("decay most", ratios.last().copied().unwrap_or(f64::NAN));
+    let steps = t[1..].iter().map(|s| (height(&s[0]), -s[0].vy));
+    physics_testkit::behaviour::series(b, h.e, h.g, height(&t[0][0]), steps);
 }
 
 /// Each domino's step past 45°: how many fell, whether in order, how fast

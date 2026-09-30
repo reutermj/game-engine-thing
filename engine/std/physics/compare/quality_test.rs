@@ -32,7 +32,6 @@
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
-mod baseline;
 #[allow(dead_code)] // The behaviour group's, which `:behaviour_test` checks.
 mod behave;
 #[allow(dead_code)] // The behaviour group's.
@@ -64,6 +63,7 @@ mod variants;
 
 pub use sim::{Dyn, Sim};
 
+use physics_testkit::{Broken, baseline};
 use record::{PILES, STEPS, STILL};
 use scene::Scene;
 use settle::Settling;
@@ -160,32 +160,6 @@ struct PileBounds {
     /// columns): columns are 1.0 contacts a body, an island a column.
     contacts_per_body: f64,
     islands: usize,
-}
-
-/// Every bound a run broke: all of them, not the first, so a failure (or
-/// a planted bug) says everything it changed.
-#[derive(Default)]
-struct Broken(Vec<String>);
-
-impl Broken {
-    fn check(&mut self, ok: bool, what: impl FnOnce() -> String) {
-        let matrix = std::env::var_os("MATRIX").is_some();
-        if !ok || matrix {
-            let line = what();
-            if matrix {
-                // Every bound's value, met or not, for the decision matrix
-                // (physics.md, "Why colors let the pyramid fall").
-                println!("CHECK {} | {} | {line}", std::thread::current().name().unwrap_or("?"), if ok { "ok" } else { "FAIL" });
-            }
-            if !ok {
-                self.0.push(line);
-            }
-        }
-    }
-
-    fn assert(self) {
-        assert!(self.0.is_empty(), "{} bounds broken:\n{}", self.0.len(), self.0.join("\n"));
-    }
 }
 
 /// The look a run stayed at rest from, or never (past any bound).

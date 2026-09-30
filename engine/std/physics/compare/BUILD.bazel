@@ -75,22 +75,16 @@ rust_binary(
         "//engine/ecs",
         "//engine/loader",
         "//engine/std/physics:physics_interface",
+        "//engine/std/physics_testkit",
         "@crates//:rapier2d",
     ],
 )
 
-# The baseline's format and comparison, which 3D's shares.
-exports_files(
-    ["baseline.rs"],
-    visibility = ["//engine/std/physics3d/compare:__pkg__"],
-)
-
 # What the quality and behaviour tests share: the comparison's scenes,
 # measures and our step on arrays, the runs each binary makes once
-# (runs.rs), and the baseline they are held to (record.rs, baseline.rs,
-# and the files, built in).
+# (runs.rs), and the baseline they are held to (record.rs, and the files,
+# built in; the format is //engine/std/physics_testkit's).
 MEASURE_SRCS = [
-    "baseline.rs",
     "behave.rs",
     "bounces.rs",
     "ecs.rs",
@@ -120,6 +114,7 @@ QUALITY_DEPS = [
     "//engine/ecs",
     "//engine/loader",
     "//engine/std/physics:physics_interface",
+    "//engine/std/physics_testkit",
 ]
 
 # Quality as a test: how soon piles, pyramids and stacks come to rest, how

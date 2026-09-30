@@ -64,7 +64,6 @@ rust_library(
         "rapier.rs",
         "record.rs",
         "runs.rs",
-        "//engine/std/physics/compare:baseline.rs",
         "//engine/std/physics3d:tests/scenes.rs",
     ],
     # The baseline (record.rs), built in for the tests to check.
@@ -85,6 +84,7 @@ rust_library(
         "//engine/ecs",
         "//engine/loader",
         "//engine/std/physics3d:physics3d_interface",
+        "//engine/std/physics_testkit",
         "@crates//:rapier3d",
     ],
 )
@@ -96,7 +96,7 @@ rust_binary(
     deps = [":physics3d_compare"],
 )
 
-# The baseline's tool, 2D's for 3D (physics-testing.md, "The baseline";
+# The baseline's tool, the test kit's for 3D (physics-testing.md, "The baseline";
 # runbook 005): every value the baseline records, compared with the file;
 # --write writes it. The quality and behaviour tests check it, from their
 # own runs (their test "baseline").
@@ -105,7 +105,10 @@ rust_binary(
 rust_binary(
     name = "baseline",
     srcs = ["baseline_main.rs"],
-    deps = [":physics3d_compare"],
+    deps = [
+        ":physics3d_compare",
+        "//engine/std/physics_testkit",
+    ],
 )
 
 test_suite(
@@ -146,7 +149,10 @@ rust_test(
     name = "quality_test",
     srcs = ["quality_test.rs"],
     crate_root = "quality_test.rs",
-    deps = [":physics3d_compare"],
+    deps = [
+        ":physics3d_compare",
+        "//engine/std/physics_testkit",
+    ],
 )
 
 # Quality beyond settling, in 3D: a cube on a ramp, a sphere rolling, a ball
@@ -156,7 +162,10 @@ rust_test(
 rust_test(
     name = "behaviour_test",
     srcs = ["behaviour_test.rs"],
-    deps = [":physics3d_compare"],
+    deps = [
+        ":physics3d_compare",
+        "//engine/std/physics_testkit",
+    ],
 )
 
 # The bounce families on their long grids (bounces.rs): a few minutes, so
@@ -171,7 +180,10 @@ rust_test(
     crate_features = ["long"],
     crate_root = "behaviour_test.rs",
     tags = ["manual"],
-    deps = [":physics3d_compare"],
+    deps = [
+        ":physics3d_compare",
+        "//engine/std/physics_testkit",
+    ],
 )
 
 # The same at 1000 and 10 000 bodies: minutes, so manual, and meant for -c opt:
@@ -185,5 +197,8 @@ rust_test(
     crate_features = ["long"],
     crate_root = "quality_test.rs",
     tags = ["manual"],
-    deps = [":physics3d_compare"],
+    deps = [
+        ":physics3d_compare",
+        "//engine/std/physics_testkit",
+    ],
 )

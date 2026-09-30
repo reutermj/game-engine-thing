@@ -8,25 +8,9 @@ use crate::measure::{self, REST_SPEED};
 use crate::scenes::{self, DROP, Hit, Kind, Scene, Shape, Target};
 use crate::{Backend, DT, GRAVITY, State};
 
-/// One engine on one scene: named values, in the order they were found.
-#[derive(Clone, Debug, Default)]
-pub struct Behaviour {
-    pub backend: String,
-    pub values: Vec<(&'static str, f64)>,
-}
-
-impl Behaviour {
-    pub fn get(&self, name: &str) -> f64 {
-        self.values.iter().find(|(k, _)| *k == name).map(|(_, v)| *v).unwrap_or_else(|| panic!("no {name} in {:?}", self.values))
-    }
-
-    fn put(&mut self, name: &'static str, v: f64) {
-        self.values.push((name, v));
-    }
-}
-
-/// Never at rest: past any bound.
-pub const NEVER: f64 = f64::INFINITY;
+/// A run's named values, and never at rest: the test kit's, which 2D's
+/// `behave.rs` fills by the same names.
+pub use physics_testkit::{Behaviour, NEVER};
 
 /// Closing speeds below this don't bounce: physics3d's (its solver's
 /// `BOUNCE_THRESHOLD`), and Box3D's and Box2D's default.
@@ -63,7 +47,7 @@ pub fn behave(scene: &Scene, backend: &mut dyn Backend) -> Behaviour {
         backend.state(&mut state);
         t.push(state.clone());
     }
-    let mut b = Behaviour { backend: backend.name(), values: Vec::new() };
+    let mut b = Behaviour::new(backend.name());
     let fastest = |s: &[State]| s.iter().zip(&shapes).map(|(s, &shape)| measure::speed(s, shape)).fold(0.0, f32::max);
     let g = -GRAVITY[1];
     let (first, end) = (&t[0], t.last().unwrap());
@@ -94,25 +78,9 @@ pub fn behave(scene: &Scene, backend: &mut dyn Backend) -> Behaviour {
                 Shape::Sphere(r) => r,
                 Shape::Box(_) => unreachable!("a ball"),
             };
-            let (mut apexes, mut rising, mut top) = (Vec::new(), false, 0f32);
-            for s in &t[1..] {
-                let (h, vy) = (s[0].pos[1] - r, s[0].vel[1]);
-                if !rising && vy > 0.0 {
-                    (rising, top) = (true, h);
-                } else if rising {
-                    top = top.max(h);
-                    if vy < 0.0 {
-                        apexes.push(top / DROP);
-                        rising = false;
-                    }
-                }
-            }
-            let e = scene.n as f32 / 100.0;
-            b.put("expected", (e * e) as f64);
-            b.put("first apex", apexes.first().copied().unwrap_or(0.0) as f64);
-            b.put("bounces", apexes.len() as f64);
-            b.put("most apex", apexes.iter().copied().fold(0.0, f32::max) as f64);
-            b.put("last apex", apexes.last().copied().unwrap_or(0.0) as f64);
+            // The ball's bottom above the floor, and its speed up.
+            let steps = t[1..].iter().map(|s| (s[0].pos[1] - r, s[0].vel[1]));
+            physics_testkit::behaviour::bounce(&mut b, scene.n as f32 / 100.0, DROP, steps);
         }
         Kind::Hit => {
             let h = Hit::unpack(scene.n);
@@ -246,36 +214,14 @@ fn hit(b: &mut Behaviour, t: &[Vec<State>], h: &Hit, shapes: &[Shape]) {
     b.put("spin", dot3(z.ang).sqrt() as f64);
 }
 
-/// Many bounces, as 2D's `behave::series`: apexes by the energy's height.
+/// Many bounces, as 2D's `behave::series`: apexes by the energy's height
+/// (`physics_testkit::behaviour::series`).
 fn series(b: &mut Behaviour, t: &[Vec<State>], h: &Hit, shapes: &[Shape]) {
     let flat = match shapes[0] {
         Shape::Sphere(r) => r,
         Shape::Box([h, _, _]) => h,
     };
     let height = |s: &State| s.pos[1] - flat + 0.5 * s.vel[1] * s.vel[1] / h.g;
-    let drop = height(&t[0][0]);
-    let (mut apexes, mut rising, mut top) = (Vec::new(), false, 0f32);
-    for st in &t[1..] {
-        let s = st[0];
-        if !rising && s.vel[1] > 0.0 {
-            (rising, top) = (true, height(&s));
-        } else if rising {
-            if s.vel[1] > 0.0 {
-                top = top.max(height(&s));
-            }
-            if s.vel[1] < 0.0 {
-                apexes.push(top / drop);
-                rising = false;
-            }
-        }
-    }
-    let e2 = h.e * h.e;
-    let fast = |a: f32| (2.0 * h.g * a * drop).sqrt() > 2.0;
-    let with_drop: Vec<f32> = std::iter::once(1.0).chain(apexes.iter().copied()).collect();
-    let mut ratios: Vec<f64> = with_drop.windows(2).filter(|w| fast(w[0]) && fast(w[1])).map(|w| (w[1] / w[0] / e2) as f64).collect();
-    b.put("apexes", apexes.len() as f64);
-    b.put("rise most", apexes.iter().copied().fold(0.0, f32::max) as f64);
-    ratios.sort_by(f64::total_cmp);
-    b.put("decay median", ratios.get(ratios.len() / 2).copied().unwrap_or(f64::NAN));
-    b.put("decay most", ratios.last().copied().unwrap_or(f64::NAN));
+    let steps = t[1..].iter().map(|s| (height(&s[0]), s[0].vel[1]));
+    physics_testkit::behaviour::series(b, h.e, h.g, height(&t[0][0]), steps);
 }

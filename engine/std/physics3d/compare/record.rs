@@ -1,4 +1,4 @@
-//! What the 3D baseline records (`baseline.rs`, 2D's, shared;
+//! What the 3D baseline records (`physics_testkit::baseline`, as 2D's;
 //! physics-testing.md, "The baseline"), and the scenes each suite runs:
 //! the quality tests' piles and stacks (group `quality`, checked by
 //! `:quality_test`) and the behaviour tests' scenes (`behaviour`,
@@ -8,6 +8,8 @@
 //! the files.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use physics_testkit::stats::{least, median, most};
 
 use crate::baseline::{Band, Better, Entry};
 use crate::behave::Behaviour;
@@ -116,19 +118,6 @@ fn energy(r: &Run) -> f64 {
     r.quality.kinetic_energy / r.quality.bodies.max(1) as f64
 }
 
-fn median(mut v: Vec<f64>) -> f64 {
-    v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
-}
-
-fn most(v: impl Iterator<Item = f64>) -> f64 {
-    v.fold(f64::NEG_INFINITY, f64::max)
-}
-
-fn least(v: impl Iterator<Item = f64>) -> f64 {
-    v.fold(f64::INFINITY, f64::min)
-}
-
 /// One pile: how soon it rests, how deep it sinks at the end and while
 /// settling, what energy is left, whether anything escaped.
 fn pile(group: &'static str, name: String, r: &Run) -> Vec<Entry> {
@@ -211,17 +200,10 @@ pub fn quality(long: bool) -> Vec<Entry> {
     runs::par(&jobs, |j| j()).concat()
 }
 
-/// A bounce family's statistic: 2D's bands (its `record::bounce_band`),
-/// but a count's, whose grids here are no more than 3000.
+/// A bounce family's statistic: 2D's bands (`physics_testkit::bounces::band`),
+/// but a count's, one run, whose grids here are no more than 3000.
 fn bounce_band(name: &str) -> (Band, Better) {
-    match name {
-        "gain median" => (Band::Rel(0.05, 1e-3), Better::Toward(0.0)),
-        "bounced below" | "flat above" => (Band::Abs(1.0), Better::Lower),
-        "tangent most" | "tangent median" => (Band::Rel(0.01, 1e-4), Better::Neither),
-        "rise worst" | "decay worst" | "decay median" => (Band::Rel(0.01, 1e-3), Better::Toward(1.0)),
-        "momentum worst" => (Band::Rel(0.5, 1e-4), Better::Lower),
-        _ => (Band::Rel(0.05, 1e-3), Better::Lower),
-    }
+    physics_testkit::bounces::band(name, Band::Abs(1.0))
 }
 
 /// The bounce families' statistics (`bounces.rs`), on the short grids or

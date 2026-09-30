@@ -1,4 +1,4 @@
-//! What the 2D baseline records (`baseline.rs`; physics-testing.md, "The
+//! What the 2D baseline records (`physics_testkit::baseline`; physics-testing.md, "The
 //! baseline"), and the scenes each suite runs, which the tests bound and
 //! this records: the quality tests' settling (group `quality`, checked by
 //! `:quality_test`) and the behaviour tests' scenes and families (group
@@ -9,6 +9,8 @@
 //! files.
 
 use std::sync::atomic::{AtomicI32, Ordering};
+
+use physics_testkit::stats::{least, median, most};
 
 use crate::baseline::{Band, Better, Entry};
 use crate::behave::{self, Behaviour};
@@ -141,19 +143,6 @@ fn turned(turning: bool) -> &'static str {
 /// The look a run stayed at rest from, or never.
 fn rest(r: Option<u32>) -> f64 {
     r.map_or(f64::INFINITY, f64::from)
-}
-
-fn median(mut v: Vec<f64>) -> f64 {
-    v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
-}
-
-fn most(v: impl Iterator<Item = f64>) -> f64 {
-    v.fold(f64::NEG_INFINITY, f64::max)
-}
-
-fn least(v: impl Iterator<Item = f64>) -> f64 {
-    v.fold(f64::INFINITY, f64::min)
 }
 
 /// A pile family: one pile at several sizes, recorded as the family's
@@ -402,19 +391,10 @@ fn bullets() -> Vec<(f32, f32, Vec<Scene>)> {
 }
 
 /// A bounce family's statistic (`bounces::stats`): its band and which way
-/// is better. Shares of energy move by 5% of themselves or a thousandth; a
-/// count by one run in fifty, as an edge family's; what is kept of a speed
-/// or a height by 1%; the momentum lost, rounding in the fourth decimal, by
-/// half of itself.
+/// is better, the test kit's (`physics_testkit::bounces::band`), a count
+/// by one run in fifty, as an edge family's.
 fn bounce_band(name: &str, runs: usize) -> (Band, Better) {
-    match name {
-        "gain median" => (Band::Rel(0.05, 1e-3), Better::Toward(0.0)),
-        "bounced below" | "flat above" => (family_band(runs), Better::Lower),
-        "tangent most" | "tangent median" => (Band::Rel(0.01, 1e-4), Better::Neither),
-        "rise worst" | "decay worst" | "decay median" => (Band::Rel(0.01, 1e-3), Better::Toward(1.0)),
-        "momentum worst" => (Band::Rel(0.5, 1e-4), Better::Lower),
-        _ => (Band::Rel(0.05, 1e-3), Better::Lower),
-    }
+    physics_testkit::bounces::band(name, family_band(runs))
 }
 
 /// The behaviour group: every behaviour scene of `:behaviour_test`, the

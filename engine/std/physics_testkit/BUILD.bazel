@@ -1,0 +1,31 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# What the 2D and 3D physics harnesses (//engine/std/physics/compare,
+# //engine/std/physics3d/compare) share, apart from any dimension: the
+# baseline and its tool, a run's named values, the bounds a test collects,
+# family statistics, the run cache and the bounce families' statistics.
+# Not a mod, and nothing a game links: see lib.rs, and
+# docs/architecture/physics-testing.md, "Where the tests live".
+rust_library(
+    name = "physics_testkit",
+    srcs = [
+        "baseline.rs",
+        "behaviour.rs",
+        "bounces.rs",
+        "broken.rs",
+        "lib.rs",
+        "runs.rs",
+        "stats.rs",
+        "tool.rs",
+    ],
+    visibility = [
+        "//engine/std/physics/compare:__pkg__",
+        "//engine/std/physics3d/compare:__pkg__",
+    ],
+)
+
+rust_test(
+    name = "physics_testkit_test",
+    crate = ":physics_testkit",
+)

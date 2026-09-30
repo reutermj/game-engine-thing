@@ -17,6 +17,7 @@ use std::sync::Arc;
 #[cfg(feature = "long")]
 mod behaviour_long;
 
+use physics_testkit::Broken;
 use physics3d_compare::behave::Behaviour;
 use physics3d_compare::scenes::Kind;
 use physics3d_compare::{baseline, bounces, record, runs};
@@ -31,44 +32,6 @@ fn run(cases: &[(Kind, usize)]) -> Vec<Arc<Behaviour>> {
         println!("{} {n}: {}", kind.name(), values.join(", "));
     }
     runs
-}
-
-/// Every bound broken, not the first.
-#[derive(Default)]
-struct Broken(Vec<String>);
-
-impl Broken {
-    fn check(&mut self, what: (Kind, usize), ok: bool, why: impl FnOnce() -> String) {
-        if !ok {
-            self.0.push(format!("{} {}: {}", what.0.name(), what.1, why()));
-        }
-    }
-
-    fn most(&mut self, what: (Kind, usize), r: &Behaviour, name: &str, bound: f64) {
-        let v = r.get(name);
-        self.check(what, v <= bound, || format!("{name} {v}, bound {bound}"));
-    }
-
-    fn least(&mut self, what: (Kind, usize), r: &Behaviour, name: &str, bound: f64) {
-        let v = r.get(name);
-        self.check(what, v >= bound, || format!("{name} {v}, at least {bound}"));
-    }
-
-    /// A bounce family's statistic `name` at most `bound`.
-    fn stat_most(&mut self, f: &(Family, Stats), name: &str, bound: f64) {
-        let v = bounces::stat(&f.1, name);
-        self.check(f.0, v <= bound, || format!("{name} {v}, bound {bound}"));
-    }
-
-    /// ... at least `bound`.
-    fn stat_least(&mut self, f: &(Family, Stats), name: &str, bound: f64) {
-        let v = bounces::stat(&f.1, name);
-        self.check(f.0, v >= bound, || format!("{name} {v}, at least {bound}"));
-    }
-
-    fn assert(self) {
-        assert!(self.0.is_empty(), "{} bounds broken:\n{}", self.0.len(), self.0.join("\n"));
-    }
 }
 
 type Stats = Vec<(&'static str, f64)>;
@@ -124,7 +87,7 @@ fn a_cube_above_the_friction_angle_slides_at_g_sin_less_mu_g_cos() {
     let c = (Kind::RampSlide, 1);
     let r = &run(&[c])[0];
     let mut broken = Broken::default();
-    broken.check(c, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
+    broken.check_at(c, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
     broken.assert();
 }
 
@@ -138,7 +101,7 @@ fn a_sphere_rolls_without_slipping_at_five_sevenths_g_sin() {
     let c = (Kind::RampRoll, 1);
     let r = &run(&[c])[0];
     let mut broken = Broken::default();
-    broken.check(c, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
+    broken.check_at(c, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
     broken.most(c, r, "slip", 2.0 * 0.0354);
     broken.assert();
 }

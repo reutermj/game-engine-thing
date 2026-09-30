@@ -14,6 +14,15 @@ one for the other differently.
 
 ## Resolution
 
+Each mod has its harness beside it: `//engine/std/physics/compare` (2D,
+against Box2D and Rapier 2D) and `//engine/std/physics3d/compare` (3D,
+against Rapier 3D, Box3D and Jolt), each with its comparison binary, its
+quality and behaviour tests and its baseline. What they share apart from
+the dimension (the baseline format and tool, the bounds a test collects,
+family statistics, the run cache, the bounce statistics) is
+`//engine/std/physics_testkit` (physics-testing.md, "Where the tests
+live").
+
 ```sh
 ./bazel run --config=bench //engine/std/physics/compare > compare.md
 ```
@@ -158,7 +167,10 @@ Our own accepted results, per scene and measure, in four files:
 (physics-testing.md, "The baseline"). The quality and behaviour tests
 check them, from their own runs (the test `baseline` in each, and
 `baseline_long` in the long ones), both ways: a value past its band fails,
-better or worse.
+better or worse. What each records, and with which band, is its
+`record.rs`; the format, the comparison and the tool's flags are the test
+kit's (`//engine/std/physics_testkit`, `baseline.rs` and `tool.rs`), the
+same for both.
 
 - **Trigger:** a baseline test fails; or a change to the solver, the
   narrowphase, the broadphase, sleeping, the step, a scene or a measure,

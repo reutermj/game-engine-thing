@@ -158,7 +158,11 @@ changing the ABI, the reload sequence or the Bazel rules.
   Each one's `:quality_test` and `:behaviour_test` bound how soon ours
   settles, how deep it sinks and how it bounces by what the references
   meet (physics.md, "Quality as a test"), and hold it to its baseline.
-  Credits and licences in [docs/CREDITS.md](docs/CREDITS.md).
+  `physics_testkit` is what the two harnesses share apart from the
+  dimension: the baseline's format and tool, the bounds a test collects,
+  family statistics, the run cache and the bounce statistics. Scenes,
+  measures, engines and bounds stay in each harness. Credits and licences
+  in [docs/CREDITS.md](docs/CREDITS.md).
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's

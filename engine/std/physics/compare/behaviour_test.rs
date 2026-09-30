@@ -24,7 +24,6 @@
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
 mod arrays;
-mod baseline;
 mod behave;
 #[cfg(feature = "long")]
 mod behaviour_long;
@@ -56,6 +55,7 @@ mod variants;
 pub use sim::{Dyn, Sim};
 
 use behave::Behaviour;
+use physics_testkit::{Broken, Named, baseline};
 use scene::Scene;
 
 /// Each scene run by ours on arrays (or the variant `SOLVER` names),
@@ -70,57 +70,14 @@ fn run(scenes: &[Scene]) -> Vec<Behaviour> {
     runs
 }
 
-/// Every bound a run broke, not the first, so a failure (or a planted bug)
-/// says everything it changed.
-#[derive(Default)]
-struct Broken(Vec<String>);
+type Stats = Vec<(&'static str, f64)>;
 
-impl Broken {
-    fn check(&mut self, scene: &Scene, ok: bool, what: impl FnOnce() -> String) {
-        let matrix = std::env::var_os("MATRIX").is_some();
-        if !ok || matrix {
-            let line = format!("{}: {}", scene.text(), what());
-            if matrix {
-                // Every bound's value, met or not, for the decision matrix
-                // (physics.md, "Why colors let the pyramid fall").
-                println!("CHECK {} | {} | {line}", std::thread::current().name().unwrap_or("?"), if ok { "ok" } else { "FAIL" });
-            }
-            if !ok {
-                self.0.push(line);
-            }
-        }
-    }
-
-    /// `name` at most `bound`.
-    fn most(&mut self, scene: &Scene, r: &Behaviour, name: &str, bound: f64) {
-        let v = r.get(name);
-        self.check(scene, v <= bound, || format!("{name} {v}, bound {bound}"));
-    }
-
-    /// `name` at least `bound`.
-    fn least(&mut self, scene: &Scene, r: &Behaviour, name: &str, bound: f64) {
-        let v = r.get(name);
-        self.check(scene, v >= bound, || format!("{name} {v}, at least {bound}"));
-    }
-
-    /// A bounce family's statistic `name` (`bounces::stats`) at most `bound`.
-    fn stat_most(&mut self, f: &(Scene, Stats), name: &str, bound: f64) {
-        let v = bounces::stat(&f.1, name);
-        self.check(&f.0, v <= bound, || format!("{name} {v}, bound {bound}"));
-    }
-
-    /// ... at least `bound`.
-    fn stat_least(&mut self, f: &(Scene, Stats), name: &str, bound: f64) {
-        let v = bounces::stat(&f.1, name);
-        self.check(&f.0, v >= bound, || format!("{name} {v}, at least {bound}"));
-    }
-
-    fn assert(self) {
-        assert!(self.0.is_empty(), "{} bounds broken:\n{}", self.0.len(), self.0.join("\n"));
+/// A broken bound names its scene.
+impl Named for Scene {
+    fn named(&self) -> String {
+        self.text()
     }
 }
-
-type Stats = Vec<(&'static str, f64)>;
 
 /// A bounce family (`bounces.rs`) on its short or long grid, run by ours
 /// (each run once in the binary, `runs.rs`, which the baseline reads too),
@@ -162,7 +119,7 @@ fn a_box_below_the_friction_angle_holds_still() {
     let scene = Scene::Ramp { deg: 20.0, mu: 0.6, circle: false };
     let r = &run(&[scene])[0];
     let mut broken = Broken::default();
-    broken.most(&scene, r, "crept", 3.0 * 0.0003);
+    broken.most(scene, r, "crept", 3.0 * 0.0003);
     broken.assert();
 }
 
@@ -174,7 +131,7 @@ fn a_box_above_the_friction_angle_slides_at_g_sin_less_mu_g_cos() {
     let scene = Scene::Ramp { deg: 30.0, mu: 0.2, circle: false };
     let r = &run(&[scene])[0];
     let mut broken = Broken::default();
-    broken.check(&scene, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
+    broken.check_at(scene, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
     broken.assert();
 }
 
@@ -191,10 +148,10 @@ fn a_disc_rolls_at_two_thirds_g_sin_and_slips_below_a_third_of_tan() {
     let runs = run(&[rolls, slips]);
     let mut broken = Broken::default();
     for (scene, r) in [rolls, slips].iter().zip(&runs) {
-        broken.check(scene, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
+        broken.check_at(scene, off(r).abs() <= 0.01, || format!("a {} against {}", r.get("a"), r.get("expected a")));
     }
-    broken.most(&rolls, &runs[0], "slip", 2.0 * 0.0522);
-    broken.least(&slips, &runs[1], "slip", 0.9 * 4.805);
+    broken.most(rolls, &runs[0], "slip", 2.0 * 0.0522);
+    broken.least(slips, &runs[1], "slip", 0.9 * 4.805);
     broken.assert();
 }
 
@@ -229,9 +186,9 @@ fn a_ball_never_rebounds_higher_than_e_squared() {
     let scenes = [Scene::Bounce { e: 0.75 }, Scene::Bounce { e: 1.0 }];
     let runs = run(&scenes);
     let mut broken = Broken::default();
-    broken.most(&scenes[0], &runs[0], "first apex", 1.01 * 0.5625);
-    broken.most(&scenes[1], &runs[1], "most apex", 1.01);
-    broken.least(&scenes[1], &runs[1], "last apex", 0.9 * 0.9194);
+    broken.most(scenes[0], &runs[0], "first apex", 1.01 * 0.5625);
+    broken.most(scenes[1], &runs[1], "most apex", 1.01);
+    broken.least(scenes[1], &runs[1], "last apex", 0.9 * 0.9194);
     broken.assert();
 }
 
@@ -433,8 +390,8 @@ fn a_heavy_box_crushing_a_column_throws_nothing_through_the_floor() {
     let scene = Scene::Ratio { ratio: 1000.0, light: 5 };
     let r = &run(&[scene])[0];
     let mut broken = Broken::default();
-    broken.most(&scene, r, "escaped", 0.0);
-    broken.most(&scene, r, "jitter", 2.0 * 4.131);
+    broken.most(scene, r, "escaped", 0.0);
+    broken.most(scene, r, "jitter", 2.0 * 4.131);
     broken.assert();
 }
 
@@ -465,7 +422,7 @@ fn overlapping_boxes_separate_at_the_capped_speed_without_exploding() {
         broken.most(scene, r, "separated at", 2.0 * apart);
         broken.most(scene, r, "at rest from", 2.0 * rest);
         let t = r.get("top off").abs();
-        broken.check(scene, t <= 0.5 * top, || format!("top off {t}, bound {}", 0.5 * top));
+        broken.check_at(scene, t <= 0.5 * top, || format!("top off {t}, bound {}", 0.5 * top));
         broken.most(scene, r, "escaped", 0.0);
     }
     broken.assert();
@@ -502,7 +459,7 @@ fn a_ball_bounces_off_a_wall_while_a_step_is_within_the_margin_its_radius_and_ha
         }
         let scenes = bullets(thick, &[past]);
         let through: f64 = run(&scenes).iter().map(|r| r.get("through")).sum();
-        broken.check(&scenes[0], through > 0.0, || format!("no phase tunnelled at {past}, just past the limit"));
+        broken.check_at(scenes[0], through > 0.0, || format!("no phase tunnelled at {past}, just past the limit"));
     }
     broken.assert();
 }
@@ -538,7 +495,7 @@ fn family_meets(name: &str, long: bool, refs: (usize, usize)) {
     let bound = refs.0.min(refs.1);
     println!("family {name}: {} {yes} of {} {marks}, bound {bound} (Box2D {}, Rapier {})", runs[0].label, runs.len(), refs.0, refs.1);
     let mut broken = Broken::default();
-    broken.check(&f.scenes[0], yes >= bound, || format!("family {name}: {yes} of {}, at least {bound}", runs.len()));
+    broken.check_at(f.scenes[0], yes >= bound, || format!("family {name}: {yes} of {}, at least {bound}", runs.len()));
     broken.assert();
 }
 
@@ -631,12 +588,12 @@ fn dominoes_topple_in_order_as_in_box2d_and_rapier() {
     let scene = Scene::Dominoes { n: 15, spacing: 1.0, mu: 0.6 };
     let r = &run(&[scene])[0];
     let mut broken = Broken::default();
-    broken.least(&scene, r, "toppled", 15.0);
-    broken.least(&scene, r, "in order", 1.0);
+    broken.least(scene, r, "toppled", 15.0);
+    broken.least(scene, r, "in order", 1.0);
     let (wave, mean) = (r.get("wave"), (2.667 + 2.736) / 2.0);
-    broken.check(&scene, (wave / mean - 1.0).abs() <= 0.1, || format!("wave {wave}, the references' {mean}"));
-    broken.least(&scene, r, "last lean", 80.0);
-    broken.most(&scene, r, "at rest from", 2.0 * 443.0);
+    broken.check_at(scene, (wave / mean - 1.0).abs() <= 0.1, || format!("wave {wave}, the references' {mean}"));
+    broken.least(scene, r, "last lean", 80.0);
+    broken.most(scene, r, "at rest from", 2.0 * 443.0);
     broken.assert();
 }
 

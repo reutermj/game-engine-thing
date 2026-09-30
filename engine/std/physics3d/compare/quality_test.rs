@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use physics_testkit::Broken;
 use physics3d_compare::measure::Run;
 use physics3d_compare::record::{SIZES, STILL};
 use physics3d_compare::scenes::Kind;
@@ -64,39 +65,30 @@ struct PileBounds {
     not_columns: f64,
 }
 
-/// Every bound broken, not the first.
-fn assert_none(broken: Vec<String>) {
-    assert!(broken.is_empty(), "{} bounds broken:\n{}", broken.len(), broken.join("\n"));
-}
-
 fn piles_meet(kind: Kind, sizes: &[usize], rotate: bool, b: &PileBounds) {
     let runs = runs(kind, sizes, rotate);
-    let mut broken = Vec::new();
-    let mut check = |ok: bool, what: String| {
-        if !ok {
-            broken.push(what);
-        }
-    };
+    let mut broken = Broken::default();
     for (n, r) in sizes.iter().zip(&runs) {
         let (q, name) = (&r.quality, format!("{} {n}", kind.name()));
         let rest = r.settled_at.unwrap_or(usize::MAX);
-        check(q.contacts_per_body >= b.partners && q.not_columns >= b.not_columns, format!("{name}: not a pile: {q:?}"));
-        check(q.escaped == 0, format!("{name}: {} escaped", q.escaped));
-        check(rest <= b.rest_worst, format!("{name}: at rest from {:?}, bound {}", r.settled_at, b.rest_worst));
-        check(q.pen_max <= b.deepest_end, format!("{name}: {} deep at the end, bound {}", q.pen_max, b.deepest_end));
-        check(
-            r.pen_max_during <= b.deepest_during,
-            format!("{name}: {} deep while settling, bound {}", r.pen_max_during, b.deepest_during),
-        );
-        check(r.pen_mean_during <= b.mean_during, format!("{name}: {} deep on average, bound {}", r.pen_mean_during, b.mean_during));
+        broken.check(q.contacts_per_body >= b.partners && q.not_columns >= b.not_columns, || format!("{name}: not a pile: {q:?}"));
+        broken.check(q.escaped == 0, || format!("{name}: {} escaped", q.escaped));
+        broken.check(rest <= b.rest_worst, || format!("{name}: at rest from {:?}, bound {}", r.settled_at, b.rest_worst));
+        broken.check(q.pen_max <= b.deepest_end, || format!("{name}: {} deep at the end, bound {}", q.pen_max, b.deepest_end));
+        broken.check(r.pen_max_during <= b.deepest_during, || {
+            format!("{name}: {} deep while settling, bound {}", r.pen_max_during, b.deepest_during)
+        });
+        broken.check(r.pen_mean_during <= b.mean_during, || {
+            format!("{name}: {} deep on average, bound {}", r.pen_mean_during, b.mean_during)
+        });
         let (energy, bound) = (q.kinetic_energy / q.bodies as f64, b.energy_end.max(STILL));
-        check(energy <= bound, format!("{name}: energy {energy:e} a body at the end, bound {bound:e}"));
+        broken.check(energy <= bound, || format!("{name}: energy {energy:e} a body at the end, bound {bound:e}"));
     }
     let mut rests: Vec<usize> = runs.iter().map(|r| r.settled_at.unwrap_or(usize::MAX)).collect();
     rests.sort();
     let m = rests[rests.len() / 2];
-    check(m <= b.rest_median, format!("at rest from {rests:?}: median {m}, bound {}", b.rest_median));
-    assert_none(broken);
+    broken.check(m <= b.rest_median, || format!("at rest from {rests:?}: median {m}, bound {}", b.rest_median));
+    broken.assert();
 }
 
 /// Turning cubes (1000 steps, 2026-09-26). At rest from: Rapier 128, 265,
@@ -188,24 +180,19 @@ fn piles_of_turning_planks_are_as_still_at_rest_as_rapier_and_box3d() {
 fn stands(n: usize, rest: (usize, usize), top: (f32, f32), deepest: (f32, f32), tilt: (f32, f32), energy: (f64, f64)) {
     let r = &runs(Kind::Stack, &[n], true)[0];
     let q = &r.quality;
-    let mut broken = Vec::new();
-    let mut check = |ok: bool, what: String| {
-        if !ok {
-            broken.push(what);
-        }
-    };
+    let mut broken = Broken::default();
     let bound = 2 * rest.0.max(rest.1);
-    check(q.escaped == 0, format!("stack {n}: {} escaped", q.escaped));
-    check(r.settled_at.is_some_and(|s| s <= bound), format!("stack {n}: at rest from {:?}, bound {bound}", r.settled_at));
+    broken.check(q.escaped == 0, || format!("stack {n}: {} escaped", q.escaped));
+    broken.check(r.settled_at.is_some_and(|s| s <= bound), || format!("stack {n}: at rest from {:?}, bound {bound}", r.settled_at));
     let bound = 0.5 * top.0.min(top.1);
-    check(r.top_moved <= bound, format!("stack {n}: its top moved {}, bound {bound}", r.top_moved));
+    broken.check(r.top_moved <= bound, || format!("stack {n}: its top moved {}, bound {bound}", r.top_moved));
     let bound = 0.5 * deepest.0.min(deepest.1);
-    check(q.pen_max <= bound, format!("stack {n}: {} deep at the end, bound {bound}", q.pen_max));
+    broken.check(q.pen_max <= bound, || format!("stack {n}: {} deep at the end, bound {bound}", q.pen_max));
     let bound = tilt.0.min(tilt.1).max(1.0);
-    check(q.tilt <= bound, format!("stack {n}: a box leans {}°, bound {bound}", q.tilt));
+    broken.check(q.tilt <= bound, || format!("stack {n}: a box leans {}°, bound {bound}", q.tilt));
     let (e, bound) = (q.kinetic_energy / n as f64, (10.0 * energy.0.max(energy.1)).max(STILL));
-    check(e <= bound, format!("stack {n}: energy {e:e} a body at the end, bound {bound:e}"));
-    assert_none(broken);
+    broken.check(e <= bound, || format!("stack {n}: energy {e:e} a body at the end, bound {bound:e}"));
+    broken.assert();
 }
 
 /// 10, 15 and 20 cubes high, each set off by up to 0.04 (1000 steps,

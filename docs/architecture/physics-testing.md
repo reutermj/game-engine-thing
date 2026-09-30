@@ -60,6 +60,57 @@ never a looser bound.
 (CLAUDE.md, "green has to be earned"): friction halved, the old warm start
 restored, an inverse mass squared. That keeps tolerances honest.
 
+## Where the tests live
+
+Each physics mod has its harness beside it, `compare/`: its scenes built
+in every engine, its measures, its quality and behaviour tests, its
+baseline files and tool, and the comparison binary that prints the
+tables the bounds come from (runbook 005).
+
+| package | what | reference engines |
+|---|---|---|
+| `//engine/std/physics/compare` | the 2D mod, and our 2D step on arrays (bit for bit the mod) | Box2D v3.1.1, Rapier 2D 0.36 |
+| `//engine/std/physics3d/compare` | the physics3d mod in the engine, on `pile3d`'s scenes | Rapier 3D 0.36, Box3D 0.1, Jolt 5.6 |
+| `//engine/std/physics_testkit` | what the two share, apart from any dimension | – |
+
+**The test kit** (`physics_testkit`, 2026-09-29) is the part of testing
+physics that doesn't depend on the dimension, taking plain values or
+small traits, never a 2D or a 3D type:
+
+- `baseline`: the file format, bands and comparison (below, "The
+  baseline"); `tool`: the baseline tool's command line, which each
+  harness's `baseline_main.rs` fills with its files, its commands, its
+  offset and its record;
+- `behaviour`: a run's named values (`Behaviour`, `NEVER`), and the two
+  bounce measures that are the same arithmetic in either dimension once a
+  harness says how high a body is and how fast it rises: a dropped ball's
+  apexes, and a series' decay by the energy's height;
+- `bounces`: the bounce families' statistics and their bands, over any
+  bounce that says what it is (`Bounce`: restitution, speed, friction,
+  round, flat, tipping); each harness keeps its grids and its threshold;
+- `broken`: `Broken`, every bound a test broke, not the first, with
+  `MATRIX=1` printing every bound met or not; `Named` and `Values` say
+  what names a run and what it measured;
+- `stats`: median, most and least, a family's statistics;
+- `runs`: `Runs`, each scene run once a test binary whichever test asks
+  first, and `par`, runs in threads, at most so many at once (2D 256, the
+  threads a long grid spawns; 3D 64, the engines a process can map).
+
+What stays in each harness is what differs in substance: the scenes and
+their grids, the engines and how each is driven, the settling measures
+(2D's `settle.rs` and `quality.rs` read bodies from arrays or the ECS,
+3D's `measure.rs` reads engine states, and the two record different
+things), what each baseline records and with which bands (`record.rs`:
+the families differ, and so do the measured spreads), the bounds and the
+references' values they come from (`PileBounds` and `StandBounds` have
+different fields, set from different engines), and one bounce's own
+measure (`behave::hit`): the same physics, but on 2D and 3D vectors in
+their own arithmetic (a momentum is `hypot` in 2D and a three-component
+root in 3D), and with its values found in a different order, so sharing
+it would change bits and the comparison's tables. Each harness's
+`runs.rs` keeps its own keys and wrappers, since what a run is (a variant
+of ours on arrays; ours tuned, in the engine) is the harness's.
+
 ## The gaps
 
 1. **Drift within the floor is invisible.** If a change moves a pile's
@@ -113,9 +164,10 @@ the floor" or "suspiciously better" gets an explicit yes or no.
   scenes: 228 values, 27 of them the bounce families') and
   `baseline_long.txt` (the long suite's: 225),
   `engine/std/physics3d/compare/baseline.txt` (100) and `baseline_long.txt` (94).
-  `baseline.rs` is the format and the comparison, shared; `record.rs` in
-  each says what is recorded and with which band; `runs.rs` in each runs
-  every scene once per test binary.
+  The format and the comparison are the test kit's (`baseline.rs`,
+  and the tool's command line, `tool.rs`); `record.rs` in each harness
+  says what is recorded and with which band; `runs.rs` in each runs every
+  scene once per test binary, on the kit's cache.
 - **Format:** plain text, one line per scene and measure, in the order
   the suite records them, columns separated by two spaces or more (a
   scene's name has single spaces):

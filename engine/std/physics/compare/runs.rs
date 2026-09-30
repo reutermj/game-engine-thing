@@ -1,46 +1,24 @@
-//! Every run a test binary makes, made once. The quality tests, the
-//! behaviour tests and the baseline (`record.rs`) ask for the same scenes,
-//! and whichever asks first runs one while the others wait for it, so the
-//! baseline costs the suite nothing it didn't already run. The runs are
-//! deterministic, so a run shared is the run each would have made.
+//! Every run a test binary makes, made once (`physics_testkit::runs`): the
+//! quality tests, the behaviour tests and the baseline (`record.rs`) ask
+//! for the same scenes, and whichever asks first runs one while the others
+//! wait for it.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use physics_testkit::runs::Runs;
 
 use crate::behave::{self, Behaviour};
 use crate::scene::Scene;
 use crate::settle::{self, Settling};
 use crate::{Sim, ecs};
 
-type Slots<T> = LazyLock<Mutex<HashMap<String, Arc<OnceLock<T>>>>>;
-
-static SETTLED: Slots<Settling> = LazyLock::new(Default::default);
-static BEHAVED: Slots<Behaviour> = LazyLock::new(Default::default);
-static ASLEEP: Slots<Option<u32>> = LazyLock::new(Default::default);
-
-/// `run`'s result under `key`: run by the first to ask, waited for by the
-/// rest.
-fn once<T: Clone>(slots: &Slots<T>, key: String, run: impl FnOnce() -> T) -> T {
-    let slot = slots.lock().unwrap().entry(key).or_default().clone();
-    slot.get_or_init(run).clone()
-}
+static SETTLED: Runs<Settling> = Runs::new();
+static BEHAVED: Runs<Behaviour> = Runs::new();
+static ASLEEP: Runs<Option<u32>> = Runs::new();
 
 /// Each of `items` through `f`, in threads of their own, the results in
-/// their order: a test's time is its slowest scene's. At most `WIDE` at
-/// once: a long bounce grid is 9900 runs, and several tests spawning that
-/// many side by side ran out of threads.
+/// their order. At most 256 at once: a long bounce grid is 9900 runs, and
+/// several tests spawning that many side by side ran out of threads.
 pub fn par<A: Sync, T: Send>(items: &[A], f: impl Fn(&A) -> T + Sync) -> Vec<T> {
-    const WIDE: usize = 256;
-    let f = &f;
-    items
-        .chunks(WIDE)
-        .flat_map(|chunk| {
-            std::thread::scope(|s| {
-                let threads: Vec<_> = chunk.iter().map(|a| s.spawn(move || f(a))).collect();
-                threads.into_iter().map(|t| t.join().expect("a run panicked")).collect::<Vec<T>>()
-            })
-        })
-        .collect()
+    physics_testkit::runs::par(items, 256, f)
 }
 
 /// The variant `SOLVER` names in the environment (`variants.rs`), which
@@ -78,7 +56,7 @@ pub fn mod_in_engine(scene: &Scene, turning: bool, sleep: bool) -> ecs::Ecs {
 /// `scene` settled on arrays over `steps` by `ours` with `spec`.
 pub fn settled(scene: Scene, turning: bool, steps: u32, spec: &str) -> Settling {
     let key = format!("{} {turning} {steps} {spec} {:?}", scene.text(), solver());
-    once(&SETTLED, key, || settle::settle(&mut ours(&scene, turning, spec), &scene, turning, steps))
+    (*SETTLED.get(key, || settle::settle(&mut ours(&scene, turning, spec), &scene, turning, steps))).clone()
 }
 
 /// `scene` settled on the mod in the engine at `substeps`, which a game
@@ -86,18 +64,19 @@ pub fn settled(scene: Scene, turning: bool, steps: u32, spec: &str) -> Settling 
 /// no world to read it from.
 pub fn settled_on_mod(scene: Scene, turning: bool, substeps: u32, steps: u32) -> Settling {
     let key = format!("mod {} {turning} {substeps} {steps}", scene.text());
-    once(&SETTLED, key, || {
+    let run = SETTLED.get(key, || {
         let mut m = mod_in_engine(&scene, turning, false);
         m.substeps(substeps);
         settle::settle(&mut m, &scene, turning, steps)
-    })
+    });
+    (*run).clone()
 }
 
 /// The look (every `settle::EVERY` steps) at which every body of `scene`
 /// is asleep, on the mod with its default sleeping; none by `max`.
 pub fn asleep_at(scene: Scene, turning: bool, max: u32) -> Option<u32> {
     let key = format!("{} {turning} {max}", scene.text());
-    once(&ASLEEP, key, || {
+    *ASLEEP.get(key, || {
         let mut m = mod_in_engine(&scene, turning, true);
         let bodies = scene.build().iter().filter(|s| s.dynamic).count();
         let mut step = 0;
@@ -115,5 +94,5 @@ pub fn asleep_at(scene: Scene, turning: bool, max: u32) -> Option<u32> {
 /// `scene`, a behaviour scene, run by `ours`, bodies turning.
 pub fn behaved(scene: Scene) -> Behaviour {
     let key = format!("{} {:?}", scene.text(), solver());
-    once(&BEHAVED, key, || behave::behave(&mut ours(&scene, true, ""), &scene, true))
+    (*BEHAVED.get(key, || behave::behave(&mut ours(&scene, true, ""), &scene, true))).clone()
 }

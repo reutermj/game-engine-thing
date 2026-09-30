@@ -154,7 +154,7 @@ fn behaviour(scene: &Scene, config: &Config, backends: &[&str]) {
     println!("|---|{}", "---|".repeat(names.len()));
     for r in &runs {
         let cells: Vec<String> = r.values.iter().map(|(_, v)| format!("{v:.6}")).collect();
-        println!("| {} | {} |", r.backend, cells.join(" | "));
+        println!("| {} | {} |", r.label, cells.join(" | "));
     }
     println!();
 }

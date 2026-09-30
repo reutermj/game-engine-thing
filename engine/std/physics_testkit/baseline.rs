@@ -4,9 +4,9 @@
 //! (docs/architecture/physics-testing.md, "The baseline"). A value past its
 //! band fails, better or worse, until the file is written again in the
 //! same commit, so the file's diff is the record of what a change did to
-//! physics. This is the format and the comparison, shared by 2D
-//! (`record.rs` beside this file) and 3D (`//engine/std/physics3d/compare:record.rs`),
-//! which each say what they record and with which bands.
+//! physics. This is the format and the comparison; each harness's
+//! `record.rs` (`//engine/std/physics/compare`, `//engine/std/physics3d/compare`)
+//! says what it records and with which bands, and `tool` writes the files.
 //!
 //! A line is a group (the test binary that checks it), a scene, a measure,
 //! the value and its band, separated by two spaces or more, since a

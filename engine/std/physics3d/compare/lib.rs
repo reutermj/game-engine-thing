@@ -9,9 +9,8 @@
 //! code. The world is fixed across engines: y up, gravity (0, -9.81, 0), a
 //! 1/60 s step, mass 1, friction 0.5, restitution 0.
 
-// The baseline's format and comparison, 2D's.
-#[path = "../../physics/compare/baseline.rs"]
-pub mod baseline;
+// The baseline's format and comparison, the test kit's, 2D's too.
+pub use physics_testkit::baseline;
 pub mod behave;
 pub mod bounces;
 pub mod box3d;
@@ -27,6 +26,14 @@ pub mod runs;
 pub mod scenes;
 
 pub use scenes::{Shape, Spec};
+
+/// A broken bound names a scene by its kind, and its size with it
+/// (`(Kind, n)`).
+impl physics_testkit::Named for scenes::Kind {
+    fn named(&self) -> String {
+        self.name().to_string()
+    }
+}
 
 pub const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 pub const DT: f32 = 1.0 / 60.0;
