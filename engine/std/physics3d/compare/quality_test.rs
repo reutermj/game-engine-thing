@@ -4,7 +4,7 @@
 //! (`measure.rs`) on its scenes (`scenes.rs`), against bounds derived from
 //! what Rapier 3D 0.36 and Box3D 0.1 meet on the same scenes (Jolt 5.6
 //! recorded beside them). The bounds are set as 2D's are
-//! (`//engine/std/physics/compare:quality_test`; physics.md, "Quality as a
+//! (`//engine/std/physics2d/compare:quality_test`; physics.md, "Quality as a
 //! test"): rest from the references' medians over the sizes, since
 //! settling is chaotic; depth at half the shallower reference's. The values
 //! are from

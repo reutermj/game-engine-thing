@@ -3,7 +3,7 @@
 //! an inverse mass and a world inverse inertia; a contact a normal and up
 //! to four points.
 //!
-//! The 2D solver's soft step (engine/std/physics, solver.rs; Box2D v3's,
+//! The 2D solver's soft step (engine/std/physics2d, solver.rs; Box2D v3's,
 //! physics.md "Settling") with rotation, as Box3D (contact_solver.c,
 //! solver.c) runs it: `SUBSTEPS` substeps, each gravity, warm start, one
 //! soft pushing pass, positions and rotations moved, `RELAX_ITERATIONS`

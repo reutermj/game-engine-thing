@@ -2,7 +2,7 @@
 //! sphere rolling, a ball bouncing, a heavy cube on a light one, the
 //! physics3d mod against bounds from hand calculations and from what Rapier
 //! 3D 0.36 and Box3D 0.1 do on the same scenes (Jolt 5.6 recorded beside
-//! them), set as 2D's are (//engine/std/physics/compare:behaviour_test;
+//! them), set as 2D's are (//engine/std/physics2d/compare:behaviour_test;
 //! physics.md, "Quality beyond settling"). The values are from
 //!
 //!     ./bazel run --config=bench //engine/std/physics3d/compare:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave

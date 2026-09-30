@@ -10,7 +10,7 @@
 //! court.
 
 use engine_api::{Cx, Dt, Entity, EventReader, Mod, Query, Systems, With, Without, WorldMut, export_mod, phase};
-use physics::{Body, Collider, Contact, Position, Trigger, Velocity};
+use physics2d::{Body, Collider, Contact, Position, Trigger, Velocity};
 use pong::{
     BALL_RADIUS, Ball, Goal, HEIGHT, LEFT_FACE, Opponent, PADDLE_HEIGHT, PADDLE_SPEED, Paddle, Player, RIGHT_FACE, SERVE_SPEED, Score,
     Steer, WIDTH,

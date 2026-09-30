@@ -1,12 +1,12 @@
 # Physics
 
-**Status: built** as `//engine/std/physics`, after a spike (results
+**Status: built** as `//engine/std/physics2d`, after a spike (results
 [below](#spike-results)), and both games run on it
 ([The games on it](#the-games-on-it)). What the work showed about the
 design's flaws is in the
 [physics retrospective](../retrospectives/2026-09-23-physics.md).
 The third part of the MVP, after the mod loader and the ECS: 2D rigid-body
-physics as an engine mod, `//engine/std/physics`, whose every piece of
+physics as an engine mod, `//engine/std/physics2d`, whose every piece of
 state is in the world.
 
 ## Goals
@@ -36,25 +36,25 @@ polygons. Rotation, once one, is built: [Rotation](#rotation).
 ## Components
 
 Declared in the physics mod's interface, so a game depends on it with
-`mod_deps = ["//engine/std/physics"]` and the game target loads it.
+`mod_deps = ["//engine/std/physics2d"]` and the game target loads it.
 
 ```rust
 component! {
     /// Where a body is: its collider's center. Units are the game's.
-    pub struct Position: "physics::Position" { pub x: f32, pub y: f32 }
+    pub struct Position: "physics2d::Position" { pub x: f32, pub y: f32 }
 }
 
 component! {
     /// Units per second. Set by the game at will (a jump, a serve); the
     /// solver changes it on contact.
-    pub struct Velocity: "physics::Velocity" { pub x: f32, pub y: f32 }
+    pub struct Velocity: "physics2d::Velocity" { pub x: f32, pub y: f32 }
 }
 
 component! {
     /// How a body moves. `kind` is `DYNAMIC` (moved by velocity, gravity
     /// and contacts), `KINEMATIC` (moved by velocity only: pushes, is never
     /// pushed) or `STATIC` (never moves; tiles, walls).
-    pub struct Body: "physics::Body" {
+    pub struct Body: "physics2d::Body" {
         pub kind: u8,
         /// 0 means infinite (a dynamic body that can't be pushed).
         pub inv_mass: f32,
@@ -68,7 +68,7 @@ component! {
 component! {
     /// The body's shape, centered on its `Position`: a box (`BOX`, half
     /// extents `hx`, `hy`) or a circle (`CIRCLE`, radius `hx`).
-    pub struct Collider: "physics::Collider" {
+    pub struct Collider: "physics2d::Collider" {
         pub shape: u8,
         pub hx: f32,
         pub hy: f32,
@@ -88,20 +88,20 @@ component! {
     /// Which way a body faces, as the cosine and sine of its angle: its
     /// collider turned about its position. None is axis-aligned. Part of
     /// the body's box in storage, with the collider.
-    pub struct Rotation: "physics::Rotation" { pub c: f32, pub s: f32 }
+    pub struct Rotation: "physics2d::Rotation" { pub c: f32, pub s: f32 }
 }
 
 component! {
     /// Radians a second. A dynamic body with a `Rotation` and a `Spin`
     /// turns, with its shape's inertia at its mass; without a `Spin` it
     /// keeps its rotation (the rotation lock).
-    pub struct Spin: "physics::Spin" { pub w: f32 }
+    pub struct Spin: "physics2d::Spin" { pub w: f32 }
 }
 
 component! {
     /// The world's gravity, on one entity. None means none: pong has no
     /// entity with it.
-    pub struct Gravity: "physics::Gravity" { pub x: f32, pub y: f32 }
+    pub struct Gravity: "physics2d::Gravity" { pub x: f32, pub y: f32 }
 }
 
 component! {
@@ -109,14 +109,14 @@ component! {
     /// substeps. More substeps are stiffer contacts, for a game that stacks
     /// tall (six stand a 20-high turning stack at rest from step 60, not
     /// 580), at about a fifth more solver each ([Still at rest](#still-at-rest)).
-    pub struct Tuning: "physics::Tuning" { pub substeps: u32 }
+    pub struct Tuning: "physics2d::Tuning" { pub substeps: u32 }
 }
 
 component! {
     /// Which sides of a body touched something solid on the last step:
     /// the answer to "can the player jump". Kept up to date on bodies that
     /// have it; a game adds it where it wants to ask.
-    pub struct Touching: "physics::Touching" {
+    pub struct Touching: "physics2d::Touching" {
         pub below: bool, pub above: bool, pub left: bool, pub right: bool,
     }
 }
@@ -125,14 +125,14 @@ event! {
     /// Two solid colliders began touching this step. `nx, ny` points from
     /// `a` to `b`; `speed` is how fast they met along it, for game rules
     /// (pong's spin, a stomp).
-    pub struct Contact: "physics::Contact" {
+    pub struct Contact: "physics2d::Contact" {
         pub a: Entity, pub b: Entity, pub nx: f32, pub ny: f32, pub speed: f32,
     }
 }
 
 event! {
     /// A sensor began overlapping a collider its mask includes.
-    pub struct Trigger: "physics::Trigger" { pub sensor: Entity, pub other: Entity }
+    pub struct Trigger: "physics2d::Trigger" { pub sensor: Entity, pub other: Entity }
 }
 ```
 
@@ -144,7 +144,7 @@ component! {
     /// Two solid colliders touching or about to, `a < b`: an entity from
     /// the step physics finds them until the step it doesn't. An ordered
     /// key, so contacts are stored in pair order.
-    pub struct ContactPair: "physics::ContactPair", order = key { pub a: Entity, pub b: Entity }
+    pub struct ContactPair: "physics2d::ContactPair", order = key { pub a: Entity, pub b: Entity }
 }
 // With it on each contact: `Manifold` (normal from a to b, depth, pressed
 // now and the step before, how many points), `Response` (friction,
@@ -155,7 +155,7 @@ component! {
 component! {
     /// Two colliders overlapping where one is a sensor or senses the
     /// other: an entity while it lasts, in pair order too.
-    pub struct Overlap: "physics::Overlap", order = key { pub a: Entity, pub b: Entity }
+    pub struct Overlap: "physics2d::Overlap", order = key { pub a: Entity, pub b: Entity }
 }
 ```
 
@@ -167,7 +167,7 @@ Shapes are a `u8` and half extents rather than an enum because a
 component's fields must be `FieldType`, and the schema has no enums;
 migration still works field by field.
 
-`physics::Position` replaces `transform::Position` and the games' own
+`physics2d::Position` replaces `transform::Position` and the games' own
 coordinates (`Player::x`, `Ball::x`): a body's position is the physics
 mod's, and game components keep only game state (coins, deaths, score).
 
@@ -180,7 +180,7 @@ reads the step with a `Dt` parameter. The same inputs give the same
 simulation at any frame rate, on the same machine.[^onestep]
 
 The step is a pipeline of the physics mod's systems in its own phase,
-`physics::step`, after `simulate` and before `late`, so a game sets
+`physics2d::step`, after `simulate` and before `late`, so a game sets
 velocities (input, AI, rules) in `update` or `simulate` and reacts to
 contacts in `late`:
 
@@ -220,7 +220,7 @@ touching", and a reload of physics leaves them in place like any other
 entities.
 
 **Pre-solve hooks** are systems a game orders between the two:
-`.phase("physics::step").after("physics::find_contacts").before("physics::solve")`.
+`.phase("physics2d::step").after("physics2d::find_contacts").before("physics2d::solve")`.
 One sees this step's contacts and overlaps, found from where everything
 is now, and may change a contact's `Response` (disable it: a one-way
 platform; its restitution: a bounce pad). The platformer's walkers meet
@@ -261,7 +261,7 @@ closures, and declares the same footprint, plus reads of `Position` and
 `Collider`; so its `Data` can't write those two.
 
 ```rust
-use physics::{Circle, Ray, Spatial};
+use physics2d::{Circle, Ray, Spatial};
 
 // The walkers' ledge check: is there ground just ahead, below?
 fn walk(.., mut walkers: Query<(&Position, &mut Velocity), With<Walker>>,
@@ -371,7 +371,7 @@ add spin and speed; on a `Trigger` from a goal line, score and serve.
 ### The stress demo
 
 A walled box that a few hundred circles and boxes are dropped into:
-`pile`, a test scene in `engine/std/physics/tests`, which the settling,
+`pile`, a test scene in `engine/std/physics2d/tests`, which the settling,
 determinism and reload tests run and `:bench` times. The engine's demo
 (`mods/spawner` and `mods/reporter`, in `//game`) is the same idea at a
 couple of dozen bodies. It's also the scene system parallelism and
@@ -407,7 +407,7 @@ it takes 713 on the columns ([Parallel solving](#parallel-solving), timed
 alone; in the step, below, 1428 and 760). The same comparison on the real
 pile is [after the table's causes](#the-real-pile).
 
-2026-09-24. `./bazel run --config=bench //engine/std/physics:tax` runs a pile in
+2026-09-24. `./bazel run --config=bench //engine/std/physics2d:tax` runs a pile in
 the engine to the frame to measure, copies its whole state (bodies, and
 contacts with their impulses) into plain arrays, and runs the same steps
 both ways: the mod in the world, and the same step on arrays, with the same
@@ -496,7 +496,7 @@ What took it there:
   separate allocations, so there's no flat index into the world's memory
   to solve over.
   Taken apart one cause at a time, the same solve bit for bit at 10 000
-  settled (`./bazel run --config=bench //engine/std/physics:solver_layout`), from
+  settled (`./bazel run --config=bench //engine/std/physics2d:solver_layout`), from
   791 µs on the copy:
   - *Layout* isn't it. SoA over the same flat index is 780, and the holes
     of spatial pages (9.5 rows in 16) cost nothing: flat arrays indexed
@@ -628,7 +628,7 @@ are get-emj.30's answer.
 
 In the physics mod, each stage takes the parallel path when its `Workers`
 has more than one thread and nothing sleeps (waking looks sleeping bodies
-up as pairs are found); `physics_test` runs a 600-body pile, sensing and
+up as pairs are found); `physics2d_test` runs a 600-body pile, sensing and
 touching, on four threads against one. `:tax -- parallel` measures both
 sides at 1 to 16 threads, and checks every run against one thread's, bit
 for bit: positions, velocities, and every contact with its entity and
@@ -735,7 +735,7 @@ the system that made it, borrowing its stack, and returns before it does,
 so at a safe point no mod code is on any thread. A reloadable mod can't
 own the threads: a thread it spawns keeps its build mapped
 ([lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)), and a
-pool's idle loop would be its code. Measured in `physics_test`: host threads
+pool's idle loop would be its code. Measured in `physics2d_test`: host threads
 that ran physics's tasks, kept or spawned per run, leave nothing mapped
 after a reload; a thread-local with a destructor touched in a task keeps
 the build mapped, from any thread, the main one included
@@ -856,7 +856,7 @@ it's seen:
     not taken off (a count in its state), and a walk of the resting
     contacts finds the ends gone, whose other ends' islands wake. A
     spawn reusing the index is another entity, so it's no end of theirs;
-  - `Sleep` despawned, or `physics` sent `wake`: everything.
+  - `Sleep` despawned, or `physics2d` sent `wake`: everything.
 - in `find_contacts`:
   - a static written or spawned (a spawn writes its values) into or out
     from under sleeping bodies, found by `for_each_written` and a region
@@ -1056,7 +1056,7 @@ What it doesn't do:
   the same frame either way; writing only a changed value would keep it
   asleep.
 
-Its tests (`physics_test`, `pile::`), on the columns (200 bodies in 40
+Its tests (`physics2d_test`, `pile::`), on the columns (200 bodies in 40
 wide) and on a real pile (1000 in 41): falling asleep into tables of
 their own, every contact resting, the scene checked to be what it says
 (contacts a body); staying put with nothing moved or written; no deeper
@@ -1090,7 +1090,7 @@ the step taken as still when marking resting contacts).[^prototype]
 
 Moving the bookkeeping into the world (2026-09-26, get-emj.40) added
 `core_test`'s `sleeping::` (how many steps is enough, and islands) and,
-in `physics_test`, a body's time still starting afresh when it goes
+in `physics2d_test`, a body's time still starting afresh when it goes
 faster, falls asleep or is put to sleep by a game (asleep exactly 30
 steps after it's still at 60 a second), physics numbering its islands
 after a game's, a game's island apart waking as one, a despawn in the
@@ -1134,7 +1134,7 @@ across threads](#solving-across-threads)). What follows is the prototype
 on arrays, before rotation and lanes. The solver was
 one thread, sequential impulses over contacts in pair order. How far it
 parallelizes was measured on arrays, outside the mod:
-`./bazel run --config=bench //engine/std/physics:parallel_solver` takes the solver's
+`./bazel run --config=bench //engine/std/physics2d:parallel_solver` takes the solver's
 input from piles run in the engine (and a scene of separate stacks built
 there), and solves it three ways, each checked bit for bit:
 
@@ -1294,7 +1294,7 @@ default must stay bit for bit what it is.
 
 **Status: measured** (2026-09-25; the solver since replaced, and the
 settling gap closed: [Settling](#settling), 2026-09-26). `./bazel run -c opt
-//engine/std/physics/compare` runs the same scenes in the physics mod, in
+//engine/std/physics2d/compare` runs the same scenes in the physics mod, in
 the same step on plain arrays (`tests/arrays.rs`, bit for bit the mod's,
 checked on every scene without rain), in **Box2D v3.1.1** and in **Rapier
 2D 0.36.0**, one thread each, and prints time per step by stage and how
@@ -1526,7 +1526,7 @@ already known (2).
   `rapier2d = "=0.36.0"` with `profiler`, and `Cargo.lock` regenerated
   ([runbook 001](../runbooks/001-regenerate-cargo-lock.md)); `rules_rs`
   built its 60-odd crates unpatched.
-- Both are visible to `//engine/std/physics/compare` alone. Box2D is
+- Both are visible to `//engine/std/physics2d/compare` alone. Box2D is
   pinned to its latest release; Rapier to the version current on the day,
   so a rerun compares the same code.
 
@@ -1812,7 +1812,7 @@ cuboids. For convex shapes without a routine of their own parry takes the
 general route, GJK for the distance (or that they overlap) and EPA for the
 depth, then clips the faces the normal picks (`contact_manifold_pfm_pfm`).
 Both measured on the same 100 000 pairs of turned boxes, from 0.03 apart
-to sunk 0.12 (`./bazel run --config=bench //engine/std/physics:narrow_bench`, two
+to sunk 0.12 (`./bazel run --config=bench //engine/std/physics2d:narrow_bench`, two
 runs):
 
 | way | ns a pair | contacts |
@@ -2086,9 +2086,9 @@ pair of extents answers:
 ## What changes elsewhere
 
 - `mods/transform` and the old `mods/physics` demo went;
-  `//engine/std/physics` has the name `physics`, and `spawner` and
+  `//engine/std/physics2d` has the name `physics2d`, and `spawner` and
   `reporter` use it. The `mod_deps` examples in mod-deps.md still hold,
-  since `physics` declares `Velocity` in its interface.
+  since `physics2d` declares `Velocity` in its interface.
 - The recorded routes in `platformer_test` and `pong_test` pass
   unchanged (see below).
 
@@ -2205,7 +2205,7 @@ in "Rotation in 3D", below**):**
 on branch `physics3d-rotation`, a mod since `physics3d-land`).
 `//engine/std/physics3d` bodies turn: spheres and boxes with orientation,
 angular velocity and inertia, contacts of up to four points, the soft
-step with angular terms. It is a mod as `//engine/std/physics` is, and
+step with angular terms. It is a mod as `//engine/std/physics2d` is, and
 hot-reloads under a running pile ([A mod](#a-mod)). Still left out: layers,
 sensors, kinematic bodies, sleeping, events, parallelism, rolling
 resistance, gyroscopic terms. The comparison runs every engine locked (as
@@ -2262,7 +2262,7 @@ an interface crate other mods depend on (`components.rs` and `math.rs`,
 crate `physics3d`), and the mod (`lib.rs`, `narrow.rs`, `gjk.rs`,
 `solver.rs`): three systems, `integrate_velocities`, `find_contacts` and
 `solve`, in the phase `physics3d::step`, after `simulate` and before
-`late` at the simulation's rate, as `physics::step` is. Its messages are
+`late` at the simulation's rate, as `physics2d::step` is. Its messages are
 `stats` (steps, contacts, time per system), `stages` (time per stage, and
 the last step's pairs, contacts, points and warm starts) and
 `reset_timings`. `pile3d` (`tests/pile.rs`) is its scene mod: it builds
@@ -2296,7 +2296,7 @@ keeps them, and a reload keeps them too.
 
 **Through the engine, at the harness's cost.** The bench's ours is now the
 mod in an engine, stepped by `lockstep step 1` (so a step is a frame, with
-the schedule and apply nodes in it), as `//engine/std/physics:tax` drives
+the schedule and apply nodes in it), as `//engine/std/physics2d:tax` drives
 2D's. The same scenes, turning, whole run in ms a step (one run each, the
 harness's the second batch of choice 5):
 
@@ -2642,8 +2642,8 @@ and a solver that crept for thousands of steps passed them
 
 | target | what | runtime |
 |---|---|---|
-| `//engine/std/physics/compare:quality_test` | 2D: piles 400-1200, pyramids 15-50, stacks 10 and 20, sleeping, the mod bit for bit the arrays, the baseline | 49 s (fastbuild; 1.2 s at `-c opt`), 2026-09-28 |
-| `//engine/std/physics/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid, and the wider families (piles 21-401 wide, mixed piles, pyramids 30-120; physics-testing.md, "Wider families") | 80 s at `-c opt` |
+| `//engine/std/physics2d/compare:quality_test` | 2D: piles 400-1200, pyramids 15-50, stacks 10 and 20, sleeping, the mod bit for bit the arrays, the baseline | 49 s (fastbuild; 1.2 s at `-c opt`), 2026-09-28 |
+| `//engine/std/physics2d/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid, and the wider families (piles 21-401 wide, mixed piles, pyramids 30-120; physics-testing.md, "Wider families") | 80 s at `-c opt` |
 | `//engine/std/physics3d/compare:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 5-20, the baseline | 17.5 s (fastbuild; 2.0 s at `-c opt`) |
 | `//engine/std/physics3d/compare:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000, and the wider families (200-1000 and 2000-5000, mixed piles) | 86-130 s at `-c opt` |
 
@@ -2738,7 +2738,7 @@ Until 2026-09-27 there were three: a five-high stack of turning cubes in
 times the references' energy and never rested at 10 000 (get-emj.43),
 both fixed by contact recycling and softer static contacts; and a 20-high
 stack of turning boxes in 2D rests late at the default five substeps
-(get-emj.41), which is now tested at six, set through `physics::Tuning`
+(get-emj.41), which is now tested at six, set through `physics2d::Tuning`
 as a game that stacks would ([Still at rest](#still-at-rest)).
 
 **What the tests catch** (mutation-checked, 2026-09-26: each bug planted in
@@ -2777,7 +2777,7 @@ them.
 
 | target | what | runtime |
 |---|---|---|
-| `//engine/std/physics/compare:behaviour_test` | 2D: ramps, bounces, mass ratios, overlap, bullets, the card house, the ladder, dominoes; the mod bit for bit the arrays on them | 2-5 s (fastbuild) |
+| `//engine/std/physics2d/compare:behaviour_test` | 2D: ramps, bounces, mass ratios, overlap, bullets, the card house, the ladder, dominoes; the mod bit for bit the arrays on them | 2-5 s (fastbuild) |
 | `//engine/std/physics3d/compare:behaviour_test` | 3D: ramps, bounces, mass ratios | under 1 s |
 
 ### The debug view
@@ -2797,7 +2797,7 @@ neither end of our contact turns, it keeps no point, only a normal and a
 depth, and the view puts one on the smaller body's face (a square). It is
 test and bench code: nothing renders in the physics mod.
 
-    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run --config=bench //engine/std/physics/compare
+    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run --config=bench //engine/std/physics2d/compare
 
 (runbook 005, "The debug view"). Behaviour scenes are drawn turning, as
 they run; `TURN=1` turns the others; `ENGINES` picks the columns.
@@ -2854,7 +2854,7 @@ sliding.
 
 ### Results, 2D
 
-`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/compare`
+`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics2d/compare`
 (2026-09-28; Box2D v3.1.1, continuous on; Rapier 0.36 as shipped, its CCD
 changing nothing here; ours re-run on get-emj.61's default the same day).
 Deterministic, one run. The mod and the arrays agree on every scene to
@@ -3426,7 +3426,7 @@ Rapier's, whose block solver is on in 2D, rests at 1100 too). The block
 solver stays a variant.
 
 **Decided** (2026-09-27, get-emj.41): the substep count is a setting in
-the world, `physics::Tuning` on one entity as 3D's `Tuning` is, read by
+the world, `physics2d::Tuning` on one entity as 3D's `Tuning` is, read by
 the solve every step; none, or 0, is the default five. That is what both
 references do (Box2D's 4 substeps and Rapier's 4 iterations are each a
 default and a knob), and it costs no game what it didn't choose. The
@@ -3478,7 +3478,7 @@ is speed work alone.[^levels-default]
 ### Where the time went
 
 The solver alone, on the same inputs, timed by stage
-(`./bazel run --config=bench //engine/std/physics/compare:solver_bench`, which
+(`./bazel run --config=bench //engine/std/physics2d/compare:solver_bench`, which
 captures the solver's input from the comparison's turning scenes at the
 steps it times; the stages by clocks put in a copy, since removed). µs
 per step, one thread, the turning pile of 10 000 (22 136 contacts, every
@@ -4111,7 +4111,7 @@ to the default on one thread, bit for bit on the turning pile and pyramid
 of the other equivalence tests over 150 steps. Planted, it fails on a
 race (each color's stage given the next color's first block), on the
 colors solved last first, and on a stage that doesn't wait for its count
-(which the block lock catches as a panic). In the mod, `physics_test`'s
+(which the block lock catches as a panic). In the mod, `physics2d_test`'s
 `a_turning_pile_on_four_threads_lands_where_it_does_on_one` runs a turning
 pile of 600 on kept and on spawned threads against one, and fails on the
 colors reversed; `threads_that_ran_a_builds_tasks_do_not_keep_it_mapped`
@@ -4294,13 +4294,13 @@ spawned for each run instead: 2034 / 2013 at 8.
 
 ## Spike results
 
-2026-09-23, `spike/physics` (since landed as `//engine/std/physics`,
+2026-09-23, `spike/physics` (since landed as `//engine/std/physics2d`,
 whose tests are the spike's): the mod as designed, on the real engine,
 with a stress demo (`pile`) and a platformer in miniature (`runner`: a tile
 floor with a pit, a running and jumping player, a coin, a walker that
 turns at ledges with a spatial query). `./bazel run -c opt
-//engine/std/physics:bench` prints the numbers below; `./bazel run
-//engine/std/physics:pile_game` runs the pile to play with over `modctl`.
+//engine/std/physics2d:bench` prints the numbers below; `./bazel run
+//engine/std/physics2d:pile_game` runs the pile to play with over `modctl`.
 
 **What held up:**
 
@@ -4379,7 +4379,7 @@ turns at ledges with a spatial query). `./bazel run -c opt
 
 ## The games on it
 
-2026-09-23. Both games moved onto `//engine/std/physics`, and every
+2026-09-23. Both games moved onto `//engine/std/physics2d`, and every
 recorded route and replay in `platformer_test` and `pong_test` passes
 unchanged: the winning run still wins on frame 255, the stomp and the
 walker's kill land on the same frames, and pong's replay still ends on
@@ -4485,7 +4485,7 @@ frame 508.
     still and it fell asleep `Sleep::time` late: the platformer's player,
     standing at the start with physics reloaded every frame, never slept.
     The reload replays found it; `a_reload_keeps_how_long_awake_bodies_have_been_still`
-    in //engine/std/physics:physics_test pins it.
+    in //engine/std/physics2d:physics2d_test pins it.
 
 [^sleep-adopt]: *(History, 2026-09-26.)* A build handed the copy also
     adopted everything the world had asleep, as the first build does, so

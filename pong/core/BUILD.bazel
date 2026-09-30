@@ -6,7 +6,7 @@ engine_mod(
     name = "core",
     srcs = ["lib.rs"],
     interface = ["components.rs"],
-    mod_deps = ["//engine/std/physics"],
+    mod_deps = ["//engine/std/physics2d"],
     mod_name = "pong",
     twin = True,
     visibility = ["//visibility:public"],

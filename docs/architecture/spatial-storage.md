@@ -17,7 +17,7 @@ spatial structures outside the ECS, and this deliberately doesn't.
 ## The shape
 
 - **Declared on the key.** `component! { pub struct Position:
-  "physics::Position", order = spatial { .. } }`, with `SpatialKey`
+  "physics2d::Position", order = spatial { .. } }`, with `SpatialKey`
   implemented: the box around a row from its key and, if the row has it,
   its extent component (`Collider`). Carried in `ComponentDesc` like
   storage, so every build that declares the component agrees, and
@@ -725,7 +725,7 @@ pairs for the narrowphase to test (the answer has to be `near_pairs`',
 exactly, and our narrowphase costs more per pair than a box test).
 
 **Decisions, each measured** (µs a step, one thread, `-c opt`, 10 000
-bodies unless said; 2D the real pile of `//engine/std/physics/compare`,
+bodies unless said; 2D the real pile of `//engine/std/physics2d/compare`,
 3D `//engine/std/physics3d/compare`'s boxes turning; `live_bench` the lattice without
 physics):
 
@@ -804,7 +804,7 @@ physics):
 
 **Before and after** (2026-09-27; before is edfea31, after this work; the
 same binaries alternated, no build running beside them).
-`//engine/std/physics/compare`, the real pile, µs a step, the step and its
+`//engine/std/physics2d/compare`, the real pile, µs a step, the step and its
 broadphase (physics's stage: the pairs, then their colliders' slots; in
 brackets the pairs alone), median of 3; Box2D's and Rapier's from the same
 run:

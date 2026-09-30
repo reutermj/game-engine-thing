@@ -1,0 +1,295 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_game", "engine_mod")
+
+# //engine/std/physics2d against Box2D v3 and Rapier 2D, on the same scenes,
+# one thread each: time per step by stage, and how well each settles. The
+# two libraries are for this package alone; nothing else may depend on them.
+# See docs/architecture/physics.md, "Against other engines", and
+# docs/runbooks/005-compare-physics-with-other-engines.md.
+#
+#   ./bazel run --config=bench //engine/std/physics2d/compare
+
+package(default_visibility = ["//visibility:private"])
+
+# The scenes, built in the engine by a mod from the same code the other
+# engines build them from.
+engine_mod(
+    name = "scene",
+    srcs = [
+        "scene.rs",
+        "scene_mod.rs",
+    ],
+    crate_root = "scene_mod.rs",
+    mod_deps = ["//engine/std/physics2d"],
+)
+
+engine_game(
+    name = "scene_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":scene"],
+)
+
+cc_library(
+    name = "box2d_shim",
+    srcs = ["box2d_shim.c"],
+    copts = ["-O3"],
+    deps = ["@box2d"],
+)
+
+rust_binary(
+    name = "compare",
+    srcs = [
+        "behave.rs",
+        "bounces.rs",
+        "box2d.rs",
+        "compare.rs",
+        "ecs.rs",
+        "family.rs",
+        "quality.rs",
+        "rapier.rs",
+        "scene.rs",
+        "settle.rs",
+        "sim.rs",
+        "variants.rs",
+        "view.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+    ],
+    crate_root = "compare.rs",
+    # The two libraries' licenses travel with the binary that contains
+    # them: see docs/CREDITS.md.
+    data = [
+        ":scene_game",
+        "licenses/rapier-LICENSE",
+        "@box2d//:LICENSE",
+    ],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = [
+        ":box2d_shim",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+        "//engine/std/physics2d:physics2d_interface",
+        "//engine/std/physics_testkit",
+        "@crates//:rapier2d",
+    ],
+)
+
+# What the quality and behaviour tests share: the comparison's scenes,
+# measures and our step on arrays, the runs each binary makes once
+# (runs.rs), and the baseline they are held to (record.rs, and the files,
+# built in; the format is //engine/std/physics_testkit's).
+MEASURE_SRCS = [
+    "behave.rs",
+    "bounces.rs",
+    "ecs.rs",
+    "family.rs",
+    "quality.rs",
+    "record.rs",
+    "runs.rs",
+    "scene.rs",
+    "settle.rs",
+    "sim.rs",
+    "variants.rs",
+    "//engine/std/physics2d:narrow.rs",
+    "//engine/std/physics2d:solver.rs",
+    "//engine/std/physics2d:tests/split_impulse.rs",
+    "//engine/std/physics2d:tests/arrays.rs",
+]
+
+BASELINES = [
+    "baseline.txt",
+    "baseline_long.txt",
+]
+
+QUALITY_SRCS = MEASURE_SRCS + ["quality_test.rs"]
+
+QUALITY_DEPS = [
+    "//engine/control",
+    "//engine/ecs",
+    "//engine/loader",
+    "//engine/std/physics2d:physics2d_interface",
+    "//engine/std/physics_testkit",
+]
+
+# Quality as a test: how soon piles, pyramids and stacks come to rest, how
+# deep they sink, what energy is left and that sleeping follows, bounded by
+# what Box2D and Rapier meet on the same scenes (recorded, not linked). See
+# the source, and physics.md, "Quality as a test". SOLVER=(a variant) in the
+# environment runs one of variants.rs instead of ours.
+rust_test(
+    name = "quality_test",
+    srcs = QUALITY_SRCS,
+    compile_data = BASELINES,
+    crate_root = "quality_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
+# The same at 10 000 bodies: minutes, so manual, and meant for -c opt:
+#   ./bazel test //engine/std/physics2d/compare:quality_long_test
+rust_test(
+    name = "quality_long_test",
+    srcs = QUALITY_SRCS + ["quality_long.rs"],
+    compile_data = BASELINES,
+    crate_features = ["long"],
+    crate_root = "quality_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# Quality beyond settling: what a player sees a body do (a box on a ramp, a
+# disc rolling, a ball bouncing, heavy boxes on light ones, overlap pushed
+# apart, a ball fired at a wall, a card house, a ladder, dominoes), bounded
+# by hand calculations and by what Box2D and Rapier do on the same scenes
+# (recorded, not linked). See the source, and physics.md, "Quality beyond
+# settling". Tests that found a problem are ignored, each naming its bead.
+BEHAVIOUR_SRCS = MEASURE_SRCS + ["behaviour_test.rs"]
+
+rust_test(
+    name = "behaviour_test",
+    srcs = BEHAVIOUR_SRCS,
+    compile_data = BASELINES,
+    crate_root = "behaviour_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
+# The edge-of-stability families on their long grids (family.rs): minutes,
+# so manual, and meant for -c opt:
+#   ./bazel test //engine/std/physics2d/compare:behaviour_long_test
+rust_test(
+    name = "behaviour_long_test",
+    srcs = BEHAVIOUR_SRCS + ["behaviour_long.rs"],
+    compile_data = BASELINES,
+    crate_features = ["long"],
+    crate_root = "behaviour_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# The baseline's tool (physics-testing.md, "The baseline"; runbook 005):
+# every value the baseline records, run and compared with the file, the
+# ones that moved past their band printed; --write writes the file.
+#   ./bazel run //engine/std/physics2d/compare:baseline [-- --write]
+#   ./bazel run //engine/std/physics2d/compare:baseline -- --long [--write]
+# The tests that check it are the quality and behaviour tests themselves,
+# whose runs it is recorded from (their test "baseline"): a target of its
+# own would run every scene a second time.
+rust_binary(
+    name = "baseline",
+    srcs = MEASURE_SRCS + ["baseline_main.rs"],
+    compile_data = BASELINES,
+    crate_root = "baseline_main.rs",
+    data = [":scene_game"],
+    env = { "SCENE_GAME": "$(rlocationpath :scene_game)" },
+    deps = QUALITY_DEPS,
+)
+
+test_suite(
+    name = "baseline_test",
+    tests = [
+        ":behaviour_test",
+        ":quality_test",
+    ],
+)
+
+test_suite(
+    name = "baseline_long_test",
+    tags = ["manual"],
+    tests = [
+        ":behaviour_long_test",
+        ":quality_long_test",
+    ],
+)
+
+# The 2D solver alone, on inputs captured from the comparison's turning
+# scenes: each way of solving that was weighed, timed on the same work.
+#   ./bazel run --config=bench //engine/std/physics2d/compare:solver_bench
+rust_binary(
+    name = "solver_bench",
+    srcs = [
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "solver_bench.rs",
+        "variants.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    crate_root = "solver_bench.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
+# SPIKE (docs/architecture/parallel-relations.md): colors kept across steps
+# against colored afresh, the solve on each, and a solve pass over bodies in
+# pages against the copy, measured. Not engine code; kept so the numbers can
+# be taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:colors_spike
+rust_binary(
+    name = "colors_spike",
+    srcs = [
+        "colors_spike.rs",
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        ":colors_spike_srcs",
+    ],
+    crate_root = "colors_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# The physics files the spike builds over, copied into this package (a
+# generated source moves a crate's sources, and those from another package
+# with them go missing), and solver.rs with one line patched: its coloring
+# taken from the spike when it hands the solve some (`kept_colors`), so the
+# solve can be timed on colors kept across steps. A patch of one line, so
+# it can't drift from solver.rs; the grep fails the build if it stops
+# applying.
+genrule(
+    name = "colors_spike_srcs",
+    srcs = [
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    outs = [
+        "colors_spike_arrays.rs",
+        "colors_spike_narrow.rs",
+        "colors_spike_pool.rs",
+        "colors_spike_solver.rs",
+        "colors_spike_split_impulse.rs",
+    ],
+    cmd = " && ".join([
+        "sed 's/let (groups, n_groups) = group(contacts, &moves, params.wide);/let (groups, n_groups) = crate::kept_colors::take().unwrap_or_else(|| group(contacts, \\&moves, params.wide));/' $(location //engine/std/physics2d:solver.rs) > $(location colors_spike_solver.rs)",
+        "grep -q kept_colors $(location colors_spike_solver.rs)",
+        "cp $(location //engine/std/physics2d:narrow.rs) $(location colors_spike_narrow.rs)",
+        "cp $(location //engine/std/physics2d:tests/arrays.rs) $(location colors_spike_arrays.rs)",
+        "cp $(location //engine/std/physics2d:tests/pool.rs) $(location colors_spike_pool.rs)",
+        "cp $(location //engine/std/physics2d:tests/split_impulse.rs) $(location colors_spike_split_impulse.rs)",
+    ]),
+    tags = ["manual"],
+)

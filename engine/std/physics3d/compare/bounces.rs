@@ -1,4 +1,4 @@
-//! The bounce families in 3D, as 2D's (//engine/std/physics/compare,
+//! The bounce families in 3D, as 2D's (//engine/std/physics2d/compare,
 //! `bounces.rs`, which says why a family): a sphere, a cube landing flat, on
 //! an edge and on a corner, two free spheres, angled impacts and 20 s of
 //! bounces, over restitution, impact speed, gravity (none, the

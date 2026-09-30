@@ -9,7 +9,7 @@
 
 use clock::Clock;
 use engine_api::{Cx, Mod, WorldMut, export_mod};
-use physics::{Position, Velocity};
+use physics2d::{Position, Velocity};
 use pong::{Ball, HEIGHT, PADDLE_HEIGHT, Paddle, Player, Score, Steer, WIDTH};
 
 const HELP: &str = "commands: up | down | stay | show | state";

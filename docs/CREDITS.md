@@ -6,7 +6,7 @@ merge cleanly. Authors and licenses were read from each project's fetched
 source, not from memory.
 
 None of them is part of the engine or of any game: each is linked only
-into a comparison bench (`//engine/std/physics/compare` for 2D,
+into a comparison bench (`//engine/std/physics2d/compare` for 2D,
 `//engine/std/physics3d/compare` for 3D), so our own solvers can be measured against
 established ones on identical scenes. Flecs and EnTT, last, were read
 for the ECS's design, and aren't built at all.
@@ -27,8 +27,8 @@ one would have to ship those files with it.
 - **Author:** Erin Catto (`LICENSE`: "Copyright (c) 2022 Erin Catto").
 - **License:** MIT.
 - **Version we use:** v3.1.1 (2025-06-04), fetched by checksum in
-  `MODULE.bazel` and built by `engine/std/physics/compare/box2d.BUILD.bazel`.
-- **What for:** the reference C engine in `//engine/std/physics/compare`,
+  `MODULE.bazel` and built by `engine/std/physics2d/compare/box2d.BUILD.bazel`.
+- **What for:** the reference C engine in `//engine/std/physics2d/compare`,
   and nothing else; see docs/architecture/physics.md, "Against other
   engines".
 - **Scenes taken from its samples** (`samples/` in the same archive, read,
@@ -38,7 +38,7 @@ one would have to ship those files with it.
   speed and spin), overlap recovery (`sample_robustness.cpp`, "Overlap
   Recovery"), the wide box on two small ones ("HighMassRatio2") and the
   idea of a heavy box on light ones ("HighMassRatio1"), each rebuilt in
-  `engine/std/physics/compare/scene.rs` with y turned down (the card house
+  `engine/std/physics2d/compare/scene.rs` with y turned down (the card house
   also five times larger); its arch ("Arch") needs polygons, so a ladder
   stands in.
 - **Notice:** MIT asks that the copyright and permission notice go with
@@ -50,7 +50,7 @@ one would have to ship those files with it.
   - sequential impulses with accumulated, clamped impulses and warm
     starting, the solver Box2D is built on, which Erin Catto presented at
     GDC 2006 and in the talks listed at <https://box2d.org/publications/>
-    (`engine/std/physics/solver.rs`);
+    (`engine/std/physics2d/solver.rs`);
   - speculative contacts, pairs found and solved a margin before they
     touch (`narrow.rs`; Box2D's `B2_SPECULATIVE_DISTANCE`);
   - the soft step, since 2026-09-26 the 2D solver (`solver.rs`): the step
@@ -76,7 +76,7 @@ one would have to ship those files with it.
     physics.md, "Bounces");
   - graph coloring for a parallel solve, with contacts on a static body
     kept out of color 0, and SIMD batches of a color's contacts
-    (`engine/std/physics/tests/parallel_solver.rs`, measured only; Box2D
+    (`engine/std/physics2d/tests/parallel_solver.rs`, measured only; Box2D
     v3's `constraint_graph.c`, which credits "High-Performance Physical
     Simulations on Next-Generation Architecture with Many Cores",
     Intel Technology Journal).
@@ -169,16 +169,16 @@ one would have to ship those files with it.
   `LICENSE`: "Copyright 2020 Sébastien Crozet").
 - **License:** Apache-2.0.
 - **Version we use:** `rapier2d` 0.36.0 from crates.io, pinned in
-  `engine/std/physics/compare/Cargo.toml` and `Cargo.lock`. Its
+  `engine/std/physics2d/compare/Cargo.toml` and `Cargo.lock`. Its
   dependencies (parry2d, nalgebra, simba, glamx and more, by Dimforge and
   others) come the same way, each under its own license, listed with its
   version in `Cargo.lock`.
 - **What for:** the reference Rust engine in
-  `//engine/std/physics/compare`, and nothing else.
+  `//engine/std/physics2d/compare`, and nothing else.
 - **Notice:** Apache-2.0 (section 4) asks that redistributions carry a copy
   of the license and keep the notices. The crate as published has no
   `LICENSE` file, so a copy from the repository at the tag we use
-  (`v0.36.0`) is kept at `engine/std/physics/compare/licenses/rapier-LICENSE`
+  (`v0.36.0`) is kept at `engine/std/physics2d/compare/licenses/rapier-LICENSE`
   and put in the comparison binary's runfiles. Rapier has no `NOTICE`
   file. We modify none of it.
 - **Ideas our physics takes from it:** friction solved only in the
@@ -203,7 +203,7 @@ one would have to ship those files with it.
   polygonal features the normal picks (`contact_manifold_pfm_pfm`, which
   parry uses for convex shapes without a dedicated routine; for boxes it
   uses SAT, `contact_manifold_cuboid_cuboid`), in
-  `//engine/std/physics:narrow_bench`.
+  `//engine/std/physics2d:narrow_bench`.
 - **Read, for the solve across threads** (2026-09-29, physics.md,
   "Solving across threads"): 0.36.0's staged island solver
   (`dynamics/solver/staged_island_solver/`): stages that advance on work
@@ -263,7 +263,7 @@ one would have to ship those files with it.
   Gauss-Seidel: `ContactConstraintManager::sSolvePositionConstraint` and
   `AxisConstraintPart::SolvePositionConstraint`, Baumgarte 0.2, a slop and
   a 0.2 cap on the correction), tried as the comparison's
-  `VARIANTS=arrays:ngs` (`engine/std/physics/compare/variants.rs`); see
+  `VARIANTS=arrays:ngs` (`engine/std/physics2d/compare/variants.rs`); see
   physics.md, "Settling".
 
 ## Box3D
@@ -342,7 +342,7 @@ one would have to ship those files with it.
   penetration with a second "push" velocity that moves positions and is
   then thrown away, so correction adds no energy. It was the 2D solver
   until 2026-09-26, and is kept as it was for the experiments that
-  measured it (`engine/std/physics/tests/split_impulse.rs`; Bullet's
+  measured it (`engine/std/physics2d/tests/split_impulse.rs`; Bullet's
   `btContactSolverInfo::m_splitImpulse` and its push velocities in
   `btSequentialImpulseConstraintSolver`).
 
@@ -413,6 +413,6 @@ one would have to ship those files with it.
 - **License:** the Unlicense (public domain), as its `UNLICENSE` states
   (read 2026-09-28).
 - **What we use:** the constants and shifts of its `lowbias32`, as given
-  in its README, for `hashed` in `engine/std/physics/compare/scene.rs`,
+  in its README, for `hashed` in `engine/std/physics2d/compare/scene.rs`,
   which chooses each body of a mixed pile (`Scene::Mixed`) the same way
   in every engine. Nothing is linked.

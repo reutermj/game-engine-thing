@@ -12,21 +12,21 @@ A mod is two crates:
 
 - **Its interface**: the components it declares, which other mods may use.
   `engine_mod(interface = ["components.rs"])` builds it as a library named
-  after the mod, so a dependent writes `use physics::Velocity`.
+  after the mod, so a dependent writes `use physics2d::Velocity`.
 - **Its implementation**: its systems, the shared library the engine loads.
 
 A dependent names the mods it uses in `mod_deps` and compiles against their
 interfaces, never their implementations. That split is what makes Bazel do
-the propagation work. Editing `physics/lib.rs` rebuilds only `physics`; every
+the propagation work. Editing `physics2d/lib.rs` rebuilds only `physics2d`; every
 dependent's inputs are unchanged, so its library is byte-for-byte the same.
-Editing `physics/components.rs` rebuilds `physics` and every mod that
+Editing `physics2d/components.rs` rebuilds `physics2d` and every mod that
 compiled against its interface.
 
 A mod that only declares components has an implementation of one line:
 `engine_api::export_mod!(engine_api::Inert);`.
 
 Component names are namespaced by the declaring mod
-(`"physics::Velocity"`) by convention. The engine doesn't enforce it.
+(`"physics2d::Velocity"`) by convention. The engine doesn't enforce it.
 
 ## How the engine knows a mod's dependencies
 
@@ -55,11 +55,11 @@ After any load, every mod must run against the interfaces it was built
 against. Concretely:
 
 - **A mod's dependencies must be loaded.** Loading `spawner` without
-  `physics` is refused.
+  `physics2d` is refused.
 - **Each dependency must have the interface digest the dependent recorded.**
-  Loading a `spawner` built against a different `physics` interface than the
+  Loading a `spawner` built against a different `physics2d` interface than the
   running one is refused.
-- **A reload may not strand a running dependent.** Reloading `physics` alone
+- **A reload may not strand a running dependent.** Reloading `physics2d` alone
   with a changed interface, while `spawner` still runs against the old one,
   is refused, and the error names the game's reload target:
 
@@ -85,7 +85,7 @@ older builds cut off) remains as a fallback for libraries built without
 - **`./bazel run //game:reload`** sends every mod in the game as one batch.
   Bazel rebuilds only what the edit affected, and the engine skips every
   library whose contents match the running one, so only the affected mods
-  reload: for an interface change to `physics`, that is `physics` and
+  reload: for an interface change to `physics2d`, that is `physics2d` and
   whatever compiled against it, and nothing else.
 
 A batch is atomic. Every changed build is opened and checked first, and if
@@ -98,8 +98,8 @@ access by the new builds.
 dependencies the game didn't list.
 
 The per-mod command can't do the game's job because Bazel's graph only
-points one way: `//engine/std/physics` knows what `physics` depends on, but not
-what depends on `physics`. Only a target above every mod, the game, sees
+points one way: `//engine/std/physics2d` knows what `physics2d` depends on, but not
+what depends on `physics2d`. Only a target above every mod, the game, sees
 which mods an interface change reaches.
 
 ### Alternatives that were considered

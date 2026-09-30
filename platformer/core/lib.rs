@@ -10,7 +10,7 @@
 //! level, or reloads.
 
 use engine_api::{Cx, Despawns, EventReader, Mod, Query, Spawner, Systems, With, export_mod, phase};
-use physics::{Body, Collider, Gravity, Position, Touching, Trigger, Velocity};
+use physics2d::{Body, Collider, Gravity, Position, Touching, Trigger, Velocity};
 use platformer::{
     Bounce, Coin, GOAL, GRAVITY, Hurt, Input, JUMP_SPEED, Jump, LevelInfo, MAX_FALL, PLAYER, PLAYER_HEIGHT, PLAYER_WIDTH, Player,
     RUN_SPEED, Run, SENSORS, SPIKE, TILES, Tile,

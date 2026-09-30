@@ -108,7 +108,7 @@ fn nothing_in_pong_falls_asleep() {
         send(&e, "pong_text", command);
         for _ in 0..frames {
             send(&e, "lockstep", "step 1");
-            assert_eq!(send(&e, "physics", "sleeping"), "asleep 0", "{}", state(&e));
+            assert_eq!(send(&e, "physics2d", "sleeping"), "asleep 0", "{}", state(&e));
         }
     }
 }
@@ -143,7 +143,7 @@ fn input_and_the_ai_come_before_the_paddles_move() {
         "input: pong::steer\n\
          update: pong_ai::think\n\
          simulate (60 Hz): pong::play\n\
-         physics::step (60 Hz): physics::integrate_velocities, physics::find_contacts, physics::solve\n\
+         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, physics2d::solve\n\
          late: pong::rebound"
     );
 }

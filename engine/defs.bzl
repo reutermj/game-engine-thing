@@ -1,13 +1,13 @@
 """Rules for building engine mods and the games that bundle them.
 
     engine_mod(
-        name = "physics",
+        name = "physics2d",
         srcs = ["lib.rs"],
         interface = ["components.rs"],
         mod_deps = ["//engine/std/clock"],
     )
 
-builds `libphysics_mod.so`. `bazel run //engine/std/physics` sends it to the running
+builds `libphysics2d_mod.so`. `bazel run //engine/std/physics2d` sends it to the running
 engine, which loads it, or hot-reloads it if it's already running.
 
 A mod's `interface` is what other mods may use (its components); `mod_deps`
@@ -186,7 +186,7 @@ def engine_mod(
         variants of a mod (with different `crate_features`), as the tests do.
       interface: Rust sources other mods may depend on: the components this mod
         declares. The first file is the crate root, and the crate is named after
-        the mod, so dependents write `use physics::Velocity`.
+        the mod, so dependents write `use physics2d::Velocity`.
       mod_deps: `engine_mod` targets whose interfaces this mod uses. The engine
         loads them first and refuses to strand this mod by reloading one of them
         with a different interface.

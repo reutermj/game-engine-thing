@@ -51,7 +51,7 @@ fn reloading_the_whole_game_every_frame_is_invisible() {
     let seen = assert_invisible(&game(RALLY, "step 1"), "whole", &[plan]);
     // Something to see in the frames compared: contacts with both paddles,
     // and the wall between.
-    let contacts = seen[..210].iter().filter(|s| s.contains("physics::ContactPair: Some([(")).count();
+    let contacts = seen[..210].iter().filter(|s| s.contains("physics2d::ContactPair: Some([(")).count();
     assert!(contacts > 3, "{contacts} frames with contacts");
     assert!(seen[100].contains("vx 16.80"), "returned:\n{}", seen[100]);
 }
@@ -75,7 +75,7 @@ fn reloading_a_few_mods_together_now_and_then_is_invisible() {
 fn reloading_around_a_point_is_invisible() {
     let seen = assert_invisible(&game(MISS, "step 1"), "point", &[every(2, Batch::Mixed(4)), every(5, Batch::Whole)]);
     assert!(seen.last().unwrap().contains("score you 0 ai 1"), "{}", seen.last().unwrap());
-    assert!(seen.iter().any(|s| s.contains("physics::Trigger events: Some(([(")), "the goal line never triggered");
+    assert!(seen.iter().any(|s| s.contains("physics2d::Trigger events: Some(([(")), "the goal line never triggered");
 }
 
 /// At 45 frames a second, the 60 Hz phases take one step some frames and

@@ -139,16 +139,16 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/std/` — the mods the engine ships, which `engine_game` uses by
   default: `realtime` (the frame loop in real time) and `lockstep` (frames
   only when sent `step N`), both resident bootstraps; `clock` (the `Clock`
-  both publish); `sequential`, the default scheduler; and `physics`, 2D
+  both publish); `sequential`, the default scheduler; and `physics2d`, 2D
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
   `physics3d` is experimental: 3D spheres and boxes that turn, a mod like
-  `physics` (its settings, `Gravity` and `Tuning`, in the world), on 3D
+  `physics2d` (its settings, `Gravity` and `Tuning`, in the world), on 3D
   spatial storage, with `pile3d`, a scene mod that builds the comparison's
   scenes, and a reload replay (physics.md, "Rotation in 3D").
   Each has its comparison and test harness beside it, `compare/` (runbook
   005, [docs/architecture/physics-testing.md](docs/architecture/physics-testing.md)):
-  - `physics/compare` runs the 2D mod beside Box2D and Rapier 2D, fetched
+  - `physics2d/compare` runs the 2D mod beside Box2D and Rapier 2D, fetched
     for that package alone.
   - `physics3d/compare` runs the physics3d mod in the engine beside Rapier
     3D, Jolt and Box3D on the same scenes
@@ -166,7 +166,7 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's
-  moving, both on `//engine/std/physics`. Their `mod_deps` are the dependency example.
+  moving, both on `//engine/std/physics2d`. Their `mod_deps` are the dependency example.
 - `engine/tests/` — integration and e2e tests, and the test mods they load.
   The test mods are separate from `mods/` so editing a demo never changes
   what a test proves. See the testing conventions below.
@@ -177,11 +177,11 @@ changing the ABI, the reload sequence or the Bazel rules.
     [runbook 003](docs/runbooks/003-fuzz-hot-reload.md).
 - `game/` — the `engine_game` target listing the mods loaded at startup,
   and its `reload` target.
-- `platformer/` — the second game, on `//engine/std/physics`: `core` (the player and the rules, mod
+- `platformer/` — the second game, on `//engine/std/physics2d`: `core` (the player and the rules, mod
   `platformer`), `walkers` (enemies), `level` (the map, `map.txt`, rebuilt
   live when it changes), `text`, and `platformer_test`, which replays routes
   an agent played.
-- `pong/` — the first real game, on `//engine/std/physics`: `core` (the rules, mod `pong`), `ai`,
+- `pong/` — the first real game, on `//engine/std/physics2d`: `core` (the rules, mod `pong`), `ai`,
   `text` (commands and drawing over messages), the game target on the
   lockstep bootstrap, and `pong_test`, which plays it through messages.
 - `bazel` — runs a pinned, checksummed bazelisk so a fresh checkout needs no
@@ -247,7 +247,7 @@ changing the ABI, the reload sequence or the Bazel rules.
   behaviour tests (2D and 3D) check our own accepted results in
   `baseline.txt` beside their scenes, each within a band set from
   measured noise: a change that moves a value past its band, better or
-  worse, fails until `./bazel run //engine/std/physics/compare:baseline
+  worse, fails until `./bazel run //engine/std/physics2d/compare:baseline
   -- --write` (and `//engine/std/physics3d/compare:baseline`, and `--long` for the long
   suites) writes it again in the same commit, whose message says why.
   After merging physics branches, regenerate on the merged tree and

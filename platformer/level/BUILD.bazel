@@ -9,7 +9,7 @@ engine_mod(
     srcs = ["lib.rs"],
     compile_data = ["map.txt"],
     mod_deps = [
-        "//engine/std/physics",
+        "//engine/std/physics2d",
         "//platformer/core",
         "//platformer/walkers",
     ],
@@ -29,7 +29,7 @@ engine_mod(
     ],
     crate_features = ["test_" + variant],
     mod_deps = [
-        "//engine/std/physics",
+        "//engine/std/physics2d",
         "//platformer/core",
         "//platformer/walkers",
     ],

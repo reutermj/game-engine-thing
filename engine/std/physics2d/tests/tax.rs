@@ -1,0 +1,271 @@
+//! What physics in the ECS costs over the same step on plain arrays:
+//! `./bazel run --config=bench //engine/std/physics2d:tax`.
+//!
+//! A pile runs in the engine (the physics mod, on the lockstep bootstrap)
+//! until the frame to measure. Its state is then copied out (bodies, and
+//! contacts with their impulses) into arrays, and both run the same frames:
+//! the mod in the world, and the same step here, with the same narrowphase
+//! and solver, contacts in the same order, and bodies as indices instead of
+//! entities. They must end bit for bit the same, or the comparison is of two
+//! different computations. Then each stage is timed on both.
+//!
+//! With `-- parallel`, the same at 1 to 16 threads instead: see `tax_par.rs`.
+//! With `-- sleeping`, only the sleeping tables at the end.
+
+#[path = "arrays.rs"]
+mod arrays;
+#[path = "../narrow.rs"]
+mod narrow;
+#[path = "tax_par.rs"]
+mod par;
+#[path = "pool.rs"]
+mod pool;
+#[path = "../solver.rs"]
+mod solver;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use arrays::{Arrays, Stages};
+use engine_ecs::Entity;
+use engine_loader::engine::Engine;
+use physics2d::Position;
+
+/// Bodies, and how wide the box is they're dropped in. A box whose rows
+/// hold an odd number of bodies (40 and 400 wide) stacks them in columns
+/// that alternate circles and boxes and never touch their neighbors: without
+/// rotation a circle on a box stays put, so each body rests on one contact
+/// and each column is an island. One body more or less a row (41 and 401
+/// wide) packs them into one pile, with half again the contacts: the pile
+/// a solver is up against (2026-09-24, found by the parallel solver's
+/// work).
+const PILES: [(u32, f32); 4] = [(1000, 40.0), (1000, 41.0), (10000, 400.0), (10000, 401.0)];
+/// Piles of bodies that turn (a `Rotation` and a `Spin` each), dropped
+/// staggered so they pile in any engine: the same computation on arrays,
+/// bit for bit, with contact points and angular terms; and what turning
+/// costs over the piles above.
+const TURNING: [(u32, f32); 2] = [(1000, 41.0), (10000, 401.0)];
+
+/// The number after `key` in `text`.
+fn field(text: &str, key: &str) -> f64 {
+    let mut words = text.split_whitespace();
+    words.find(|w| *w == key).unwrap_or_else(|| panic!("no {key} in {text}"));
+    words.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no number after {key} in {text}"))
+}
+
+fn main() {
+    let manifest = engine_control::read_manifest(&std::env::var("PILE").unwrap()).unwrap();
+    if std::env::args().any(|a| a == "parallel") {
+        par::run(&manifest);
+        return;
+    }
+    const FRAMES: u32 = 60;
+    if std::env::args().any(|a| a == "sleeping") {
+        sleeping(&manifest, FRAMES);
+        before_asleep(&manifest, FRAMES);
+        return;
+    }
+    println!("µs per step, {FRAMES} steps, -c opt, one thread; ECS / arrays\n");
+    println!(
+        "| bodies | box | scene | contacts | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    // `ONLY=<text>`: only the cases whose "bodies box scene" contain it.
+    let only = std::env::var("ONLY").unwrap_or_default();
+    let piles = PILES.iter().map(|&(n, w)| (n, w, false)).chain(TURNING.iter().map(|&(n, w)| (n, w, true)));
+    for (n, width, turning) in piles {
+        // Settled is still creeping (every body 1e-4 to 1e-2 a step); at rest
+        // is still bit for bit, which the 10 000 are by about step 3000.
+        for (scene, warmup) in [("falling", 1u32), ("settled", 400), ("at rest", 4000)] {
+            let scene = if turning { format!("{scene}, turning") } else { scene.to_string() };
+            if !format!("{n} {width} {scene}").contains(&only) {
+                continue;
+            }
+            let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{}", std::process::id(), scene.replace(' ', "-")));
+            let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
+            e.load_batch(&manifest.mods).expect("loading the pile");
+            e.send("pile", &format!("widen {width}")).unwrap();
+            e.send("pile", &format!("drop {n}{}", if turning { " staggered turning" } else { "" })).unwrap();
+            e.send("lockstep", &format!("step {warmup}")).unwrap();
+
+            let mut arrays = Arrays::snapshot(e.world());
+            let mut t = Stages::default();
+            let start = Instant::now();
+            for _ in 0..FRAMES {
+                arrays.step(&mut t, arrays::WithPoints(solver::solve_points));
+            }
+            let array_frame = (start.elapsed().as_secs_f64() * 1e6 - t.fresh_sweep) / FRAMES as f64;
+
+            e.send("physics2d", "reset_timings").unwrap();
+            let start = Instant::now();
+            e.send("lockstep", &format!("step {FRAMES}")).unwrap();
+            let ecs_frame = start.elapsed().as_secs_f64() * 1e6 / FRAMES as f64;
+            let (stats, stages) = (e.send("physics2d", "stats").unwrap(), e.send("physics2d", "stages").unwrap());
+
+            // The same computation, or the numbers mean nothing.
+            let ecs: HashMap<Entity, Position> = e.world().values::<Position>().unwrap().into_iter().collect();
+            let differ = arrays
+                .entity
+                .iter()
+                .zip(&arrays.pos)
+                .filter(|(e, p)| ecs[e].x.to_bits() != p.x.to_bits() || ecs[e].y.to_bits() != p.y.to_bits())
+                .count();
+            assert_eq!(differ, 0, "{n} {scene}: {differ} bodies ended elsewhere than the arrays put them");
+            let turned: HashMap<Entity, physics2d::Rotation> =
+                e.world().values::<physics2d::Rotation>().unwrap_or_default().into_iter().collect();
+            let differ = arrays
+                .entity
+                .iter()
+                .zip(&arrays.rot)
+                .filter(|(e, q)| turned.get(e).map(|t| (t.c.to_bits(), t.s.to_bits())) != q.map(|q| (q.c.to_bits(), q.s.to_bits())))
+                .count();
+            assert_eq!(differ, 0, "{n} {scene}: {differ} bodies turned otherwise than the arrays turned them");
+            assert_eq!(field(&stats, "contacts") as usize, arrays.contacts.len(), "{n} {scene}: contacts");
+
+            let f = FRAMES as f64;
+            let per_step = stats.split("us/step").nth(1).expect("timings in stats");
+            let systems = field(per_step, "gravity") + field(per_step, "contacts") + field(per_step, "solve");
+            let pair = |ecs: f64, arr: f64| format!("{ecs:.0} / {arr:.0}");
+            println!("  (the arrays' sweep, sorting afresh each step: {:.0} µs)", t.fresh_sweep / f);
+            if std::env::var_os("STAGES").is_some() {
+                println!("  (stages: {stages})");
+            }
+            println!(
+                "| {n} | {width} | {scene} | {} | {} | {} | {} / – | {} | {} | {} | {} | {} | {} | {:.0} |",
+                arrays.contacts.len(),
+                pair(ecs_frame, array_frame),
+                pair(field(per_step, "gravity"), t.gravity / f),
+                field(&stages, "gather").round(),
+                pair(field(&stages, "broadphase"), t.broadphase / f),
+                pair(field(&stages, "narrowphase"), t.narrowphase / f),
+                pair(field(&stages, "merge"), t.merge / f),
+                pair(field(&stages, "solve_gather"), t.solve_gather / f),
+                pair(field(&stages, "solver"), t.solver / f),
+                pair(field(&stages, "write_back"), t.write_back / f),
+                ecs_frame - systems,
+            );
+            drop(e);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    sleeping(&manifest, FRAMES);
+    before_asleep(&manifest, FRAMES);
+}
+
+/// Sleeping, which changes the simulation, so the ECS alone: the pile with
+/// `Sleep` on, from `SETTLE` steps after all of it is asleep, against the
+/// same pile awake at the same step.
+fn sleeping(manifest: &engine_control::Manifest, frames: u32) {
+    const SPEED: f32 = 0.05;
+    const TIME: f32 = 0.5;
+    const SETTLE: u32 = 10;
+    println!("\nSleeping (speed {SPEED}, {TIME} s), ECS only: µs per step, asleep / awake at the same step\n");
+    println!(
+        "| bodies | box | asleep at step | frame | gravity | gather | broadphase | narrowphase | merge | solve: gather | solver | write back | outside systems | deepest overlap |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (n, width) in PILES {
+        let run = |sleep: bool, until: Option<u32>| {
+            let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{width}-sleep-{sleep}", std::process::id()));
+            let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
+            e.load_batch(&manifest.mods).expect("loading the pile");
+            e.send("pile", &format!("widen {width}")).unwrap();
+            e.send("pile", &format!("drop {n}")).unwrap();
+            if sleep {
+                e.send("pile", &format!("sleep {SPEED} {TIME}")).unwrap();
+            }
+            let mut steps = 0;
+            match until {
+                Some(s) => {
+                    e.send("lockstep", &format!("step {s}")).unwrap();
+                    steps = s;
+                }
+                None => {
+                    while field(&e.send("physics2d", "sleeping").unwrap(), "asleep") < n as f64 && steps < 6000 {
+                        e.send("lockstep", "step 10").unwrap();
+                        steps += 10;
+                    }
+                    // Then `SETTLE` more, so what's timed is a pile asleep,
+                    // not also the step after the last of it fell asleep,
+                    // which looks at each body that did (its velocity was
+                    // written by the solve that stopped it).
+                    e.send("lockstep", &format!("step {SETTLE}")).unwrap();
+                }
+            }
+            e.send("physics2d", "reset_timings").unwrap();
+            let start = Instant::now();
+            e.send("lockstep", &format!("step {frames}")).unwrap();
+            let frame = start.elapsed().as_secs_f64() * 1e6 / frames as f64;
+            let (stats, stages) = (e.send("physics2d", "stats").unwrap(), e.send("physics2d", "stages").unwrap());
+            let per_step = stats.split("us/step").nth(1).expect("timings in stats").to_string();
+            let systems = field(&per_step, "gravity") + field(&per_step, "contacts") + field(&per_step, "solve");
+            let pile = e.send("pile", "stats").unwrap();
+            let asleep = field(&e.send("physics2d", "sleeping").unwrap(), "asleep");
+            drop(e);
+            let _ = std::fs::remove_dir_all(dir);
+            (steps, frame, stages, frame - systems, field(&pile, "deepest"), asleep)
+        };
+        let (at, frame, stages, outside, deepest, asleep) = run(true, None);
+        let (_, frame_awake, stages_awake, outside_awake, deepest_awake, _) = run(false, Some(at + SETTLE));
+        // Not all of it asleep by the last step waited for, or woken since:
+        // the timings are of a pile partly awake.
+        let at = if asleep < n as f64 { format!("{at} ({asleep} asleep)") } else { at.to_string() };
+        let pair = |k: &str| format!("{:.0} / {:.0}", field(&stages, k), field(&stages_awake, k));
+        println!(
+            "| {n} | {width} | {at} | {frame:.0} / {frame_awake:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {outside:.0} / {outside_awake:.0} | {deepest:.3} / {deepest_awake:.3} |",
+            pair("gravity"),
+            pair("gather"),
+            pair("broadphase"),
+            pair("narrowphase"),
+            pair("merge"),
+            pair("solve_gather"),
+            pair("solver"),
+            pair("write_back"),
+        );
+    }
+}
+
+/// Sleeping on, before the pile is asleep: what the bookkeeping costs a
+/// step while bodies fall (every one moving) and settle (most slower than
+/// the threshold, few islands asleep), against the same pile with sleeping
+/// off at the same step. The real piles only: in columns, each island falls
+/// asleep on its own, and there's little settling to see.
+fn before_asleep(manifest: &engine_control::Manifest, frames: u32) {
+    println!("\nSleeping on / off, before asleep: µs per step\n");
+    println!("| bodies | box | from step | asleep then / after | frame | write back | of it, sleeping |");
+    println!("|---|---|---|---|---|---|---|");
+    for (n, width) in [(1000, 41.0), (10000, 401.0)] {
+        for warmup in [1u32, 60, 120] {
+            let run = |on: bool| {
+                let dir = std::env::temp_dir().join(format!("physics-tax-{}-{n}-{width}-before-{warmup}-{on}", std::process::id()));
+                let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
+                e.load_batch(&manifest.mods).expect("loading the pile");
+                e.send("pile", &format!("widen {width}")).unwrap();
+                e.send("pile", &format!("drop {n}")).unwrap();
+                if on {
+                    e.send("pile", "sleep 0.05 0.5").unwrap();
+                }
+                e.send("lockstep", &format!("step {warmup}")).unwrap();
+                let then = field(&e.send("physics2d", "sleeping").unwrap(), "asleep");
+                e.send("physics2d", "reset_timings").unwrap();
+                let start = Instant::now();
+                e.send("lockstep", &format!("step {frames}")).unwrap();
+                let frame = start.elapsed().as_secs_f64() * 1e6 / frames as f64;
+                let stages = e.send("physics2d", "stages").unwrap();
+                let after = field(&e.send("physics2d", "sleeping").unwrap(), "asleep");
+                drop(e);
+                let _ = std::fs::remove_dir_all(dir);
+                (frame, stages, then, after)
+            };
+            let (frame, stages, then, after) = run(true);
+            let (frame_off, stages_off, _, _) = run(false);
+            println!(
+                "| {n} | {width} | {warmup} | {then} / {after} | {frame:.0} / {frame_off:.0} | {:.0} / {:.0} | {:.1} |",
+                field(&stages, "write_back"),
+                field(&stages_off, "write_back"),
+                field(&stages, "sleeping"),
+            );
+        }
+    }
+}

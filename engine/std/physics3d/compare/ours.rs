@@ -4,7 +4,7 @@
 //! its statics at `build`, and each step's arrivals from a system in that
 //! step, where a game's spawns would be. So its step is the engine's frame,
 //! with what the ECS costs around the systems (the re-sorts at apply nodes,
-//! the schedule) in it, as `//engine/std/physics:tax` measures the 2D mod.
+//! the schedule) in it, as `//engine/std/physics2d:tax` measures the 2D mod.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

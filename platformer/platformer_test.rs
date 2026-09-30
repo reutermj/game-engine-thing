@@ -129,7 +129,7 @@ fn falling_onto_the_spikes_respawns_the_player() {
 /// Told to jump in the step it's asleep, it jumps as it does awake.
 #[test]
 fn a_player_asleep_jumps_in_the_frame_it_is_told_to_as_it_does_awake() {
-    let asleep = |e: &Engine| e.send("physics", "sleeping").unwrap() == "asleep 1";
+    let asleep = |e: &Engine| e.send("physics2d", "sleeping").unwrap() == "asleep 1";
     let e = game("asleep");
     play(&e, &["step 20"]);
     let mut frames = 20;
@@ -196,7 +196,7 @@ fn input_comes_first_then_the_rules_the_walkers_physics_and_what_they_did() {
         e.schedule().unwrap(),
         "input: platformer::steer\n\
          simulate (60 Hz): platformer::play, walkers::walk\n\
-         physics::step (60 Hz): physics::integrate_velocities, physics::find_contacts, walkers::meet, physics::solve\n\
+         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, walkers::meet, physics2d::solve\n\
          late: platformer::take_hits"
     );
 }

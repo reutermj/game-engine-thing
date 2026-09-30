@@ -32,7 +32,7 @@ rust_test(
 # Twins of every mod that isn't resident, by mod name: see
 # //engine/tests:replay.rs.
 PONG_TWINS = {
-    "physics": "//engine/std/physics:physics_twin",
+    "physics2d": "//engine/std/physics2d:physics2d_twin",
     "pong": "//pong/core:core_twin",
     "pong_ai": "//pong/ai:ai_twin",
     "pong_text": "//pong/text:text_twin",

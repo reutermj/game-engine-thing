@@ -2,7 +2,7 @@
 //! is, so a reload elsewhere is visible here.
 
 use engine_api::{Cx, Mod, Query, Systems, export_mod, phase};
-use physics::{Position, Velocity};
+use physics2d::{Position, Velocity};
 
 /// Slower than this counts as still.
 const STILL: f32 = 0.1;

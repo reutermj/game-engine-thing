@@ -1,0 +1,233 @@
+# The 2D baseline, the long suite's scenes: our accepted results, which the
+# tests hold every change to within each band, both ways
+# (docs/architecture/physics-testing.md, "The baseline"). Group quality
+# is checked by the quality tests, behaviour by the behaviour tests.
+# Written by
+#     ./bazel run //engine/std/physics2d/compare:baseline -- --long --write
+# never by hand: a change that moves a value writes it again in the same
+# commit. Columns: group, scene, measure, value, band.
+quality    piles 9000-11000 401            rest_median          270        steps 250 or 30%
+quality    piles 9000-11000 401            first_rest_median    270        steps 250 or 30%
+quality    piles 9000-11000 401            depth_end_median     0.01265    rel 0.45 or 1e-4
+quality    piles 9000-11000 401            depth_end_worst      0.01621    rel 0.45 or 1e-4
+quality    piles 9000-11000 401            depth_during_median  0.3105     rel 0.45 or 1e-4
+quality    piles 9000-11000 401            mean_during_worst    0.02643    rel 0.3 or 1e-4
+quality    piles 9000-11000 401            energy_end_median    7.476e-11  log 10 under 1e-8
+quality    piles 9000-11000 401            contacts_least       1.396      rel 0.03
+quality    piles 9000-11000 401            escaped              0          exact
+quality    piles 150-450 21                rest_median          210        steps 100 or 20%
+quality    piles 150-450 21                first_rest_median    160        steps 130 or 25%
+quality    piles 150-450 21                depth_end_median     0.00692    rel 0.45 or 1e-4
+quality    piles 150-450 21                depth_end_worst      0.01143    rel 0.45 or 1e-4
+quality    piles 150-450 21                depth_during_median  0.2432     rel 0.45 or 1e-4
+quality    piles 150-450 21                mean_during_worst    0.02771    rel 0.3 or 1e-4
+quality    piles 150-450 21                energy_end_median    4.702e-11  log 10 under 1e-8
+quality    piles 150-450 21                contacts_least       1.207      rel 0.03
+quality    piles 150-450 21                escaped              0          exact
+quality    piles 300-1200 41               rest_median          190        steps 100 or 20%
+quality    piles 300-1200 41               first_rest_median    190        steps 130 or 25%
+quality    piles 300-1200 41               depth_end_median     0.009499   rel 0.45 or 1e-4
+quality    piles 300-1200 41               depth_end_worst      0.0139     rel 0.45 or 1e-4
+quality    piles 300-1200 41               depth_during_median  0.2759     rel 0.45 or 1e-4
+quality    piles 300-1200 41               mean_during_worst    0.02792    rel 0.3 or 1e-4
+quality    piles 300-1200 41               energy_end_median    1.722e-11  log 10 under 1e-8
+quality    piles 300-1200 41               contacts_least       1.336      rel 0.03
+quality    piles 300-1200 41               escaped              0          exact
+quality    piles 800-2400 81               first_rest_median    200        steps 130 or 25%
+quality    piles 800-2400 81               depth_end_median     0.01337    rel 0.45 or 1e-4
+quality    piles 800-2400 81               depth_end_worst      0.02657    rel 0.45 or 1e-4
+quality    piles 800-2400 81               depth_during_median  0.2846     rel 0.45 or 1e-4
+quality    piles 800-2400 81               mean_during_worst    0.02592    rel 0.3 or 1e-4
+quality    piles 800-2400 81               contacts_least       1.361      rel 0.03
+quality    piles 800-2400 81               escaped              0          exact
+quality    piles 2000-4800 161             rest_median          230        steps 100 or 20%
+quality    piles 2000-4800 161             first_rest_median    230        steps 130 or 25%
+quality    piles 2000-4800 161             depth_end_median     0.01119    rel 0.45 or 1e-4
+quality    piles 2000-4800 161             depth_end_worst      0.0161     rel 0.45 or 1e-4
+quality    piles 2000-4800 161             depth_during_median  0.3088     rel 0.45 or 1e-4
+quality    piles 2000-4800 161             mean_during_worst    0.02644    rel 0.3 or 1e-4
+quality    piles 2000-4800 161             energy_end_median    4.171e-11  log 10 under 1e-8
+quality    piles 2000-4800 161             contacts_least       1.363      rel 0.03
+quality    piles 2000-4800 161             escaped              0          exact
+quality    piles 5000-12000 401            rest_median          240        steps 100 or 20%
+quality    piles 5000-12000 401            first_rest_median    240        steps 130 or 25%
+quality    piles 5000-12000 401            depth_end_median     0.01119    rel 0.45 or 1e-4
+quality    piles 5000-12000 401            depth_end_worst      0.01747    rel 0.45 or 1e-4
+quality    piles 5000-12000 401            depth_during_median  0.2861     rel 0.45 or 1e-4
+quality    piles 5000-12000 401            mean_during_worst    0.02643    rel 0.3 or 1e-4
+quality    piles 5000-12000 401            energy_end_median    8.544e-11  log 10 under 1e-8
+quality    piles 5000-12000 401            contacts_least       1.365      rel 0.03
+quality    piles 5000-12000 401            escaped              0          exact
+quality    mixed 400-1200 41               rest_median          200        steps 100 or 20%
+quality    mixed 400-1200 41               first_rest_median    200        steps 130 or 25%
+quality    mixed 400-1200 41               depth_end_median     0.01475    rel 0.45 or 1e-4
+quality    mixed 400-1200 41               depth_end_worst      0.02552    rel 0.45 or 1e-4
+quality    mixed 400-1200 41               depth_during_median  0.3522     rel 0.45 or 1e-4
+quality    mixed 400-1200 41               mean_during_worst    0.02251    rel 0.3 or 1e-4
+quality    mixed 400-1200 41               energy_end_median    1.442e-11  log 10 under 1e-8
+quality    mixed 400-1200 41               contacts_least       1.447      rel 0.03
+quality    mixed 400-1200 41               escaped              0          exact
+quality    pyramids 30-60                  rest_median          50         steps 10
+quality    pyramids 30-60                  rest_worst           80         steps 10
+quality    pyramids 30-60                  top_moved_median     0.05434    rel 0.02 or 1e-4
+quality    pyramids 30-60                  top_moved_worst      0.09634    rel 0.02 or 1e-4
+quality    pyramids 30-60                  depth_end_median     0.002685   rel 0.02 or 1e-4
+quality    pyramids 30-60                  tilt_worst           0          rel 0.1 or 0.01
+quality    pyramids 30-60                  energy_tail_median   6.529e-12  log 3 under 1e-8
+quality    pyramids 30-60                  stand                7          within 1
+quality    pyramids 30-60                  escaped              0          exact
+quality    pyramids 70-120                 rest_median          150        steps 10
+quality    pyramids 70-120                 rest_worst           200        steps 10
+quality    pyramids 70-120                 top_moved_median     0.2667     rel 0.02 or 1e-4
+quality    pyramids 70-120                 top_moved_worst      0.3838     rel 0.02 or 1e-4
+quality    pyramids 70-120                 depth_end_median     0.00603    rel 0.02 or 1e-4
+quality    pyramids 70-120                 tilt_worst           0          rel 0.1 or 0.01
+quality    pyramids 70-120                 energy_tail_median   1.394e-10  log 3 under 1e-8
+quality    pyramids 70-120                 stand                8          within 1
+quality    pyramids 70-120                 escaped              0          exact
+quality    pyramid 100                     rest                 150        steps 10
+quality    pyramid 100                     top_moved            0.2667     rel 0.02 or 1e-4
+quality    pyramid 100                     depth_end            0.00603    rel 0.02 or 1e-4
+quality    pyramid 100                     tilt                 0          rel 0.1 or 0.01
+quality    pyramid 100                     energy_tail          2.413e-10  log 3 under 1e-8
+quality    pyramid 100                     escaped              0          exact
+quality    piles 9000-11000 401 turning    first_rest_median    310        steps 250 or 30%
+quality    piles 9000-11000 401 turning    depth_end_median     0.02178    rel 0.45 or 1e-4
+quality    piles 9000-11000 401 turning    depth_end_worst      0.02766    rel 0.45 or 1e-4
+quality    piles 9000-11000 401 turning    depth_during_median  0.4042     rel 0.45 or 1e-4
+quality    piles 9000-11000 401 turning    mean_during_worst    0.01799    rel 0.3 or 1e-4
+quality    piles 9000-11000 401 turning    contacts_least       1.96       rel 0.03
+quality    piles 9000-11000 401 turning    escaped              0          exact
+quality    piles 150-450 21 turning        rest_median          180        steps 100 or 20%
+quality    piles 150-450 21 turning        first_rest_median    180        steps 130 or 25%
+quality    piles 150-450 21 turning        depth_end_median     0.01319    rel 0.45 or 1e-4
+quality    piles 150-450 21 turning        depth_end_worst      0.01681    rel 0.45 or 1e-4
+quality    piles 150-450 21 turning        depth_during_median  0.2072     rel 0.45 or 1e-4
+quality    piles 150-450 21 turning        mean_during_worst    0.01713    rel 0.3 or 1e-4
+quality    piles 150-450 21 turning        energy_end_median    3.175e-11  log 10 under 1e-8
+quality    piles 150-450 21 turning        contacts_least       1.807      rel 0.03
+quality    piles 150-450 21 turning        escaped              0          exact
+quality    piles 300-1200 41 turning       rest_median          260        steps 100 or 20%
+quality    piles 300-1200 41 turning       first_rest_median    220        steps 130 or 25%
+quality    piles 300-1200 41 turning       depth_end_median     0.01432    rel 0.45 or 1e-4
+quality    piles 300-1200 41 turning       depth_end_worst      0.02458    rel 0.45 or 1e-4
+quality    piles 300-1200 41 turning       depth_during_median  0.3257     rel 0.45 or 1e-4
+quality    piles 300-1200 41 turning       mean_during_worst    0.02103    rel 0.3 or 1e-4
+quality    piles 300-1200 41 turning       energy_end_median    2.066e-9   log 10 under 1e-8
+quality    piles 300-1200 41 turning       contacts_least       1.907      rel 0.03
+quality    piles 300-1200 41 turning       escaped              0          exact
+quality    piles 800-2400 81 turning       rest_median          370        steps 100 or 20%
+quality    piles 800-2400 81 turning       first_rest_median    310        steps 130 or 25%
+quality    piles 800-2400 81 turning       depth_end_median     0.02182    rel 0.45 or 1e-4
+quality    piles 800-2400 81 turning       depth_end_worst      0.03055    rel 0.45 or 1e-4
+quality    piles 800-2400 81 turning       depth_during_median  0.2717     rel 0.45 or 1e-4
+quality    piles 800-2400 81 turning       mean_during_worst    0.02111    rel 0.3 or 1e-4
+quality    piles 800-2400 81 turning       energy_end_median    2.709e-8   log 10 under 1e-8
+quality    piles 800-2400 81 turning       contacts_least       1.933      rel 0.03
+quality    piles 800-2400 81 turning       escaped              0          exact
+quality    piles 2000-4800 161 turning     rest_median          300        steps 100 or 20%
+quality    piles 2000-4800 161 turning     first_rest_median    300        steps 130 or 25%
+quality    piles 2000-4800 161 turning     depth_end_median     0.02031    rel 0.45 or 1e-4
+quality    piles 2000-4800 161 turning     depth_end_worst      0.02761    rel 0.45 or 1e-4
+quality    piles 2000-4800 161 turning     depth_during_median  0.3242     rel 0.45 or 1e-4
+quality    piles 2000-4800 161 turning     mean_during_worst    0.02202    rel 0.3 or 1e-4
+quality    piles 2000-4800 161 turning     energy_end_median    1.692e-9   log 10 under 1e-8
+quality    piles 2000-4800 161 turning     contacts_least       1.911      rel 0.03
+quality    piles 2000-4800 161 turning     escaped              0          exact
+quality    piles 5000-12000 401 turning    first_rest_median    320        steps 130 or 25%
+quality    piles 5000-12000 401 turning    depth_end_median     0.01984    rel 0.45 or 1e-4
+quality    piles 5000-12000 401 turning    depth_end_worst      0.02766    rel 0.45 or 1e-4
+quality    piles 5000-12000 401 turning    depth_during_median  0.4038     rel 0.45 or 1e-4
+quality    piles 5000-12000 401 turning    mean_during_worst    0.02221    rel 0.3 or 1e-4
+quality    piles 5000-12000 401 turning    contacts_least       1.911      rel 0.03
+quality    piles 5000-12000 401 turning    escaped              0          exact
+quality    mixed 400-1200 41 turning       rest_median          300        steps 100 or 20%
+quality    mixed 400-1200 41 turning       first_rest_median    300        steps 130 or 25%
+quality    mixed 400-1200 41 turning       depth_end_median     0.01356    rel 0.45 or 1e-4
+quality    mixed 400-1200 41 turning       depth_end_worst      0.02219    rel 0.45 or 1e-4
+quality    mixed 400-1200 41 turning       depth_during_median  0.333      rel 0.45 or 1e-4
+quality    mixed 400-1200 41 turning       mean_during_worst    0.02691    rel 0.3 or 1e-4
+quality    mixed 400-1200 41 turning       energy_end_median    9.341e-8   log 10 under 1e-8
+quality    mixed 400-1200 41 turning       contacts_least       1.948      rel 0.03
+quality    mixed 400-1200 41 turning       escaped              0          exact
+quality    pyramids 30-60 turning          rest_median          110        steps 10
+quality    pyramids 30-60 turning          rest_worst           190        steps 10
+quality    pyramids 30-60 turning          top_moved_median     0.05122    rel 0.02 or 1e-4
+quality    pyramids 30-60 turning          top_moved_worst      0.09276    rel 0.02 or 1e-4
+quality    pyramids 30-60 turning          depth_end_median     0.002663   rel 0.02 or 1e-4
+quality    pyramids 30-60 turning          tilt_worst           0.1839     rel 0.1 or 0.01
+quality    pyramids 30-60 turning          energy_tail_median   6.108e-8   log 3 under 1e-8
+quality    pyramids 30-60 turning          stand                7          within 1
+quality    pyramids 30-60 turning          escaped              0          exact
+quality    pyramids 70-120 turning         rest_median          780        steps 10
+quality    pyramids 70-120 turning         rest_worst           1200       steps 10
+quality    pyramids 70-120 turning         top_moved_median     0.2584     rel 0.02 or 1e-4
+quality    pyramids 70-120 turning         top_moved_worst      0.3712     rel 0.02 or 1e-4
+quality    pyramids 70-120 turning         depth_end_median     0.005962   rel 0.02 or 1e-4
+quality    pyramids 70-120 turning         tilt_worst           0.4695     rel 0.1 or 0.01
+quality    pyramids 70-120 turning         energy_tail_median   5.524e-8   log 3 under 1e-8
+quality    pyramids 70-120 turning         stand                8          within 1
+quality    pyramids 70-120 turning         escaped              0          exact
+quality    pyramid 100 turning             rest                 780        steps 10
+quality    pyramid 100 turning             top_moved            0.2584     rel 0.02 or 1e-4
+quality    pyramid 100 turning             depth_end            0.005962   rel 0.02 or 1e-4
+quality    pyramid 100 turning             tilt                 0.3795     rel 0.1 or 0.01
+quality    pyramid 100 turning             energy_tail          5.524e-8   log 3 under 1e-8
+quality    pyramid 100 turning             escaped              0          exact
+quality    pyramid 50 turning rot          rest                 120        steps 10
+quality    pyramid 50 turning rot          top_moved            0.06338    rel 0.02 or 1e-4
+quality    pyramid 50 turning rot          depth_end            0.002963   rel 0.02 or 1e-4
+quality    pyramid 50 turning rot          tilt                 0.1458     rel 0.1 or 0.01
+quality    pyramid 50 turning rot          energy_tail          5.366e-7   log 3 under 1e-8
+quality    pyramid 50 turning rot          escaped              0          exact
+quality    pyramid 50 turning rot/order=2  rest                 90         steps 10
+quality    pyramid 50 turning rot/order=2  top_moved            0.06567    rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/order=2  depth_end            0.003071   rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/order=2  tilt                 0.1446     rel 0.1 or 0.01
+quality    pyramid 50 turning rot/order=2  energy_tail          3.446e-11  log 3 under 1e-8
+quality    pyramid 50 turning rot/order=2  escaped              0          exact
+quality    pyramid 50 turning rot/order=3  rest                 90         steps 10
+quality    pyramid 50 turning rot/order=3  top_moved            0.06546    rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/order=3  depth_end            0.003027   rel 0.02 or 1e-4
+quality    pyramid 50 turning rot/order=3  tilt                 0.1337     rel 0.1 or 0.01
+quality    pyramid 50 turning rot/order=3  energy_tail          6.588e-8   log 3 under 1e-8
+quality    pyramid 50 turning rot/order=3  escaped              0          exact
+behaviour  family cards                    good                 105        within 2
+behaviour  family ramp                     good                 30         within 1
+behaviour  family ladder                   good                 24         within 1
+behaviour  family dominoes                 good                 13         within 1
+behaviour  family stacks                   good                 6          within 1
+behaviour  family ratios                   good                 34         within 1
+behaviour  family pyramids                 good                 6          within 1
+behaviour  family cards_wide               good                 69         within 2
+behaviour  family dominoes_fine            good                 25         within 1
+behaviour  family stacks_fine              good                 9          within 1
+behaviour  family ratios_fine              good                 60         within 1
+behaviour  family pyramids_fine            good                 11         within 1
+behaviour  bounces drops                   excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces drops                   excess_tipping       2.384e-7   rel 0.05 or 0.001
+behaviour  bounces drops                   gain_worst           0.0909     rel 0.05 or 0.001
+behaviour  bounces drops                   gain_median          -0.01892   rel 0.05 or 0.001
+behaviour  bounces drops                   loss_worst           1.015      rel 0.05 or 0.001
+behaviour  bounces drops                   bounced_below        0          within 198
+behaviour  bounces drops                   flat_above           502        within 198
+behaviour  bounces rates                   excess_worst         -8.546e-4  rel 0.05 or 0.001
+behaviour  bounces rates                   gain_worst           0.03237    rel 0.05 or 0.001
+behaviour  bounces rates                   gain_median          -0.07001   rel 0.05 or 0.001
+behaviour  bounces rates                   loss_worst           1.043      rel 0.05 or 0.001
+behaviour  bounces rates                   bounced_below        0          within 25
+behaviour  bounces rates                   flat_above           207        within 25
+behaviour  bounces oblique                 excess_worst         0          rel 0.05 or 0.001
+behaviour  bounces oblique                 gain_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique                 gain_median          -1.55e-5   rel 0.05 or 0.001
+behaviour  bounces oblique                 loss_worst           0.2391     rel 0.05 or 0.001
+behaviour  bounces oblique                 bounced_below        0          within 32
+behaviour  bounces oblique                 flat_above           0          within 32
+behaviour  bounces oblique                 slip_worst           0          rel 0.05 or 0.001
+behaviour  bounces oblique                 tangent_most         0.9747     rel 0.01 or 1e-4
+behaviour  bounces oblique                 tangent_median       0.681      rel 0.01 or 1e-4
+behaviour  bounces pairs                   gain_worst           2.384e-7   rel 0.05 or 0.001
+behaviour  bounces pairs                   momentum_worst       1.007e-4   rel 0.5 or 1e-4
+behaviour  bounces series                  rise_worst           0.9988     rel 0.01 or 0.001
+behaviour  bounces series                  decay_worst          1.085      rel 0.01 or 0.001
+behaviour  bounces series                  decay_median         0.9633     rel 0.01 or 0.001

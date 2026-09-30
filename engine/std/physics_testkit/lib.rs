@@ -1,4 +1,4 @@
-//! What the 2D and 3D physics harnesses (`//engine/std/physics/compare`,
+//! What the 2D and 3D physics harnesses (`//engine/std/physics2d/compare`,
 //! `//engine/std/physics3d/compare`) share: the parts of testing physics
 //! that don't depend on the dimension (physics-testing.md, "Where the
 //! tests live"). The baseline's file format, bands and comparison, and its tool's

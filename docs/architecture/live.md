@@ -79,7 +79,7 @@ fn find_contacts(_: &mut Cx, /* the queries it reads data through */ mut near: L
 }
 ```
 
-That is the 2D physics mod's relation (`engine/std/physics/lib.rs`), which
+That is the 2D physics mod's relation (`engine/std/physics2d/lib.rs`), which
 finds its pairs across workers: `near.pairs_with(&workers)`.
 
 **The names.** The two halves are named apart on purpose. `Proximity` is

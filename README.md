@@ -14,9 +14,9 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 
 ```sh
 ./bazel run //game                  # terminal 1: engine + the mods in game/BUILD.bazel
-# edit engine/std/physics/lib.rs (say, flip gravity in integrate_velocities), then:
-./bazel run //engine/std/physics    # terminal 2: rebuild and hot-reload; bodies keep moving
-# edit engine/std/physics/components.rs, which spawner and reporter also use, then:
+# edit engine/std/physics2d/lib.rs (say, flip gravity in integrate_velocities), then:
+./bazel run //engine/std/physics2d    # terminal 2: rebuild and hot-reload; bodies keep moving
+# edit engine/std/physics2d/components.rs, which spawner and reporter also use, then:
 ./bazel run //game:reload           # reloads the three together, nothing else
 # edit mods/counter/lib.rs, then:
 ./bazel run //mods/counter          # per-mod state carries over too
@@ -59,8 +59,8 @@ level is `platformer/level/map.txt`: edit it and
 - `engine/std`: the mods every game gets by default: the `realtime` and
   `lockstep` bootstraps, `clock`, and the `sequential` scheduler
 - `mods/*`: `counter` (per-mod state), `hello` (live
-  load), `transform`/`physics`/`spawner`/`reporter` (ECS demo, and mods that
-  depend on each other's components)
+  load), `spawner`/`reporter` (the physics demo, on `//engine/std/physics2d`:
+  mods that depend on another's components)
 - `engine/tools`: build-time tooling for `engine_mod`
 
 ## How reload works

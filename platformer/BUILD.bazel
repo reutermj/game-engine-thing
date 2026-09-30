@@ -39,7 +39,7 @@ rust_test(
 # Twins of every mod that isn't resident, by mod name: see
 # //engine/tests:replay.rs.
 PLATFORMER_TWINS = {
-    "physics": "//engine/std/physics:physics_twin",
+    "physics2d": "//engine/std/physics2d:physics2d_twin",
     "platformer": "//platformer/core:core_twin",
     "walkers": "//platformer/walkers:walkers_twin",
     "level": "//platformer/level:level_twin",

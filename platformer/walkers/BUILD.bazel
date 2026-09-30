@@ -7,7 +7,7 @@ engine_mod(
     srcs = ["lib.rs"],
     interface = ["components.rs"],
     mod_deps = [
-        "//engine/std/physics",
+        "//engine/std/physics2d",
         "//platformer/core",
     ],
     twin = True,

@@ -11,7 +11,7 @@
 
 use clock::Clock;
 use engine_api::{Cx, Mod, WorldMut, export_mod};
-use physics::{Position, Touching, Velocity};
+use physics2d::{Position, Touching, Velocity};
 use platformer::{Coin, GOAL, Input, Jump, LevelInfo, PLAYER_HEIGHT, PLAYER_WIDTH, Player, Run, SOLID, SPIKE, Tile};
 use walkers::Walker;
 

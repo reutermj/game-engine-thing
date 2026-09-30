@@ -26,7 +26,7 @@ rust_library(
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",
-        "//engine/std/physics:physics_interface",
+        "//engine/std/physics2d:physics2d_interface",
         "@rules_rust//rust/runfiles",
     ],
 )

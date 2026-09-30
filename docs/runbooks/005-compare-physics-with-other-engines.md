@@ -1,6 +1,6 @@
 # Runbook: compare the physics with Box2D and Rapier
 
-- **Trigger:** a change to `//engine/std/physics`'s step (the solver, the
+- **Trigger:** a change to `//engine/std/physics2d`'s step (the solver, the
   narrowphase, the broadphase, the storage it walks) that claims to make it
   faster or better behaved; or bumping Box2D or Rapier.
 
@@ -14,7 +14,7 @@ one for the other differently.
 
 ## Resolution
 
-Each mod has its harness beside it: `//engine/std/physics/compare` (2D,
+Each mod has its harness beside it: `//engine/std/physics2d/compare` (2D,
 against Box2D and Rapier 2D) and `//engine/std/physics3d/compare` (3D,
 against Rapier 3D, Box3D and Jolt), each with its comparison binary, its
 quality and behaviour tests and its baseline. What they share apart from
@@ -24,7 +24,7 @@ family statistics, the run cache, the bounce statistics) is
 live").
 
 ```sh
-./bazel run --config=bench //engine/std/physics/compare > compare.md
+./bazel run --config=bench //engine/std/physics2d/compare > compare.md
 ```
 
 About 25 minutes with `LONG=1`, 12 without, on this machine. It prints,
@@ -34,14 +34,14 @@ settled, each engine's own stages, and whether the arrays agreed with the
 mod bit for bit (they must, but for rain). Narrower runs:
 
 ```sh
-ONLY="pile 10000" REPS=5 ./bazel run --config=bench //engine/std/physics/compare
-ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run --config=bench //engine/std/physics/compare
-SLEEP=1 ./bazel run --config=bench //engine/std/physics/compare   # each engine's default sleeping
-SETTLE=1500 ./bazel run --config=bench //engine/std/physics/compare  # how soon each comes to rest
-VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run --config=bench //engine/std/physics/compare
-TURN=1 ./bazel run --config=bench //engine/std/physics/compare   # only bodies that turn
-TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run --config=bench //engine/std/physics/compare
-./bazel run --config=bench //engine/std/physics/compare:solver_bench   # the 2D solver alone, each way of solving
+ONLY="pile 10000" REPS=5 ./bazel run --config=bench //engine/std/physics2d/compare
+ENGINES=ecs,box2d VARIANTS=box2d:2,rapier:8 ./bazel run --config=bench //engine/std/physics2d/compare
+SLEEP=1 ./bazel run --config=bench //engine/std/physics2d/compare   # each engine's default sleeping
+SETTLE=1500 ./bazel run --config=bench //engine/std/physics2d/compare  # how soon each comes to rest
+VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run --config=bench //engine/std/physics2d/compare
+TURN=1 ./bazel run --config=bench //engine/std/physics2d/compare   # only bodies that turn
+TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run --config=bench //engine/std/physics2d/compare
+./bazel run --config=bench //engine/std/physics2d/compare:solver_bench   # the 2D solver alone, each way of solving
 ```
 
 Every case runs twice by default: with rotation locked (every engine), as
@@ -65,7 +65,7 @@ overlap at any look, contacts a body, islands, tilt, escapes, and for
 pyramids and stacks how far the top box moved. `TRACE=1` with it names
 the body that moved again. The
 `arrays:` variants are other solvers on the arrays, listed in
-`engine/std/physics/compare/variants.rs`: the split-impulse solver the
+`engine/std/physics2d/compare/variants.rs`: the split-impulse solver the
 soft step replaced (`split`, with friction on its pseudo velocities or a
 decaying correction), Jolt-style position iterations (`ngs`), and the
 soft step with any constant changed (`soft/<key>=<value>/...`, e.g.
@@ -92,9 +92,9 @@ says (a pile standing in columns, a body through a wall, a card house
 built wrong) measures as confidently as one that is.
 
 ```sh
-VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp ./bazel run --config=bench //engine/std/physics/compare
-VIEW="ratio 1000 5" VIEW_STEPS=0,60,120 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run --config=bench //engine/std/physics/compare
-TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run --config=bench //engine/std/physics/compare
+VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp ./bazel run --config=bench //engine/std/physics2d/compare
+VIEW="ratio 1000 5" VIEW_STEPS=0,60,120 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run --config=bench //engine/std/physics2d/compare
+TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run --config=bench //engine/std/physics2d/compare
 ```
 
 - `VIEW` is any scene `Scene::parse` reads (`scene.rs`): the settling
@@ -120,10 +120,10 @@ TURN=1 VIEW="pyramid 20" VIEW_STEPS=600 VIEW_TEXT=100 ./bazel run --config=bench
 ## The behaviour scenes
 
 ```sh
-BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics/compare > behave.md
-SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run --config=bench //engine/std/physics/compare
-FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # the edge-of-stability families, short grids
-FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics/compare   # a long grid
+BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics2d/compare > behave.md
+SCENES="bullet 50 0.25 1 0.5,ladder 30 0.26" BEHAVE=1 ./bazel run --config=bench //engine/std/physics2d/compare
+FAMILIES=all ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics2d/compare   # the edge-of-stability families, short grids
+FAMILIES=cards FAMILY_LONG=1 ENGINES=arrays,box2d,rapier ./bazel run --config=bench //engine/std/physics2d/compare   # a long grid
 ./bazel run --config=bench //engine/std/physics3d/compare:bench -- ramp_hold,ramp_slide,ramp_roll 1 all --rotate --behave
 ./bazel run --config=bench //engine/std/physics3d/compare:bench -- bounce 25,50,75,100 all --rotate --behave
 ./bazel run --config=bench //engine/std/physics3d/compare:bench -- ratio 10,100,1000 all --rotate --behave
@@ -139,10 +139,10 @@ longer meets is a bead and an ignored test.
 ## The bounce families
 
 ```sh
-BOUNCES=all BOUNCE_RUNS=1 ./bazel run //engine/std/physics/compare > bounces.txt              # short grids, every engine, every run
-BOUNCES=drops,rates BOUNCE_LONG=1 ./bazel run //engine/std/physics/compare                    # long grids, statistics only
-BOUNCES=all ENGINES=closing VARIANTS=arrays:rot/closing=1,arrays:rot/closing=3 ./bazel run //engine/std/physics/compare   # options of ours
-VIEW="hit corner e=1 v=5 g=20" VIEW_STEPS=0,15,16,22 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run //engine/std/physics/compare
+BOUNCES=all BOUNCE_RUNS=1 ./bazel run //engine/std/physics2d/compare > bounces.txt              # short grids, every engine, every run
+BOUNCES=drops,rates BOUNCE_LONG=1 ./bazel run //engine/std/physics2d/compare                    # long grids, statistics only
+BOUNCES=all ENGINES=closing VARIANTS=arrays:rot/closing=1,arrays:rot/closing=3 ./bazel run //engine/std/physics2d/compare   # options of ours
+VIEW="hit corner e=1 v=5 g=20" VIEW_STEPS=0,15,16,22 VIEW_TEXT=60 ENGINES=arrays,box2d ./bazel run //engine/std/physics2d/compare
 ./bazel run //engine/std/physics3d/compare:bench -- ours,rapier,box3d --bounces --each > bounces3d.txt    # 3D, short grids
 ./bazel run //engine/std/physics3d/compare:bench -- ours --bounces --long --tune=closing=before           # 3D, long grids, an option
 ```
@@ -162,7 +162,7 @@ measure again on exactly the tests' grids.
 ## The baseline
 
 Our own accepted results, per scene and measure, in four files:
-`engine/std/physics/compare/baseline.txt` and `baseline_long.txt` (2D),
+`engine/std/physics2d/compare/baseline.txt` and `baseline_long.txt` (2D),
 `engine/std/physics3d/compare/baseline.txt` and `baseline_long.txt` (3D)
 (physics-testing.md, "The baseline"). The quality and behaviour tests
 check them, from their own runs (the test `baseline` in each, and
@@ -179,11 +179,11 @@ same for both.
   commit message or the report:
 
   ```sh
-  ./bazel run //engine/std/physics/compare:baseline          # 2D default, 1 s
-  ./bazel run //engine/std/physics/compare:baseline -- --long  # 2D long, about a minute
+  ./bazel run //engine/std/physics2d/compare:baseline          # 2D default, 1 s
+  ./bazel run //engine/std/physics2d/compare:baseline -- --long  # 2D long, about a minute
   ./bazel run //engine/std/physics3d/compare:baseline                    # 3D default, seconds
   ./bazel run //engine/std/physics3d/compare:baseline -- --long            # 3D long, about 90 s
-  SOLVER=rot/carry=0 ./bazel run //engine/std/physics/compare:baseline   # a variant against the baseline
+  SOLVER=rot/carry=0 ./bazel run //engine/std/physics2d/compare:baseline   # a variant against the baseline
   ```
 
   Every value that moved past its band, with old, new, band and which
@@ -223,8 +223,8 @@ them again and set each bound by the rules in physics.md:
 
 ```sh
 # 2D, the default suite's scenes, and the long ones
-ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run --config=bench //engine/std/physics/compare
-ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run --config=bench //engine/std/physics/compare
+ENGINES=arrays,box2d,rapier SETTLE=700 SCENES="pile 400 41,pile 600 41,pile 800 41,pile 1000 41,pile 1200 41,pyramid 15,pyramid 20,pyramid 25,stack 10,stack 20" ./bazel run --config=bench //engine/std/physics2d/compare
+ENGINES=arrays,box2d,rapier SETTLE=2500 SCENES="pile 9000 401,pile 10000 401,pile 11000 401,pyramid 100" ./bazel run --config=bench //engine/std/physics2d/compare
 # 3D
 ./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes,planks 200,300,400,500,1000 all --rotate --runs=1
 ./bazel run --config=bench //engine/std/physics3d/compare:bench -- boxes 200,300,400,500 all --runs=1
@@ -245,9 +245,9 @@ a looser bound.
   field order (`box2d.rs` asserts their sizes, not their order), and
   `b2Body_SetMassData` must still leave a fixed rotation locked (the
   bench asserts no body turned; see the lore).
-- **Rapier:** the version in `engine/std/physics/compare/Cargo.toml`, then
+- **Rapier:** the version in `engine/std/physics2d/compare/Cargo.toml`, then
   runbook 001 for `Cargo.lock`. The counters' names move between versions
   (see the lore on its broadphase timers), and so do the defaults the
   tables call "defaults": note them.
 - Update the versions in docs/CREDITS.md, and the license copy in
-  `engine/std/physics/compare/licenses/` from the new tag.
+  `engine/std/physics2d/compare/licenses/` from the new tag.

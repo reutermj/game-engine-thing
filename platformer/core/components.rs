@@ -2,7 +2,7 @@
 //! how the level is written, how `platformer_text` draws it, and physics's
 //! convention. A tile at `(x, y)` covers `[x, x + 1) × [y, y + 1)`.
 //!
-//! Where things are and how they move is physics's (`physics::Position`,
+//! Where things are and how they move is physics's (`physics2d::Position`,
 //! the center of a collider, and `Velocity`); these components hold the
 //! game's own state.
 

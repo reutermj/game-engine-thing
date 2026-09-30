@@ -9,7 +9,7 @@
 //! either pushes the other.
 
 use engine_api::{Cx, Despawns, EventWriter, Mod, Query, Systems, With, Without, export_mod, phase};
-use physics::{Overlap, Position, Spatial, Touching, Vec2, Velocity, rect};
+use physics2d::{Overlap, Position, Spatial, Touching, Vec2, Velocity, rect};
 use platformer::{Bounce, Hurt, PLAYER_HEIGHT, Player, SOLID, Tile};
 use walkers::{STOMP_BOUNCE, WALK_SPEED, Walker};
 
@@ -86,7 +86,7 @@ impl Mod for Walkers {
 
     fn systems(s: &mut Systems<Self>) {
         s.add("walk", Self::walk).phase(phase::SIMULATE).after("platformer::play");
-        s.add("meet", Self::meet).phase("physics::step").after("physics::find_contacts").before("physics::solve");
+        s.add("meet", Self::meet).phase("physics2d::step").after("physics2d::find_contacts").before("physics2d::solve");
     }
 }
 

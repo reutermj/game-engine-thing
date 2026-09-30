@@ -5,7 +5,7 @@
 //! band fails, better or worse, until the file is written again in the
 //! same commit, so the file's diff is the record of what a change did to
 //! physics. This is the format and the comparison; each harness's
-//! `record.rs` (`//engine/std/physics/compare`, `//engine/std/physics3d/compare`)
+//! `record.rs` (`//engine/std/physics2d/compare`, `//engine/std/physics3d/compare`)
 //! says what it records and with which bands, and `tool` writes the files.
 //!
 //! A line is a group (the test binary that checks it), a scene, a measure,

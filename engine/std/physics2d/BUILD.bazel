@@ -1,0 +1,267 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
+load("//engine:sanitize.bzl", "sanitized_tests")
+
+# 2D rigid bodies, with every piece of state in the world or this mod's
+# state, so the solver hot-reloads under a running simulation. A game uses
+# it by naming it in a mod's mod_deps. See docs/architecture/physics.md.
+
+PHYSICS_SRCS = [
+    "lib.rs",
+    "narrow.rs",
+    "sleep.rs",
+    "solver.rs",
+]
+
+PHYSICS_INTERFACE = [
+    "components.rs",
+    "shapes.rs",
+    "spatial.rs",
+]
+
+engine_mod(
+    name = "physics2d",
+    srcs = PHYSICS_SRCS,
+    twin = True,
+    interface = PHYSICS_INTERFACE,
+    visibility = ["//visibility:public"],
+)
+
+# The same mod under another build name, for the test that swaps the solver
+# under a running simulation.
+engine_mod(
+    name = "physics2d_v2",
+    srcs = PHYSICS_SRCS,
+    crate_features = ["v2"],
+    interface = PHYSICS_INTERFACE,
+    mod_name = "physics2d",
+)
+
+# Test scenes, apart from the demos in //mods: a walled box to drop bodies
+# into, and a platformer in miniature. See the sources.
+engine_mod(
+    name = "pile",
+    srcs = ["tests/pile.rs"],
+    crate_root = "tests/pile.rs",
+    mod_deps = [":physics2d"],
+)
+
+# A pre-solve hook for the pile, apart so the pile the benchmarks run has
+# no system of its own.
+engine_mod(
+    name = "pile_hook",
+    srcs = ["tests/hook.rs"],
+    crate_root = "tests/hook.rs",
+    mod_deps = [":physics2d"],
+)
+
+engine_mod(
+    name = "runner",
+    srcs = ["tests/runner.rs"],
+    crate_root = "tests/runner.rs",
+    mod_deps = [":physics2d"],
+)
+
+#   ./bazel run //engine/std/physics2d:pile_game
+#   bazel-bin/engine/modctl/modctl send pile drop 300
+#   bazel-bin/engine/modctl/modctl send lockstep step 300
+#   bazel-bin/engine/modctl/modctl send pile stats
+engine_game(
+    name = "pile_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":pile"],
+)
+
+engine_game(
+    name = "pile_hook_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [
+        ":pile",
+        ":pile_hook",
+    ],
+)
+
+engine_game(
+    name = "runner_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [":runner"],
+)
+
+# The shapes' tests, in the interface crate.
+rust_test(
+    name = "shapes_test",
+    crate = ":physics2d_interface",
+)
+
+# The narrowphase and solver alone, and whole steps over arrays.
+rust_test(
+    name = "core_test",
+    srcs = [
+        "narrow.rs",
+        "sleep.rs",
+        "solver.rs",
+        "tests/core_test.rs",
+    ],
+    crate_root = "tests/core_test.rs",
+    deps = [
+        ":physics2d_interface",
+        "//engine/api",
+    ],
+)
+
+# Spatial queries on a world driven by the ECS harness, without the loader.
+rust_test(
+    name = "spatial_test",
+    srcs = ["tests/spatial_test.rs"],
+    deps = [
+        ":physics2d_interface",
+        "//engine/api",
+        "//engine/ecs",
+    ],
+)
+
+TEST_DATA = {
+    "PILE": ":pile_game",
+    "PILE_HOOK": ":pile_hook_game",
+    "RUNNER": ":runner_game",
+    "PHYSICS_V2": ":physics2d_v2",
+}
+
+# The mod in a running engine, on the test scenes.
+rust_test(
+    name = "physics2d_test",
+    srcs = [
+        "tests/physics2d_test.rs",
+        "tests/pool.rs",
+    ],
+    crate_root = "tests/physics2d_test.rs",
+    data = TEST_DATA.values(),
+    env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()} | POISON_ENV,
+    deps = [
+        ":physics2d_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+#   ./bazel run --config=bench //engine/std/physics2d:bench
+rust_binary(
+    name = "bench",
+    srcs = ["tests/bench.rs"],
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+# The ECS's cost over the same step on plain arrays, checked to be the same
+# computation bit for bit:
+#   ./bazel run --config=bench //engine/std/physics2d:tax
+# and split across 1 to 16 threads, each checked bit for bit against one
+# (REPS and THREADS=1,2,.. in the environment override the defaults;
+# STICKY, SPIN_US and TASK_ALLOC change the pool and the arrays' lists: see
+# tests/pool.rs and tests/tax_par.rs):
+#   ./bazel run --config=bench //engine/std/physics2d:tax -- parallel
+rust_binary(
+    name = "tax",
+    srcs = [
+        "narrow.rs",
+        "solver.rs",
+        "tests/arrays.rs",
+        "tests/pool.rs",
+        "tests/tax.rs",
+        "tests/tax_par.rs",
+    ],
+    crate_root = "tests/tax.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics2d_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
+
+# The turned-box narrowphase by SAT and clipping (as it is) against GJK and
+# EPA, on the same pairs (see the source):
+#   ./bazel run --config=bench //engine/std/physics2d:narrow_bench
+rust_binary(
+    name = "narrow_bench",
+    srcs = [
+        "narrow.rs",
+        "tests/narrow_bench.rs",
+    ],
+    crate_root = "tests/narrow_bench.rs",
+    deps = [":physics2d_interface"],
+)
+
+# Why `solve` copies bodies out of the world: the same solve over the same
+# pile's contacts with bodies kept each way (layout, pages, derived inverse
+# mass, order, in the world's own pages), each checked bit for bit:
+#   ./bazel run --config=bench //engine/std/physics2d:solver_layout
+rust_binary(
+    name = "solver_layout",
+    srcs = [
+        "tests/solver_layout.rs",
+        "tests/split_impulse.rs",
+    ],
+    crate_root = "tests/solver_layout.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics2d_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
+
+# How far the solver parallelizes: sequential impulses over graph colors
+# and over islands, on 1 to 32 threads, against `solver::solve`, over a
+# 10 000 pile's contacts and a scene of separate stacks; checked bit for
+# bit across thread counts, and for how well the pile settles:
+#   ./bazel run --config=bench //engine/std/physics2d:parallel_solver
+rust_binary(
+    name = "parallel_solver",
+    srcs = [
+        "narrow.rs",
+        "tests/arrays.rs",
+        "tests/parallel_solver.rs",
+        "tests/split_impulse.rs",
+    ],
+    crate_root = "tests/parallel_solver.rs",
+    data = [":pile_game"],
+    env = {"PILE": "$(rlocationpath :pile_game)"},
+    deps = [
+        ":physics2d_interface",
+        "//engine/control",
+        "//engine/ecs",
+        "//engine/loader",
+    ],
+)
+
+# physics2d_test_asan; see docs/runbooks/004-run-the-loader-under-sanitizers.md.
+sanitized_tests(
+    skip = ["threads::threads_that_ran_a_builds_tasks_do_not_keep_it_mapped"],
+    tests = [":physics2d_test"],
+)
+
+# The step on plain arrays and the code it shares with the mod, for the
+# comparison with other engines in ./compare, which runs them beside the mod.
+exports_files(
+    [
+        "narrow.rs",
+        "solver.rs",
+        "tests/arrays.rs",
+        "tests/pool.rs",
+        "tests/split_impulse.rs",
+    ],
+    visibility = ["//engine/std/physics2d/compare:__pkg__"],
+)

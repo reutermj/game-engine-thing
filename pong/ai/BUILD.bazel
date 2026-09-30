@@ -4,7 +4,7 @@ engine_mod(
     name = "ai",
     srcs = ["lib.rs"],
     mod_deps = [
-        "//engine/std/physics",
+        "//engine/std/physics2d",
         "//pong/core",
     ],
     mod_name = "pong_ai",

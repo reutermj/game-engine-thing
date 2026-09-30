@@ -42,12 +42,12 @@ the fourth.
 
 | layer | what it compares | direction | targets | catches | misses |
 |---|---|---|---|---|---|
-| **Equivalence** | two implementations of the same step: the ECS against plain arrays (`:tax`), the mod against the arrays, the solver's colored four-lane path (the default) against its colors' order solved one contact at a time, which a parallel solve over the colors will have to pass too, and the level path (a variant) against pair order, a replay after a reload or at another frame rate | exact, bit for bit | `//engine/std/physics:tax`, `compare:quality_test` (`the_mod_is_the_arrays_bit_for_bit`, `the_colored_solve_…`, `the_solve_by_level_…`), `physics_test` (replays), reload tests | the plumbing changing physics | nothing about quality: both sides change together |
-| **Physical law** | a measured quantity against a formula | both ways, within a tolerance | `compare:behaviour_test`, `physics3d/compare:behaviour_test` (landing with the card-house fix) | wrong friction, rolling, restitution; bleeding energy; sticky or slippery contacts | only the scenes with a formula |
-| **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `compare:quality_test`, `quality_long_test`, `physics3d/compare:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
+| **Equivalence** | two implementations of the same step: the ECS against plain arrays (`:tax`), the mod against the arrays, the solver's colored four-lane path (the default) against its colors' order solved one contact at a time, which a parallel solve over the colors will have to pass too, and the level path (a variant) against pair order, a replay after a reload or at another frame rate | exact, bit for bit | `//engine/std/physics2d:tax`, `physics2d/compare:quality_test` (`the_mod_is_the_arrays_bit_for_bit`, `the_colored_solve_…`, `the_solve_by_level_…`), `physics2d_test` (replays), reload tests | the plumbing changing physics | nothing about quality: both sides change together |
+| **Physical law** | a measured quantity against a formula | both ways, within a tolerance | `physics2d/compare:behaviour_test`, `physics3d/compare:behaviour_test` (landing with the card-house fix) | wrong friction, rolling, restitution; bleeding energy; sticky or slippery contacts | only the scenes with a formula |
+| **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `physics2d/compare:quality_test`, `quality_long_test`, `physics3d/compare:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
 | **Scene sanity** | contacts per body, islands, nothing escaped | lower and upper | inside the floor tests | a scene that isn't what we think (the columns pile) | – |
-| **Unit behaviour** | single contacts and bodies against hand-checked outcomes | exact or tight | `physics:core_test`, `physics3d:core_test`, the solver's and narrowphase's unit tests | a landing that bounces, a friction limit, a feature id that jumps, a contact colored against Box2D's rule (which the equivalence tests can't see, solving the same order on both sides) | whole-scene behaviour |
-| **Baseline** | our values against our last accepted ones, per scene and measure, a band each set from measured noise | both ways | the `baseline` test in `compare:quality_test`, `behaviour_test` and 3D's, and `baseline_long` in the long ones | drift within the floor; a result suspiciously better | a pile family's median rest moving under 100 steps |
+| **Unit behaviour** | single contacts and bodies against hand-checked outcomes | exact or tight | `physics2d:core_test`, `physics3d:core_test`, the solver's and narrowphase's unit tests | a landing that bounces, a friction limit, a feature id that jumps, a contact colored against Box2D's rule (which the equivalence tests can't see, solving the same order on both sides) | whole-scene behaviour |
+| **Baseline** | our values against our last accepted ones, per scene and measure, a band each set from measured noise | both ways | the `baseline` test in `physics2d/compare:quality_test`, `behaviour_test` and 3D's, and `baseline_long` in the long ones | drift within the floor; a result suspiciously better | a pile family's median rest moving under 100 steps |
 | **Calibration** | each measure on bodies placed where its value is known | exact | `quality.rs`'s and `settle.rs`'s tests (2D), `physics3d/compare:measure_test` | a measure that reads zero or the wrong thing | – |
 | **Game acceptance** | routes an agent played, replayed: "YOU WIN at frame 255, deaths 0" | exact outcome | `pong:pong_test`, `platformer:platformer_test`, their reload tests | a physics change that breaks a game | why: a changed outcome says nothing about better or worse |
 
@@ -69,7 +69,7 @@ tables the bounds come from (runbook 005).
 
 | package | what | reference engines |
 |---|---|---|
-| `//engine/std/physics/compare` | the 2D mod, and our 2D step on arrays (bit for bit the mod) | Box2D v3.1.1, Rapier 2D 0.36 |
+| `//engine/std/physics2d/compare` | the 2D mod, and our 2D step on arrays (bit for bit the mod) | Box2D v3.1.1, Rapier 2D 0.36 |
 | `//engine/std/physics3d/compare` | the physics3d mod in the engine, on `pile3d`'s scenes | Rapier 3D 0.36, Box3D 0.1, Jolt 5.6 |
 | `//engine/std/physics_testkit` | what the two share, apart from any dimension | – |
 
@@ -134,7 +134,7 @@ of ours on arrays; ours tuned, in the engine) is the harness's.
 5. **Sleeping too early is untested.** The floor tests run with sleep off.
    Sleep is tested for taking everything eventually, not for never
    freezing a body that is still tipping.
-6. **The default suite is slowing.** `compare:quality_test` went from 6.7
+6. **The default suite is slowing.** `physics2d/compare:quality_test` went from 6.7
    s (as documented) to 34 s, and to 72 s with the pyramids in three
    orders. There's no budget, so each scene added is a small, permanent
    tax on every change.
@@ -160,7 +160,7 @@ of what the change did to physics, and review is where "worse but within
 the floor" or "suspiciously better" gets an explicit yes or no.
 
 - **Where:** four files, next to the scenes:
-  `engine/std/physics/compare/baseline.txt` (2D, the default suite's
+  `engine/std/physics2d/compare/baseline.txt` (2D, the default suite's
   scenes: 228 values, 27 of them the bounce families') and
   `baseline_long.txt` (the long suite's: 225),
   `engine/std/physics3d/compare/baseline.txt` (100) and `baseline_long.txt` (94).
@@ -253,7 +253,7 @@ the floor" or "suspiciously better" gets an explicit yes or no.
     looked enough; sizes 10% away moved it 80, and the wider families' by
     up to 250. The bands above hold every run of both.
 - **Regenerating:** one command writes the file from a run:
-  `./bazel run //engine/std/physics/compare:baseline -- --write`
+  `./bazel run //engine/std/physics2d/compare:baseline -- --write`
   (`--long` for the long file, about a minute; 3D's is
   `//engine/std/physics3d/compare:baseline`). Bazel runs it with
   `BUILD_WORKSPACE_DIRECTORY` set, so it writes into the source tree.
@@ -271,7 +271,7 @@ the floor" or "suspiciously better" gets an explicit yes or no.
   whichever test asks first), so the baseline costs the default suite no
   runs of its own: `:quality_test` went from 58 to 51 s with it, since the
   pyramids and the sleeping pile that two tests ran are now run once.
-  `//engine/std/physics/compare:baseline_test` (and 3D's, and
+  `//engine/std/physics2d/compare:baseline_test` (and 3D's, and
   `baseline_long_test`) is a test suite of those binaries: a target of
   its own would run every scene a second time. The file is built in
   (`include_str!`), so a change to it reruns the tests.
@@ -380,7 +380,7 @@ on one such run is a coin toss that a correct change can lose. So:
   stacks over), the bound is weak, and the family is a record of how far
   ours is from the other.
 - **A short grid in the default suite, the full one in the long suite**
-  (`compare:behaviour_test`, `behaviour_long_test`; `family.rs` holds the
+  (`physics2d/compare:behaviour_test`, `behaviour_long_test`; `family.rs` holds the
   grids and the rule). The short grid is chosen to straddle the edge, so a
   planted break moves it: friction halved, the short card grid stands
   none of 12 against a bound of 7.
@@ -554,8 +554,8 @@ own mechanism: a clue there, not noise.
   fastbuild, and the physics targets together within about 2 minutes of
   wall time when run in parallel. A scene goes in the default suite if
   it's fast and covers something no other default scene does. Measured
-  (2026-09-28, each target alone): `compare:quality_test` 49 s,
-  `compare:behaviour_test` 7.7 s, `physics3d/compare:quality_test` 17.5 s,
+  (2026-09-28, each target alone): `physics2d/compare:quality_test` 49 s,
+  `physics2d/compare:behaviour_test` 7.7 s, `physics3d/compare:quality_test` 17.5 s,
   `physics3d/compare:behaviour_test` 0.3 s, the same with the baseline tests
   skipped (it costs nothing: its runs are the other tests'). With the whole
   suite running beside it, `:quality_test` takes 66 s. It is over the
@@ -564,12 +564,12 @@ own mechanism: a clue there, not noise.
 - **Long suite** (manual targets): everything else, with its
   own baseline. It runs before merging any change to the solver, the
   narrowphase, sleep or the step, and its baseline diff goes in that
-  commit. Measured: `compare:quality_long_test` 80 s,
+  commit. Measured: `physics2d/compare:quality_long_test` 80 s,
   `behaviour_long_test` 4 s, `physics3d/compare:quality_long_test` 86-130 s.
 - **Every build is optimized** (`.bazelrc`, 2026-09-28, get-emj.66),
   with debug assertions and overflow checks kept on, so tests check what
   they did unoptimized. The default suite runs in about 36 s, a full
-  rebuild included: `:quality_test` 1.0 s (from 49), `physics_test` 2.8 s
+  rebuild included: `:quality_test` 1.0 s (from 49), `physics2d_test` 2.8 s
   (from 25), pong's reload test 3.4 s (from 32). The results are bit for
   bit the same (the baselines pass unchanged; rustc doesn't reorder float
   arithmetic). The cost is a few seconds per physics rebuild (the physics

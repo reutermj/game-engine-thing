@@ -7,6 +7,6 @@ resolver = "3"
 members = [
     "engine/loader",
     # The physics comparisons: Rapier 2D and 3D, bench-only.
-    "engine/std/physics/compare",
+    "engine/std/physics2d/compare",
     "engine/std/physics3d/compare",
 ]

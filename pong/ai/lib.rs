@@ -3,7 +3,7 @@
 //! can be beaten with angled hits.
 
 use engine_api::{Cx, Mod, Query, Systems, With, export_mod};
-use physics::{Position, Velocity};
+use physics2d::{Position, Velocity};
 use pong::{Ball, HEIGHT, Opponent, Paddle};
 
 /// Fraction of full paddle speed the AI uses.

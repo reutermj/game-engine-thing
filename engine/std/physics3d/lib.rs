@@ -454,7 +454,7 @@ impl Mod for Physics3d {
     fn systems(s: &mut Systems<Self>) {
         const STEP: &str = "physics3d::step";
         // At the rate of `simulate`, so the two make one group: a game's
-        // rules, then the step, once per step (as 2D's `physics::step`).
+        // rules, then the step, once per step (as 2D's `physics2d::step`).
         s.phase(STEP).after(phase::SIMULATE).before(phase::LATE).fixed_hz(phase::SIMULATE_HZ);
         s.add("integrate_velocities", Self::integrate_velocities).phase(STEP);
         s.add("find_contacts", Self::find_contacts).phase(STEP).after("physics3d::integrate_velocities");

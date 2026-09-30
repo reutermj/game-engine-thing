@@ -22,7 +22,7 @@ _ENV = str(Label("@rules_rust//rust/settings:extra_rustc_env"))
 # Every test sanitized_tests may wrap, for the suites in //engine/tests,
 # which list them from here so a sanitized test can't be left out of them.
 SANITIZED_TESTS = [
-    "//engine/std/physics:physics_test",
+    "//engine/std/physics2d:physics2d_test",
     "//engine/tests:e2e_test",
     "//engine/tests:reload_test",
     "//platformer:platformer_test",

@@ -3,7 +3,7 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
 
 # Experimental 3D rigid bodies that turn, on the ECS's 3D spatial storage:
-# a mod, as //engine/std/physics is, with every piece of state in the world
+# a mod, as //engine/std/physics2d is, with every piece of state in the world
 # or its state, so the step hot-reloads under a running simulation. See
 # lib.rs and docs/architecture/physics.md, "Rotation in 3D". The comparison
 # with Rapier, Jolt and Box3D is //engine/std/physics3d/compare.

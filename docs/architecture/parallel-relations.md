@@ -6,7 +6,7 @@
 but that parallelism lives in physics's own per-step copy of bodies and
 contacts. This doc asks how the ECS could grow so that the same kind of
 parallelism fits the world instead of living beside it. Its claims are
-measured by a spike, `//engine/std/physics/compare:colors_spike`
+measured by a spike, `//engine/std/physics2d/compare:colors_spike`
 (`colors_spike.rs`, a bench target, not engine code).
 
 **The recommendation, in short:**
@@ -248,7 +248,7 @@ component! {
     /// The color the contact is solved in: taken when it begins, kept while
     /// it lasts, packed again every `Tuning::repack` steps. `NONE` until
     /// the first solve that sees it.
-    pub struct SolveColor: "physics::SolveColor" { pub color: u8 }
+    pub struct SolveColor: "physics2d::SolveColor" { pub color: u8 }
 }
 ```
 
@@ -466,7 +466,7 @@ decision (get-znt.20). Nothing here depends on the choice.
 
 ## Spike results
 
-`taskset -c 0-7 ./bazel run --config=bench //engine/std/physics/compare:colors_spike`,
+`taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:colors_spike`,
 2026-09-29, Ryzen 9 7950X, one CCD, the machine otherwise idle (load under
 1.2), results within 1-2% over three runs. The spike:
 

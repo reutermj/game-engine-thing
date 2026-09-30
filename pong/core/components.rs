@@ -1,7 +1,7 @@
 //! Pong's world. Units are text cells: the court is `WIDTH` columns by
 //! `HEIGHT` rows, with y growing downward, which is how `pong_text` draws it
 //! and physics's convention. Where the ball and paddles are and how they
-//! move is physics's (`physics::Position`, `Velocity`).
+//! move is physics's (`physics2d::Position`, `Velocity`).
 
 use engine_api::{component, event};
 

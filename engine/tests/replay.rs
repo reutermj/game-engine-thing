@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use engine_ecs::{ChildOf, Component, Event};
 use engine_loader::engine::Engine;
-use physics::{
+use physics2d::{
     Asleep, Body, Collider, Contact, ContactPair, Gravity, Impulse, Manifold, Overlap, Position, Response, Resting, Sleep, Touching,
     Trigger, Velocity,
 };
@@ -258,9 +258,9 @@ pub fn events<E: Event + Clone + Debug>(e: &Engine, out: &mut String) {
 /// state (steps run and bodies asleep; not its timings, which are wall time).
 pub fn physics(e: &Engine, out: &mut String) {
     writeln!(out, "{}", e.world().summary()).unwrap();
-    let stats = e.send("physics", "stats").unwrap();
+    let stats = e.send("physics2d", "stats").unwrap();
     let steps: String = stats.split(" us/step").next().unwrap().split_once(' ').unwrap().1.split_once(' ').unwrap().1.into();
-    writeln!(out, "physics {steps}, {}", e.send("physics", "sleeping").unwrap()).unwrap();
+    writeln!(out, "physics2d {steps}, {}", e.send("physics2d", "sleeping").unwrap()).unwrap();
     values::<Position>(e, out);
     values::<Velocity>(e, out);
     values::<Body>(e, out);
