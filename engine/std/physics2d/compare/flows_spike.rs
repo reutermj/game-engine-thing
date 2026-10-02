@@ -102,8 +102,8 @@ fn in_situ(ecs: &mut ecs::Ecs, steps: u32) -> String {
         words.next().unwrap().parse::<f64>().unwrap()
     };
     format!(
-        "in the mod over {steps} steps, one thread, µs a step: solve {:.0} (gather {:.1}, solver {:.0}, write-back {:.1}, sleeping and sides included)",
-        per("solve"),
+        "in the mod over {steps} steps, one thread, µs a step: solve {:.0} (gather {:.1}, solver {:.0}, write-back {:.1}, its sides and sleeping included)",
+        per("solve_gather") + per("solver") + per("write_back"),
         per("solve_gather"),
         per("solver"),
         per("write_back"),
@@ -352,7 +352,7 @@ fn systems(label: &str, world: &World, reps: usize, gang: &Arc<dyn Executor>) {
     println!("\nBy stage, µs, the median of {reps} (the systems' bodies; a frame less their sum is the hand-off and the harness)\n");
     println!("| way | stage | 1 thread | {} threads |", gang.threads());
     println!("|---|---|---|---|");
-    for (i, name) in names.iter().enumerate().take(3) {
+    for (i, name) in names.iter().enumerate() {
         let mut names: Vec<&'static str> = stages.keys().filter(|(w, t, _)| *w == i && *t == 1).map(|(_, _, n)| *n).collect();
         names.sort_by_key(|n| STAGE_ORDER.iter().position(|o| o == n));
         let mut sums = [0.0f64; 2];
@@ -367,7 +367,8 @@ fn systems(label: &str, world: &World, reps: usize, gang: &Arc<dyn Executor>) {
     }
 }
 
-const STAGE_ORDER: [&str; 11] = [
+const STAGE_ORDER: [&str; 12] = [
+    "fused",
     "gather",
     "gather_bodies",
     "gather_turning",

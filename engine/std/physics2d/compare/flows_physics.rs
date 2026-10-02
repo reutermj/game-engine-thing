@@ -110,105 +110,147 @@ pub type MovingQ<'w, 'a> = Query<'w, (&'a Body, &'a mut Velocity, &'a mut Positi
 pub type TurningQ<'w, 'a> = Query<'w, (&'a Body, &'a Collider, &'a mut Rotation, &'a mut Spin), Without<Asleep>>;
 pub type ContactsQ<'w, 'a> =
     Query<'w, (&'a ContactPair, &'a mut Manifold, &'a Response, &'a mut Impulse, &'a mut ContactPoints), Without<Resting>>;
+pub type MovingR<'w, 'a> = Query<'w, (&'a Body, &'a Velocity, &'a Position), Without<Asleep>>;
+pub type TurningR<'w, 'a> = Query<'w, (&'a Body, &'a Collider, &'a Rotation, &'a Spin), Without<Asleep>>;
+pub type ContactsR<'w, 'a> = Query<'w, (&'a ContactPair, &'a Manifold, &'a Response, &'a Impulse, &'a ContactPoints), Without<Resting>>;
 
 // ---- The stages' bodies: lib.rs's `solve`, split ----
 
-pub fn gather_bodies(dt: f32, g: Vec2, moving: &mut MovingQ, workers: &Workers, out: &mut Bodies) {
-    let Bodies { entities, bodies, kinds, slots } = out;
-    let solver_body = |body: &Body, v: &Velocity| {
-        let (inv_mass, g) = if body.kind == DYNAMIC { (body.inv_mass, g) } else { (0.0, Vec2::ZERO) };
-        let gravity = Vec2::new(g.x * body.gravity_scale * dt, g.y * body.gravity_scale * dt);
-        SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity)
-    };
-    if workers.threads() > 1 {
-        let room = |r: std::ops::Range<usize>| (Vec::with_capacity(r.len()), Vec::with_capacity(r.len()), Vec::with_capacity(r.len()));
-        let parts = moving.par_for_each(workers, room, |(e, s, k), row, (body, v, _)| {
-            e.push(row.entity());
-            s.push(solver_body(body, &v));
-            k.push((body.kind != STATIC, body.kind));
-        });
-        for (e, s, k) in parts {
-            entities.extend(e);
-            bodies.extend(s);
-            kinds.extend(k);
+macro_rules! gather_bodies {
+    ($dt:expr, $g:expr, $moving:expr, $workers:expr, $out:expr) => {{
+        let (dt, g, moving, workers, out): (f32, Vec2, _, &Workers, &mut Bodies) = ($dt, $g, $moving, $workers, $out);
+        let Bodies { entities, bodies, kinds, slots } = out;
+        let solver_body = |body: &Body, v: &Velocity| {
+            let (inv_mass, g) = if body.kind == DYNAMIC { (body.inv_mass, g) } else { (0.0, Vec2::ZERO) };
+            let gravity = Vec2::new(g.x * body.gravity_scale * dt, g.y * body.gravity_scale * dt);
+            SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity)
+        };
+        if workers.threads() > 1 {
+            let room = |r: std::ops::Range<usize>| (Vec::with_capacity(r.len()), Vec::with_capacity(r.len()), Vec::with_capacity(r.len()));
+            let parts = moving.par_for_each(workers, room, |(e, s, k), row, (body, v, _)| {
+                e.push(row.entity());
+                s.push(solver_body(body, &v));
+                k.push((body.kind != STATIC, body.kind));
+            });
+            for (e, s, k) in parts {
+                entities.extend(e);
+                bodies.extend(s);
+                kinds.extend(k);
+            }
+        } else {
+            moving.for_each(|row, (body, v, _)| {
+                entities.push(row.entity());
+                bodies.push(solver_body(body, &v));
+                kinds.push((body.kind != STATIC, body.kind));
+            });
         }
-    } else {
-        moving.for_each(|row, (body, v, _)| {
-            entities.push(row.entity());
-            bodies.push(solver_body(body, &v));
-            kinds.push((body.kind != STATIC, body.kind));
+        bodies.push(SolverBody::default());
+        kinds.push((false, STATIC));
+        slots.fill(entities);
+    }};
+}
+
+macro_rules! gather_turning {
+    ($turning:expr, $b:expr, $out:expr) => {{
+        let (turning, b, out): (_, &Bodies, &mut Turning) = ($turning, $b, $out);
+        let Turning { spinning, reach } = out;
+        turning.for_each(|row, (body, c, _, spin)| {
+            let Some(k) = b.slots.get(row.entity()) else { return };
+            spinning.push(match body.kind {
+                DYNAMIC => Spinning::new(k, spin.w, b.bodies[k as usize].inv_mass * c.inertia_per_mass()),
+                KINEMATIC => Spinning::new(k, spin.w, 0.0),
+                _ => return,
+            });
+            reach.push(c.reach());
         });
-    }
-    bodies.push(SolverBody::default());
-    kinds.push((false, STATIC));
-    slots.fill(entities);
+    }};
+}
+
+macro_rules! gather_contacts {
+    ($contacts:expr, $b:expr, $workers:expr, $out:expr) => {{
+        let (contacts, b, workers, out): (_, &Bodies, &Workers, &mut Contacts) = ($contacts, $b, $workers, $out);
+        let still = b.entities.len() as u32;
+        let index_of = |e: Entity| b.slots.get(e).unwrap_or(still);
+        let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse, cp: &ContactPoints, points: &mut Vec<Points>| {
+            let c = Constraint {
+                a: index_of(pair.a),
+                b: index_of(pair.b),
+                normal: Vec2::new(m.nx, m.ny),
+                depth: m.depth,
+                friction: r.friction,
+                restitution: r.restitution,
+                jn: j.normal,
+                jt: j.tangent,
+                speed: 0.0,
+                points: 0,
+            };
+            if m.points == 0 {
+                return c;
+            }
+            let mut pts = Points { count: m.points, ..Points::default() };
+            for (i, p) in pts.point.iter_mut().enumerate().take(m.points as usize) {
+                let (ra, rb) = cp.anchors(i);
+                let (jn, jt) = cp.last(m.solved, cp.ids[i]);
+                *p = ContactPoint { ra, rb, separation: cp.separations[i], jn, jt };
+            }
+            points.push(pts);
+            c.with_points(points.len() - 1)
+        };
+        let Contacts { constraints, points, firsts } = out;
+        if workers.threads() > 1 {
+            let parts = contacts.par_for_each_ordered_page(
+                workers,
+                |rows| (rows.start, Vec::with_capacity(rows.len()), Vec::new()),
+                |(_, out, pts), _, (pair, m, r, j, cp)| {
+                    out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], pts)));
+                },
+            );
+            for (row, part, pts) in parts {
+                firsts.push((row, constraints.len()));
+                let offset = points.len() as u32;
+                constraints.extend(part.into_iter().map(|c| if c.points > 0 { Constraint { points: c.points + offset, ..c } } else { c }));
+                points.extend(pts);
+            }
+        } else {
+            contacts.for_each_ordered_page(|page, (pair, m, r, j, cp)| {
+                for i in page.rows() {
+                    if !r[i].disabled {
+                        constraints.push(constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], points));
+                    }
+                }
+            });
+        }
+    }};
+}
+
+// The sources' bodies as macros, each made a function twice: over the
+// queries the solve as built writes through (one system can't both read
+// and write a column), and over read-only ones, which is what a source
+// declares. A source over the writing queries would get an apply node that
+// re-sorts the bodies' spatial tables after it, for nothing.
+
+pub fn gather_bodies(dt: f32, g: Vec2, moving: &mut MovingQ, workers: &Workers, out: &mut Bodies) {
+    gather_bodies!(dt, g, moving, workers, out)
+}
+
+pub fn gather_bodies_read(dt: f32, g: Vec2, moving: &mut MovingR, workers: &Workers, out: &mut Bodies) {
+    gather_bodies!(dt, g, moving, workers, out)
 }
 
 pub fn gather_turning(turning: &mut TurningQ, b: &Bodies, out: &mut Turning) {
-    let Turning { spinning, reach } = out;
-    turning.for_each(|row, (body, c, _, spin)| {
-        let Some(k) = b.slots.get(row.entity()) else { return };
-        spinning.push(match body.kind {
-            DYNAMIC => Spinning::new(k, spin.w, b.bodies[k as usize].inv_mass * c.inertia_per_mass()),
-            KINEMATIC => Spinning::new(k, spin.w, 0.0),
-            _ => return,
-        });
-        reach.push(c.reach());
-    });
+    gather_turning!(turning, b, out)
+}
+
+pub fn gather_turning_read(turning: &mut TurningR, b: &Bodies, out: &mut Turning) {
+    gather_turning!(turning, b, out)
 }
 
 pub fn gather_contacts(contacts: &mut ContactsQ, b: &Bodies, workers: &Workers, out: &mut Contacts) {
-    let still = b.entities.len() as u32;
-    let index_of = |e: Entity| b.slots.get(e).unwrap_or(still);
-    let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse, cp: &ContactPoints, points: &mut Vec<Points>| {
-        let c = Constraint {
-            a: index_of(pair.a),
-            b: index_of(pair.b),
-            normal: Vec2::new(m.nx, m.ny),
-            depth: m.depth,
-            friction: r.friction,
-            restitution: r.restitution,
-            jn: j.normal,
-            jt: j.tangent,
-            speed: 0.0,
-            points: 0,
-        };
-        if m.points == 0 {
-            return c;
-        }
-        let mut pts = Points { count: m.points, ..Points::default() };
-        for (i, p) in pts.point.iter_mut().enumerate().take(m.points as usize) {
-            let (ra, rb) = cp.anchors(i);
-            let (jn, jt) = cp.last(m.solved, cp.ids[i]);
-            *p = ContactPoint { ra, rb, separation: cp.separations[i], jn, jt };
-        }
-        points.push(pts);
-        c.with_points(points.len() - 1)
-    };
-    let Contacts { constraints, points, firsts } = out;
-    if workers.threads() > 1 {
-        let parts = contacts.par_for_each_ordered_page(
-            workers,
-            |rows| (rows.start, Vec::with_capacity(rows.len()), Vec::new()),
-            |(_, out, pts), _, (pair, m, r, j, cp)| {
-                out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], pts)));
-            },
-        );
-        for (row, part, pts) in parts {
-            firsts.push((row, constraints.len()));
-            let offset = points.len() as u32;
-            constraints.extend(part.into_iter().map(|c| if c.points > 0 { Constraint { points: c.points + offset, ..c } } else { c }));
-            points.extend(pts);
-        }
-    } else {
-        contacts.for_each_ordered_page(|page, (pair, m, r, j, cp)| {
-            for i in page.rows() {
-                if !r[i].disabled {
-                    constraints.push(constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], points));
-                }
-            }
-        });
-    }
+    gather_contacts!(contacts, b, workers, out)
+}
+
+pub fn gather_contacts_read(contacts: &mut ContactsR, b: &Bodies, workers: &Workers, out: &mut Contacts) {
+    gather_contacts!(contacts, b, workers, out)
 }
 
 pub fn scatter_bodies(dt: f32, moving: &mut MovingQ, turning: &mut TurningQ, b: &Bodies, t: &Turning, workers: &Workers) {
@@ -352,14 +394,14 @@ fn gravity_of(gravity: &mut Query<&Gravity>) -> Vec2 {
 
 /// The pipeline, in plan order.
 pub fn pipeline(world: &World) -> Schedule {
-    let gather_b = |_: &mut Cx, (dt, workers): (Dt, Workers), mut gravity: Query<&Gravity>, mut moving: MovingQ, mut out: Make<Bodies>| {
-        timed("gather_bodies", || gather_bodies(*dt, gravity_of(&mut gravity), &mut moving, &workers, &mut out))
+    let gather_b = |_: &mut Cx, (dt, workers): (Dt, Workers), mut gravity: Query<&Gravity>, mut moving: MovingR, mut out: Make<Bodies>| {
+        timed("gather_bodies", || gather_bodies_read(*dt, gravity_of(&mut gravity), &mut moving, &workers, &mut out))
     };
-    let gather_t = |_: &mut Cx, mut turning: TurningQ, b: See<Bodies>, mut out: Make<Turning>| {
-        timed("gather_turning", || gather_turning(&mut turning, &b, &mut out))
+    let gather_t = |_: &mut Cx, mut turning: TurningR, b: See<Bodies>, mut out: Make<Turning>| {
+        timed("gather_turning", || gather_turning_read(&mut turning, &b, &mut out))
     };
-    let gather_c = |_: &mut Cx, workers: Workers, mut contacts: ContactsQ, b: See<Bodies>, mut out: Make<Contacts>| {
-        timed("gather_contacts", || gather_contacts(&mut contacts, &b, &workers, &mut out))
+    let gather_c = |_: &mut Cx, workers: Workers, mut contacts: ContactsR, b: See<Bodies>, mut out: Make<Contacts>| {
+        timed("gather_contacts", || gather_contacts_read(&mut contacts, &b, &workers, &mut out))
     };
     let prepare = |_: &mut Cx,
                    (dt, workers): (Dt, Workers),
@@ -444,7 +486,9 @@ pub fn reference(world: &World) -> Schedule {
             let params = params_of(&mut tuning);
             solver::solve_across(&params, (&mut b.bodies, &mut t.spinning), &mut c.constraints, &mut c.points, dt, &workers);
         });
-        *SEEN.lock().unwrap() = Some(solved(&b, &t, &c));
+        if RECORD.load(std::sync::atomic::Ordering::Relaxed) {
+            *SEEN.lock().unwrap() = Some(solved(&b, &t, &c));
+        }
         timed("write_back", || {
             scatter_bodies(dt, &mut moving, &mut turning, &b, &t, &workers);
             scatter_contacts(&mut contacts, &c, &workers);
@@ -473,6 +517,7 @@ pub fn fused(world: &World) -> Schedule {
                       mut contacts: ContactsQ| {
         let dt = *dt;
         let mut k = kept.lock().unwrap();
+        let start = Instant::now();
         let Kept { b, t, c, g } = &mut *k;
         flows::Flow::recycle(b);
         flows::Flow::recycle(t);
@@ -486,6 +531,7 @@ pub fn fused(world: &World) -> Schedule {
         solver::lanes::finish_flow(&g.prepared, &params, (&mut b.bodies, &mut t.spinning), &mut c.constraints, &mut c.points, &workers);
         scatter_bodies(dt, &mut moving, &mut turning, b, t, &workers);
         scatter_contacts(&mut contacts, c, &workers);
+        TIMES.lock().unwrap().push(("fused", start.elapsed().as_secs_f64() * 1e6));
     };
     Schedule { systems: vec![whole.system(world, "fused")] }
 }
@@ -514,6 +560,9 @@ pub fn gathered(world: &World) -> (Vec<SolverBody>, Vec<Spinning>, Vec<Constrain
 pub type Solved = (HashMap<Entity, Vec<u32>>, Vec<u32>);
 
 static SEEN: Mutex<Option<Solved>> = Mutex::new(None);
+/// Whether the reference records its solved copy: only when checked, so
+/// its frames aren't timed with the recording.
+static RECORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn take_seen() -> Option<Solved> {
     SEEN.lock().unwrap().take()
@@ -654,7 +703,9 @@ pub fn check_against_reference(world: &World, shapes: &[Shape]) -> [usize; 4] {
     let (save, restore, _) = saver(world);
     save.run_sequential(world);
     let before = written(world);
+    RECORD.store(true, std::sync::atomic::Ordering::Relaxed);
     reference(world).run_sequential(world);
+    RECORD.store(false, std::sync::atomic::Ordering::Relaxed);
     let want_copy = take_seen().expect("the reference saw its copy");
     let want = written(world);
     restore.run_sequential(world);
