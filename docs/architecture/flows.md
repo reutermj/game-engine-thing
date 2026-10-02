@@ -1,0 +1,528 @@
+# Flows
+
+**Status: proposed** (2026-10-02, get-znt.25). Nothing here is built yet.
+Stage 1 (get-znt.32) builds the mechanism and the shapes in `engine_ecs`,
+run on one thread; stage 2 (get-znt.33) moves physics2d's solve onto it;
+stage 3 (get-znt.34) has the scheduler run the shapes across threads.
+The spike behind every choice here, with its measurements, is
+[flows-spike.md](flows-spike.md); this doc cites its numbers rather than
+restating them.
+
+**In short:**
+
+- **A flow is a typed value that lives one frame** (one step, in a
+  fixed-rate group) and passes from system to system: a source makes it
+  from the world, stages see, edit or take it, and a sink writes what it
+  carries back. Systems take it as parameters, `Make<T>`, `See<T>`,
+  `Pass<T>` and `Take<T>`, so every use is a declaration.
+- **It's for systems that already copy.** Physics's solve, as eight
+  systems passing four flows, was bit for bit the solve as built and cost
+  the same at 8 threads. Transform propagation as flows cost 1.5 to 4.7
+  times the idiom it would replace. A flow is a copy, and it pays only
+  where the work is many times the copy.
+- **Order comes from the plan, as now.** Flows add a check at load that
+  refuses a plan whose flows are out of turn, and its errors name the
+  fix: "`See<Graph>` in `debug::view` runs before `Make<Graph>` in
+  `physics2d::prepare`; add `.after("physics2d::prepare")` to
+  `debug::view`".
+- **Edges are the graph's own.** A flow's uses order like an event
+  queue's: `See`s together, anything else one at a time, with no apply
+  node.
+- **Values live in the world, by name**, out of sight of everything but
+  the systems that declare them, and empty between frames. Each flow keeps
+  one emptied value as a recycling bin, dropped whenever a build that
+  uses the flow is installed.
+- **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
+  are parameters, and the kernels a system hands them are the only code
+  that may run across threads. In stage 1 they run on the system's own
+  thread, with the results stage 3 must reproduce at any thread count.
+
+## What a flow is, and isn't
+
+The user's idea (2026-10-02): systems that act like map/reduce stages,
+taking data from a previous system and passing it to the next, with the
+systems at either end acting on the world. Physics's solve is already
+that inside one system: it gathers the world into dense arrays, iterates
+on them, and scatters the results back. Three spikes found that the copy
+is the solver's need, not a storage workaround
+([working-sets.md](working-sets.md), [parallel-relations.md](parallel-relations.md)
+(c), [contiguous-columns.md](contiguous-columns.md)). Flows make the
+copy's stages systems the ECS can see.
+
+A flow is:
+
+- **frame-scoped.** Nothing it holds survives the frame, or the step of
+  its fixed-rate group. Persistent state belongs in components, as it
+  does today.
+- **typed and named.** `"physics2d::flow::Graph"` is one value, wherever
+  it's declared from.
+- **declared at each use**, so the graph orders its uses and the plan
+  check can refuse a bad order before anything runs.
+
+A flow isn't:
+
+- **a cheaper way to read the world.** It is a copy, and costs what any
+  copy costs. The hierarchy spike's gather alone (38 µs in walk order) was
+  more than the idiom's whole frame (29 µs) on fresh indices. Flows serve
+  systems whose work is many times the copy, as the solve's 20 passes
+  are. For hierarchy the answer stays a depth order kept by storage
+  (working-sets.md, get-qdi).
+- **a channel between frames.** That is an event, or a component.
+- **a resource.** There is no world-wide singleton; a flow has a producer
+  every frame, or it has nothing.
+
+## Declaring a flow
+
+```rust
+engine_api::flow! {
+    /// The awake bodies, dense, by an index the step makes.
+    pub struct Bodies: "physics2d::flow::Bodies" {
+        pub entities: Vec<Entity>,
+        pub bodies: Vec<SolverBody>,
+        pub kinds: Vec<(bool, u8)>,
+    }
+}
+```
+
+`flow!` declares the struct and implements `Flow` for it: its name, and
+`recycle`, which empties each field and keeps its allocations. A field
+can be any type that implements `Recycle`: `Vec` (cleared), `Option`
+(back to `None`), the scalars (back to their default), `String`, or a
+type of the mod's own. Unlike a component, a flow's fields needn't be
+`FieldType`s: a flow is never migrated, stored between frames or seen by
+another build (below).
+
+A flow that other mods use goes in its mod's interface, as a component
+does, and is named after the mod by convention.
+
+## The parameters
+
+| use | what the system gets | how many a frame | runs |
+|---|---|---|---|
+| `Make<T>` | `&mut T`, empty: last frame's value emptied if there is one, else `T::default()`. What it holds when the system returns is the frame's | one | before every other use |
+| `See<T>` | `&T` | any | after the `Make`, before any `Take`; together with other `See`s |
+| `Pass<T>` | `&mut T`, to edit in place and hand on | any | after the `Make`, before any `Take`, one at a time |
+| `Take<T>` | owns it. Dropped, it goes back to the bin; `into_inner` keeps it | at most one after each `Make` | after the `Make` |
+
+The rules, each from a case the spike tested (flows-spike.md,
+"Ownership"):
+
+- **One maker.** Two producers of one value is ambiguous. A stage that
+  changes a flow takes `Pass<T>`.
+- **Nothing has to take it.** A flow nobody takes is moved to the bin at
+  the end of the frame. An optional reader, such as a debug view, only
+  `See`s, and nobody has to take the flow to keep the frame valid.
+- **Nothing uses it after it's taken**, except a second `Make`, which
+  makes a new value.
+- **A system uses a flow once.** `See` and `Make` of one flow in one
+  system is nonsense either way, and a hook that edits a flow is a `Pass`,
+  not a `Take` and a `Make`. Refused when the system is added, as two
+  conflicting queries are.
+
+**`Make` is a parameter, not a return value.** A returned flow reads
+better for a pure function, and Bevy's `pipe` does it that way. But:
+
+- the value starts from last frame's allocations, so the system needs it
+  as `&mut T` before it fills it. A returned value would get them through
+  a parameter anyway, or lose them. Recycling saved 2 to 7% of the solve's
+  frame at 8 threads.
+- a system that makes two flows (physics's `prepare` passes `Contacts`
+  and makes `Graph`) would return a tuple, while its other uses stay
+  parameters: two ways to declare one thing.
+- the loader's `SystemFn` returns a status, and every system returns
+  `()`. Return values would change `IntoSystem` and the ABI for one
+  parameter kind.
+
+**Recycling is by type.** A stage that takes `Bodies` and makes a
+`Solved` from its vectors moves the allocation into `Solved`'s bin, and
+`Bodies`' `Make` allocates afresh every frame. So stages that change a
+flow edit it in place (`Pass`), as the spike's pipeline did. Recycling
+doesn't follow a value across types, and `Take::into_inner` keeps the
+value for good, so its allocation leaves the store.
+
+## Edges in the graph
+
+A flow's uses are edges the frame's graph already knows how to order. The
+spike declared each flow as an event queue: `See` reads it, the other
+uses write it, and `graph.rs`'s rule for events gave exactly what a flow
+needs (flows-spike.md, "Edges"):
+
+- two `See`s run together;
+- anything else waits for every earlier use, in plan order.
+
+The real declaration is `ParamDecl::Flow { slot, name, access, ty }`.
+`graph.rs` treats `See` as a read of the slot and every other use as a
+write, as it treats an event queue, in a namespace of its own. Unlike an
+event writer, a flow's use changes nothing in the world, so it has **no
+apply node**: a reader waits for the system before it, not for an apply
+after that. The spike's uses cost about 85 ns each, apply node included;
+the real ones skip the apply node.[^stand-in]
+
+## The store
+
+A world keeps its flows as it keeps its event queues: a slot for each
+name, interned when a build declares a system that uses it.
+
+- **The value**, while a frame runs: made by `Make`, borrowed by `See`
+  and `Pass`, moved out by `Take`. Each use takes the slot's lock with
+  `try_*`, so two uses the graph should have ordered are a panic, never a
+  race.
+- **The bin**: one emptied value, kept for the next `Make`. `Take` puts
+  its value back when dropped, and the end of the frame moves a value
+  nothing took into the bin. `Make` empties whatever it starts from.
+- **Between frames, a flow is empty.** Its bin holds allocations, not a
+  value anyone can read. So flows are invisible to `WorldMut`, to hooks
+  and message handlers, and to every inspection of the world
+  (`World::values`, `summary`), and a replay that stops between frames
+  never stops between two stages.
+
+### Reload, and whose code a bin holds
+
+A bin is a boxed value whose drop code, and whose type, is the code of
+the build that made it. That's a problem for two reasons:
+
+1. **Its code may go.** A bin made by `maker` v1 and dropped after v1 is
+   unmapped calls into nothing. Event queues have the same problem, and
+   solve it by keeping the build mapped (`EventQueue::_keepalive`).
+2. **Its layout may change.** `maker` v2 can declare `Bodies` with
+   another field. A downcast by `TypeId` doesn't tell the two apart:
+   `TypeId` hashes the crate's name and the type's path, and two builds of
+   one crate by one Bazel target have the same. A v2 `Make` handed v1's
+   bin would read the wrong layout with no `unsafe` in sight.
+
+So:
+
+- **A flow's bin is dropped whenever a build that uses it is installed**
+  (loaded or reloaded): as the load commits, before the old build is
+  released, with its code still mapped. The cost is one frame of fresh
+  allocations after a reload, about what the "fresh allocations" row of
+  flows-spike.md's first table costs once.
+- **The slot keeps every user's build mapped**, by build name, so a bin
+  outliving an unloaded maker still drops with valid code. A newer build
+  of the same mod replaces its predecessor's keepalive.
+- **Poison mode checks it** (hot-reload.md, "Poison mode and the
+  sanitizers"): a bin kept across a reload would be downcast through an
+  unmapped vtable at the next `Make`, and fault naming the build.
+
+### Names, and the interface digest
+
+Flows are found by name, as events are. Their layout is guarded by the
+declaring mod's **interface digest** (mod-deps.md), not by a field schema
+or by `TypeId`:
+
+- a flow other mods use is in its mod's interface, which they compile
+  against and name in `mod_deps`;
+- changing it changes the digest, and the loader refuses a batch that
+  would leave a dependent built against the old one ("reload them together
+  with `./bazel run //game:reload`");
+- so every build running at once was compiled against one layout of each
+  shared flow, and the bin dropped at install covers the moment between.
+
+That is stricter than components need, and right for a value that lives
+one frame: there's nothing to migrate.
+
+The plan check also compares each use's `TypeId`. Builds of one crate
+agree on it, so it can't guard a layout; what it catches is two mods
+declaring one name separately, which would otherwise fail at the first
+`Make` after both load.
+
+## The plan check
+
+**Plan order stays the only source of order.** The plan comes from
+phases, `.after`/`.before` and declaration order, as scheduling.md says.
+Flows add a check of the plan, run wherever the plan is built: when a load
+or unload is checked before it commits, and when the plan is rebuilt. A
+plan that fails it is refused like a cycle, and the running builds are
+untouched.
+
+Walking the plan in order, a fixed-rate group's phases once (every step
+repeats them), it refuses, with errors that name the fix:
+
+| refused | the error |
+|---|---|
+| a use before the `Make`, same phase | `` `See<test::Numbers>` in `b::view` runs before `Make<test::Numbers>` in `a::make`; add `.after("a::make")` to `b::view` `` |
+| a use before the `Make`, earlier phase | `` `See<…>` in `b::view` (phase update) runs before `Make<…>` in `a::make` (phase late); move `b::view` to phase late, with `.after("a::make")` `` |
+| a use with no `Make` loaded | `` `See<…>` in `b::view`: nothing loaded makes test::Numbers `` |
+| a second `Make` | `` `Make<…>` in `b::again` and in `a::make`: a flow has one maker; a stage that changes it takes `Pass<…>` `` |
+| a use after the `Take` | `` `See<…>` in `c::late` runs after `Take<…>` in `b::sink` took it; add `.before("b::sink")` to `c::late` `` (or move it, as above) |
+| a second `Take` | the same, ending "a flow has one taker: make one of them a `Pass` that runs before it" |
+| uses in two groups | below |
+| two types under one name | `` test::Numbers is declared as two types: `a::Numbers` by `a::make` and `b::Numbers` by `b::view`; a flow shared between mods is declared once, in its mod's interface `` |
+
+A flow made again after it's taken is a new value, and is allowed. A flow
+nothing reads is allowed too: it's there for whoever wants it.
+
+**Why not infer the order from flows.** Inference would be a topological
+sort with each `Make` before its uses, and mods that don't know each other
+would get a working order without naming each other's systems. It isn't
+done, for now, because:
+
+- **every user so far is one mod.** Physics's eight systems are
+  physics2d's, and so would be a hierarchy pipeline. Within one mod,
+  declaration order already is the pipeline's order; the check only
+  confirms it.
+- **a consumer in another mod already names its producer** for anything
+  else it reads: a component written in `simulate` is read in `late`, or
+  after `.after("physics2d::step")`. A flow asks the same, and the error
+  says exactly what to write.
+- **two sources of order are two things to explain.** With inference, a
+  plan's order would depend on which flows a system takes, and adding a
+  `See` to a debug view could reorder a game's systems.
+
+If it comes, inference starts within one mod, where it can't reorder
+anyone else's systems.
+
+**At run time** the same rules are asserted at fetch, so a plan that
+skipped the check (a harness test, a bug) fails at the first bad use,
+naming the flow: `See`, `Pass` or `Take` with no value present, or a
+value of another type. A value never outlives its frame, so last frame's
+can't be mistaken for this frame's. Within a frame, the run-time check
+can't tell one step of a group from the next; the plan check is what
+guarantees a later step's uses follow that step's `Make`.
+
+## Fixed-rate groups
+
+A fixed-rate group's phases run once a step, as many steps a frame as
+time has accumulated (scheduling.md, "Fixed rates"), and the phases
+outside every group run once a frame. **A flow lives one step of its
+group**, or one frame outside any group:
+
+- each step's `Make` starts from the value the step before left, if
+  nothing took it, emptied. Nothing of one step's value reaches the next;
+- **uses in two groups are refused**, and so are uses both in a group
+  and outside one:
+
+  `` `See<…>` in `render::draw` (once a frame) and `Make<…>` in `physics2d::prepare` (simulate at 60 Hz): a flow lives one step of its group, so its uses can't cross groups; use it in one group, or carry the value across in a component or an event ``
+
+  A frame may run a group's steps none, one or several times, so a reader
+  outside the group would see none, the last step's, or a value from a
+  frame with no steps. None of those is a flow's meaning.
+
+## Parallel shapes
+
+**Decided by the user** (2026-10-02, get-znt.28): parallel work is
+declared and run by the scheduler, never by a system. Systems declare the
+shape of their parallel work; they never hold a thread pool. This
+answers the rejection of parallel-relations.md's phase 2, systems taking
+the pool to run parallel work the ECS can't see.
+
+### A shape is a parameter
+
+```rust
+fn solve(&mut self, _: &mut (), _: &mut Cx, turning: See<Turning>, mut graph: Pass<Graph>, passes: Passes) {
+    let Graph { layout, items, states, .. } = &mut *graph;
+    passes.run(layout, items, states, &PROGRAM, |pass, block, states| solve_block(pass, block, states, &turning), |pass, range, states| integrate(pass, range, states));
+}
+```
+
+Three parameters, each declaring `ParamDecl::Shape` with its kind, and
+nothing else: no footprint, no apply node.
+
+- **`ParMap`**: `map_into(items, min, out, f)` sets `out` to `f(i, item)`
+  of each item, in the items' order, keeping `out`'s allocation;
+  `for_each_mut(items, min, f)` calls `f(i, &mut item)`. `min` is the
+  fewest items a task is worth.
+- **`Reduce`**: `reduce(items, chunk, map, fold)` maps fixed chunks of
+  `chunk` items and folds the results left to right, in the items' order.
+  The chunks are the input's, not the threads', so a float sum is the
+  same at any thread count.
+- **`Passes`**: `run(layout, items, states, program, block, each)` runs a
+  program of stages over items in colors and the states they share:
+
+  ```rust
+  pub enum Stage<K> {
+      /// Every item, a color at a time, the overflow first.
+      Items(K),
+      /// Each of `n` states, by range.
+      Each(K, usize),
+  }
+  ```
+
+  `block(k, &mut [I], &S)` gets a block of consecutive items of one
+  color, and `each(k, Range<usize>, &S)` a range of states. `layout` is a
+  `Colored`, made by `Coloring::greedy` and `pack` (Box2D v3's rule and
+  layout, from the spike); `S` is shared as `&S`, which kernels write
+  only where their items' edges are (relaxed atomics, in physics).
+
+Why each choice, from the spike:
+
+- **The kernel takes a block, the stage decided outside the loop.** A
+  kernel per edge cost 1.6 to 2.1 times the four-lane solve, all of it the
+  SIMD lanes lost; matching the pass inside a kernel called per batch cost
+  7 to 16% at 8 lanes. With a block kernel the generic primitive was level
+  with the hand-tuned run at one thread (−1.0% to +1.6%).
+- **Shapes are generic over their kernels**, so the mod's compiler inlines
+  them. A kernel behind `&dyn Fn` cost 1 to 4%. The scheduler's side of
+  stage 3 sees only a block at a time: one dynamic call a block, not an
+  item.
+- **The shapes are closed.** Colors of items, stages over items or
+  ranges, a map, a fixed-order reduction. Physics's whole staged solve
+  fits in them with no physics in the shape.
+
+### Declared, and run by the scheduler
+
+The system calls its shape with the frame's data and its kernels; what
+runs them is the scheduler's. That is the line get-znt.28 draws:
+
+- **the declaration** is the parameter: the plan knows, before a frame
+  runs, which nodes fan out and how (a map, a reduction, a colored run).
+  Stage 3 sizes its work by it, and keeps such a node from waiting behind
+  threads another system's tasks hold;
+- **the execution** is the scheduler's. In stage 3 `Passes::run` turns
+  the program into (stage, block) tasks on the scheduler's threads, each
+  stage's blocks after the last stage's, in the spike's protocol (any
+  thread takes any block, a late thread skips stages already done). The
+  system's thread waits for them, and every kernel has returned when
+  `run` does, so no mod code is on a worker's stack once the node ends
+  (get-znt.29's rule for hot reload);
+- **the system holds no pool.** Its parameters give it no way to start a
+  thread, and `Workers` goes once its users have moved (get-znt.31).
+
+*Considered and not proposed:* a shape as a node of its own, the kernel
+registered when the system is declared and called by the scheduler after
+the system returns, with the flow as its data. It would take the call out
+of the system's body entirely. But a program's data is the frame's (the
+coloring changes every step, and kernels close over the step's settings
+and `See`s), the plan would gain a node kind beside systems and applies,
+and the kernels would become plain functions with no captures. That's a
+change to how the scheduler runs a frame, and nothing the spike measured
+needs it.
+
+### Determinism
+
+Each shape's result is the same on any number of threads, by
+construction, and stage 1 fixes what that result is:
+
+- `ParMap` calls `f` once an item; its output is in the items' order.
+- `Reduce` folds `map(chunk)` results left to right in chunk order. Stage
+  3 may map chunks in any order but must fold in this one.
+- `Passes` runs stages in program order, and within an `Items` stage the
+  overflow's block first and then each color's. The kernel must treat a
+  block's items independently: how a color is cut into blocks is the
+  scheduler's, and only colors are promised. A color's items share no
+  moving state, so blocks in any order give the same states.
+
+### On one thread
+
+A plain-memory path is the optimization right after physics moves
+(get-znt.26), not a gate. The spike's primitive shares states as relaxed
+atomics even on one thread, which costs 6 to 14% against the solve as
+built's plain path. The API takes the states as `&S` with `S` any `Sync`
+type, so a later `run` can hand a kernel generic over a state view (as
+physics's `lanes::Bodies` is) plain memory on one thread and atomics on
+several, without changing a mod that doesn't adopt it.
+
+**Open question:** whether that one-thread path can be plain memory
+without making kernels generic over a state view (the spike's open
+question). get-znt.26 measures it.
+
+## Stage 1: on one thread
+
+Stage 1 builds the mechanism in `engine_ecs` and runs every shape on the
+system's own thread:
+
+- `ParMap` and `Reduce` loop in order, `Reduce` still chunked as asked.
+- `Passes` runs each stage in order: an `Items` stage calls `block` once
+  for the overflow and once for each color, in order; an `Each` stage
+  calls `each` once, over every state.
+
+That is the result stage 3 must reproduce. A world with an executor
+installed (benchmarks, physics's tests) still runs shapes on one thread
+in stage 1: `Workers` is the only way onto it, until stage 3.
+
+`API_VERSION` goes up: `ParamDecl` gains `Flow` and `Shape`, the world a
+flow store, and `Declarations` the flows a build uses.
+
+## Testing
+
+Each tier proves what the others can't (CLAUDE.md):
+
+- **Unit tests** (`engine_ecs`, and the loader's `schedule.rs`):
+  - every plan error, with its text, and what's allowed (made again after
+    a `Take`, made and never read);
+  - the graph's edges: readers together, a writer after them, no apply
+    node;
+  - run time: a use with no value, a value of another type, a value from
+    an earlier frame, and a system using one flow twice;
+  - recycling: from a `Take`, from a value nothing took, a later step's
+    `Make` from an earlier step's value, a bin dropped at install;
+  - the shapes' sequential semantics: order, the fixed-order reduction,
+    stages and colors in order, and the coloring's invariants.
+- **Integration** (`reload_test`): purpose-made mods, a maker whose
+  interface declares a flow and a reader depending on it, in two builds
+  whose flow layouts differ. Reloaded as a batch, the new builds' code
+  runs, the first `Make` starts from nothing, and recycling resumes. Poison
+  mode is on in every loader test, so a bin kept across the reload faults
+  at the next `Make`. Unloading both and dropping the engine checks that a
+  bin outliving its maker drops with its code mapped.
+- **End to end**: nothing new. The manifest, runfiles and socket don't
+  change.
+- **Stage 3** adds what only threads can show: every shape bit for bit at
+  1, 2, 3 and 8 threads, as the spike's tests do.
+
+## Physics's adoption (stage 2)
+
+get-znt.33 moves physics2d's solve onto flows as the spike ported it,
+bit for bit:
+
+```text
+gather_bodies    world -> Make<Bodies>
+gather_turning   See<Bodies>, world -> Make<Turning>
+gather_contacts  See<Bodies>, world -> Make<Contacts>
+prepare          See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
+solve            See<Turning>, Pass<Graph>, Passes
+finish           Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
+scatter_bodies   Take<Bodies>, Take<Turning> -> world
+scatter_contacts Take<Contacts> -> world
+```
+
+- **Baselines unchanged**, the long suites run, and pong's and the
+  platformer's replays unchanged.
+- **The one-thread atomics cost is accepted** (3.6 to 6.7% of the
+  pipeline at one thread in the spike), then optimized (get-znt.26).
+- **The threads wait for stage 3.** Physics solves across threads today
+  only where a benchmark or test installs an executor; the running engine
+  installs none (get-znt.20). Moved onto shapes, physics runs on one
+  thread until stage 3, so its 8-thread benchmarks measure nothing new in
+  between.
+- **`prepare`'s batch fill** may move into the passes' first stage, which
+  closed most of the spike's 8-thread gap (flows-spike.md, "Where the
+  8-thread gap is"), and makes `prepare` and `solve` one coarser stage.
+  Stage 2's call, measured.
+- **Kept colors** (parallel-relations.md, phase 1; get-emj.74) become an
+  input of `prepare`, decided with stage 3, so one re-baseline covers
+  both.
+
+## Out of scope
+
+- **Inferring order from flows** (above): possible later, within one mod.
+- **A "levels of a tree" shape.** The hierarchy spike wanted one, but it
+  isn't a flows user, and no other user has asked. It comes when one
+  does.
+- **Recycling across types**, and a `Take` that hands its allocation to
+  another flow's `Make`.
+- **Flows across frames or groups**, and flows in snapshots or replays.
+- **Shapes over world storage.** Shapes run over what a system holds,
+  normally a flow. A colored iteration over a relation's rows
+  (parallel-relations.md, phase 3) stays deferred.
+- **A shape that names its flow**, so the scheduler could pipeline one
+  system's blocks into the next's (get-znt.23). Shapes take slices.
+
+## Open questions
+
+- **Open question:** a maker whose mod has failed (and so is skipped)
+  leaves its readers with no value, and each reader fails at fetch: one
+  failed mod fails every mod downstream. Skipping a system whose flows
+  weren't made would contain it.
+- **Open question:** why the settled pile's `prepare` was 5 to 7% slower
+  on recycled allocations than on fresh ones in the spike (get-znt.27).
+- **Open question:** the one-thread path without atomics (above,
+  get-znt.26).
+
+[^stand-in]: *(History, 2026-10-02.)* The spike built flows on the ECS's
+    public API without changing it: each flow declared a marker event, its
+    parameters declared that event's queue, and the access kind rode in the
+    declaration as a count of `Dt` leaves, read only by the plan check. Every
+    use but `See` got an apply node that published nothing, and the values
+    lived beside the world in a store found by the world's address.
+    `ParamDecl::Flow` and the world's store replace all three.

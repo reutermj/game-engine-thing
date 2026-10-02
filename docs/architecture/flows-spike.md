@@ -15,7 +15,9 @@ harness:
   second user.
 
 This is a report, not the design doc. It says what was built, what it
-measured, and what a design doc would have to settle.
+measured, and what a design doc would have to settle. The design doc is
+[flows.md](flows.md) (get-znt.25), which settles each question listed
+under "Recommendation".
 
 **In short:**
 
