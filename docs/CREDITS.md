@@ -530,3 +530,28 @@ one would have to ship those files with it.
   in its README, for `hashed` in `engine/std/physics2d/compare/scene.rs`,
   which chooses each body of a mixed pile (`Scene::Mixed`) the same way
   in every engine. Nothing is linked.
+
+## FNV
+
+- **Project:** the Fowler/Noll/Vo hash, by Glenn Fowler, Phong Vo and
+  Landon Curt Noll, http://www.isthe.com/chongo/tech/comp/fnv/.
+- **License:** public domain, "via the Creative Commons CC0 1.0 Universal
+  (CC0 1.0) Public Domain Dedication", as its page states (read
+  2026-10-02).
+- **What we use:** FNV-1a's 64-bit offset basis and prime, for the hashes
+  of physics3d's exact fingerprint (`engine/std/physics3d/tests/exact.rs`),
+  and in the ECS's component fingerprints (`engine/ecs/component.rs`).
+  Nothing is linked.
+
+## SplitMix64
+
+- **Project:** SplitMix64, Guy Steele, Doug Lea and Christine Flood's
+  generator (Java's `SplittableRandom`), in Sebastiano Vigna's C,
+  https://prng.di.unimi.it/splitmix64.c.
+- **License:** public domain: "the author has dedicated all copyright and
+  related and neighboring rights to this software to the public domain
+  worldwide", as the file states (read 2026-10-02).
+- **What we use:** its increment and mixing constants, for the seeded
+  scenes of the 3D comparison (`engine/std/physics3d/tests/scenes.rs`)
+  and the kernel's inputs of physics3d's exact fingerprint
+  (`engine/std/physics3d/tests/exact.rs`). Nothing is linked.

@@ -215,6 +215,35 @@ same for both.
   speed and the normal impulse), run `--all`, and revert. Set each band
   just outside the larger spread, and record it in physics-testing.md.
 
+## The exact fingerprint
+
+physics3d's step and solver, pinned bit for bit in
+`engine/std/physics3d/tests/exact.txt`, which `//engine/std/physics3d:exact_test`
+checks in the default suite (physics-testing.md, "The exact
+fingerprint"): 3D's stand-in for 2D's arrays.
+
+- **Trigger:** `exact_test` fails; or any change to physics3d's step, its
+  narrowphase or solver, the interface's math, or pile3d.
+- **Compare:**
+
+  ```sh
+  ./bazel run //engine/std/physics3d:exact     # a second; which lines differ, the first of each layer
+  ```
+
+  `mod` lines are the mod in the engine, a frame each; `kernel` lines
+  the solver alone, a tuning each. The first differing frame and its
+  components say where the change went in.
+- **A change that claims to keep results** (a refactor, a speed change, a
+  kernel in lanes in pair order) must leave both layers as pinned. If it
+  doesn't, it isn't what it claims: find the change, don't write the file.
+- **Regenerate** when results change on purpose: `-- --write`, in the
+  commit that changes them, with the baselines' files, and the message
+  says why, and which layer moved (the kernel's lines too, or only the
+  mod's: an order change). Never edit the file by hand.
+- **Merging** branches that touch physics3d: write it on the merged tree,
+  after the baselines' comparison; a conflict in it is never resolved by
+  hand.
+
 ## Refreshing the quality tests' bounds
 
 The quality tests (physics.md, "Quality as a test") hold ours to bounds
