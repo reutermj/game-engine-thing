@@ -28,7 +28,8 @@
 use std::time::Instant;
 
 use engine_api::{
-    Adds, Colored, Coloring, Cx, Dt, Entity, EventWriter, Make, Pass, Passes, Query, Recycle, See, Stage, Take, Without, flow,
+    Adds, Colored, Coloring, Cx, Dt, Entity, EventWriter, Make, Pass, Passes, Query, Recycle, See, Shareable, Stage, States, Take, Without,
+    flow,
 };
 use physics2d::{
     Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Position, Response,
@@ -37,7 +38,7 @@ use physics2d::{
 
 use crate::Turning as TurningQ;
 use crate::sleep::Sleepers;
-use crate::solver::staged::{Staged, Step};
+use crate::solver::staged::{Atom, Shared, Staged, State, Step};
 use crate::solver::{self, Constraint, ContactPoint, Points, SolverBody, Spinning};
 use crate::{Moving, Physics, Records, RestingContacts, SleepingBodies, Slots, Stills, mark, nanos, sleeping_by};
 
@@ -117,6 +118,24 @@ struct Colors {
 /// to empty: recycling them is keeping their allocations.
 impl Recycle for Staged<LANES> {
     fn recycle(&mut self) {}
+}
+
+/// The lanes' states, shared between threads as relaxed atomics of their
+/// bits (`lanes::Atom`), which on x86 are plain loads and stores.
+impl Shareable for State {
+    type Shared = Atom;
+
+    fn share(&self) -> Atom {
+        State::share(self)
+    }
+
+    fn load(shared: &Atom) -> State {
+        State::load(shared)
+    }
+
+    fn store(shared: &Atom, value: State) {
+        State::store(shared, value)
+    }
 }
 
 impl Recycle for Colors {
@@ -313,8 +332,25 @@ impl Physics {
                     Some(n) => Stage::Each(k, n),
                 })
             });
-            let (items, atoms, kernels) = staged.split(&params, &t.spinning);
-            passes.run(&colors.layout, items, atoms, program, |k, block, s| kernels.block(k, block, s), |k, r, s| kernels.each(k, r, s));
+            let n = staged.states();
+            let (items, states, kernels) = staged.split(&params, &t.spinning);
+            // The kernels are generic over the lanes' view of the states
+            // (`Bodies`), so each view is matched once a call, not once a
+            // body (docs/architecture/flows.md, "On one thread").
+            passes.run(
+                &colors.layout,
+                items,
+                states,
+                program,
+                |k, block, s| match s {
+                    States::Plain(s) => kernels.block(k, block, s),
+                    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+                },
+                |k, r, s| match s {
+                    States::Plain(s) => kernels.each(k, r, s, n),
+                    States::Shared(s) => kernels.each(k, r, &mut Shared(s), n),
+                },
+            );
         }
         self.solver_time(start, |time, t| time.passes += t);
     }

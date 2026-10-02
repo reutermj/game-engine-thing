@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use engine_ecs::flows::{PlanStep, check_plan};
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
-use engine_ecs::{Build, Colored, Coloring, Make, ParMap, ParamDecl, Pass, Passes, Reduce, See, ShapeKind, Stage, Take, World, flow};
+use engine_ecs::{
+    Build, Colored, Coloring, Make, ParMap, ParamDecl, Pass, Passes, Reduce, See, ShapeKind, Stage, States, Take, World, flow,
+};
 
 flow! {
     pub struct Numbers: "test::Numbers" {
@@ -453,10 +455,11 @@ fn passes_run_stages_in_order_the_overflow_first_then_each_color() {
         let mut items: Vec<u32> = (0..6).collect();
         let calls = Mutex::new(Vec::new());
         let program = [Stage::Items('a'), Stage::Each('e', 4), Stage::Each('z', 0), Stage::Items('b')];
+        let mut none: [f32; 0] = [];
         passes.run(
             &layout,
             &mut items,
-            &(),
+            &mut none,
             &program,
             |k, block, _| {
                 block.iter_mut().for_each(|x| *x += 10);
@@ -523,13 +526,14 @@ fn colored_passes_relax_the_edges_color_by_color() {
             items[*item as usize].push(edges[i]);
         }
     }
-    let relax = move |x: &mut [f32], (a, b): (u32, u32), k: f32| {
-        let d = (x[b as usize] - x[a as usize]) * k;
-        if moves[a as usize] {
-            x[a as usize] += d;
+    let relax = move |x: &mut States<'_, f32>, (a, b): (u32, u32), k: f32| {
+        let (a, b) = (a as usize, b as usize);
+        let d = (x.get(b) - x.get(a)) * k;
+        if moves[a] {
+            x.set(a, x.get(a) + d);
         }
-        if moves[b as usize] {
-            x[b as usize] -= d;
+        if moves[b] {
+            x.set(b, x.get(b) - d);
         }
     };
     // The reference: edges one at a time, in color order, edge order within
@@ -539,26 +543,39 @@ fn colored_passes_relax_the_edges_color_by_color() {
     let mut order: Vec<usize> = (0..edges.len()).filter(|&i| coloring.of[i] != engine_ecs::shape::UNSOLVED).collect();
     order.sort_by_key(|&i| coloring.of[i]);
     for &i in &order {
-        relax(&mut want, edges[i], 0.5);
+        relax(&mut States::Plain(&mut want), edges[i], 0.5);
     }
     want.iter_mut().for_each(|x| *x *= 0.99);
-    let states = Mutex::new(start);
-    let items = Mutex::new(items);
-    let w = World::new();
-    let s = schedule(vec![
-        (move |_: &mut Cx, passes: Passes| {
-            passes.run(
-                &layout,
-                &mut items.lock().unwrap(),
-                &states,
-                &[Stage::Items(0.5f32), Stage::Each(0.99f32, 300)],
-                |k, block, s| block.iter().flatten().for_each(|&e| relax(&mut s.lock().unwrap(), e, k)),
-                |k, r, s| s.lock().unwrap()[r].iter_mut().for_each(|x| *x *= k),
-            );
-            let got = states.lock().unwrap();
-            assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
-        })
-        .system(&w, "relax"),
-    ]);
-    s.run_sequential(&w);
+    // Plain, as on one thread, and shared, as on several.
+    for shared in [false, true] {
+        let (layout, items, want, relax) = (layout.clone(), Mutex::new(items.clone()), want.clone(), relax.clone());
+        let states = Mutex::new(start.clone());
+        let views = Mutex::new(Vec::new());
+        let w = World::new();
+        w.set_shapes_shared(shared);
+        let s = schedule(vec![
+            (move |_: &mut Cx, passes: Passes| {
+                let seen = |s: &States<'_, f32>| views.lock().unwrap().push(matches!(s, States::Shared(_)));
+                passes.run(
+                    &layout,
+                    &mut items.lock().unwrap(),
+                    &mut states.lock().unwrap(),
+                    &[Stage::Items(0.5f32), Stage::Each(0.99f32, 300)],
+                    |k, block, mut s| {
+                        seen(&s);
+                        block.iter().flatten().for_each(|&e| relax(&mut s, e, k))
+                    },
+                    |k, r, mut s| {
+                        seen(&s);
+                        r.for_each(|i| s.set(i, s.get(i) * k))
+                    },
+                );
+                let got = states.lock().unwrap();
+                assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()), "shared {shared}: the colors' order");
+                assert!(views.lock().unwrap().iter().all(|v| *v == shared), "shared {shared}: every kernel saw the states so");
+            })
+            .system(&w, "relax"),
+        ]);
+        s.run_sequential(&w);
+    }
 }

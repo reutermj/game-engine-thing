@@ -16,6 +16,7 @@
 
 use std::marker::PhantomData;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::{Declare, FrameCx, Param, ParamDecl};
 use crate::world::World;
@@ -88,8 +89,126 @@ impl Reduce<'_> {
 }
 
 /// Runs a program of stages over items in colors.
-pub struct Passes<'w>(PhantomData<&'w World>);
-shape_param!(Passes, Passes);
+pub struct Passes<'w> {
+    /// Hand kernels the shared form of the states even on one thread
+    /// (`World::set_shapes_shared`).
+    shared: bool,
+    _world: PhantomData<&'w World>,
+}
+
+impl Param for Passes<'static> {
+    type Item<'w> = Passes<'w>;
+
+    fn declare(_: &mut Declare<'_>) -> ParamDecl {
+        ParamDecl::Shape(ShapeKind::Passes)
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Passes<'w> {
+        Passes { shared: cx.world.shapes_shared.load(Ordering::Relaxed), _world: PhantomData }
+    }
+}
+
+impl World {
+    /// Whether `Passes` hands kernels their states as threads share them
+    /// (`States::Shared`) even on one thread, where it hands them plain
+    /// (`States::Plain`) by default: so a test can hold a kernel's shared
+    /// path to its plain one before the scheduler runs it across threads,
+    /// and a benchmark can measure what sharing costs.
+    pub fn set_shapes_shared(&self, on: bool) {
+        self.shapes_shared.store(on, Ordering::Relaxed);
+    }
+}
+
+/// A state type a primitive can hand kernels as plain memory, on one
+/// thread, or in a form threads can share, on several: `Shared`, made from
+/// a value, read and written through `&`. Relaxed atomics of its fields'
+/// bits, normally, which on x86 are plain loads and stores.
+pub trait Shareable: Copy + Send + Sync {
+    type Shared: Sync;
+    fn share(&self) -> Self::Shared;
+    fn load(shared: &Self::Shared) -> Self;
+    fn store(shared: &Self::Shared, value: Self);
+}
+
+impl Shareable for f32 {
+    type Shared = AtomicU32;
+
+    fn share(&self) -> AtomicU32 {
+        AtomicU32::new(self.to_bits())
+    }
+
+    fn load(shared: &AtomicU32) -> f32 {
+        f32::from_bits(shared.load(Ordering::Relaxed))
+    }
+
+    fn store(shared: &AtomicU32, value: f32) {
+        shared.store(value.to_bits(), Ordering::Relaxed)
+    }
+}
+
+impl Shareable for u32 {
+    type Shared = AtomicU32;
+
+    fn share(&self) -> AtomicU32 {
+        AtomicU32::new(*self)
+    }
+
+    fn load(shared: &AtomicU32) -> u32 {
+        shared.load(Ordering::Relaxed)
+    }
+
+    fn store(shared: &AtomicU32, value: u32) {
+        shared.store(value, Ordering::Relaxed)
+    }
+}
+
+/// The states as a kernel of [`Passes::run`] gets them: the slice itself on
+/// one thread, or its shared form on several. A kernel written over the
+/// view's `get` and `set` serves both, at a match per access; one generic
+/// over a view of the mod's own matches once a call and runs a copy of
+/// itself for each (docs/architecture/flows.md, "On one thread").
+pub enum States<'a, T: Shareable> {
+    Plain(&'a mut [T]),
+    Shared(&'a [T::Shared]),
+}
+
+impl<T: Shareable> States<'_, T> {
+    /// The same states for a shorter while: to hand them on and keep them.
+    #[inline(always)]
+    pub fn reborrow(&mut self) -> States<'_, T> {
+        match self {
+            States::Plain(s) => States::Plain(s),
+            States::Shared(s) => States::Shared(s),
+        }
+    }
+
+    #[inline(always)]
+    pub fn get(&self, i: usize) -> T {
+        match self {
+            States::Plain(s) => s[i],
+            States::Shared(s) => T::load(&s[i]),
+        }
+    }
+
+    #[inline(always)]
+    pub fn set(&mut self, i: usize, value: T) {
+        match self {
+            States::Plain(s) => s[i] = value,
+            States::Shared(s) => T::store(&s[i], value),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            States::Plain(s) => s.len(),
+            States::Shared(s) => s.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// A stage of [`Passes::run`]: every item, a color at a time (the overflow
 /// first), or each of `n` states by range.
@@ -105,40 +224,62 @@ impl Passes<'_> {
     /// `Items` stage the overflow's items and then each color's. `block`
     /// gets consecutive items of one color: all of them on one thread,
     /// some on several, so it must treat them independently. `each` gets a
-    /// range of `0..n`. States are shared as `&S`, which kernels write only
-    /// where their items' edges are (relaxed atomics, in physics). A color's
-    /// items share no moving state, so any order of its blocks gives the
-    /// same states.
+    /// range of `0..n`. Kernels get the states as [`States`]: the slice
+    /// itself on one thread (`Plain`), and on several the shared form,
+    /// made from it before the first stage and written back after the last
+    /// (`Shared`), which kernels write only where their items' edges are.
+    /// A color's items share no moving state, so any order of its blocks
+    /// gives the same states.
     ///
     /// Box2D v3's staged solve (`b2SolverStage`, `solver.c`), generic, as
     /// physics2d's `lanes::run_across` is that solve.
-    pub fn run<I: Send, S: Sync + ?Sized, K: Copy + Sync>(
+    pub fn run<I: Send, T: Shareable, K: Copy + Sync>(
         &self,
         layout: &Colored,
         items: &mut [I],
-        states: &S,
+        states: &mut [T],
         program: &[Stage<K>],
-        block: impl Fn(K, &mut [I], &S) + Sync,
-        each: impl Fn(K, Range<usize>, &S) + Sync,
+        block: impl Fn(K, &mut [I], States<'_, T>) + Sync,
+        each: impl Fn(K, Range<usize>, States<'_, T>) + Sync,
     ) {
         assert_eq!(items.len(), layout.items(), "items as the coloring laid them out");
-        for stage in program {
-            match *stage {
-                Stage::Items(k) => {
-                    let mut rest = &mut items[..];
-                    for n in std::iter::once(layout.overflow).chain(layout.colors.iter().copied()) {
-                        let (color, tail) = std::mem::take(&mut rest).split_at_mut(n);
-                        rest = tail;
-                        // A color can be empty: the greedy coloring keeps
-                        // color 0 from edges at a fixed state.
-                        if !color.is_empty() {
-                            block(k, color, states);
-                        }
+        if self.shared {
+            let shared: Vec<T::Shared> = states.iter().map(T::share).collect();
+            stages(layout, items, program, &block, &each, States::Shared(&shared));
+            for (s, x) in states.iter_mut().zip(&shared) {
+                *s = T::load(x);
+            }
+        } else {
+            stages(layout, items, program, &block, &each, States::Plain(states));
+        }
+    }
+}
+
+/// `Passes::run`'s stages on this thread.
+fn stages<I, T: Shareable, K: Copy>(
+    layout: &Colored,
+    items: &mut [I],
+    program: &[Stage<K>],
+    block: &impl Fn(K, &mut [I], States<'_, T>),
+    each: &impl Fn(K, Range<usize>, States<'_, T>),
+    mut states: States<'_, T>,
+) {
+    for stage in program {
+        match *stage {
+            Stage::Items(k) => {
+                let mut rest = &mut items[..];
+                for n in std::iter::once(layout.overflow).chain(layout.colors.iter().copied()) {
+                    let (color, tail) = std::mem::take(&mut rest).split_at_mut(n);
+                    rest = tail;
+                    // A color can be empty: the greedy coloring keeps color
+                    // 0 from edges at a fixed state.
+                    if !color.is_empty() {
+                        block(k, color, states.reborrow());
                     }
                 }
-                Stage::Each(k, n) if n > 0 => each(k, 0..n, states),
-                Stage::Each(..) => {}
             }
+            Stage::Each(k, n) if n > 0 => each(k, 0..n, states.reborrow()),
+            Stage::Each(..) => {}
         }
     }
 }

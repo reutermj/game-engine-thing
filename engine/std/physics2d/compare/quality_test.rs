@@ -433,6 +433,24 @@ fn the_mod_is_the_arrays_bit_for_bit() {
     });
 }
 
+/// The mod's passes run on one thread, where the solve's kernels get their
+/// states plain; across threads they get them shared (`States::Shared`),
+/// a path of their own. Shared on one thread, it is the arrays' solve bit
+/// for bit too, so the scheduler's threads (get-znt.34) start from a path
+/// already held to it.
+#[test]
+fn the_mod_is_the_arrays_with_its_states_shared() {
+    let scene = Scene::Pile { n: 400, width: 41.0, stagger: true };
+    let m = runs::mod_in_engine(&scene, true, false);
+    m.engine().world().set_shapes_shared(true);
+    let (mut m, mut a) = (m, ecs::Flat::new(&scene, true, Box::new(solver::solve_points), "ours"));
+    m.step(150);
+    a.step(150);
+    let (mb, ab) = (m.bodies(), a.bodies());
+    assert_eq!(mb.len(), ab.len());
+    assert_eq!(differ(&mb, &ab), 0, "shared states: bodies differ from the arrays");
+}
+
 /// Bodies whose position, velocity, angle or turn rate differ at all.
 fn differ(x: &[Dyn], y: &[Dyn]) -> usize {
     let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy, b.angle, b.w].map(f32::to_bits);

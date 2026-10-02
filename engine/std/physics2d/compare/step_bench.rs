@@ -9,6 +9,8 @@
 //!
 //!     taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench
 //!
+//! `SHARED=1` hands the solver's kernels their states shared, as threads
+//! will, on one thread (`World::set_shapes_shared`): what sharing costs.
 //! `RUNS` (5), `ONLY=<case>`, and `THREADS=1,8` (1) for the host's threads,
 //! kept between steps (`tests/pool.rs`). Until the scheduler runs declared
 //! shapes across threads (get-znt.34), the solve runs on one thread
@@ -56,6 +58,7 @@ fn run(manifest: &engine_control::Manifest, scene: &Scene, turning: bool, (befor
     if threads > 1 {
         ecs = ecs.on_threads(Arc::new(pool::Pool::new(threads)));
     }
+    ecs.engine().world().set_shapes_shared(std::env::var("SHARED").is_ok_and(|s| s == "1"));
     ecs.step(before);
     ecs.reset();
     ecs.step(window);

@@ -104,8 +104,10 @@ changing the ABI, the reload sequence or the Bazel rules.
     [docs/architecture/flows.md](docs/architecture/flows.md).
   - `shape.rs` — parallel shapes, the form a system's parallel work takes
     once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a
-    program of stages over items in colors), parameters the scheduler will
-    run across threads; on one thread for now.
+    program of stages over items in colors, its kernels handed the states
+    plain on one thread and shared on several, `States`), parameters the
+    scheduler will run across threads; on one thread for now. physics2d's
+    solve is their first user (its `pipeline.rs`).
   - `graph.rs` — footprints and the overlap rules the schedule's edges
     come from.
   - `live.rs` — live relations: a `Proximity` a mod declares (a spatial

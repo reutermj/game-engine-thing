@@ -433,6 +433,10 @@ pub struct World {
     pub(crate) flows: Arena<crate::flows::FlowSlot>,
     pub(crate) flows_by_name: Mutex<HashMap<String, usize>>,
     pub(crate) flow_recycling: AtomicBool,
+    /// Whether `Passes` hands its kernels the states as threads share them
+    /// even on one thread (`shape.rs`): for testing a kernel's shared path,
+    /// and measuring what sharing costs.
+    pub(crate) shapes_shared: AtomicBool,
     /// Each live relation's kept state (`live.rs`), by relation, named by
     /// its type: the world's, like the orders it's found in, and taken by a
     /// system as a parameter (`Live`), so the scheduler sees who uses it.
@@ -474,6 +478,7 @@ impl World {
             flows: Arena::new(MAX_FLOWS),
             flows_by_name: Mutex::new(HashMap::new()),
             flow_recycling: AtomicBool::new(true),
+            shapes_shared: AtomicBool::new(false),
             relations: Arena::new(MAX_RELATIONS),
             relations_by_name: Mutex::new(HashMap::new()),
             entities: Entities::new(),

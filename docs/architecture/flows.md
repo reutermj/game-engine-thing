@@ -6,8 +6,9 @@ get-znt.32): the mechanism and the shapes in `engine_ecs`
 thread, and the plan check in the loader's `schedule.rs`. **Stage 2
 built** (2026-10-02, get-znt.33): physics2d's solve is a pipeline of nine
 systems over five flows, its passes on `Passes`, bit for bit the solve it
-replaced ([below](#physicss-adoption-stage-2)). Stage 3 (get-znt.34) has
-the scheduler run the shapes across threads.
+replaced ([below](#physicss-adoption-stage-2)); since get-znt.26 its
+kernels get plain memory on one thread ([On one thread](#on-one-thread)).
+Stage 3 (get-znt.34) has the scheduler run the shapes across threads.
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -321,6 +322,8 @@ fn solve(&mut self, _: &mut (), _: &mut Cx, turning: See<Turning>, mut graph: Pa
 }
 ```
 
+(physics2d's own is `passes` in `engine/std/physics2d/pipeline.rs`.)
+
 Three parameters, each declaring `ParamDecl::Shape` with its kind, and
 nothing else: no footprint, no apply node.
 
@@ -344,11 +347,14 @@ nothing else: no footprint, no apply node.
   }
   ```
 
-  `block(k, &mut [I], &S)` gets a block of consecutive items of one
-  color, and `each(k, Range<usize>, &S)` a range of states. `layout` is a
-  `Colored`, made by `Coloring::greedy` and `pack` (Box2D v3's rule and
-  layout, from the spike); `S` is shared as `&S`, which kernels write
-  only where their items' edges are (relaxed atomics, in physics).
+  `block(k, &mut [I], States<T>)` gets a block of consecutive items of
+  one color, and `each(k, Range<usize>, States<T>)` a range of states.
+  `layout` is a `Colored`, made by `Coloring::greedy` and `pack` (Box2D
+  v3's rule and layout, from the spike). The states are a `&mut [T]`,
+  which kernels get as `States`: the slice itself on one thread, and on
+  several its shared form (`T: Shareable`, relaxed atomics in physics),
+  which kernels write only where their items' edges are ("On one
+  thread", below).
 
 Why each choice, from the spike:
 
@@ -410,17 +416,74 @@ construction, and stage 1 fixes what that result is:
 
 ### On one thread
 
-A plain-memory path is the optimization right after physics moves
-(get-znt.26), not a gate. The spike's primitive shares states as relaxed
-atomics even on one thread, which costs 6 to 14% against the solve as
-built's plain path. The API takes the states as `&S` with `S` any `Sync`
-type, so a later `run` can hand a kernel generic over a state view (as
-physics's `lanes::Bodies` is) plain memory on one thread and atomics on
-several, without changing a mod that doesn't adopt it.
+**Built** (2026-10-02, get-znt.26): `Passes::run` takes the states as
+plain memory, `&mut [T]`, and hands each kernel call a view of them:
 
-**Open question:** whether that one-thread path can be plain memory
-without making kernels generic over a state view (the spike's open
-question). get-znt.26 measures it.
+```rust
+pub enum States<'a, T: Shareable> {
+    Plain(&'a mut [T]),        // on one thread: the slice itself
+    Shared(&'a [T::Shared]),   // on several: made before the first stage, read back after the last
+}
+
+pub trait Shareable: Copy + Send + Sync {
+    type Shared: Sync;         // relaxed atomics of the fields' bits, normally
+    fn share(&self) -> Self::Shared;
+    fn load(shared: &Self::Shared) -> Self;
+    fn store(shared: &Self::Shared, value: Self);
+}
+```
+
+A kernel matches the view once a call and runs its generic body on
+either, which is how physics's lanes were already written
+(`lanes::Bodies`, over `[State]` and the shared `Atom`s):
+
+```rust
+|k, block, s| match s {
+    States::Plain(s) => kernels.block(k, block, s),
+    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+}
+```
+
+`States` also has `get` and `set`, a match an access, for a kernel that
+would rather not be generic and doesn't mind the cost.
+`World::set_shapes_shared` hands kernels the shared view on one thread
+too, so a mod's shared path is tested before any thread runs it
+(`quality_test`'s `the_mod_is_the_arrays_with_its_states_shared`), and
+measured.
+
+**The open question, answered: kernels needn't be generic, but fast ones
+are.** Measured on physics's passes (`step_bench`, one thread, the median
+of 5 runs, µs a step of the `passes` system):
+
+| kernels get the states | pile 10 000 falling | settled | pyramid 5050 |
+|---|---|---|---|
+| plain, matched once a call (built) | 297 | 3850 | 2423 |
+| plain, matched once an access (`get`/`set`) | 354 | 4569 | 2911 |
+| shared, matched once a call (part 1's path) | 368 | 4106 | 2576 |
+| shared, matched once an access | 439 | 5389 | 3309 |
+
+- **A match an access costs 19 to 20%** of the passes plain, and more
+  than the atomics: LLVM doesn't hoist the match out of the kernels'
+  loops. The atomics cost 6 to 7% of the passes settled and on the
+  pyramid, 24% falling, about what the spike measured. So a mod whose kernels are hot writes them generic over a
+  view of its own, as physics does, and matches once a call.
+- **Considered and not built:** kernels as a trait with generic methods
+  (`fn block<V: View<T>>`), the engine choosing the view. The same code
+  in the mod, a trait in place of two closures, and an engine-defined
+  view with only whole-`T` loads, where physics's lanes load a body's
+  velocity alone (`load_v`, which spares the shared path four atomic
+  loads a body). And a plain path behind `UnsafeCell`, refused: new
+  unsafe code whose soundness would rest on the colors.
+- **The pipeline on one thread is no slower than the solve it replaced**:
+  alternated runs of the pre-port solve and the pipeline on one build
+  (`step_bench`, two rounds of 5), the solve system(s) µs a step, before /
+  after: falling 564, 560 / 559, 555; settled 5240, 5199 / 5183, 5100;
+  pyramid 3356, 3360 / 3245, 3242; not turning 2739, 2758 / 2757, 2742.
+  The whole step is level (settled 6793, 6766 / 6844, 6740).
+
+The `angle`s physics's `Move` stage keeps for turning bodies stay relaxed
+atomics on both paths: written once a substep a turning body, through the
+shared reference every kernel has, too few to be worth a plain path.
 
 ## Stage 1: on one thread
 
@@ -536,7 +599,9 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
 | pile 10 000 not turning, settled | 2712 / 3288 | 2676 / 3252 | 2648 / 3083 | 2698 / 3127 |
 
 - **One thread: 0.7 to 2.3% slower** where bodies turn, the solver's
-  relaxed atomics (below, "On one thread"); level where nothing does.
+  relaxed atomics; level where nothing does. Since get-znt.26 the passes
+  get plain memory on one thread, and the pipeline is level with the
+  solve it replaced or faster (below, "On one thread").
 - **Eight threads: the solve's threads are gone until stage 3**, as
   planned. With no shape run across threads the solve takes its
   one-thread time (5327 against 1415 settled), and the step loses what
@@ -579,8 +644,6 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
   weren't made would contain it.
 - **Open question:** why the settled pile's `prepare` was 5 to 7% slower
   on recycled allocations than on fresh ones in the spike (get-znt.27).
-- **Open question:** the one-thread path without atomics (above,
-  get-znt.26).
 
 [^stand-in]: *(History, 2026-10-02.)* The spike built flows on the ECS's
     public API without changing it: each flow declared a marker event, its

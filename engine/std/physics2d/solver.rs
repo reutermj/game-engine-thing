@@ -2552,20 +2552,76 @@ mod lanes {
             stage(Step::Bounce, None);
         }
 
+        pub use super::{Atom, Bodies, Shared, State};
+
+        /// A `State` as threads share it, and back: what a primitive that
+        /// shares the states between threads makes them into (the mod's
+        /// `Shareable`).
+        impl State {
+            pub fn share(&self) -> Atom {
+                Atom::new(self)
+            }
+
+            pub fn load(shared: &Atom) -> State {
+                shared.state()
+            }
+
+            pub fn store(shared: &Atom, s: State) {
+                for (k, x) in [s.v.x, s.v.y, s.w, s.moved.x, s.moved.y, s.turned.c, s.turned.s].into_iter().enumerate() {
+                    shared.put(k, x);
+                }
+            }
+        }
+
+        /// What the bodies' stages write besides velocities, field by field:
+        /// on threads, the moving and the turning of one body are two
+        /// ranges of one stage, which a whole state's store would race.
+        pub trait Moves: Bodies {
+            fn store_moved(&mut self, i: usize, moved: Vec2);
+            fn store_turned(&mut self, i: usize, turned: Rot);
+        }
+
+        impl Moves for [State] {
+            #[inline(always)]
+            fn store_moved(&mut self, i: usize, moved: Vec2) {
+                self[i].moved = moved;
+            }
+
+            #[inline(always)]
+            fn store_turned(&mut self, i: usize, turned: Rot) {
+                self[i].turned = turned;
+            }
+        }
+
+        impl Moves for Shared<'_> {
+            #[inline(always)]
+            fn store_moved(&mut self, i: usize, moved: Vec2) {
+                self.0[i].put(3, moved.x);
+                self.0[i].put(4, moved.y);
+            }
+
+            #[inline(always)]
+            fn store_turned(&mut self, i: usize, turned: Rot) {
+                self.0[i].put(5, turned.c);
+                self.0[i].put(6, turned.s);
+            }
+        }
+
         /// A step's contacts as the passes solve them: batches in lanes, the
         /// bodies as states, kept from step to step for their allocations
         /// (a flow's payload).
         pub struct Staged<const N: usize> {
+            /// Its states (`s`) are the passes': handed to kernels plain on
+            /// one thread, shared by the primitive on several.
             hd: Head,
             moves: Vec<bool>,
             gravity: Vec<Vec2>,
             items: Vec<Batch<N>>,
             lanes: Vec<[Lane; N]>,
-            /// The states as threads share them (`Shared`), which the
-            /// passes run on whether or not they have threads.
-            atoms: Vec<Atom>,
             /// Each turning body's angle over the step, as bits: the `Move`
-            /// stage writes them through a shared reference.
+            /// stage writes them through the shared reference every kernel
+            /// has, whether its states are plain or shared. Once a substep a
+            /// turning body: too few to be worth a plain path of their own.
             angle: Vec<AtomicU32>,
             solved: Vec<usize>,
             kept: Vec<(usize, [(f32, f32); 2])>,
@@ -2579,7 +2635,6 @@ mod lanes {
                     gravity: Vec::new(),
                     items: Vec::new(),
                     lanes: Vec::new(),
-                    atoms: Vec::new(),
                     angle: Vec::new(),
                     solved: Vec::new(),
                     kept: Vec::new(),
@@ -2643,15 +2698,9 @@ mod lanes {
                 // give back a share at a time.
                 self.gravity.clear();
                 self.gravity.extend(bodies.iter().map(|b| b.gravity));
-                let (s, gravity) = (&self.hd.s, &self.gravity);
-                self.atoms.clear();
-                self.atoms.extend(s.iter().enumerate().map(|(i, st)| {
-                    let mut st = *st;
-                    if let Some(g) = gravity.get(i) {
-                        st.v -= *g;
-                    }
-                    Atom::new(&st)
-                }));
+                for (st, g) in self.hd.s.iter_mut().zip(self.gravity.iter()) {
+                    st.v -= *g;
+                }
                 self.angle.clear();
                 self.angle.extend((0..spins).map(|_| AtomicU32::new(0.0f32.to_bits())));
             }
@@ -2659,14 +2708,18 @@ mod lanes {
             /// How many states the passes run over: the bodies and one
             /// standing still.
             pub fn states(&self) -> usize {
-                self.atoms.len()
+                self.hd.s.len()
             }
 
             /// The batches, the states and the kernels, for the passes.
-            pub fn split<'a>(&'a mut self, params: &Params, spinning: &'a [Spinning]) -> (&'a mut [Batch<N>], &'a [Atom], Kernels<'a>) {
+            pub fn split<'a>(
+                &'a mut self,
+                params: &Params,
+                spinning: &'a [Spinning],
+            ) -> (&'a mut [Batch<N>], &'a mut [State], Kernels<'a>) {
                 let (h, inv_h, share) = (self.hd.h, self.hd.inv_h, self.hd.share);
                 let kernels = Kernels { params: *params, h, inv_h, share, gravity: &self.gravity, angle: &self.angle, spinning };
-                (&mut self.items, &self.atoms, kernels)
+                (&mut self.items, &mut self.hd.s, kernels)
             }
 
             /// The step's impulses into the contacts and points, and the
@@ -2679,18 +2732,19 @@ mod lanes {
             ) {
                 let angle = self.angle.iter().map(|a| f32::from_bits(a.load(Ordering::Relaxed)));
                 let batches = self.items.iter().zip(self.lanes.iter());
-                finish(params, batches, (bodies, spinning), (&Shared(&self.atoms), angle), contacts, points);
+                finish(params, batches, (bodies, spinning), (&self.hd.s[..], angle), contacts, points);
             }
         }
 
         impl Kernels<'_> {
-            /// A stage over consecutive batches of one color: which pass it
-            /// is decided once a block, as `run_across` decides it, since
-            /// deciding it a batch at a time, or calling a kernel an edge,
-            /// lost the lanes' gain (flows-spike.md).
+            /// A stage over consecutive batches of one color, over the
+            /// states plain or shared: which pass it is decided once a
+            /// block, as `run_across` decides it, since deciding it a batch
+            /// at a time, or calling a kernel an edge, lost the lanes' gain
+            /// (flows-spike.md).
             #[inline(always)]
-            pub fn block<const N: usize>(&self, k: Step, items: &mut [Batch<N>], atoms: &[Atom]) {
-                let (s, inv_h) = (&mut Shared(atoms), self.inv_h);
+            pub fn block<const N: usize, B: Bodies + ?Sized>(&self, k: Step, items: &mut [Batch<N>], s: &mut B) {
+                let inv_h = self.inv_h;
                 match k {
                     Step::Warm => items.iter_mut().for_each(|o| warm_start(o, s)),
                     Step::Push(last) => items.iter_mut().for_each(|o| pass::<N, true, COMPUTE>(o, s, inv_h, last)),
@@ -2707,40 +2761,35 @@ mod lanes {
                 }
             }
 
-            /// A stage over states `r`: gravity's share, or moving them and
-            /// then turning the turning bodies (`r` past the states), as
-            /// `run`'s loops.
+            /// A stage over states `r` of `states`, plain or shared:
+            /// gravity's share, or moving them and then turning the turning
+            /// bodies (`r` past the states), as `run`'s loops.
             #[inline(always)]
-            pub fn each(&self, k: Step, r: Range<usize>, atoms: &[Atom]) {
-                let nb = atoms.len();
+            pub fn each<B: Moves + ?Sized>(&self, k: Step, r: Range<usize>, s: &mut B, states: usize) {
                 match k {
                     Step::Gravity => {
-                        let g = &self.gravity[r.start.min(self.gravity.len())..r.end.min(self.gravity.len())];
-                        for (a, g) in atoms[r].iter().zip(g) {
-                            let mut v = Vec2::new(a.get(0), a.get(1));
-                            v += *g * self.share;
-                            a.put(0, v.x);
-                            a.put(1, v.y);
+                        for i in r.start..r.end.min(self.gravity.len()) {
+                            let (mut v, w) = s.load_v(i);
+                            v += self.gravity[i] * self.share;
+                            s.store_v(i, v, w);
                         }
                     }
                     Step::Move => {
-                        for a in atoms[r.start.min(nb)..r.end.min(nb)].iter() {
-                            let mut moved = Vec2::new(a.get(3), a.get(4));
-                            moved += Vec2::new(a.get(0), a.get(1)) * self.h;
-                            a.put(3, moved.x);
-                            a.put(4, moved.y);
+                        for i in r.start.min(states)..r.end.min(states) {
+                            let mut st = s.load(i);
+                            st.moved += st.v * self.h;
+                            s.store_moved(i, st.moved);
                         }
-                        for j in r.start.max(nb) - nb..r.end.max(nb) - nb {
-                            let (angle, a) = (&self.angle[j], &atoms[self.spinning[j].body as usize]);
-                            let w = a.get(2);
-                            let turned_by = f32::from_bits(angle.load(Ordering::Relaxed)) + self.h * w;
+                        for j in r.start.max(states) - states..r.end.max(states) - states {
+                            let (angle, body) = (&self.angle[j], self.spinning[j].body as usize);
+                            let st = s.load(body);
+                            let turned_by = f32::from_bits(angle.load(Ordering::Relaxed)) + self.h * st.w;
                             angle.store(turned_by.to_bits(), Ordering::Relaxed);
                             let turned = match self.params.integrate {
-                                Integrate::Rotation => Rot { c: a.get(5), s: a.get(6) }.integrate(self.h * w),
+                                Integrate::Rotation => st.turned.integrate(self.h * st.w),
                                 Integrate::Angle => Rot::from_angle(turned_by),
                             };
-                            a.put(5, turned.c);
-                            a.put(6, turned.s);
+                            s.store_turned(body, turned);
                         }
                     }
                     _ => unreachable!("a stage over batches"),
