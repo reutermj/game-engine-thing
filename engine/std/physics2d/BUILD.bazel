@@ -260,8 +260,17 @@ exports_files(
         "narrow.rs",
         "solver.rs",
         "tests/arrays.rs",
-        "tests/pool.rs",
         "tests/split_impulse.rs",
     ],
     visibility = ["//engine/std/physics2d/compare:__pkg__"],
+)
+
+# The benchmarks' kept threads, also for the flows spike's hierarchy
+# (//engine/ecs:flows_hierarchy_spike).
+exports_files(
+    ["tests/pool.rs"],
+    visibility = [
+        "//engine/ecs:__pkg__",
+        "//engine/std/physics2d/compare:__pkg__",
+    ],
 )

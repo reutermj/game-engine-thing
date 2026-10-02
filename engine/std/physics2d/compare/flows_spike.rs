@@ -186,12 +186,13 @@ impl Way {
     }
 }
 
-const WAYS: [Way; 10] = [
+const WAYS: [Way; 11] = [
     Way::Built(4),
     Way::Staged(4),
     Way::Generic(4, Shape::Batch),
     Way::Generic(4, Shape::Dyn),
     Way::Built(8),
+    Way::Staged(8),
     Way::Generic(8, Shape::Batch),
     Way::Built(1),
     Way::Staged(1),
@@ -206,22 +207,23 @@ struct Kept {
     p8: Prepared<8>,
 }
 
-fn solve_one(way: Way, input: &mut Input, kept: &mut Kept, workers: &Workers) -> (f64, f64, f64) {
+fn solve_one(way: Way, input: &mut Input, kept: &mut Kept, workers: &Workers) -> (f64, f64, f64, f64) {
     let wide = |n: usize| solver::Params { wide: Wide::Colored(n), ..input.params };
     let Input { bodies, spinning, constraints, points, .. } = input;
     match way {
         Way::Built(n) => {
             let t = Instant::now();
             solver::solve_across(&wide(n), (&mut **bodies, &mut **spinning), constraints, points, DT, workers);
-            (0.0, us(t), 0.0)
+            (0.0, us(t), 0.0, 0.0)
         }
         Way::Staged(n) => {
             let parts = (&mut **bodies, &mut **spinning);
-            match n {
+            let (a, b, c) = match n {
                 4 => solver::lanes::solve_across_timed::<4>(&wide(4), parts, constraints, points, DT, workers),
                 8 => solver::lanes::solve_across_timed::<8>(&wide(8), parts, constraints, points, DT, workers),
                 _ => solver::lanes::solve_across_timed::<1>(&wide(1), parts, constraints, points, DT, workers),
-            }
+            };
+            (a, b, c, 0.0)
         }
         Way::Generic(n, shape) => {
             macro_rules! stages {
@@ -235,7 +237,8 @@ fn solve_one(way: Way, input: &mut Input, kept: &mut Kept, workers: &Workers) ->
                     let run = us(t);
                     let t = Instant::now();
                     solver::lanes::finish_flow($p, &params, (&mut **bodies, &mut **spinning), constraints, points, workers);
-                    (setup, run, us(t))
+                    let fill = solver::lanes::FILLED.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e3;
+                    (setup, run, us(t), fill)
                 }};
             }
             match n {
@@ -260,7 +263,7 @@ fn solvers(label: &str, input: &Input, reps: usize, gang: &Workers) {
     solver::lanes::prepare_flow(&mut kept.p4, &input.params, (&x.bodies, &x.spinning), &mut x.constraints, &x.points, DT, &one);
     assert_eq!(kept.p4.coloring.of, groups, "{label}: the generic coloring is the solver's");
     assert_eq!(kept.p4.coloring.count.len(), n);
-    let mut times: HashMap<(Way, usize), Vec<(f64, f64, f64)>> = HashMap::new();
+    let mut times: HashMap<(Way, usize), Vec<(f64, f64, f64, f64)>> = HashMap::new();
     for rep in 0..reps {
         let mut ways = WAYS.to_vec();
         ways.rotate_left(rep % WAYS.len());
@@ -286,11 +289,12 @@ fn solvers(label: &str, input: &Input, reps: usize, gang: &Workers) {
         print!("| {} |", way.name());
         for threads in [1, gang.threads()] {
             let ts = &times[&(way, threads)];
-            let m = |f: fn(&(f64, f64, f64)) -> f64| median(ts.iter().map(f).collect());
+            let m = |f: fn(&(f64, f64, f64, f64)) -> f64| median(ts.iter().map(f).collect());
             let all = m(|t| t.0 + t.1 + t.2);
             match way {
                 Way::Built(_) => print!(" – | – | – | {all:.0} |"),
-                _ => print!(" {:.0} | {:.0} | {:.0} | {all:.0} |", m(|t| t.0), m(|t| t.1), m(|t| t.2)),
+                Way::Staged(_) => print!(" {:.0} | {:.0} | {:.0} | {all:.0} |", m(|t| t.0), m(|t| t.1), m(|t| t.2)),
+                Way::Generic(..) => print!(" {:.0} ({:.0}) | {:.0} | {:.0} | {all:.0} |", m(|t| t.0), m(|t| t.3), m(|t| t.1), m(|t| t.2)),
             }
         }
         println!();

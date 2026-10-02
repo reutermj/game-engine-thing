@@ -199,6 +199,7 @@ pub fn prepare_flow<const N: usize>(
     p.shared = shareable(bodies, spinning);
 
     // The batches, filled across the threads: `run_across`'s first stage.
+    let filling = std::time::Instant::now();
     p.items.clear();
     p.items.resize(items, Batch::empty(p.hd.nowhere));
     let hd = &p.hd;
@@ -215,7 +216,12 @@ pub fn prepare_flow<const N: usize>(
             (lane.at, lane.count, lane.speed) = (at, n_points as u8, speed);
         }
     });
+    FILLED.store(filling.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
+
+/// How long the last `prepare_flow` took to fill its batches, in ns: the
+/// part of it that `run_across` makes its first stage.
+pub static FILLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The substeps as `run` makes its passes, for `Colored::passes`.
 fn program(params: &Params, states: usize, spins: usize) -> Vec<flows::Stage<Step>> {
