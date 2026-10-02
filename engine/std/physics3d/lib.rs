@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
-use physics_common::Slots;
+use physics_common::{FAT, Slots};
 pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS,
     Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
@@ -72,12 +72,6 @@ field_struct! {
         recycled: u64,
     }
 }
-
-/// How far each collider's fat box reaches past its box grown by the
-/// speculative margin, as 2D's `FAT`: in 3D a margin's candidates grow as
-/// its volume, so the smallest tried was cheaper still (314 µs against 387
-/// at 0.05, Box3D's cap, 10 000 boxes settled, 2026-09-27).
-const FAT: f32 = 0.02;
 
 /// What the broadphase finds, kept live between steps, as 2D's
 /// `Contacts`: the tables of `Moving`, against those of `Statics`.

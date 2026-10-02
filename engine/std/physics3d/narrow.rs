@@ -16,10 +16,11 @@
 //! physics.md, "Rotation in 3D". `gjk.rs` is Jolt's way, kept to measure
 //! against.
 
+pub use physics_common::MARGIN;
+
 pub use crate::MAX_POINTS;
 use crate::{BoxBox, Mat3, Reduce, Shape, Vec3};
 
-pub const MARGIN: f32 = 0.05;
 /// Box3D's linear slop: the scale of the biases that keep a manifold from
 /// flickering between features of nearly the same separation.
 pub const SLOP: f32 = 0.005;

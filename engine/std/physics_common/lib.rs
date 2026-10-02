@@ -12,4 +12,22 @@ mod slots;
 mod soft;
 
 pub use slots::Slots;
+
+/// How near two shapes count as in contact, with a negative depth: a
+/// speculative contact, which lets the solver stop a body at the surface
+/// instead of after it has sunk in, and keeps resting contacts from
+/// flickering in and out between steps. Box2D's (Erin Catto's,
+/// docs/CREDITS.md); each mod's narrowphase finds pairs within it, and
+/// the broadphase grows boxes by it.
+pub const MARGIN: f32 = 0.05;
+
+/// How far each collider's fat box reaches past its box grown by
+/// `MARGIN`: the broadphase keeps its pairs while bodies stay inside
+/// their fat boxes (each mod's `Contacts`; spatial-storage.md, "Keeping
+/// pairs"). A settled pile creeps less than any margin tried, so the
+/// smallest was cheapest, with the fewest candidates: in 2D 131 µs
+/// against 139 at Box2D's 0.05, 10 000 settled; in 3D, where a margin's
+/// candidates grow as its volume, 314 µs against 387 at 0.05 (Box3D's
+/// cap), 10 000 boxes settled (both 2026-09-27).
+pub const FAT: f32 = 0.02;
 pub use soft::{BOUNCE_THRESHOLD, DAMPING_RATIO, MAX_PUSH, Softness};

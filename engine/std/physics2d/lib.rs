@@ -21,7 +21,7 @@ use engine_api::{
     Adds, AnyOf, Cx, Despawns, Dt, Entity, EventWriter, Live, Mod, OrderKey, Proximity, Query, Removes, Spawner, Systems, With, Without,
     Workers, export_mod, field_struct, phase,
 };
-use physics_common::Slots;
+use physics_common::{FAT, Slots};
 use physics2d::{
     Asleep, Body, Collider, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
     Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Vec2, Velocity,
@@ -68,14 +68,6 @@ field_struct! {
         sleeping: u64,
     }
 }
-
-/// How far each collider's fat box reaches past its box grown by the
-/// speculative margin: the broadphase keeps its pairs while bodies stay
-/// inside their fat boxes (`Contacts`; docs/architecture/spatial-storage.md,
-/// "Keeping pairs"). A settled pile creeps less than any margin tried, so
-/// the smallest was cheapest, with the fewest candidates (0.02 against
-/// Box2D's 0.05: 131 µs against 139 at 10 000 settled, 2026-09-27).
-const FAT: f32 = 0.02;
 
 /// What the broadphase finds, kept live between steps: the pairs of
 /// colliders whose boxes, grown by the speculative margin, meet, one of

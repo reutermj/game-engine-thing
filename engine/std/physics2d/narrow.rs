@@ -19,9 +19,9 @@
 //! corners (physics.md, "Contact points"). A turned box and a circle meet
 //! at one point, as `b2CollidePolygonAndCircle` has it, in the box's frame.
 
+pub use physics_common::MARGIN;
 use physics2d::{Placed, Rot, Shape, Vec2};
 
-pub const MARGIN: f32 = 0.05;
 /// An overlap this thin is two faces resting flush, not one box inside
 /// another: more than the solver's slop, which resting contacts sink to.
 pub const FLUSH: f32 = 0.01;
