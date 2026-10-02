@@ -5,8 +5,10 @@
 //! takes the solver's input as the mod would gather it (bodies in the
 //! world's order, contacts in pair order), and runs the same sequential
 //! impulses over it stored in different ways: AoS or SoA, flat or in pages,
-//! inverse mass stored or derived from `Body`, bodies in other orders, and
-//! in place in the world's own `Velocity` pages. Each must end bit for bit
+//! inverse mass stored or derived from `Body`, bodies in other orders, in
+//! place in the world's own `Velocity` pages, and in place in the same
+//! values held as storage would hold them if each table column were one
+//! block (docs/architecture/contiguous-columns.md). Each must end bit for bit
 //! as `solver::solve` on the copy does, or it isn't the same computation.
 //! Then the copy itself (gather and scatter against the world's pages) is
 //! timed, since that's what solving in place would save.
@@ -443,6 +445,45 @@ impl Store for InWorld {
     fn set_v(&mut self, i: u32, v: Vec2) {
         // SAFETY: as in `v`, under the write guards.
         let to = unsafe { &mut *self.v[i as usize / SPATIAL_ROWS].add(i as usize % SPATIAL_ROWS) };
+        (to.x, to.y) = (v.x, v.y);
+    }
+    #[inline(always)]
+    fn p(&self, i: u32) -> Vec2 {
+        self.p[i as usize]
+    }
+    #[inline(always)]
+    fn set_p(&mut self, i: u32, p: Vec2) {
+        self.p[i as usize] = p;
+    }
+}
+
+/// In place as `InWorld`, but each column one block by `page * 16 + row`,
+/// holes and all: the world's `Velocity` and `Body` as storage that kept a
+/// table's column in one allocation would hold them
+/// (docs/architecture/contiguous-columns.md).
+struct InBlock {
+    v: Vec<Velocity>,
+    body: Vec<Body>,
+    inv: Option<Vec<f32>>,
+    p: Vec<Vec2>,
+}
+
+impl Store for InBlock {
+    #[inline(always)]
+    fn inv(&self, i: u32) -> f32 {
+        match &self.inv {
+            Some(inv) => inv[i as usize],
+            None => derived(&self.body[i as usize]),
+        }
+    }
+    #[inline(always)]
+    fn v(&self, i: u32) -> Vec2 {
+        let v = self.v[i as usize];
+        Vec2::new(v.x, v.y)
+    }
+    #[inline(always)]
+    fn set_v(&mut self, i: u32, v: Vec2) {
+        let to = &mut self.v[i as usize];
         (to.x, to.y) = (v.x, v.y);
     }
     #[inline(always)]
@@ -1188,6 +1229,51 @@ fn main() {
             || {
                 reset_world(&vptrs);
                 (InWorld { v: vptrs.clone(), body: bptrs.clone(), inv: None, p: vec![Vec2::ZERO; slots16] }, s.cached_by(&s.packed))
+            },
+            |b| solve_cached(&mut b.0, &mut b.1, DT),
+            |b| outcome(n, |i| (b.0.v(s.packed[i]), b.0.p[s.packed[i] as usize]), b.1.iter().map(|c| (c.jn, c.jt, c.speed))),
+        ),
+    );
+
+    // In place in contiguous columns: the world's values, by the same index,
+    // in one block per column (pages adjacent, holes kept).
+    let blocks = || {
+        let v = s.scatter(&s.packed, slots16, Velocity { x: 0.0, y: 0.0 }, |i| Velocity { x: s.bodies[i].v.x, y: s.bodies[i].v.y });
+        let body = s.scatter(&s.packed, slots16, Body::fixed(), |i| s.body[i]);
+        (v, body)
+    };
+    let block_out = |b: &(InBlock, Vec<Constraint>)| {
+        outcome(n, |i| (b.0.v(s.packed[i]), b.0.p[s.packed[i] as usize]), b.1.iter().map(|c| (c.jn, c.jt, c.speed)))
+    };
+    r.row(
+        "in place, contiguous: `Velocity` and `Body` blocks, inv_mass from `Body`",
+        time(
+            || {
+                let (v, body) = blocks();
+                (InBlock { v, body, inv: None, p: vec![Vec2::ZERO; slots16] }, s.contacts_by(&s.packed))
+            },
+            |b| solve(&mut b.0, &mut b.1, DT),
+            block_out,
+        ),
+    );
+    r.row(
+        "in place, contiguous: `Velocity` block, inv_mass in flat scratch",
+        time(
+            || {
+                let (v, body) = blocks();
+                let inv = s.scatter(&s.packed, slots16, 0.0, |i| s.bodies[i].inv_mass);
+                (InBlock { v, body, inv: Some(inv), p: vec![Vec2::ZERO; slots16] }, s.contacts_by(&s.packed))
+            },
+            |b| solve(&mut b.0, &mut b.1, DT),
+            block_out,
+        ),
+    );
+    r.row(
+        "in place, contiguous: `Velocity` block, inv_mass in the constraint",
+        time(
+            || {
+                let (v, body) = blocks();
+                (InBlock { v, body, inv: None, p: vec![Vec2::ZERO; slots16] }, s.cached_by(&s.packed))
             },
             |b| solve_cached(&mut b.0, &mut b.1, DT),
             |b| outcome(n, |i| (b.0.v(s.packed[i]), b.0.p[s.packed[i] as usize]), b.1.iter().map(|c| (c.jn, c.jt, c.speed))),

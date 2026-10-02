@@ -34,6 +34,11 @@ monolithic design doc.
   measured eight ways, how Box2D, Rapier, Jolt and Flecs keep theirs,
   hierarchy propagation as a second user, and why an order matters more
   than a kept copy (proposed)
+- [contiguous-columns.md](contiguous-columns.md) — why storage can't be
+  indexed as a plain array, and whether it could: a table column in one
+  block or in reserved address space against today's pages, measured for
+  storage and for a solve in place, and what it means for parallel
+  relations' phase 2 (proposed)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 - [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods

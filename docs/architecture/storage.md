@@ -504,6 +504,9 @@ beyond the equivalence tests.
   tables, instead of happening on first access.
 - **Dense working sets** kept by storage for a system: proposed, and
   mostly not recommended, in [working-sets.md](working-sets.md).
+- **Contiguous columns**, each table column one block with pages as its
+  windows, so storage can be indexed as an array: proposed, in
+  [contiguous-columns.md](contiguous-columns.md).
 
 ## Spike results
 

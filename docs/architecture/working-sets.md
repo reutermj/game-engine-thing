@@ -68,7 +68,8 @@ slower ([physics.md, "What the ECS
 costs"](physics.md#what-the-ecs-costs); parallel-relations.md, "(c)
 Solving in world storage"). Those measurements answered whether the
 solver can work in pages; they didn't ask whether storage should own the
-copy. The user's suspicion (2026-10-02): "it feels like it's a workaround
+copy. Whether storage kept in one block a column would let it solve in
+place instead is [contiguous-columns.md](contiguous-columns.md). The user's suspicion (2026-10-02): "it feels like it's a workaround
 for a missing feature in the storage and maybe other things would also
 want that missing feature."[^hypothesis]
 
