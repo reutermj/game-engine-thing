@@ -119,6 +119,7 @@ EXACT_DEPS = [
     "//engine/control",
     "//engine/ecs",
     "//engine/loader",
+    "//engine/std/physics_common",
 ]
 
 rust_test(
