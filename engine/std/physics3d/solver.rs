@@ -310,24 +310,22 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, ho
     }
 }
 
-/// A point's closing speed as restitution takes it (`Closing`, as 2D's
+/// A point's closing speed as restitution takes it (`Closing`, 2D's
 /// `Closing::speed`): from its closing speed with the step's gravity in it
 /// (`c`), the share of that the gravity gave (`g`), its gap as found and
-/// the step.
+/// the step. The interface's `Closing` is the four options `Tuning` can
+/// name, without 2D's `Less` and `Gate`; it stays in the interface, which
+/// can't depend on physics_common, so it is mapped here. None of the four
+/// reads the restitution, so it is passed as 0.
 #[inline(always)]
 fn closing(how: Closing, c: f32, g: f32, sep: f32, dt: f32) -> f32 {
-    let before = c - g;
-    match how {
-        Closing::Stepped => c,
-        Closing::Before => before,
-        Closing::Half => c - 0.5 * g,
-        Closing::Met if g > 0.0 && sep > 0.0 => {
-            let v = before.max(0.0);
-            let fall = (v * dt + 0.5 * g * dt).min(sep);
-            (v * v + 2.0 * (g / dt) * fall).sqrt()
-        }
-        Closing::Met => before,
-    }
+    let how = match how {
+        Closing::Stepped => physics_common::Closing::Stepped,
+        Closing::Before => physics_common::Closing::Before,
+        Closing::Half => physics_common::Closing::Half,
+        Closing::Met => physics_common::Closing::Met,
+    };
+    how.speed(c, g, sep, dt, 0.0)
 }
 
 /// A contact as the substeps solve it, from what was found, and its

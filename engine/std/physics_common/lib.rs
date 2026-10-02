@@ -8,9 +8,11 @@
 //! No statics (a reloaded mod's image starts its statics over) and no
 //! unsafe code.
 
+mod closing;
 mod slots;
 mod soft;
 
+pub use closing::Closing;
 pub use slots::Slots;
 
 /// How near two shapes count as in contact, with a negative depth: a

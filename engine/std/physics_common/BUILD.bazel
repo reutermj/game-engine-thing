@@ -13,6 +13,7 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 rust_library(
     name = "physics_common",
     srcs = [
+        "closing.rs",
         "lib.rs",
         "slots.rs",
         "soft.rs",
