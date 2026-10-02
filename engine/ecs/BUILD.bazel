@@ -183,6 +183,41 @@ rust_binary(
     deps = [":ecs"],
 )
 
+# SPIKE (docs/architecture/flows-spike.md): flows, values systems pass one
+# another within a frame, on this crate's public API, and the parallel
+# shapes they're processed in. Not engine code: physics's flows spike and
+# the hierarchy one build on it.
+rust_library(
+    name = "flows_spike",
+    srcs = ["tests/flows.rs"],
+    crate_name = "flows",
+    crate_root = "tests/flows.rs",
+    visibility = ["//engine/std/physics2d/compare:__pkg__"],
+    deps = [":ecs"],
+)
+
+rust_test(
+    name = "flows_test",
+    srcs = ["tests/flows_test.rs"],
+    deps = [
+        ":ecs",
+        ":flows_spike",
+    ],
+)
+
+# SPIKE (docs/architecture/flows-spike.md): transform propagation as a flow
+# pipeline, against the idiom and the sorted copy:
+#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:flows_hierarchy_spike
+rust_binary(
+    name = "flows_hierarchy_spike",
+    srcs = ["tests/flows_hierarchy_spike.rs"],
+    tags = ["manual"],
+    deps = [
+        ":ecs",
+        ":flows_spike",
+    ],
+)
+
 # What a structural change costs, by part, sparse against tables:
 #   ./bazel run --config=bench //engine/ecs:change_bench
 rust_binary(
