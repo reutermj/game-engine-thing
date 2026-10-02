@@ -279,6 +279,15 @@ changing the ABI, the reload sequence or the Bazel rules.
   reload sequence, or migration; runbooks 002-004 say how to run them. The
   default suite runs on every change. When a long check is skipped, say
   which and why; when one is warranted, say so before starting it.
+- **Spikes are throwaway.** A spike is code built quickly to answer a
+  question (a bench target or test, marked `# SPIKE` in its BUILD file),
+  with the knowledge that it will be thrown away or rewritten when its
+  idea lands. Once its findings are written into its doc and the decision
+  is made, delete its code and targets in the same change that lands the
+  real version, or soon after: the doc keeps the numbers, and a dated
+  `[^spike-code]` footnote names the commit where the spike last built.
+  Don't keep a spike building, port it onto a new API, or patch it to
+  follow the code it measured.
 - **Credit what we build on.** Every library we compare against or take
   an idea from has a section in [docs/CREDITS.md](docs/CREDITS.md):
   project, authors and license as its own files state them, what we use it
