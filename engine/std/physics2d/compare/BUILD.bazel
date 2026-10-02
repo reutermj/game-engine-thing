@@ -260,6 +260,34 @@ rust_binary(
     deps = QUALITY_DEPS,
 )
 
+# SPIKE (docs/architecture/working-sets.md): the solve's copy of the bodies
+# as built, against an index kept by entity across steps, a slot column and
+# derived values kept, on the engine's own world between frames; and what a
+# kept index adds to spawning and despawning. Not engine code; kept so the
+# numbers can be taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:working_set_spike
+rust_binary(
+    name = "working_set_spike",
+    srcs = [
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        "working_set_spike.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    crate_root = "working_set_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
 # The physics files the spike builds over, copied into this package (a
 # generated source moves a crate's sources, and those from another package
 # with them go missing), and solver.rs with one line patched: its coloring

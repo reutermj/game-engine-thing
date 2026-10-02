@@ -171,6 +171,18 @@ rust_binary(
     deps = [":ecs"],
 )
 
+# SPIKE (docs/architecture/working-sets.md): transform propagation down
+# ChildOf, as a game writes it today, sorted each frame, and on a working
+# set kept across frames. Not engine code; kept so the numbers can be taken
+# again:
+#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:hierarchy_spike
+rust_binary(
+    name = "hierarchy_spike",
+    srcs = ["tests/hierarchy_spike.rs"],
+    tags = ["manual"],
+    deps = [":ecs"],
+)
+
 # What a structural change costs, by part, sparse against tables:
 #   ./bazel run --config=bench //engine/ecs:change_bench
 rust_binary(

@@ -536,7 +536,8 @@ What took it there:
   the positions that change.
 
 **What's left**, of the 10 000 falling frame's 157 µs over the arrays
-(55 settled), before what the broadphase and narrowphase save:
+(55 settled), before what the broadphase and narrowphase save (whether
+storage should own the solver's copy: [working-sets.md](working-sets.md)):
 
 1. **Copying in and out, 150 µs** (117 over the arrays falling). Colliders out for detection (which
    makes the narrowphase faster than the arrays', whose bodies are spread
