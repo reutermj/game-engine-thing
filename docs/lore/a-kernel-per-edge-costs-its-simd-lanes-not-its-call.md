@@ -41,3 +41,5 @@ What it says:
 
 So a generic parallel primitive should take its kernel over a slice of
 items, with the pass decided outside the loop.
+
+*(History, 2026-10-02: the spike this was measured in has been removed; it builds and runs at commit `c72e8b2`.)*

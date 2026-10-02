@@ -173,74 +173,12 @@ rust_binary(
     deps = [":ecs"],
 )
 
-# SPIKE (docs/architecture/working-sets.md): transform propagation down
-# ChildOf, as a game writes it today, sorted each frame, and on a working
-# set kept across frames. Not engine code; kept so the numbers can be taken
-# again:
-#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:hierarchy_spike
-rust_binary(
-    name = "hierarchy_spike",
-    srcs = ["tests/hierarchy_spike.rs"],
-    tags = ["manual"],
-    deps = [":ecs"],
-)
-
 # Flows and parallel shapes (docs/architecture/flows.md): edges, the plan
 # check, ownership and recycling, and the shapes on one thread.
 rust_test(
     name = "flow_test",
     srcs = ["tests/flow_test.rs"],
     deps = [":ecs"],
-)
-
-# SPIKE (docs/architecture/flows-spike.md): flows, values systems pass one
-# another within a frame, on this crate's public API, and the parallel
-# shapes they're processed in. Not engine code: physics's flows spike and
-# the hierarchy one build on it.
-rust_library(
-    name = "flows_spike",
-    srcs = ["tests/flows.rs"],
-    crate_name = "flows",
-    crate_root = "tests/flows.rs",
-    visibility = ["//engine/std/physics2d/compare:__pkg__"],
-    deps = [":ecs"],
-)
-
-rust_test(
-    name = "flows_test",
-    srcs = ["tests/flows_test.rs"],
-    deps = [
-        ":ecs",
-        ":flows_spike",
-    ],
-)
-
-# SPIKE (docs/architecture/flows-spike.md): transform propagation as a flow
-# pipeline, against the idiom and the sorted copy:
-#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:flows_hierarchy_spike
-rust_binary(
-    name = "flows_hierarchy_spike",
-    srcs = [
-        "tests/flows_hierarchy_spike.rs",
-        ":flows_hierarchy_pool",
-    ],
-    crate_root = "tests/flows_hierarchy_spike.rs",
-    tags = ["manual"],
-    deps = [
-        ":ecs",
-        ":flows_spike",
-    ],
-)
-
-# The benchmarks' kept threads, copied into this package: a crate with a
-# generated source has its sources moved, so one from another package
-# can't be reached by path (docs/lore).
-genrule(
-    name = "flows_hierarchy_pool",
-    srcs = ["//engine/std/physics2d:tests/pool.rs"],
-    outs = ["flows_hierarchy_pool.rs"],
-    cmd = "cp $< $@",
-    tags = ["manual"],
 )
 
 # What a structural change costs, by part, sparse against tables:
@@ -293,35 +231,4 @@ test_suite(
     name = "miri",
     tags = ["manual"],
     tests = MIRI_TESTS,
-)
-
-# SPIKE (docs/architecture/contiguous-columns.md): table columns kept in one
-# block each, on the heap or in reserved address space, against today's
-# pages: what storage pays for it. Not engine code; kept so the numbers can
-# be taken again:
-#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:contiguous_spike
-rust_binary(
-    name = "contiguous_spike",
-    srcs = ["tests/contiguous_spike.rs"],
-    tags = ["manual"],
-    deps = [":ecs"],
-)
-
-# The spike's block column against a model, with heap values: its unsafe
-# code is the spike's own, so it's checked here, and under Miri (manual,
-# not in `:miri`, since it isn't the engine's):
-#   ./bazel test //engine/ecs:miri_contiguous_spike_sb //engine/ecs:miri_contiguous_spike_tb
-rust_test(
-    name = "contiguous_spike_test",
-    srcs = ["tests/contiguous_spike.rs"],
-    crate_root = "tests/contiguous_spike.rs",
-    deps = [":ecs"],
-)
-
-ecs_miri_test(
-    name = "miri_contiguous_spike",
-    srcs = ["tests/contiguous_spike.rs"],
-    crate_name = "contiguous_spike",
-    crate_root = "tests/contiguous_spike.rs",
-    deps = [":ecs"],
 )

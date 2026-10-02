@@ -26,3 +26,5 @@ What worked: a genrule that copies every file from the other package into
 the crate's own package (`colors_spike_srcs`), and `#[path]`s to those
 copies, so nothing the crate reads is outside its package. A file shared
 this way is copied at build time, so it can't drift from the original.
+
+*(History, 2026-10-02: the spike this was measured in has been removed; it builds and runs at commit `c72e8b2`.)*

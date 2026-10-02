@@ -12,7 +12,7 @@ harness:
   for bit the solve as built, and timed. `:flows_spike_test` checks the bit
   for bit claims on small scenes in the default suite;
 - `//engine/ecs:flows_hierarchy_spike`: transform propagation as the
-  second user.
+  second user.[^spike-code]
 
 This is a report, not the design doc. It says what was built, what it
 measured, and what a design doc would have to settle. The design doc is
@@ -632,3 +632,5 @@ settle these:
 - **Open question:** whether flows should be visible to snapshots and
   replays. They're frame-scoped, so they needn't be, but a replay that
   stops between two stages would see one.
+
+[^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.

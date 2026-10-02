@@ -38,3 +38,5 @@ So a reservation should be kept and refilled rather than made again, if
 one is used at all. "It never moves" is bought with the first touch of
 every page, every time the range is new. docs/architecture/contiguous-columns.md
 has the rest of the comparison.
+
+*(History, 2026-10-02: the spike this was measured in has been removed; it builds and runs at commit `c72e8b2`.)*

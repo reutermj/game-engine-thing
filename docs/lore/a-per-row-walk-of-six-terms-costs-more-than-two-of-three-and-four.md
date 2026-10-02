@@ -32,3 +32,5 @@ a page walk before a design is judged on it. physics.md found a page walk
 no faster than `for_each` for reads (2026-09-24, before rotation), and that
 held for the walks it measured then, not for these. Optional query terms
 pay only as page walks: working-sets.md, "Spike results: physics".
+
+*(History, 2026-10-02: the spike this was measured in has been removed; it builds and runs at commit `c72e8b2`.)*

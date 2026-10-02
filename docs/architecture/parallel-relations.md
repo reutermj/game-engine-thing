@@ -7,7 +7,7 @@ but that parallelism lives in physics's own per-step copy of bodies and
 contacts. This doc asks how the ECS could grow so that the same kind of
 parallelism fits the world instead of living beside it. Its claims are
 measured by a spike, `//engine/std/physics2d/compare:colors_spike`
-(`colors_spike.rs`, a bench target, not engine code).
+(`colors_spike.rs`, a bench target, not engine code).[^spike-code]
 
 **The recommendation, in short:**
 
@@ -642,3 +642,5 @@ that make one cheap pass, where a copy costs more than the work.
   and keep results independent of history. Not tried.
 - **Open question:** for phase 3, whether `AtomicU32::from_mut_slice` (or a
   stable equivalent) removes the need for an unsafe cast.
+
+[^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.

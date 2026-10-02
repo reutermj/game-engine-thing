@@ -10,7 +10,7 @@ code:
 - `//engine/std/physics2d/compare:working_set_spike` (`working_set_spike.rs`):
   the copy as built, against seven other ways, on the engine's own world.
 - `//engine/ecs:hierarchy_spike` (`tests/hierarchy_spike.rs`): the second
-  user, transform propagation down `ChildOf`.
+  user, transform propagation down `ChildOf`.[^spike-code]
 
 **The recommendation, in short:**
 
@@ -465,3 +465,5 @@ the 30 µs above.
     itself: every engine read still copies or is its own storage, and every
     way measured here still copies. What it kept are the index type and an
     order.
+
+[^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.

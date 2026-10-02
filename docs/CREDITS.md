@@ -165,7 +165,7 @@ one would have to ship those files with it.
     (`compare/box2d_shim.c`).
 - **The staged solve, generic, in a spike** (docs/architecture/flows-spike.md,
   2026-10-02): the same staged run, lifted out of the solver into
-  `flows::Colored::passes` (`engine/ecs/tests/flows.rs`), a stage a color
+  `flows::Colored::passes` (`engine/ecs/tests/flows.rs`, a spike since removed, at commit `c72e8b2`), a stage a color
   of any items and the blocks, starts and marks as above; and Box2D's
   coloring rule (`b2AddContactToGraph`) as `flows::Coloring::greedy`.
 - **Adopted in `engine_ecs`** (docs/architecture/flows.md, 2026-10-02,
@@ -177,12 +177,12 @@ one would have to ship those files with it.
   2026-10-02): the awake set's `localIndex`, appended at creation and
   swap-removed with the moved body's index fixed up (`b2DestroyBody`,
   `body.c`), is the index the working-set spike keeps (`Kept` in
-  `engine/std/physics2d/compare/working_set_spike.rs`). Not adopted.
+  `engine/std/physics2d/compare/working_set_spike.rs`, a spike since removed, at commit `c72e8b2`). Not adopted.
 - **Compared for contiguous columns** (docs/architecture/contiguous-columns.md,
   2026-10-02): a solver set's columns as one array each, grown 1.5 times
   by a new block and a copy (`b2GrowAlloc`, `core.c`), indexed directly by
   the solver (`stepContext->states`, `solver.c`). Not adopted; the
-  in-place spike (`engine/std/physics2d/compare/contiguous_spike.rs`)
+  in-place spike (`engine/std/physics2d/compare/contiguous_spike.rs`, a spike since removed, at commit `c72e8b2`)
   measures that shape in the world's storage.
 
 ## Rapier

@@ -278,12 +278,8 @@ exports_files(
     visibility = ["//engine/std/physics2d/compare:__pkg__"],
 )
 
-# The benchmarks' kept threads, also for the flows spike's hierarchy
-# (//engine/ecs:flows_hierarchy_spike).
+# The benchmarks' kept threads.
 exports_files(
     ["tests/pool.rs"],
-    visibility = [
-        "//engine/ecs:__pkg__",
-        "//engine/std/physics2d/compare:__pkg__",
-    ],
+    visibility = ["//engine/std/physics2d/compare:__pkg__"],
 )

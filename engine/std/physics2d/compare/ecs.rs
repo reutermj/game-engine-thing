@@ -95,8 +95,8 @@ impl Ecs {
 }
 
 impl Ecs {
-    /// The engine, for a bench that measures storage on its world between
-    /// frames and reads physics's stages itself (`working_set_spike.rs`).
+    /// The engine, for a bench or test that sets the world's switches or
+    /// reads physics's stages itself (`step_bench.rs`, `quality_test.rs`).
     #[allow(dead_code)]
     pub fn engine(&self) -> &Engine {
         &self.engine

@@ -26,7 +26,7 @@ rather than engine code:
   columns kept as today's pages, as lean pages, as one heap block a column,
   and in reserved address space. What storage's own operations cost each
   way. Its block column is tested against a model, natively and under Miri
-  (`:contiguous_spike_test`, `:miri_contiguous_spike_sb` and `_tb`).
+  (`:contiguous_spike_test`, `:miri_contiguous_spike_sb` and `_tb`).[^spike-code]
 
 `solver_layout` (the split-impulse solver, `//engine/std/physics2d:solver_layout`)
 gained three in-place rows over contiguous blocks.
@@ -434,3 +434,5 @@ costs more than the pass. No such relation is in a game yet.
 - **Open question:** how much of a spawn's cost making each page whole at
   creation would save in the engine (get-fqu). The spike says lean pages
   spawn at 9 ns a row against paged's 33, with full pages.
+
+[^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.
