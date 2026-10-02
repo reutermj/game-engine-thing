@@ -182,18 +182,21 @@ impl Way {
             Way::Generic(n, Shape::Batch) => format!("generic, a kernel a batch of {n}"),
             Way::Generic(n, Shape::Dyn) => format!("generic, a batch of {n} through `&dyn Fn`"),
             Way::Generic(n, Shape::Edge) => format!("generic, a kernel an edge ({n} wide), its two states"),
+            Way::Generic(n, Shape::Block) => format!("generic, a kernel a block of batches of {n}"),
         }
     }
 }
 
-const WAYS: [Way; 11] = [
+const WAYS: [Way; 13] = [
     Way::Built(4),
     Way::Staged(4),
     Way::Generic(4, Shape::Batch),
+    Way::Generic(4, Shape::Block),
     Way::Generic(4, Shape::Dyn),
     Way::Built(8),
     Way::Staged(8),
     Way::Generic(8, Shape::Batch),
+    Way::Generic(8, Shape::Block),
     Way::Built(1),
     Way::Staged(1),
     Way::Generic(1, Shape::Batch),

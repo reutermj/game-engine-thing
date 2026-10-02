@@ -39,6 +39,9 @@ pub enum Shape {
     Dyn,
     /// A kernel per edge, handed its two states (`Colored::edges`): `N` is 1.
     Edge,
+    /// A kernel over a block of batches (`Colored::passes_blocks`): which
+    /// pass it is decided once a block, as `run_across` decides it.
+    Block,
 }
 
 /// The step's contacts as the passes solve them: a flow's payload, its
@@ -346,6 +349,30 @@ pub fn passes_flow<const N: usize>(p: &mut Prepared<N>, params: &Params, spinnin
             let f: &(dyn Fn(Step, &mut Batch<N>, &[Atom]) + Sync) = std::hint::black_box(&k);
             p.layout.passes(workers, &mut p.items, atoms, &program, f, each)
         }
+        Shape::Block => p.layout.passes_blocks(
+            workers,
+            &mut p.items,
+            atoms,
+            &program,
+            |k, os: &mut [Batch<N>], s| {
+                let sh = &mut Shared(s);
+                match k {
+                    Step::Warm => os.iter_mut().for_each(|o| warm_start(o, sh)),
+                    Step::Push(last) => os.iter_mut().for_each(|o| pass::<N, true, COMPUTE>(o, sh, inv_h, last)),
+                    Step::Relax(true, last) => os.iter_mut().for_each(|o| pass::<N, false, STORE>(o, sh, inv_h, last)),
+                    Step::Relax(false, last) => os.iter_mut().for_each(|o| pass::<N, false, LOAD>(o, sh, inv_h, last)),
+                    Step::Bounce => {
+                        for o in os.iter_mut() {
+                            if o.restitution.0.iter().any(|e| *e != 0.0) {
+                                restitute(o, sh, params.bounce);
+                            }
+                        }
+                    }
+                    Step::Gravity | Step::Move => unreachable!("a stage over states"),
+                }
+            },
+            each,
+        ),
         Shape::Edge => {
             assert_eq!(N, 1, "a kernel per edge is a batch of one");
             p.layout.edges(

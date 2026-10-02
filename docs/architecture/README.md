@@ -34,6 +34,11 @@ monolithic design doc.
   measured eight ways, how Box2D, Rapier, Jolt and Flecs keep theirs,
   hierarchy propagation as a second user, and why an order matters more
   than a kept copy (proposed)
+- [flows-spike.md](flows-spike.md) — flows, values systems hand one
+  another within a frame as stages of a pipeline: how Bevy, Flecs, Unity
+  and dataflow systems pass values, the mechanism built on the ECS's own
+  graph, physics's solve ported onto it bit for bit with a generic colored
+  primitive, hierarchy propagation as a second user (spike results)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 - [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods

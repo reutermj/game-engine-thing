@@ -8,8 +8,9 @@ source, not from memory.
 None of them is part of the engine or of any game: each is linked only
 into a comparison bench (`//engine/std/physics2d/compare` for 2D,
 `//engine/std/physics3d/compare` for 3D), so our own solvers can be measured against
-established ones on identical scenes. Flecs and EnTT, last, were read
-for the ECS's design, and aren't built at all.
+established ones on identical scenes. Flecs, EnTT, Bevy, Unity Physics
+and Timely Dataflow, last, were read for the ECS's design, and aren't
+built at all.
 
 Where the notices live: every library's license text is in its fetched
 source (Bazel's external repository for it), or committed or fetched
@@ -160,6 +161,12 @@ one would have to ship those files with it.
     Box2D's own multithreaded step (`THREADS` in its `VARIANTS`) on a task
     system of ours for its `enqueueTask` and `finishTask`
     (`compare/box2d_shim.c`).
+- **The staged solve, generic, in a spike** (docs/architecture/flows-spike.md,
+  2026-10-02): the same staged run, lifted out of the solver into
+  `flows::Colored::passes` (`engine/ecs/tests/flows.rs`), a stage a color
+  of any items and the blocks, starts and marks as above; and Box2D's
+  coloring rule (`b2AddContactToGraph`) as `flows::Coloring::greedy`. Not
+  adopted.
 - **A kept index, in a spike** (docs/architecture/working-sets.md,
   2026-10-02): the awake set's `localIndex`, appended at creation and
   swap-removed with the moved body's index fixed up (`b2DestroyBody`,
@@ -403,6 +410,66 @@ one would have to ship those files with it.
   cache, `src/query/engine/cache.c`), and `cascade`, tables grouped by
   their depth in a hierarchy (`flecs_query_cache_group_by_cascade`). The
   doc proposes a depth order for `ChildOf` after it; nothing is built.
+- **Compared for flows** (docs/architecture/flows-spike.md, 2026-10-02,
+  read in v4.0.4 as above): pipelines ordered by phase with merges
+  inferred from the terms systems read and write
+  (`src/addons/pipeline/pipeline.c`, `flecs_pipeline_check_term`,
+  `flecs_pipeline_build`), and `ecs_run`'s call-scoped `param`
+  (`include/flecs/addons/system.h`). Flecs has no value passed between
+  systems; nothing is taken.
+
+## Bevy
+
+- **Project:** Bevy, a game engine built on its own ECS (`bevy_ecs`).
+  <https://bevy.org>, <https://github.com/bevyengine/bevy>
+- **Authors and license:** dual-licensed, MIT or Apache-2.0, "except where
+  noted", as its `README.md` and `LICENSE-MIT` state (read 2026-10-02).
+- **Version read:** `main` at commit `90942be` (0.20.0-dev), single files
+  fetched from GitHub to read, 2026-10-02: `crates/bevy_ecs/src/system/`
+  (`combinator.rs`, `input.rs`, `system_param.rs`), `message/messages.rs`,
+  `query/par_iter.rs`, `schedule/executor/multi_threaded.rs`. Not fetched by
+  the build, not linked, and none of its code is copied.
+- **Compared for flows** (docs/architecture/flows-spike.md): system
+  piping (`PipeSystem`, a value moved from one system's output to the
+  next's `In<T>`, the two scheduled as one node with their accesses
+  joined), `Local<T>` (a system's own state, its allocations kept between
+  runs) and messages (double-buffered, read by any number of systems).
+  The spike's flows take the typed hand-off from `pipe` and the kept
+  allocations from `Local`, and differ in making each use a declared edge
+  of its own. Nothing is taken as code.
+
+## Unity Physics
+
+- **Project:** Unity Physics, the DOTS physics package (`com.unity.physics`).
+- **License:** the Unity Companion License, as its `LICENSE.md` states
+  ("Unity Physics copyright © 2024 Unity Technologies ApS"), read
+  2026-10-02.
+- **Version read:** 1.5.0, from the `needle-mirror/com.unity.physics`
+  GitHub mirror (assumed faithful to the package), single files fetched to
+  read: `BuildPhysicsWorld.cs`, `PhysicsWorldData.cs`,
+  `UnityPhysicsSimulationSystems.cs`, `Simulation.cs`, `Scheduler.cs`.
+  Not linked, and none of its code is copied.
+- **Compared for flows** (docs/architecture/flows-spike.md): its stages
+  are systems handing one `Simulation` on through a singleton and job
+  handles (`state.Dependency`), its buffers kept between steps and grown
+  only, and its solve in phases of a body each (`DispatchPairSequencer`).
+  The Jobs and Entities documentation it builds on was read online, not
+  as source.
+
+## Timely Dataflow
+
+- **Project:** Timely Dataflow, a low-latency dataflow system in Rust.
+  <https://github.com/TimelyDataflow/timely-dataflow>
+- **Author and license:** Frank McSherry, MIT ("Copyright (c) 2014 Frank
+  McSherry", its `LICENSE`), read 2026-10-02.
+- **Version read:** `master` at `9efd010`, single files fetched to read
+  (`communication/src/lib.rs`, `timely/src/dataflow/channels/pushers/tee.rs`).
+  Not linked, and none of its code is copied.
+- **Compared for flows** (docs/architecture/flows-spike.md): streams
+  wired explicitly between operators, messages moved and their buffers
+  handed back by swapping (`Push::push(&mut Option<T>)`), and a stream
+  with several readers cloned for all but the last. The spike's recycling
+  of a flow's allocations is the same idea at a frame's scale.
 
 ## EnTT
 

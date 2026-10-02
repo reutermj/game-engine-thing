@@ -55,13 +55,14 @@ fn the_pipeline_is_the_solve_as_built_bit_for_bit() {
             at = step;
             let world = ecs.engine().world();
             flows::reset(world);
-            let [bodies, turning, contacts, points] = flows_physics::check_against_reference(world, &[Shape::Batch, Shape::Dyn]);
+            let [bodies, turning, contacts, points] =
+                flows_physics::check_against_reference(world, &[Shape::Batch, Shape::Dyn, Shape::Block]);
             assert!(
                 bodies > 70 && turning > 70 && contacts > 50 && points > 50,
                 "{scene:?} at step {step}: {bodies} {turning} {contacts} {points}"
             );
             world.set_executor(Some(Arc::new(Scoped(3))));
-            flows_physics::check_against_reference(world, &[Shape::Batch, Shape::Dyn]);
+            flows_physics::check_against_reference(world, &[Shape::Batch, Shape::Dyn, Shape::Block]);
             world.set_executor(None);
         }
     }
@@ -108,7 +109,15 @@ fn every_shape_of_the_generic_passes_is_the_solve_as_built() {
         let want = (b, s, c, p);
         for threads in [1, 4] {
             let w = Workers::new(Some(Arc::new(Scoped(threads))));
-            for (wide, shape) in [(4, Shape::Batch), (4, Shape::Dyn), (8, Shape::Batch), (1, Shape::Batch), (1, Shape::Edge)] {
+            for (wide, shape) in [
+                (4, Shape::Batch),
+                (4, Shape::Dyn),
+                (4, Shape::Block),
+                (8, Shape::Batch),
+                (8, Shape::Block),
+                (1, Shape::Batch),
+                (1, Shape::Edge),
+            ] {
                 let params = solver::Params { wide: Wide::Colored(wide), ..params };
                 let (mut b, mut s, mut c, mut p) = (bodies.clone(), spinning.clone(), constraints.clone(), points.clone());
                 let dt = 1.0 / 60.0;

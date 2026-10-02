@@ -31,6 +31,10 @@
 //!   address and leaked for the process: the real thing would keep them in
 //!   the world, as it keeps event queues.
 //!
+//! The typed hand-off is Bevy's system piping (`pipe`, `In<T>`) made an
+//! edge of its own; the kept allocations are Bevy's `Local<T>` and Timely
+//! Dataflow's buffers handed back by swapping (docs/CREDITS.md).
+//!
 //! And the shapes parallel work takes, so that the scheduler sees all of
 //! it rather than a system's own use of the pool (parallel-relations.md,
 //! phase 2, rejected): [`par_map`], [`par_for_each_mut`], [`reduce`] (in an
@@ -257,11 +261,12 @@ impl<T: Flow> Slot<T> {
 
     /// Last frame's value, if nothing took it, emptied into the bin.
     fn expire(&self, value: &mut Option<T>, fresh: bool) {
-        if let Some(mut old) = value.take() {
-            if !fresh {
-                old.recycle();
-                *self.bin.lock().unwrap() = Some(old);
-            }
+        // Taken whether or not it's kept: fresh, it's dropped here.
+        if let Some(mut old) = value.take()
+            && !fresh
+        {
+            old.recycle();
+            *self.bin.lock().unwrap() = Some(old);
         }
     }
 }
@@ -647,12 +652,29 @@ impl Colored {
         item: impl Fn(K, &mut I, &S) + Sync,
         each: impl Fn(K, Range<usize>, &S) + Sync,
     ) {
+        self.passes_blocks(workers, items, states, program, |k, xs: &mut [I], s| xs.iter_mut().for_each(|x| item(k, x, s)), each);
+    }
+
+    /// `passes`, its kernel handed a block of a color's items at a time
+    /// rather than one: the stage's work decided once a block, and the
+    /// loop over the items the kernel's own, as `run_across`'s stages
+    /// loop over their batches. A block's items are consecutive, of one
+    /// color; with one thread, a stage's are all of them, in order.
+    pub fn passes_blocks<I: Send, S: Sync + ?Sized, K: Copy + Sync>(
+        &self,
+        workers: &Workers,
+        items: &mut [I],
+        states: &S,
+        program: &[Stage<K>],
+        block: impl Fn(K, &mut [I], &S) + Sync,
+        each: impl Fn(K, Range<usize>, &S) + Sync,
+    ) {
         assert_eq!(items.len(), self.items(), "items as the coloring laid them out");
         let threads = workers.threads();
         if threads == 1 {
             for stage in program {
                 match *stage {
-                    Stage::Items(k) => items.iter_mut().for_each(|x| item(k, x, states)),
+                    Stage::Items(k) => block(k, items, states),
                     Stage::Each(k, n) => each(k, 0..n, states),
                 }
             }
@@ -661,13 +683,13 @@ impl Colored {
         // Blocks: the overflow's (one, in order), each color's, then each
         // distinct `Each` size's ranges.
         let mut blocks: Vec<Block<'_, I>> = Vec::new();
-        let block = |part| Block { mark: AtomicUsize::new(0), part: Mutex::new(part) };
+        let new_block = |part| Block { mark: AtomicUsize::new(0), part: Mutex::new(part) };
         let mut rest = items;
         let mut groups: Vec<Range<usize>> = Vec::new();
         if self.overflow > 0 {
             let (head, tail) = rest.split_at_mut(self.overflow);
             rest = tail;
-            blocks.push(block(Part::Items(head)));
+            blocks.push(new_block(Part::Items(head)));
             groups.push(0..1);
         }
         for &n in &self.colors {
@@ -677,7 +699,7 @@ impl Colored {
             for r in blocks_of(n, ITEMS_A_BLOCK, threads) {
                 let (head, tail) = color.split_at_mut(r.len());
                 color = tail;
-                blocks.push(block(Part::Items(head)));
+                blocks.push(new_block(Part::Items(head)));
             }
             if blocks.len() > from {
                 groups.push(from..blocks.len());
@@ -689,7 +711,7 @@ impl Colored {
                 && !sized.iter().any(|(m, _)| *m == n)
             {
                 let from = blocks.len();
-                blocks.extend(blocks_of(n, STATES_A_BLOCK, threads).map(|r| block(Part::Range(r))));
+                blocks.extend(blocks_of(n, STATES_A_BLOCK, threads).map(|r| new_block(Part::Range(r))));
                 sized.push((n, from..blocks.len()));
             }
         }
@@ -701,7 +723,7 @@ impl Colored {
             }
         }
         let exec = |k: K, part: &mut Part<'_, I>| match part {
-            Part::Items(xs) => xs.iter_mut().for_each(|x| item(k, x, states)),
+            Part::Items(xs) => block(k, xs, states),
             Part::Range(r) => each(k, r.clone(), states),
         };
         let done: Vec<Count> = stages.iter().map(|_| Count::default()).collect();
