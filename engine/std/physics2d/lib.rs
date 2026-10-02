@@ -11,6 +11,7 @@
 //! state, so a reload swaps the solver under a running simulation.
 
 mod narrow;
+mod pipeline;
 mod sleep;
 mod solver;
 
@@ -21,24 +22,11 @@ use engine_api::{
     Workers, export_mod, field_struct, phase,
 };
 use physics2d::{
-    Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
-    Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Tuning, Vec2, Velocity,
+    Asleep, Body, Collider, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
+    Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Vec2, Velocity,
 };
 use sleep::Sleepers;
-use solver::{Constraint, ContactPoint, Points, SolverBody, Spinning};
-
-/// The host's threads, as the solver shares its passes between them: bit
-/// for bit the solve on one (`solver::solve_across`). Without an executor,
-/// or with one thread, it is the solve on one.
-impl solver::Gang for Workers {
-    fn threads(&self) -> usize {
-        Workers::threads(self)
-    }
-
-    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
-        Workers::run(self, tasks, f)
-    }
-}
+use solver::{SolverBody, Spinning};
 
 #[cfg(not(feature = "v2"))]
 const BUILD: &str = "v1";
@@ -61,11 +49,17 @@ field_struct! {
         near: u64,
         narrowphase: u64,
         merge: u64,
-        /// Within `solve`: bodies and contacts gathered, the solver, and
-        /// the results written back.
+        /// Within `solve`, the pipeline's systems (`pipeline.rs`) summed:
+        /// the settings, bodies and contacts gathered; the solver
+        /// (`prepare`, `passes` and `finish`); and the results written
+        /// back.
         solve_gather: u64,
         solver: u64,
         write_back: u64,
+        /// Within `solver`: each of its systems.
+        prepare: u64,
+        passes: u64,
+        finish: u64,
         /// Within `solve_gather`: the bodies, and their angular state.
         solve_bodies: u64,
         solve_turning: u64,
@@ -132,16 +126,25 @@ engine_api::mod_state! {
 /// integers, so a vector by index finds one in O(1), where sorting the list
 /// and binary-searching it was most of gathering. The generation is kept,
 /// so a stale id (despawned since, its index reused) finds nothing.
+#[derive(Default)]
 struct Slots(Vec<(u32, u32)>);
 
 impl Slots {
     fn of(entities: impl Iterator<Item = Entity> + Clone) -> Slots {
+        let mut slots = Slots::default();
+        slots.fill(entities);
+        slots
+    }
+
+    /// Refilled in place, keeping its allocation.
+    fn fill(&mut self, entities: impl IntoIterator<Item = Entity, IntoIter: Clone>) {
+        let entities = entities.into_iter();
         let len = entities.clone().map(|e| e.index as usize + 1).max().unwrap_or(0);
-        let mut slots = vec![(u32::MAX, u32::MAX); len];
+        self.0.clear();
+        self.0.resize(len, (u32::MAX, u32::MAX));
         for (k, e) in entities.enumerate() {
-            slots[e.index as usize] = (e.generation, k as u32);
+            self.0[e.index as usize] = (e.generation, k as u32);
         }
-        Slots(slots)
     }
 
     fn get(&self, e: Entity) -> Option<u32> {
@@ -773,340 +776,6 @@ impl Physics {
             }
         });
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn solve(
-        &mut self,
-        sleep: &mut Sleepers,
-        _: &mut Cx,
-        (dt, workers): (Dt, Workers),
-        (mut config, mut gravity, mut tuning): (Query<&Sleep>, Query<&Gravity>, Query<&Tuning>),
-        // Awake bodies only: a sleeping one is immovable, and in tables of
-        // its own, so walks over bodies skip it by what they match.
-        (mut moving, mut stills): (Moving<'_, '_>, Stills<'_, '_>),
-        // A sleeping body's is left as it fell asleep.
-        (mut touching, mut turning): (Query<&mut Touching, Without<Asleep>>, Turning<'_, '_>),
-        mut contacts: Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse, &mut ContactPoints), Without<Resting>, Adds<Resting>>,
-        (mut sleeping, mut resting, mut records): (SleepingBodies<'_, '_>, RestingContacts<'_, '_>, Records<'_, '_>),
-        began: EventWriter<Contact>,
-    ) {
-        let start = Instant::now();
-        let dt = *dt;
-        let par = workers.threads() > 1;
-        let mut bodies = Vec::with_capacity(moving.len() + 1);
-        let mut entities = Vec::with_capacity(moving.len());
-        // Per body: whether it moves (isn't static), and its kind.
-        let mut kinds: Vec<(bool, u8)> = Vec::with_capacity(moving.len() + 1);
-        let g = gravity.single(|_, g| Vec2::new(g.x, g.y)).unwrap_or_default();
-        let solver_body = |body: &Body, v: &Velocity| {
-            // The gravity `integrate_velocities` added, computed as `fall`
-            // computed it, for the solver to spread over its substeps.
-            let (inv_mass, g) = if body.kind == DYNAMIC { (body.inv_mass, g) } else { (0.0, Vec2::ZERO) };
-            let gravity = Vec2::new(g.x * body.gravity_scale * dt, g.y * body.gravity_scale * dt);
-            SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity)
-        };
-        if par {
-            // Lists made here, as in `find_contacts`'s gathering.
-            let room = |r: std::ops::Range<usize>| (Vec::with_capacity(r.len()), Vec::with_capacity(r.len()), Vec::with_capacity(r.len()));
-            let parts = moving.par_for_each(&workers, room, |(e, s, k), row, (body, v, _)| {
-                e.push(row.entity());
-                s.push(solver_body(body, &v));
-                k.push((body.kind != STATIC, body.kind));
-            });
-            for (e, s, k) in parts {
-                entities.extend(e);
-                bodies.extend(s);
-                kinds.extend(k);
-            }
-        } else {
-            moving.for_each(|row, (body, v, _)| {
-                entities.push(row.entity());
-                bodies.push(solver_body(body, &v));
-                kinds.push((body.kind != STATIC, body.kind));
-            });
-        }
-        // Bodies with no velocity (statics) and sleeping ones all stand for
-        // one immovable body at the end.
-        let still = bodies.len() as u32;
-        bodies.push(SolverBody::default());
-        kinds.push((false, STATIC));
-        let slots = Slots::of(entities.iter().copied());
-        let t_bodies = Instant::now();
-        // Angular state, for the bodies that turn, and each one's reach
-        // (for how fast its edge moves, which sleeping goes by).
-        let (mut spinning, mut reach): (Vec<Spinning>, Vec<f32>) = (Vec::new(), Vec::new());
-        turning.for_each(|row, (body, c, _, spin)| {
-            let Some(k) = slots.get(row.entity()) else { return };
-            spinning.push(match body.kind {
-                DYNAMIC => Spinning::new(k, spin.w, bodies[k as usize].inv_mass * c.inertia_per_mass()),
-                KINEMATIC => Spinning::new(k, spin.w, 0.0),
-                _ => return,
-            });
-            reach.push(c.reach());
-        });
-        let t_turning = Instant::now();
-        let index_of = |e: Entity| slots.get(e).unwrap_or(still);
-        // A contact with points has them in `points`, beside the
-        // constraints (see `solver::Points`).
-        let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse, cp: &ContactPoints, points: &mut Vec<Points>| {
-            let c = Constraint {
-                a: index_of(pair.a),
-                b: index_of(pair.b),
-                normal: Vec2::new(m.nx, m.ny),
-                depth: m.depth,
-                friction: r.friction,
-                restitution: r.restitution,
-                jn: j.normal,
-                jt: j.tangent,
-                speed: 0.0,
-                points: 0,
-            };
-            if m.points == 0 {
-                return c;
-            }
-            let mut pts = Points { count: m.points, ..Points::default() };
-            for (i, p) in pts.point.iter_mut().enumerate().take(m.points as usize) {
-                let (ra, rb) = cp.anchors(i);
-                let (jn, jt) = cp.last(m.solved, cp.ids[i]);
-                *p = ContactPoint { ra, rb, separation: cp.separations[i], jn, jt };
-            }
-            points.push(pts);
-            c.with_points(points.len() - 1)
-        };
-
-        // In pair order, which storage keeps: the solve doesn't depend on
-        // when each contact began. (History, 2026-09-24: contacts were
-        // copied out of the walk and mapped after, which measured faster
-        // until `for_each` walked slices.)
-        let mut constraints: Vec<Constraint> = Vec::with_capacity(contacts.len());
-        let mut points: Vec<Points> = Vec::new();
-        // With threads: by the first contact row of each chunk, its first
-        // constraint, for writing back over the same chunks.
-        let mut firsts: Vec<(usize, usize)> = Vec::new();
-        if par {
-            let parts = contacts.par_for_each_ordered_page(
-                &workers,
-                |rows| (rows.start, Vec::with_capacity(rows.len()), Vec::new()),
-                |(_, out, pts), _, (pair, m, r, j, cp)| {
-                    out.extend((0..pair.len()).filter(|&i| !r[i].disabled).map(|i| constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], pts)));
-                },
-            );
-            for (row, part, pts) in parts {
-                firsts.push((row, constraints.len()));
-                // Each chunk's points after the chunks before it.
-                let offset = points.len() as u32;
-                constraints.extend(part.into_iter().map(|c| if c.points > 0 { Constraint { points: c.points + offset, ..c } } else { c }));
-                points.extend(pts);
-            }
-        } else {
-            // By page, so a row costs no dispatch per term (docs/lore on a
-            // query's row cost), and `ContactPoints` is read only where a
-            // contact has points.
-            contacts.for_each_ordered_page(|page, (pair, m, r, j, cp)| {
-                for i in page.rows() {
-                    if !r[i].disabled {
-                        constraints.push(constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], &mut points));
-                    }
-                }
-            });
-        }
-        let gathered = Instant::now();
-        self.time.solve_bodies += (t_bodies - start).as_nanos() as u64;
-        self.time.solve_turning += (t_turning - t_bodies).as_nanos() as u64;
-        let config = sleeping_by(&mut config);
-        let params = solver::Params::of(&tuning.single(|_, t| *t).unwrap_or(Tuning::DEFAULT));
-        solver::solve_across(&params, (&mut bodies, &mut spinning), &mut constraints, &mut points, dt, &workers);
-        let after_solver = Instant::now();
-
-        // A body's new velocity and position, `Mut`s stamping only what's
-        // written.
-        let write = |body: &Body, b: &SolverBody, mut v: engine_api::Mut<'_, Velocity>, mut p: engine_api::Mut<'_, Position>| {
-            (v.x, v.y) = (b.v.x, b.v.y);
-            // A kinematic body goes where it's told: nothing pushes it.
-            let step = if body.kind == KINEMATIC { b.v * dt } else { b.displacement(dt) };
-            // Written only when it moves: a write marks the row for the
-            // spatial re-sort to re-bound, and a pile at rest comes to rest
-            // bit for bit (the pile's 10 000 do by step 3000), when the
-            // re-sort then has nothing to do.
-            let to = (p.x + step.x, p.y + step.y);
-            if (to.0.to_bits(), to.1.to_bits()) != (p.x.to_bits(), p.y.to_bits()) {
-                (p.x, p.y) = to;
-            }
-        };
-        // Rotations and spins, written only when they changed, as positions
-        // are: a write re-bounds the row.
-        if !spinning.is_empty() {
-            // The walk that gathered them, in the same order.
-            let mut each = spinning.iter();
-            turning.for_each(|row, (body, _, mut q, mut spin)| {
-                let Some(k) = slots.get(row.entity()) else { return };
-                if body.kind != DYNAMIC && body.kind != KINEMATIC {
-                    return;
-                }
-                let b = each.next().expect("a spinning body per one gathered");
-                debug_assert_eq!(b.body, k);
-                let Some(to) = b.turned_from(q.rot(), spin.w).filter(|_| kinds[k as usize].0) else { return };
-                if spin.w.to_bits() != b.w.to_bits() {
-                    spin.w = b.w;
-                }
-                if (to.c.to_bits(), to.s.to_bits()) != (q.c.to_bits(), q.s.to_bits()) {
-                    *q = Rotation::of(to);
-                }
-            });
-        }
-        if par {
-            let (bodies, kinds) = (&bodies, &kinds);
-            moving.par_for_each(
-                &workers,
-                |rows| rows.start,
-                |k, _, (body, v, p)| {
-                    if kinds[*k].0 {
-                        write(body, &bodies[*k], v, p);
-                    }
-                    *k += 1;
-                },
-            );
-        } else {
-            let mut i = 0;
-            moving.for_each(|_, (body, v, p)| {
-                let (b, moves) = (bodies[i], kinds[i].0);
-                i += 1;
-                if moves {
-                    write(body, &b, v, p);
-                }
-            });
-        }
-
-        // Most bodies don't ask (the pile's none), and a failed lookup per
-        // end of every contact was half of writing back.
-        let mut asking = Vec::new();
-        touching.for_each(|row, mut t| {
-            *t = Touching::default();
-            asking.push(row.entity());
-        });
-        let asking = Slots::of(asking.iter().copied());
-        let mut links = Vec::new();
-        // A contact's results, from constraint `k`: the sides of bodies
-        // that asked it touches, a link for sleeping, and whether it began.
-        let points = &points;
-        let wrote = |k: &Constraint, pair: &ContactPair, m: &mut Manifold, j: &mut Impulse, out: &mut WroteBack| {
-            *j = Impulse { normal: k.jn, tangent: k.jt };
-            m.solved = k.points.checked_sub(1).map(|at| &points[at as usize]).filter(|p| p.solved).map_or(0, |p| p.count);
-            m.pressed = k.jn > 0.0 || m.depth >= 0.0;
-            if !m.pressed {
-                return;
-            }
-            if config.is_some() {
-                out.links.push((pair.a, pair.b));
-            }
-            let n = Vec2::new(m.nx, m.ny);
-            for (e, n) in [(pair.a, n), (pair.b, -n)] {
-                if asking.get(e).is_some() {
-                    out.marks.push((e, n));
-                }
-            }
-            if !m.was_pressed {
-                out.began.push(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
-            }
-        };
-        // Each point's impulses, by feature, for the next step's to start
-        // from: only if it was solved at its points, and written only where
-        // there are points, or were.
-        let solved_at = |k: &Constraint, mut cp: engine_api::Mut<'_, ContactPoints>| {
-            let p = &points[k.points as usize - 1];
-            let q = &p.point;
-            (cp.normals, cp.tangents, cp.solved_ids) = ([q[0].jn, q[1].jn], [q[0].jt, q[1].jt], cp.ids);
-        };
-        // Every contact's impulse and pressing are written, so pages are
-        // stamped whole, as in the merge.
-        let results = if par {
-            let (constraints, firsts) = (&constraints, &firsts);
-            contacts
-                .par_for_each_ordered_page(
-                    &workers,
-                    |rows| {
-                        let at = firsts.iter().find(|f| f.0 == rows.start).expect("the chunks the gathering walked").1;
-                        (at, WroteBack { began: Vec::with_capacity(rows.len() / 4 + 8), ..WroteBack::default() })
-                    },
-                    |(k, out), page, (pair, mut m, r, mut j, mut cp)| {
-                        let (m, j) = (m.write_all(), j.write_all());
-                        for i in page.rows() {
-                            if r[i].disabled {
-                                (m[i].pressed, j[i]) = (false, Impulse::default());
-                            } else {
-                                let c = &constraints[*k];
-                                wrote(c, &pair[i], &mut m[i], &mut j[i], out);
-                                if m[i].solved > 0 {
-                                    solved_at(c, cp.get_mut(i));
-                                }
-                                *k += 1;
-                            }
-                        }
-                    },
-                )
-                .into_iter()
-                .map(|(_, out)| out)
-                .collect()
-        } else {
-            let mut solved = constraints.iter();
-            let mut out = WroteBack::default();
-            contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j, mut cp)| {
-                let (m, j) = (m.write_all(), j.write_all());
-                for i in page.rows() {
-                    if r[i].disabled {
-                        (m[i].pressed, j[i]) = (false, Impulse::default());
-                        continue;
-                    }
-                    let k = solved.next().expect("a constraint per contact solved");
-                    wrote(k, &pair[i], &mut m[i], &mut j[i], &mut out);
-                    if m[i].solved > 0 {
-                        solved_at(k, cp.get_mut(i));
-                    }
-                }
-            });
-            vec![out]
-        };
-        // In walk order: the order the events and links are in with one
-        // thread. Touching is marked after, which only ever sets sides.
-        for out in results {
-            links.extend(out.links);
-            for (e, n) in out.marks {
-                touching.with(e, |_, mut t| mark(&mut t, n));
-            }
-            out.began.into_iter().for_each(|c| began.send(c));
-        }
-        if let Some(c) = config {
-            let t_sleeping = Instant::now();
-            self.fall_asleep(
-                (sleep, &mut records),
-                &c,
-                dt,
-                (&entities, &bodies, &kinds),
-                (&spinning, &reach),
-                &links,
-                (&mut moving, &mut stills, &mut turning),
-                &mut contacts,
-            );
-            self.move_woken(sleep, &mut sleeping, &mut records, &mut resting);
-            self.time.sleeping += nanos(t_sleeping);
-        } else {
-            // Turned off, sleeping forgets how long bodies were still: turned
-            // on again, they start from moving. (Kept, `since` would count
-            // the steps it was off.) A walk of the sparse set, so of nothing
-            // once they're gone; not behind `is_empty`, which counts the
-            // query's table rows, and a query of a sparse component alone
-            // has none (see docs/lore).
-            stills.for_each(|row, _| row.remove::<Still>());
-        }
-        // After every write of the step's, the stopping of bodies that fell
-        // asleep included.
-        self.slept = sleeping.now();
-        let t = &mut self.time;
-        t.solve_gather += (gathered - start).as_nanos() as u64;
-        t.solver += (after_solver - gathered).as_nanos() as u64;
-        t.write_back += nanos(after_solver);
-        t.solve += nanos(start);
-    }
 }
 
 impl Physics {
@@ -1124,7 +793,7 @@ impl Physics {
         (spinning, reach): (&[Spinning], &[f32]),
         links: &[(Entity, Entity)],
         (moving, stills, turning): (&mut Moving<'_, '_>, &mut Stills<'_, '_>, &mut Turning<'_, '_>),
-        contacts: &mut Query<(&ContactPair, &mut Manifold, &Response, &mut Impulse, &mut ContactPoints), Without<Resting>, Adds<Resting>>,
+        contacts: &mut Query<&ContactPair, Without<Resting>, Adds<Resting>>,
     ) {
         let slots = Slots::of(entities.iter().copied());
         let mut speed: Vec<f32> = bodies.iter().map(|b| b.v.x.hypot(b.v.y)).collect();
@@ -1211,22 +880,13 @@ impl Physics {
             let moves = !asleep && (woken.get(e).is_some() || slots.get(e).is_some_and(|k| kinds[k as usize].0));
             (asleep, moves)
         };
-        contacts.for_each(|row, (pair, _, _, _, _)| {
+        contacts.for_each(|row, pair| {
             let ((a, a_moves), (b, b_moves)) = (end(pair.a), end(pair.b));
             if (a || b) && !a_moves && !b_moves {
                 row.insert(Resting {});
             }
         });
     }
-}
-
-/// What writing back a chunk of contacts leaves for after: links for
-/// sleeping, sides of bodies touched, and contacts begun, in walk order.
-#[derive(Default)]
-struct WroteBack {
-    links: Vec<(Entity, Entity)>,
-    marks: Vec<(Entity, Vec2)>,
-    began: Vec<Contact>,
 }
 
 /// A contact found this step: what the merge makes or updates it with.
@@ -1438,7 +1098,18 @@ impl Mod for Physics {
         s.phase(STEP).after(phase::SIMULATE).before(phase::LATE).fixed_hz(phase::SIMULATE_HZ);
         s.add("integrate_velocities", Self::integrate_velocities).phase(STEP);
         s.add("find_contacts", Self::find_contacts).phase(STEP).after("physics2d::integrate_velocities");
+        // The solve, a pipeline of systems handing flows along
+        // (`pipeline.rs`), each after the one before; `solve` first, so a
+        // pre-solve hook ordered before it runs before anything is gathered.
         s.add("solve", Self::solve).phase(STEP).after("physics2d::find_contacts");
+        s.add("gather_bodies", Self::gather_bodies).phase(STEP).after("physics2d::solve");
+        s.add("gather_turning", Self::gather_turning).phase(STEP).after("physics2d::gather_bodies");
+        s.add("gather_contacts", Self::gather_contacts).phase(STEP).after("physics2d::gather_turning");
+        s.add("prepare", Self::prepare).phase(STEP).after("physics2d::gather_contacts");
+        s.add("passes", Self::passes).phase(STEP).after("physics2d::prepare");
+        s.add("finish", Self::finish).phase(STEP).after("physics2d::passes");
+        s.add("scatter_contacts", Self::scatter_contacts).phase(STEP).after("physics2d::finish");
+        s.add("scatter_bodies", Self::scatter_bodies).phase(STEP).after("physics2d::scatter_contacts");
     }
 
     /// `stats`: the build, steps run, contacts held, and time per system.
@@ -1473,10 +1144,13 @@ impl Mod for Physics {
                     per(t.solver),
                     per(t.write_back)
                 ) + &format!(
-                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1}",
+                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1} prepare {:.1} passes {:.1} finish {:.1}",
                     per(t.solve_bodies),
                     per(t.solve_turning),
-                    per(t.sleeping)
+                    per(t.sleeping),
+                    per(t.prepare),
+                    per(t.passes),
+                    per(t.finish)
                 ))
             }
             "sleeping" => {

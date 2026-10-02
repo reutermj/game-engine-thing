@@ -195,7 +195,7 @@ contacts in `late`:
    pairs and the stored contacts are both in pair order, so it's one pass,
    updating contacts that persist in place (their impulses carried), and
    despawning and spawning the rest.
-3. **`solve`**: a soft step, as Box2D v3's: five substeps of sequential
+3. **The solve**, from `solve` on (below): a soft step, as Box2D v3's: five substeps of sequential
    impulses over the contacts, each a pass of soft contacts that push
    penetration out through the velocity, then positions, then two rigid
    passes that take the push's speed back out; warm-started from the
@@ -212,12 +212,56 @@ contacts in `late`:
    ([What the ECS costs](#what-the-ecs-costs)).
 
 Each system is a plain system over queries, so the pipeline is the ECS
-doing what it's for, and step 3 gathers bodies into local arrays, solves
-there, and writes them back, the shape data parallelism (step 3 of
-scheduling) will want. The systems pass contacts along as entities, which
+doing what it's for. The systems pass contacts along as entities, which
 also carry them to the next step for warm starting and for "began
 touching", and a reload of physics leaves them in place like any other
 entities.
+
+**The solve is a pipeline of its own**, nine systems handing
+[flows](flows.md) along (`pipeline.rs`), since the solver works on a dense
+copy of the world (gathered, solved many passes over, written back) and
+flows make each of those stages a system the ECS can see:
+
+```text
+solve            world -> Make<Settings>                     the step's Tuning, Gravity, Sleep
+gather_bodies    See<Settings>, world -> Make<Bodies>        the awake bodies, dense
+gather_turning   See<Bodies>, world -> Make<Turning>         the turning ones' angular state
+gather_contacts  See<Bodies>, world -> Make<Contacts>        the contacts, in pair order
+prepare          See<Settings>, See<Bodies>, See<Turning>,   bodies as states; contacts colored
+                 Pass<Contacts> -> Make<Graph>               (Coloring::greedy), in lanes
+passes           See<Settings>, See<Turning>, Pass<Graph>,   the substeps and restitution
+                 Passes
+finish           See<Settings>, Take<Graph> -> Pass<Bodies>, impulses and states back
+                 Pass<Turning>, Pass<Contacts>
+scatter_contacts See<Settings>, Pass<Contacts> -> world      impulses, Touching, Contact, links
+scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, velocities, positions, rotations;
+                 Take<Contacts> -> world                     then sleeping
+```
+
+- **`solve` comes first**, though it only reads the step's settings, so
+  that a pre-solve hook ordered `.before("physics2d::solve")` (below) runs
+  before anything is gathered, as it did when the solve was one system.
+- **`passes` declares its parallel work** as a shape (`Passes`: every
+  pass a stage over the colors' batches or the bodies' states, a kernel a
+  block of batches), which the scheduler runs; until it runs shapes
+  across threads (get-znt.34) the solve is on one thread, whatever the
+  host has. The kernels are `solver.rs`'s (`lanes::staged`), the colored
+  solve taken apart where the systems take it apart, bit for bit the
+  arrays' `solve` (the mod's tests hold the two together).
+- **A step where nothing turns** is solved one contact at a time in pair
+  order, which no shape can split (its result depends on the order), and
+  so whole, by `finish` (`solver::solve_with`), as it always was.
+- **The flows are the mod's own**, not its interface's: they carry the
+  solver's layout, and a mod that saw them would be rebuilt with every
+  change to it. A debug view would get a flow of plain values in the
+  interface.
+- **The sources read, the sinks write**: the gathers' queries are
+  read-only, so they have no apply node, and the scatters walk the same
+  tables in the same order as the gathers did (asserted). The sinks are
+  last so that `scatter_bodies` ends at a tick after every write of the
+  step's, which sleeping counts from.
+
+What it cost and what it changed is in [flows.md](flows.md#physicss-adoption-stage-2).[^one-solve]
 
 **Pre-solve hooks** are systems a game orders between the two:
 `.phase("physics2d::step").after("physics2d::find_contacts").before("physics2d::solve")`.
@@ -3996,13 +4040,18 @@ variants: `rot/levels=4/carry=0` is A to the bit, `rot/carry=2` C colored.
 
 ## Solving across threads
 
-**Status: built** (2026-09-29, get-znt.5, get-emj.32). The turning
-default's colored solve runs across the host's threads
+**Status: built** (2026-09-29, get-znt.5, get-emj.32), **and out of the
+mod until the scheduler runs shapes** (2026-10-02, get-znt.33). The turning
+default's colored solve runs across threads
 (`solver::solve_across`, `lanes::run_across`), bit for bit the solve on
 one thread at any thread count, so going parallel moves no value a test
-bounds, and whatever holds the one-thread solve holds it. The mod hands
-the solver its `Workers`; with no executor, or one thread, it is
-`solve_with` itself. On one CCD with kept threads, the solver alone is 4.9
+bounds, and whatever holds the one-thread solve holds it. The mod handed
+the solver its `Workers` until its solve became a pipeline of flows ([The
+step](#the-step)), whose passes are a declared shape the scheduler will
+run across threads (get-znt.34, [flows.md](flows.md#parallel-shapes)) by
+this protocol; until then the mod solves on one thread, and
+`solve_across` is the benches' and the comparison's (`rot/threads=<n>`).
+What follows measured it in the mod. On one CCD with kept threads, the solver alone is 4.9
 times faster at 8 threads on the turning pile of 10 000 and the 5050
 pyramid, and 4.1 on rain, where Box2D's own multithreaded solver gains 5.0,
 5.2 and 4.2 on the same scenes. What stops it: the solve's serial part
@@ -4430,6 +4479,17 @@ frame 508.
     by `Clock::dt`, capped at 1/30 s, since systems ran once a frame: a
     real-time game's simulation depended on its frame rate, which only
     lockstep hid. Fixed-rate phases replaced it.
+
+[^one-solve]: *(History, 2026-10-02.)* Until get-znt.33 the solve was one
+    system, `solve`, which gathered the bodies and contacts into vectors
+    of its own, called `solver::solve_across` with the mod's `Workers`
+    (the colored passes across the host's threads, where it had them:
+    [Solving across threads](#solving-across-threads)), and wrote the
+    results, sides, events and sleeping back, its gathers and write-backs
+    split across the threads too. The pipeline is that system's code,
+    split where its stages were, with the passes on `Passes` instead of
+    `solve_across`, and no `Workers`: the scheduler owns parallelism
+    (get-znt.28).
 
 [^dead-test]: *(History, 2026-09-24.)* Before sleeping was storage, the
     solve looked each contact's ends up to skip resting ones, and did so

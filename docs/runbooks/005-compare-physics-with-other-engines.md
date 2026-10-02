@@ -42,6 +42,7 @@ VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run --config=bench //engine/std/
 TURN=1 ./bazel run --config=bench //engine/std/physics2d/compare   # only bodies that turn
 TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run --config=bench //engine/std/physics2d/compare
 ./bazel run --config=bench //engine/std/physics2d/compare:solver_bench   # the 2D solver alone, each way of solving
+THREADS=1,8 taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench   # the mod's solve and step, by system
 ```
 
 Every case runs twice by default: with rotation locked (every engine), as

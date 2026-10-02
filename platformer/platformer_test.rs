@@ -196,7 +196,9 @@ fn input_comes_first_then_the_rules_the_walkers_physics_and_what_they_did() {
         e.schedule().unwrap(),
         "input: platformer::steer\n\
          simulate (60 Hz): platformer::play, walkers::walk\n\
-         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, walkers::meet, physics2d::solve\n\
+         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, walkers::meet, physics2d::solve, physics2d::gather_bodies, physics2d::gather_turning, \
+         physics2d::gather_contacts, physics2d::prepare, physics2d::passes, physics2d::finish, physics2d::scatter_contacts, \
+         physics2d::scatter_bodies\n\
          late: platformer::take_hits"
     );
 }

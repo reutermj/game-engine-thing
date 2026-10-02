@@ -143,7 +143,9 @@ fn input_and_the_ai_come_before_the_paddles_move() {
         "input: pong::steer\n\
          update: pong_ai::think\n\
          simulate (60 Hz): pong::play\n\
-         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, physics2d::solve\n\
+         physics2d::step (60 Hz): physics2d::integrate_velocities, physics2d::find_contacts, physics2d::solve, physics2d::gather_bodies, physics2d::gather_turning, \
+         physics2d::gather_contacts, physics2d::prepare, physics2d::passes, physics2d::finish, physics2d::scatter_contacts, \
+         physics2d::scatter_bodies\n\
          late: pong::rebound"
     );
 }

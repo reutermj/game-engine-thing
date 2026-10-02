@@ -3,9 +3,11 @@
 **Status: stage 1 built** (2026-10-02; designed in get-znt.25, built in
 get-znt.32): the mechanism and the shapes in `engine_ecs`
 (`engine/ecs/flows.rs`, `engine/ecs/shape.rs`), the shapes run on one
-thread, and the plan check in the loader's `schedule.rs`. Nothing uses
-them yet. Stage 2 (get-znt.33) moves physics2d's solve onto them; stage 3
-(get-znt.34) has the scheduler run the shapes across threads.
+thread, and the plan check in the loader's `schedule.rs`. **Stage 2
+built** (2026-10-02, get-znt.33): physics2d's solve is a pipeline of nine
+systems over five flows, its passes on `Passes`, bit for bit the solve it
+replaced ([below](#physicss-adoption-stage-2)). Stage 3 (get-znt.34) has
+the scheduler run the shapes across threads.
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -466,33 +468,90 @@ Each tier proves what the others can't (CLAUDE.md):
 
 ## Physics's adoption (stage 2)
 
-get-znt.33 moves physics2d's solve onto flows as the spike ported it,
-bit for bit:
+**Built** (2026-10-02, get-znt.33). physics2d's solve, one system until
+then, is a pipeline (`engine/std/physics2d/pipeline.rs`; physics.md, "The
+step"):
 
 ```text
-gather_bodies    world -> Make<Bodies>
+solve            world -> Make<Settings>
+gather_bodies    See<Settings>, world -> Make<Bodies>
 gather_turning   See<Bodies>, world -> Make<Turning>
 gather_contacts  See<Bodies>, world -> Make<Contacts>
-prepare          See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
-solve            See<Turning>, Pass<Graph>, Passes
-finish           Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
-scatter_bodies   Take<Bodies>, Take<Turning> -> world
-scatter_contacts Take<Contacts> -> world
+prepare          See<Settings>, See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
+passes           See<Settings>, See<Turning>, Pass<Graph>, Passes
+finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
+scatter_contacts See<Settings>, Pass<Contacts> -> world
+scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts> -> world
 ```
 
-- **Baselines unchanged**, the long suites run, and pong's and the
-  platformer's replays unchanged.
-- **The one-thread atomics cost is accepted** (3.6 to 6.7% of the
-  pipeline at one thread in the spike), then optimized (get-znt.26).
-- **The threads wait for stage 3.** Physics solves across threads today
-  only where a benchmark or test installs an executor; the running engine
-  installs none (get-znt.20). Moved onto shapes, physics runs on one
-  thread until stage 3, so its 8-thread benchmarks measure nothing new in
-  between.
-- **`prepare`'s batch fill** may move into the passes' first stage, which
-  closed most of the spike's 8-thread gap (flows-spike.md, "Where the
-  8-thread gap is"), and makes `prepare` and `solve` one coarser stage.
-  Stage 2's call, measured.
+It is the spike's, with what the spike left out put back (sleeping,
+`Touching`, `Contact`, the solve one contact at a time where nothing
+turns), and three changes, each for a contract the one system kept:
+
+- **`solve` comes first and reads the settings** (`Tuning`, `Gravity`,
+  `Sleep`, into `Settings`). Pre-solve hooks order themselves
+  `.before("physics2d::solve")`, and plan order ties on load order, so a
+  first stage of another name would have run before the hook; `solve`
+  keeps the hook before anything is gathered, and the platformer's
+  walkers, the tests' hooks and physics.md's advice stay as they were.
+  The solver's pass is `passes`.
+- **The contacts are written first, then the bodies with sleeping.**
+  Sleeping needs both (the bodies' speeds, the contacts' links), and the
+  bodies' write and sleeping's stay in one system, as they were, so the
+  tick sleeping counts from (`slept`) is after every write of the step's
+  and the spatial re-sort and the moves to the sleeping tables come at one
+  apply node.
+- **A step where nothing turns** is solved one contact at a time in pair
+  order, whose result depends on that order, so no shape fits it:
+  `finish` solves it whole (`solver::solve_with`) and `passes` does
+  nothing.
+
+The flows are physics2d's own, not its interface's: they carry the
+solver's layout, and a mod that saw them would be rebuilt for every change
+to it. A debug view gets a flow of plain values in the interface, when one
+is wanted.
+
+**Bit for bit.** Every value of both baselines printed as it was (227
+default, 224 long, `baseline -- --all`, none moved), the long suites
+pass, pong's and the platformer's replays are unchanged (their schedule
+tests list the new systems), and the tests that hold the mod to the arrays
+bit for bit pass (`quality_test`'s `the_mod_is_the_arrays_bit_for_bit`
+and `the_mod_solves_at_the_substeps_its_world_sets`, `behaviour_test`'s
+`the_mod_is_the_arrays_on_the_behaviour_scenes`): those are what catch a
+change to the pipeline alone. A gravity share one ulp off in the pipeline's
+kernel failed all three; the baseline itself moved four values, all
+inside their bands, so a band is no bit-for-bit check. A one-ulp change in
+a kernel the arrays share moved 34 baseline values, all inside their
+bands, and failed the lanes' equivalence tests.
+
+**What it costs**, `step_bench` (`--config=bench`, `taskset -c 0-7`, the
+median of 7 runs, each a fresh engine stepped to the window and timed over
+30 steps), µs a step, the solve system(s) / the whole step:
+
+| case | 1 thread, before | after | 8 threads, before | after |
+|---|---|---|---|---|
+| pile 10 000 turning, falling | 561 / 1052 | 570 / 1068 | 367 / 725 | 591 / 962 |
+| pile 10 000 turning, settled | 5194 / 6724 | 5312 / 6944 | 1415 / 2107 | 5327 / 6298 |
+| pyramid 5050 turning | 3368 / 4478 | 3391 / 4538 | 882 / 1339 | 3394 / 4010 |
+| pile 10 000 not turning, settled | 2712 / 3288 | 2676 / 3252 | 2648 / 3083 | 2698 / 3127 |
+
+- **One thread: 0.7 to 2.3% slower** where bodies turn, the solver's
+  relaxed atomics (below, "On one thread"); level where nothing does.
+- **Eight threads: the solve's threads are gone until stage 3**, as
+  planned. With no shape run across threads the solve takes its
+  one-thread time (5327 against 1415 settled), and the step loses what
+  the solve gained. The broadphase and
+  narrowphase still split across `Workers` (get-znt.31). No benchmark of
+  the mod at 8 threads measures the solve's threads until get-znt.34;
+  `solver_bench`'s `THREADS` and the comparison's `rot/threads=<n>` still
+  time `solve_across` on arrays.
+- **The batch fill stayed in `prepare`.** Moving it into the passes' first
+  stage closed most of the spike's 8-thread gap, and changes nothing on
+  one thread, where everything runs now; it is measurable only with stage
+  3, so it is stage 3's call.
+- **Bodies in entity order** (get-emj.88) is left for later: the
+  renumbering it needs costs what it saves on a falling pile, and folding
+  it in would have made the port's measurements two changes'.
 - **Kept colors** (parallel-relations.md, phase 1; get-emj.74) become an
   input of `prepare`, decided with stage 3, so one re-baseline covers
   both.

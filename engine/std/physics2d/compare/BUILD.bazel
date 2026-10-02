@@ -237,6 +237,29 @@ rust_binary(
     deps = QUALITY_DEPS,
 )
 
+# The mod's solve and whole step in the engine, on the scenes the flows work
+# was measured on: a 10 000 pile falling and settled, a 5050 pyramid.
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench
+rust_binary(
+    name = "step_bench",
+    srcs = [
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "step_bench.rs",
+        "variants.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    crate_root = "step_bench.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
 # SPIKE (docs/architecture/parallel-relations.md): colors kept across steps
 # against colored afresh, the solve on each, and a solve pass over bodies in
 # pages against the copy, measured. Not engine code; kept so the numbers can

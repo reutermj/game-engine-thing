@@ -10,6 +10,7 @@ load("//engine:sanitize.bzl", "sanitized_tests")
 PHYSICS_SRCS = [
     "lib.rs",
     "narrow.rs",
+    "pipeline.rs",
     "sleep.rs",
     "solver.rs",
 ]

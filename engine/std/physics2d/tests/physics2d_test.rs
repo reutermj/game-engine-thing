@@ -1214,8 +1214,10 @@ mod threads {
     /// Threads that ran a build's tasks don't keep it mapped once it's
     /// reloaded, nor after its engine is dropped, kept between runs (a
     /// pool) or spawned for each: the same builds are mapped at each point
-    /// as with no threads at all. The bodies turn, so the solver's stages
-    /// are among the tasks (`solver::solve_across`). Tasks run only inside
+    /// as with no threads at all. The bodies turn, as they did when the
+    /// solver's stages were among the tasks; its passes are a declared shape
+    /// now, on one thread until the scheduler runs shapes across threads
+    /// (get-znt.34). Tasks run only inside
     /// the system that made them, and physics's leave nothing on a thread (a thread-local
     /// with a destructor would keep the build mapped until the thread
     /// exits: docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
@@ -1257,11 +1259,12 @@ mod threads {
         on_four_threads_as_on_one("drop 600 staggered", "");
     }
 
-    /// The same with every body turning, so the solver's passes are shared
-    /// between the threads too (`solver::solve_across`), kept between steps
-    /// and spawned for each: the mod's `Workers` reach the solver, and it is
-    /// the solve on one bit for bit. The colored solve's own test is
-    /// `quality_test`'s `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`.
+    /// The same with every body turning, on threads kept between steps and
+    /// spawned for each. The solver's passes are a declared shape (`Passes`),
+    /// which runs on one thread until the scheduler runs shapes across threads
+    /// (get-znt.34); then this holds the scheduler's run to the solve on one.
+    /// The colored solve's own test across threads is `quality_test`'s
+    /// `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`.
     #[test]
     fn a_turning_pile_on_four_threads_lands_where_it_does_on_one() {
         on_four_threads_as_on_one("drop 600 staggered turning", "_turning");
