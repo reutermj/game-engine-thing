@@ -46,8 +46,9 @@ measured, and what a design doc would have to settle.
   showed works: flows as a declared parameter kind, their values in the
   world, a plan check at load, and `Colored::passes` with a block kernel
   as the provided parallel shape. Open: whether the scheduler infers
-  order from flows, and how the parallel shapes are declared. Both are
-  the user's decision.
+  order from flows, which is the user's decision. How the parallel shapes
+  are declared has since been decided (get-znt.28, 2026-10-02): parallel
+  work is declared and run by the scheduler, never by a system.
 
 ## The question
 
@@ -578,7 +579,11 @@ Reasoned, not built:
   scheduler to see the parallel work, the shapes would have to be
   declared, for example a `Passes<Graph>` parameter whose footprint
   claims the pool, or the pool claimed by the flow's edge. That is the
-  phase 2 rejection's real question, and **the user's decision**.
+  phase 2 rejection's real question, and **the user's decision**. Decided
+  2026-10-02 (get-znt.28): parallel work is declared and run by the
+  scheduler, never by a system. A shape is a declaration the scheduler
+  turns into tasks on its own threads (get-znt.29), not a call a system
+  makes through `Workers`.
 - **No unsafe code.** States are shared as relaxed atomics (`lanes::Atom`),
   blocks behind a lock each, as `run_across` does. The benchmarks' pool
   (`tests/pool.rs`) is the only unsafe code the spike runs, as every
@@ -604,8 +609,9 @@ settle these:
    - `Colored::passes` with a block kernel;
    - a one-thread path without atomics (get-znt.26), or the 6 to 14% at
      one thread accepted;
-   - whether the shapes are declared, so the scheduler sees the pool's
-     use. The user's decision, and what the phase 2 rejection asked.
+   - the shapes as declarations the scheduler runs, as decided
+     (get-znt.28): how a system declares a program of stages, and how
+     the scheduler hands out its tasks (get-znt.29, get-znt.30).
    - Whether to provide "levels of a tree" too, which the second user
      wanted.
 6. **Physics's adoption, if any:** the port here is bit for bit and costs

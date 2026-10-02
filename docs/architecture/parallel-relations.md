@@ -21,17 +21,21 @@ measured by a spike, `//engine/std/physics2d/compare:colors_spike`
 - **The staged run does not move into `engine_ecs` as proposed.** Phase 2
   would have handed any system the host's threads to run its own stages on
   a copy of world data. The user rejected that (2026-10-02): systems
-  shouldn't take the pool to run parallel work the ECS can't see. Who may
-  use the pool, and how, waits for the spike on dense working sets owned by
-  storage (get-8m9).
-- **The primitive waits for a second user.** A colored iteration that writes
-  the entities a relation's rows reference, in world storage, has no second
-  user yet, and it would need a sharing mechanism that CLAUDE.md's rule on
-  unsafe code makes the user's decision (phase 3).
-- **The solve still copies, for now.** Solving in pages as they are is
-  still a no: measured again, pages cost 10% on the passes to save an
-  11 µs copy. Whether storage itself can hold a dense working set, so the
-  copy stops being physics's own, is get-8m9's question.
+  shouldn't take the pool to run parallel work the ECS can't see. The user
+  then decided the rule (get-znt.28): **parallel work is declared and run
+  by the scheduler, never by a system.** The staged run returns as a shape
+  a system declares over a flow and the scheduler runs (get-znt.29); see
+  [flows-spike.md](flows-spike.md).
+- **The primitive over world storage is likely superseded** (phase 3). A
+  colored iteration over flows (`Colored::passes`, flows-spike.md) needs
+  no unsafe code, since the flow owns its memory. What phase 3 would still
+  add is the one-pass relations, which write the world directly.
+- **The solve keeps its copy.** Solving in pages as they are is still a
+  no: measured again, pages cost 10% on the passes to save an 11 µs copy.
+  Neither storage owning the copy ([working-sets.md](working-sets.md)) nor
+  contiguous columns ([contiguous-columns.md](contiguous-columns.md)) beat
+  it. The copy is the solver's own layout and order, and becomes declared
+  flows.
 
 ## The problem
 
@@ -556,10 +560,17 @@ something besides physics needs it.
 that lets any system take the host's pool and run its own parallel passes
 on a copy of world data. The scheduler sees none of that: `Workers`
 declares nothing. That makes physics's workaround the pattern for every
-system, when parallel work should go through what the ECS provides. Whether
-a staged run belongs in `engine_ecs` in some other form, such as over
-storage-owned working sets or behind a footprint that claims the pool,
-waits for get-8m9. Kept below for the record.
+system, when parallel work should go through what the ECS provides.
+
+**What replaces it** (decided by the user, 2026-10-02, get-znt.28):
+parallel work is declared and run by the scheduler, never by a system. The
+three spikes since settled the copy's place: storage shouldn't own it
+(working-sets.md), contiguous columns don't remove it
+(contiguous-columns.md), and as declared flows it costs nothing at 8
+threads (flows-spike.md). A system declares the shape of its work (a map,
+a fixed-order reduction, a colored staged run over a flow), and the
+scheduler turns it into tasks on its own threads (get-znt.29). Kept below
+for the record.
 
 The proposal: move `lanes::run_across`'s protocol into `engine_ecs::par`: stages run in
 order within one run of the executor, each cut into blocks, any thread
@@ -589,6 +600,14 @@ by the user on the sharing mechanism: atomic views of a column (a small
 unsafe cast, with Miri), or only the safe reduction for accumulating
 relations.
 
+**Likely superseded (2026-10-02).** A relation of thousands of rows whose
+system needs threads would gather into a flow and run a colored staged
+run over it (`Colored::passes`, flows-spike.md), as the solve does: safe
+code, since the flow owns its memory, and as fast as the hand-tuned solve
+at 8 threads. In world columns the same walk measured 17 to 40% slower
+(contiguous-columns.md). What would be left of this phase is relations
+that make one cheap pass, where a copy costs more than the work.
+
 ### Not recommended
 
 - solving in world storage (c): measured 10% slower to save 11 µs;
@@ -597,7 +616,8 @@ relations.
   change;
 - entity-level footprints in the scheduler: nothing needs them;
 - phase 2 as written, a staged run any system can use on a copy: rejected
-  (2026-10-02), pending get-8m9.
+  (2026-10-02), replaced by declared shapes the scheduler runs
+  (get-znt.28).
 
 ## Open questions
 

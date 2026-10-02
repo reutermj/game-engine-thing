@@ -172,6 +172,12 @@ one would have to ship those files with it.
   swap-removed with the moved body's index fixed up (`b2DestroyBody`,
   `body.c`), is the index the working-set spike keeps (`Kept` in
   `engine/std/physics2d/compare/working_set_spike.rs`). Not adopted.
+- **Compared for contiguous columns** (docs/architecture/contiguous-columns.md,
+  2026-10-02): a solver set's columns as one array each, grown 1.5 times
+  by a new block and a copy (`b2GrowAlloc`, `core.c`), indexed directly by
+  the solver (`stepContext->states`, `solver.c`). Not adopted; the
+  in-place spike (`engine/std/physics2d/compare/contiguous_spike.rs`)
+  measures that shape in the world's storage.
 
 ## Rapier
 
@@ -251,6 +257,10 @@ one would have to ship those files with it.
   swap-remove, with an epoch bumped on renumbering so caches of indices
   can tell they're stale (`island_manager/manager.rs`), beside a dense
   copy of the awake bodies rebuilt every step (`SolverBodies`).
+- **Compared for contiguous columns** (docs/architecture/contiguous-columns.md,
+  2026-10-02): `Arena<T>`, a `Vec` of entries with a free list
+  (`data/arena.rs`), and the per-worker slices of the solver's copy
+  (`staged_island_solver/sync.rs`). Not adopted.
 
 ## Jolt Physics
 
@@ -286,6 +296,10 @@ one would have to ship those files with it.
   2026-10-02): its active bodies as a list of ids with each body's place
   kept by swap-remove (`BodyManager::RemoveBodyFromActiveBodies`), and a
   solve in place through `Body` pointers rather than on a copy.
+- **Compared for contiguous columns** (docs/architecture/contiguous-columns.md,
+  2026-10-02): bodies allocated one by one, held in an array of pointers
+  reserved to a fixed maximum (`BodyManager.cpp`), so a `Body*` never
+  moves. Not adopted.
 
 ## Box3D
 
@@ -417,6 +431,13 @@ one would have to ship those files with it.
   `flecs_pipeline_build`), and `ecs_run`'s call-scoped `param`
   (`include/flecs/addons/system.h`). Flecs has no value passed between
   systems; nothing is taken.
+- **Compared for contiguous columns** (docs/architecture/contiguous-columns.md,
+  2026-10-02, read in v4.0.4 as above): a table column as one array
+  (`ecs_column_t`, `src/storage/table.h`), grown by a new block and a copy
+  (`flecs_table_grow_data`), paged only where it promises stable pointers
+  (`src/datastructures/sparse.c`, the entity index), and a table's rows
+  split between workers as contiguous ranges (`ecs_worker_next`,
+  `src/iter.c`). The doc's option (b) is that column shape; not built.
 
 ## Bevy
 

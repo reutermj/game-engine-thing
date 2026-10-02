@@ -398,3 +398,60 @@ genrule(
         "cp $(location //engine/std/physics2d:tests/split_impulse.rs) $(location flows_spike_split_impulse.rs)",
     ]),
 )
+
+# SPIKE (docs/architecture/contiguous-columns.md): the solve in place in the
+# world's columns, as if each table column were one block, against the copy
+# it makes today; and in the world's own pages. Not engine code; kept so the
+# numbers can be taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:contiguous_spike
+rust_binary(
+    name = "contiguous_spike",
+    srcs = [
+        "contiguous_spike.rs",
+        "ecs.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        ":contiguous_spike_srcs",
+    ],
+    crate_root = "contiguous_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# As `colors_spike_srcs`, with solver.rs's `lanes` made public and given
+# the spike's in-place driver (contiguous_lanes.rs), included there so it
+# reaches the lanes' private kernels. One line patched; the grep fails the
+# build if it stops applying.
+genrule(
+    name = "contiguous_spike_srcs",
+    srcs = [
+        "contiguous_lanes.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    outs = [
+        "contiguous_spike_arrays.rs",
+        "contiguous_spike_lanes.rs",
+        "contiguous_spike_narrow.rs",
+        "contiguous_spike_pool.rs",
+        "contiguous_spike_solver.rs",
+        "contiguous_spike_split_impulse.rs",
+    ],
+    cmd = " && ".join([
+        "sed 's/^mod lanes {/pub mod lanes { include!(\"contiguous_spike_lanes.rs\");/' $(location //engine/std/physics2d:solver.rs) > $(location contiguous_spike_solver.rs)",
+        "grep -q 'include!(\"contiguous_spike_lanes.rs\")' $(location contiguous_spike_solver.rs)",
+        "cp $(location contiguous_lanes.rs) $(location contiguous_spike_lanes.rs)",
+        "cp $(location //engine/std/physics2d:narrow.rs) $(location contiguous_spike_narrow.rs)",
+        "cp $(location //engine/std/physics2d:tests/arrays.rs) $(location contiguous_spike_arrays.rs)",
+        "cp $(location //engine/std/physics2d:tests/pool.rs) $(location contiguous_spike_pool.rs)",
+        "cp $(location //engine/std/physics2d:tests/split_impulse.rs) $(location contiguous_spike_split_impulse.rs)",
+    ]),
+    tags = ["manual"],
+)

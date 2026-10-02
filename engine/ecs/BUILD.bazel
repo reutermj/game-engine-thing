@@ -284,3 +284,34 @@ test_suite(
     tags = ["manual"],
     tests = MIRI_TESTS,
 )
+
+# SPIKE (docs/architecture/contiguous-columns.md): table columns kept in one
+# block each, on the heap or in reserved address space, against today's
+# pages: what storage pays for it. Not engine code; kept so the numbers can
+# be taken again:
+#   taskset -c 0-7 ./bazel run --config=bench //engine/ecs:contiguous_spike
+rust_binary(
+    name = "contiguous_spike",
+    srcs = ["tests/contiguous_spike.rs"],
+    tags = ["manual"],
+    deps = [":ecs"],
+)
+
+# The spike's block column against a model, with heap values: its unsafe
+# code is the spike's own, so it's checked here, and under Miri (manual,
+# not in `:miri`, since it isn't the engine's):
+#   ./bazel test //engine/ecs:miri_contiguous_spike_sb //engine/ecs:miri_contiguous_spike_tb
+rust_test(
+    name = "contiguous_spike_test",
+    srcs = ["tests/contiguous_spike.rs"],
+    crate_root = "tests/contiguous_spike.rs",
+    deps = [":ecs"],
+)
+
+ecs_miri_test(
+    name = "miri_contiguous_spike",
+    srcs = ["tests/contiguous_spike.rs"],
+    crate_name = "contiguous_spike",
+    crate_root = "tests/contiguous_spike.rs",
+    deps = [":ecs"],
+)

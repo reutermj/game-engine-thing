@@ -39,6 +39,11 @@ monolithic design doc.
   and dataflow systems pass values, the mechanism built on the ECS's own
   graph, physics's solve ported onto it bit for bit with a generic colored
   primitive, hierarchy propagation as a second user (spike results)
+- [contiguous-columns.md](contiguous-columns.md) — why storage can't be
+  indexed as a plain array, and whether it could: a table column in one
+  block or in reserved address space against today's pages, measured for
+  storage and for a solve in place, and what it means for parallel
+  relations' phase 2 (deferred)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 - [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods

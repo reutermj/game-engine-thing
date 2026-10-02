@@ -68,7 +68,8 @@ slower ([physics.md, "What the ECS
 costs"](physics.md#what-the-ecs-costs); parallel-relations.md, "(c)
 Solving in world storage"). Those measurements answered whether the
 solver can work in pages; they didn't ask whether storage should own the
-copy. The user's suspicion (2026-10-02): "it feels like it's a workaround
+copy. Whether storage kept in one block a column would let it solve in
+place instead is [contiguous-columns.md](contiguous-columns.md). The user's suspicion (2026-10-02): "it feels like it's a workaround
 for a missing feature in the storage and maybe other things would also
 want that missing feature."[^hypothesis]
 
@@ -364,6 +365,14 @@ renumbering's cost over (k), plus (e)'s solver): on the settled pile about
 8 threads (4.7%); falling, about 25 µs worse until the renumbering is
 cheaper. The same
 in 3D, measured there. No ECS change, no unsafe code, no baseline moves.
+
+**Since (2026-10-02):** the copy may become declared flows
+([flows-spike.md](flows-spike.md), get-znt.24), whose allocations the ECS
+keeps between frames for every flow (2 to 7% of the frame at 8 threads in
+that spike). So the buffers kept in the mod's `Transient` wait on whether
+physics adopts flows (get-znt.25), rather than being built twice. The
+renumbering in entity order doesn't depend on it: it would move into the
+flow's gather as is.
 
 ### Phase 2: one entity index in `engine_ecs` (safe; get-cp4)
 
