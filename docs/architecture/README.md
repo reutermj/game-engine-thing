@@ -29,6 +29,11 @@ monolithic design doc.
   relation rows write the entities they name, across threads in colors:
   who wants it, what other engines keep in and out of the ECS, colors as
   world state, and why the solve still copies (proposed)
+- [working-sets.md](working-sets.md) — whether storage should keep a
+  dense working set for a system, as the solver's per-step copy: the copy
+  measured eight ways, how Box2D, Rapier, Jolt and Flecs keep theirs,
+  hierarchy propagation as a second user, and why an order matters more
+  than a kept copy (proposed)
 - [physics.md](physics.md) — 2D rigid bodies as an engine mod,
   with every piece of state in the world
 - [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods

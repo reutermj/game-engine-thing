@@ -95,6 +95,13 @@ impl Ecs {
 }
 
 impl Ecs {
+    /// The engine, for a bench that measures storage on its world between
+    /// frames and reads physics's stages itself (`working_set_spike.rs`).
+    #[allow(dead_code)]
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     /// The dynamic bodies, in the order they came.
     fn dynamic(&self) -> Vec<Entity> {
         let w = self.engine.world();

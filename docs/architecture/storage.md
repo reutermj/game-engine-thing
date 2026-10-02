@@ -502,6 +502,8 @@ beyond the equivalence tests.
   caller's. Probably declared by the provider per service (see get-znt.5).
 - **Layout migration** after a reload becomes a task over the affected
   tables, instead of happening on first access.
+- **Dense working sets** kept by storage for a system: proposed, and
+  mostly not recommended, in [working-sets.md](working-sets.md).
 
 ## Spike results
 

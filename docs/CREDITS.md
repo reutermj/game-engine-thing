@@ -160,6 +160,11 @@ one would have to ship those files with it.
     Box2D's own multithreaded step (`THREADS` in its `VARIANTS`) on a task
     system of ours for its `enqueueTask` and `finishTask`
     (`compare/box2d_shim.c`).
+- **A kept index, in a spike** (docs/architecture/working-sets.md,
+  2026-10-02): the awake set's `localIndex`, appended at creation and
+  swap-removed with the moved body's index fixed up (`b2DestroyBody`,
+  `body.c`), is the index the working-set spike keeps (`Kept` in
+  `engine/std/physics2d/compare/working_set_spike.rs`). Not adopted.
 
 ## Rapier
 
@@ -234,6 +239,11 @@ one would have to ship those files with it.
   constraint at the contact's friction center with a twist constraint,
   is also Box3D's and Jolt's, and is what the 3D solver does; physics.md,
   "Rotation in 3D", has the measurements.
+- **Compared, not adopted** (docs/architecture/working-sets.md,
+  2026-10-02, read in the fetched 0.36.0): a body's `active_set_id` kept by
+  swap-remove, with an epoch bumped on renumbering so caches of indices
+  can tell they're stale (`island_manager/manager.rs`), beside a dense
+  copy of the awake bodies rebuilt every step (`SolverBodies`).
 
 ## Jolt Physics
 
@@ -265,6 +275,10 @@ one would have to ship those files with it.
   a 0.2 cap on the correction), tried as the comparison's
   `VARIANTS=arrays:ngs` (`engine/std/physics2d/compare/variants.rs`); see
   physics.md, "Settling".
+- **Compared, not adopted** (docs/architecture/working-sets.md,
+  2026-10-02): its active bodies as a list of ids with each body's place
+  kept by swap-remove (`BodyManager::RemoveBodyFromActiveBodies`), and a
+  solve in place through `Body` pointers rather than on a copy.
 
 ## Box3D
 
@@ -383,6 +397,12 @@ one would have to ship those files with it.
     "Nothing to batch for non-fragmenting components"), and a run's exact
     footprint is its set, with no per-change table replay (`exact` in
     `engine/ecs/graph.rs`).
+- **Compared for working sets** (docs/architecture/working-sets.md,
+  2026-10-02, read in v4.0.4, fetched into a Bazel output base, not
+  linked): optional terms decided once per table (`set_fields` in the query
+  cache, `src/query/engine/cache.c`), and `cascade`, tables grouped by
+  their depth in a hierarchy (`flecs_query_cache_group_by_cascade`). The
+  doc proposes a depth order for `ChildOf` after it; nothing is built.
 
 ## EnTT
 
