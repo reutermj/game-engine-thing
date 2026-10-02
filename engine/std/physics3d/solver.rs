@@ -25,15 +25,10 @@
 //! starting needs no tangent basis that stays put from step to step: the
 //! last step's is projected onto this step's plane.
 
-use physics_common::Softness;
+pub use physics_common::{BOUNCE_THRESHOLD, DAMPING_RATIO, MAX_PUSH, Softness};
 
 use crate::narrow::MAX_POINTS;
 use crate::{Anchors, Carry, Closing, Inertia, Integrate, Mat3, Quat, Vec3};
-pub const DAMPING_RATIO: f32 = 10.0;
-/// The fastest a contact pushes bodies apart.
-pub const MAX_PUSH: f32 = 3.0;
-/// Closing speeds below this don't bounce, so resting bodies settle.
-pub const BOUNCE_THRESHOLD: f32 = 1.0;
 /// The most a body turns in a step, as in Box3D, Rapier and Jolt (a
 /// quarter turn is where a first-order rotation step goes badly wrong).
 pub const MAX_ROTATION: f32 = 0.25 * std::f32::consts::PI;

@@ -12,4 +12,4 @@ mod slots;
 mod soft;
 
 pub use slots::Slots;
-pub use soft::Softness;
+pub use soft::{BOUNCE_THRESHOLD, DAMPING_RATIO, MAX_PUSH, Softness};

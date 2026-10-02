@@ -51,7 +51,7 @@
 //! taken apart into its pipeline's stages (`lanes::staged`), its passes
 //! a shape the scheduler runs (physics.md, "The step").
 
-use physics_common::Softness;
+pub use physics_common::{BOUNCE_THRESHOLD, DAMPING_RATIO, MAX_PUSH, Softness};
 use physics2d::{Rot, Vec2};
 
 /// The default's substeps (`physics2d::Tuning`, which a world can change):
@@ -70,13 +70,6 @@ pub const STIFFNESS: f32 = 0.25;
 /// Contacts with something that doesn't move are twice as stiff, as in
 /// Box2D: nothing on the other side gives.
 pub const STATIC_STIFFNESS: f32 = 0.5;
-/// Heavily damped, as in Box2D: a contact pushes out without bouncing.
-pub const DAMPING_RATIO: f32 = 10.0;
-/// The fastest a contact pushes bodies apart, so a deep overlap comes
-/// apart over a few steps, not in one throw.
-pub const MAX_PUSH: f32 = 3.0;
-/// Closing speeds below this don't bounce, so resting bodies settle.
-pub const BOUNCE_THRESHOLD: f32 = 1.0;
 /// Restitution passes over a contact's two points: one (Box2D's) bounces a
 /// box landing flat at 10 with restitution 0.5 back at 4.4, turning it at
 /// 1.2 a second; four at 5.0, not turning it
