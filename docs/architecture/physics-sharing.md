@@ -1,10 +1,13 @@
 # Physics in 2D and 3D: what to share
 
-**Status: proposed** (2026-09-29; its beads get-emj.77 to get-emj.87). Nothing here is
-built. `//engine/std/physics2d` (2D) and `//engine/std/physics3d` (3D) share
-no physics code: each has its own math, narrowphase, solver, settings and
-contact handling, over one ECS whose spatial storage (`const D`) and live
-relations (`Live<R>`) are generic over the dimension. Features have moved
+**Status: accepted; phase 1 built** (proposed 2026-09-29, its beads
+get-emj.77 to get-emj.87; phase 1, `physics_common`, built 2026-10-02 with
+two of its items left, see "Phase 1"). Before it, `//engine/std/physics2d`
+(2D) and `//engine/std/physics3d` (3D) shared no physics code: each had its
+own math, narrowphase, solver, settings and contact handling, over one ECS
+whose spatial storage (`const D`) and live relations (`Live<R>`) are
+generic over the dimension. The analysis below is as of `f5df2da`; the
+parity table is kept current. Features have moved
 between them by hand, and some have not moved at all. This doc asks what
 could be shared, what should be, and how to stop the drift. Everything in
 it was read from the code at `f5df2da`, not from the other docs, and the
@@ -47,19 +50,19 @@ with this doc.
 | rotation | `Rotation` (cos, sin) and `Spin`; first order, normalized every substep; no cap on a step's turn | `Rotation` (quaternion) and `AngularVelocity`; first order, normalized every substep (variants: once, exact); at most a quarter turn a step | same rule, 3D caps the turn | – |
 | inertia | a box's `m (w² + h²) / 12`, a disc's `m r² / 2`, a scalar | a diagonal about the body's axes, turned to a world `Mat3` once a step | per dimension | – |
 | statics | a collider without `Body` and `Velocity` (or `STATIC`) | a `Static` marker | no | – |
-| **broadphase** | `Live<Contacts>`, `FAT` 0.02, sides by `AnyOf` (awake with or without body or velocity, against statics and sleepers), pairs across workers | `Live<Contacts>`, `FAT` 0.02, moving against `Static`, one thread | same relation, 3D's sides simpler | – |
+| **broadphase** | `Live<Contacts>`, `FAT` 0.02, sides by `AnyOf` (awake with or without body or velocity, against statics and sleepers), pairs across workers | `Live<Contacts>`, `FAT` 0.02, moving against `Static`, one thread | same relation, 3D's sides simpler; `FAT` shared (`physics_common`) | – |
 | bounds | `(Collider, Rotation)` extents | `(Collider, Rotation)` extents, the box as turned | same | – |
 | **narrowphase** | unturned pairs: the old tests, no points (the tile-seam rule is box against box by relative velocity); turned: SAT over both boxes' faces and clipping, up to 2 points, `u16` feature ids | SAT over 15 axes with the last step's axis tried first, clipping, reduced to 4 (Box3D's area rule), `u32` ids; GJK/EPA as a variant | same family, per dimension; 3D caches its axis | – |
 | manifold storage | `Manifold` (normal, depth, pressed, was pressed) and `ContactPoints` apart, written only where there are points | points inline in `Manifold` (40 words), with the rotations and move for recycling | no, each measured | – |
 | contact recycling | none: every pair found every step | box pairs carried while they move under 0.03 (Box3D's), halving the narrowphase on piles | 3D only | get-emj.44 |
-| speculative contacts | within `MARGIN` 0.05, a gap may close in a substep and no more | the same | same | – |
-| **solver: soft step** | Box2D v3's: 5 substeps (`Tuning`), 2 relaxing passes, stiffness 0.25 and static 0.5 of the substep rate, damping 10, push at most 3 | the same structure, 5 and 2, stiffness 0.2 and static 0.25 (a turning cube rocks on four points: physics.md, "Still at rest") | same structure, stiffness measured apart | – |
-| restitution | once after the substeps, from the closing speed before the step's gravity (`Closing::Before`), above 1.0, **four passes** over a contact's points | the same closing speed (ported by hand, get-emj.60), **one pass** over up to four points | closing same, passes not | get-emj.82 (new) |
+| speculative contacts | within `MARGIN` 0.05, a gap may close in a substep and no more | the same | same, `MARGIN` shared (`physics_common`) | – |
+| **solver: soft step** | Box2D v3's: 5 substeps (`Tuning`), 2 relaxing passes, stiffness 0.25 and static 0.5 of the substep rate, damping 10, push at most 3 | the same structure, 5 and 2, stiffness 0.2 and static 0.25 (a turning cube rocks on four points: physics.md, "Still at rest") | same structure, stiffness measured apart; `Softness` (`b2MakeSoft`), damping, push and bounce threshold shared (`physics_common`) | – |
+| restitution | once after the substeps, from the closing speed before the step's gravity (`Closing::Before`), above 1.0, **four passes** over a contact's points | the same closing speed, **one pass** over up to four points | closing shared (`physics_common::Closing`; 3D's `Tuning` names four of its six options, its own enum in the interface mapped onto it), passes not | get-emj.82 |
 | friction | per point, in the relaxing passes only, clamped by the point's normal impulse | per contact at the points' centroid, clamped to a disc, and twist about the normal, relaxing passes only | no | – |
-| friction mixing | the smaller of the two | `sqrt(a b)` (Box2D's and Box3D's; Rapier averages) | **no, and not decided** | get-emj.81 (new) |
+| friction mixing | the smaller of the two | `sqrt(a b)` (Box2D's and Box3D's; Rapier averages) | **no, and not decided**; restitution the larger in both; neither in `physics_common` until get-emj.81 decides | get-emj.81 |
 | warm-start carry | turning points: normal from the last substep, tangent averaged (`Carry::Normal`, decided get-emj.61); a contact whose ends don't turn: the mean | the mean of both (`Carry::Mean`); `Last` a variant; B never tried | **no** | get-emj.82 (new) |
-| warm-start matching | by feature id (`ContactPoints::last`) | by feature id; nearest point within 1 cm a variant | same | – |
-| order, lanes, threads | turning: Box2D's colors, four lanes, across the host's threads bit for bit (`solve_across`); by level a variant; locked: one contact at a time in pair order | one contact at a time in pair order | 2D only | get-emj.52, get-emj.75, get-emj.74 |
+| warm-start matching | by feature id (`ContactPoints::last`, in the interface) | by feature id (`lib.rs`, `warm`); nearest point within 1 cm a variant | same, not shared: 2D's is a method of an interface component, which can't use `physics_common` | get-emj.91 |
+| order, lanes, threads | turning: Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy` and placing since flows, `Passes` running the program), four lanes, across the host's threads bit for bit (`solve_across`); by level a variant; locked: one contact at a time in pair order | one contact at a time in pair order | 2D only | get-emj.52, get-emj.75, get-emj.74 |
 | the solve's systems (since 2026-10-02) | a pipeline of nine systems over five [flows](flows.md) (`pipeline.rs`), the colored passes on `Passes` | a pipeline of six systems over three flows (`pipeline.rs`), the solve whole in one system, no shape | same shape: settings, gathers, solve, scatters; 3D's solve isn't split, its pair order being its result | get-znt.33, get-znt.35 |
 | block solver | a variant (2x2 over a contact's two points) | none | 2D only, a variant | – |
 | **sleeping, islands** | islands by union-find over pressed contacts; `Asleep`, `Slept`, `Still`, `Resting` in the world; every wake a game can cause | none | 2D only | get-emj.77 (new) |
@@ -377,6 +380,35 @@ feature id. About 60 to 90 lines out of each mod, one crate in. This is small
 on purpose: it proves the crate, the twin and the benches depending on it,
 and that nothing moves, before anything larger rides on it.
 
+**Built 2026-10-02, but for two items.** `//engine/std/physics_common` is
+a `rust_library` in the `deps` of both mods (their twins and 2D's `v2`
+included), and of everything that compiles their sources by path: 2D's
+`core_test`, `:tax`, `narrow_bench`, `parallel_solver` and the
+comparison's targets, 3D's `core_test`. In it: `Slots` (with its
+`Recycle`), `Softness`, `DAMPING_RATIO`, `MAX_PUSH`, `BOUNCE_THRESHOLD`,
+`MARGIN`, `FAT` and `Closing` with `speed`, each moved in a commit of
+its own. The mods keep their old paths (`solver::BOUNCE_THRESHOLD`,
+`narrow::MARGIN`) by `pub use`, so the comparisons didn't change. 3D's
+`Closing` stays in its interface (its `Tuning` names it) and is mapped
+onto the shared one. Every move moved no value: `:tax` bit for bit, both
+baselines' `--all` output and `--long --all` output identical to the
+commit before, pong's and the platformer's replays, physics3d's
+`reload_test`. A change to the crate rebuilds physics2d's and physics3d's
+libraries and no game crate (measured: a constant added to it rebuilt the
+one cdylib `//game` has from it), and `bazel run //engine/std/physics2d`
+reloads the mod under a running `//game`, its dependents untouched.
+
+Left, and why:
+
+- **Mixing:** friction still mixes by the smaller in 2D and by `sqrt(a b)`
+  in 3D (get-emj.81, undecided); moving either would decide it. Restitution
+  is the larger in both, but moving it alone splits the rule from its pair.
+- **Matching by feature id:** 2D's is `ContactPoints::last`, a method of a
+  component in 2D's interface, which can't depend on this crate; moving it
+  out is an interface change of physics2d (every game rebuilt and
+  reloaded), and its callers include the comparison's spikes. The two
+  copies are one `position` over the ids each, and agree (get-emj.91).
+
 ### Phase 2: coloring and lanes (get-emj.86, with get-znt.21)
 
 `F<N>`, Box2D's greedy coloring over each contact's two body indices
@@ -385,6 +417,15 @@ the staged run into `engine_ecs::par` as parallel-relations.md's phase 2
 already proposes (get-znt.21). About 300 lines of 2D's solver become
 common. Then 3D's lanes (get-emj.52) and threads (get-emj.75) are a port of
 its kernels only, and kept colors (get-emj.74) are built once for both.
+
+**Rescoped by flows (2026-10-02, get-emj.86's note):** the coloring and
+placing now live in `engine_ecs::shape` (`Coloring::greedy`, asserted
+equal to 2D's `lanes::group` contact for contact; `Passes` packs the
+colors and runs the program), and the staged run is the scheduler's
+(get-znt.28), not `engine_ecs::par`, so get-znt.21's plan is superseded.
+What is left for `physics_common` is `F<N>`, the lane array, and whatever
+lanes helpers 3D's kernel shares with 2D's; 2D's `lanes::group` should
+then give way to `shape::Coloring` if that is bit for bit.
 
 ### Phase 3: the bookkeeping 3D lacks (spike get-emj.87)
 

@@ -53,10 +53,12 @@ one would have to ship those files with it.
     GDC 2006 and in the talks listed at <https://box2d.org/publications/>
     (`engine/std/physics2d/solver.rs`);
   - speculative contacts, pairs found and solved a margin before they
-    touch (`narrow.rs`; Box2D's `B2_SPECULATIVE_DISTANCE`);
+    touch (`narrow.rs`, the margin `physics_common::MARGIN`; Box2D's
+    `B2_SPECULATIVE_DISTANCE`);
   - the soft step, since 2026-09-26 the 2D solver (`solver.rs`): the step
     in substeps, each gravity, warm starting, one pass of soft contacts
-    (`b2MakeSoft`'s constants, a push-out speed capped as
+    (`b2MakeSoft`'s constants, `physics_common::Softness` since
+    2026-10-02, shared by both mods; a push-out speed capped as
     `maxContactPushSpeed` caps it, contacts with a static body twice as
     stiff), positions integrated and separations updated from how far the
     bodies moved, then rigid relaxing passes; and restitution applied once
@@ -68,12 +70,12 @@ one would have to ship those files with it.
     passes (Box2D's one) are our own measurements (physics.md,
     "Settling");
   - a restitution threshold, the closing speed below which nothing
-    bounces, at Box2D's default of 1 (`solver.rs`, `BOUNCE_THRESHOLD`;
+    bounces, at Box2D's default of 1 (`physics_common`'s `BOUNCE_THRESHOLD`;
     Box2D's `b2WorldDef::restitutionThreshold`);
   - restitution's closing speed taken before the step's gravity, as
     `b2PrepareContactsTask` stores `relativeVelocity` before
     `b2_stageIntegrateVelocities`: one of the options weighed for
-    get-emj.56, a variant in 2D and 3D (`solver::Closing::Before`;
+    get-emj.56, a variant in 2D and 3D (`physics_common::Closing::Before`;
     physics.md, "Bounces");
   - graph coloring for a parallel solve, with contacts on a static body
     kept out of color 0, and SIMD batches of a color's contacts
@@ -346,7 +348,7 @@ one would have to ship those files with it.
   - fat boxes kept between steps, as Box2D's (above), with the margin
     Box3D caps shapes at (`B3_MAX_AABB_MARGIN`, 0.05; its margin is an
     eighth of a shape's size below that, ours one for all)
-    (`engine/ecs/live.rs`, physics3d's `FAT`).
+    (`engine/ecs/live.rs`, `physics_common::FAT`, both mods').
   - contact recycling (2026-09-27, physics.md, "Still at rest"): a pair's
     manifold kept while its bodies barely move, each point's anchors
     carried with both bodies and its separation updated from how far they

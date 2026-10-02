@@ -175,6 +175,13 @@ changing the ABI, the reload sequence or the Bazel rules.
   family statistics, the run cache and the bounce statistics. Scenes,
   measures, engines and bounds stay in each harness. Credits and licences
   in [docs/CREDITS.md](docs/CREDITS.md).
+  `physics_common` is what the two mods share apart from the dimension
+  (`Slots`, `Softness`, `Closing`, the soft step's and the broadphase's
+  constants): a dependency of their implementations, never their
+  interfaces, so a change to it reloads both mods and no game. No
+  statics, no unsafe. What may go in it, and what's left out and why:
+  [physics-sharing.md](docs/architecture/physics-sharing.md), with the
+  parity table every physics change keeps current.
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's
