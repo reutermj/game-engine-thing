@@ -43,7 +43,7 @@ monolithic design doc.
   `Take` and their rules, edges in the graph, the world's store and its
   recycling bins across reloads, the plan check and its errors, fixed-rate
   groups, and parallel shapes (`ParMap`, `Reduce`, `Passes`) declared as
-  parameters and run by the scheduler (proposed)
+  parameters and run by the scheduler (stage 1 built: on one thread)
 - [contiguous-columns.md](contiguous-columns.md) — why storage can't be
   indexed as a plain array, and whether it could: a table column in one
   block or in reserved address space against today's pages, measured for

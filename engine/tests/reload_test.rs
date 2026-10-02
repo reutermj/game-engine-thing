@@ -1094,3 +1094,56 @@ mod schedulers {
         assert_eq!(trace(&e), ["sneak ran", "sneak got Status(-1)"]);
     }
 }
+
+/// Flows across reloads: docs/architecture/flows.md, "Reload, and whose
+/// code a bin holds". Poison mode is on, so a bin kept past its build's
+/// unmapping faults where it's next touched.
+mod flows {
+    use test_probe::Trace;
+
+    use super::{engine, lib, load, step};
+
+    fn trace(e: &engine_loader::engine::Engine) -> Vec<String> {
+        let traces = e.world().values::<Trace>().expect("test::Trace is registered with this layout");
+        traces.into_iter().flat_map(|(_, t)| t.lines).collect()
+    }
+
+    #[test]
+    fn a_reload_that_changes_a_flows_layout_drops_its_bin_and_runs_the_new_code() {
+        let e = engine("flows_reload");
+        load(&e, "streamer", "STREAMER_V1");
+        load(&e, "drain", "DRAIN_V1");
+        step(&e, 2);
+        // The second frame's `Make` starts from the first's allocation,
+        // which drain took and gave back.
+        assert_eq!(trace(&e), ["v1 made from 0/0", "saw 28", "took 8", "v1 made from 0/8", "saw 28", "took 8"]);
+        assert_eq!(e.world().flow_holds("test::Samples"), (false, true));
+
+        let reply = e.load_batch(&[("streamer".into(), lib("STREAMER_V2")), ("drain".into(), lib("DRAIN_V2"))]);
+        assert_eq!(reply.as_deref(), Ok("reloaded streamer (generation 1); reloaded drain (generation 1)"));
+        // v1's bin went with the reload: had it been kept, v2's `Make`
+        // would downcast it through v1's vtable, unmapped.
+        assert_eq!(e.world().flow_holds("test::Samples"), (false, false));
+        let from = trace(&e).len();
+        step(&e, 2);
+        assert_eq!(trace(&e)[from..], ["v2 made from 0/0", "saw 828", "took 8", "v2 made from 0/8", "saw 828", "took 8"]);
+    }
+
+    #[test]
+    fn a_bin_outliving_its_maker_drops_with_its_code_mapped() {
+        // drain only sees, so the bin is the value streamer made, boxed by
+        // streamer's code. Once both are unloaded, only the flow keeps
+        // streamer mapped (drain, loaded last, keeps `Trace`'s code), and
+        // the world drops the bin with the engine.
+        let e = engine("flows_unload");
+        load(&e, "streamer", "STREAMER_V1");
+        load(&e, "drain", "DRAIN_SEER");
+        step(&e, 2);
+        assert_eq!(trace(&e), ["v1 made from 0/0", "saw 28", "v1 made from 0/8", "saw 28"]);
+        assert_eq!(e.world().flow_holds("test::Samples"), (false, true));
+        assert_eq!(e.world().flow_keepalives("test::Samples"), ["drain", "streamer"]);
+        e.unload("drain").unwrap();
+        e.unload("streamer").unwrap();
+        drop(e);
+    }
+}

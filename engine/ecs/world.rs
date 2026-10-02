@@ -39,6 +39,8 @@ pub const PAGE_ROWS: usize = 256;
 const MAX_COMPONENTS: usize = 4096;
 const MAX_TABLES: usize = 4096;
 pub(crate) const MAX_EVENTS: usize = 1024;
+/// Flows a world can keep: each is a type a mod declares, as events are.
+const MAX_FLOWS: usize = 1024;
 /// Live relations a world can keep: each is a type a mod declares, so a
 /// handful per game.
 const MAX_RELATIONS: usize = 256;
@@ -426,6 +428,11 @@ pub struct World {
     by_set: Mutex<HashMap<Vec<ComponentId>, TableId>>,
     pub(crate) events: Arena<RwLock<EventQueue>>,
     pub(crate) events_by_name: Mutex<HashMap<String, usize>>,
+    /// Each flow's value while a frame runs, and its bin (`flows.rs`), by
+    /// name: the world's, like event queues, and empty between frames.
+    pub(crate) flows: Arena<crate::flows::FlowSlot>,
+    pub(crate) flows_by_name: Mutex<HashMap<String, usize>>,
+    pub(crate) flow_recycling: AtomicBool,
     /// Each live relation's kept state (`live.rs`), by relation, named by
     /// its type: the world's, like the orders it's found in, and taken by a
     /// system as a parameter (`Live`), so the scheduler sees who uses it.
@@ -464,6 +471,9 @@ impl World {
             by_set: Mutex::new(HashMap::new()),
             events: Arena::new(MAX_EVENTS),
             events_by_name: Mutex::new(HashMap::new()),
+            flows: Arena::new(MAX_FLOWS),
+            flows_by_name: Mutex::new(HashMap::new()),
+            flow_recycling: AtomicBool::new(true),
             relations: Arena::new(MAX_RELATIONS),
             relations_by_name: Mutex::new(HashMap::new()),
             entities: Entities::new(),
@@ -767,12 +777,14 @@ impl World {
     }
 
     /// Ends a frame: drops the events that became visible in the one before,
-    /// which every reader has now had a full frame to see.
+    /// which every reader has now had a full frame to see, and empties every
+    /// flow.
     pub fn end_frame(&self) {
         let frame = self.frame();
         for q in self.events.iter() {
             q.take_write().expire(frame);
         }
+        self.expire_flows();
         self.frame_open.store(false, Ordering::Release);
     }
 

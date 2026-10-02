@@ -32,13 +32,16 @@ pub struct Declare<'w> {
     pub world: &'w World,
     pub components: Vec<ComponentDesc>,
     pub events: Vec<ComponentDesc>,
+    /// The flows its parameters use, by name: the loader installs each as
+    /// the build's load commits, which drops the flow's bin.
+    pub flows: Vec<String>,
     /// The first component that couldn't be interned (its storage changed).
     pub error: Option<String>,
 }
 
 impl<'w> Declare<'w> {
     pub fn new(world: &'w World) -> Declare<'w> {
-        Declare { world, components: Vec::new(), events: Vec::new(), error: None }
+        Declare { world, components: Vec::new(), events: Vec::new(), flows: Vec::new(), error: None }
     }
 
     pub fn component<T: Component>(&mut self) -> ComponentId {
@@ -61,6 +64,13 @@ impl<'w> Declare<'w> {
             self.events.push(desc);
         }
         self.world.intern_event(&desc)
+    }
+
+    pub fn flow<T: crate::flows::Flow>(&mut self) -> usize {
+        if !self.flows.iter().any(|f| f == T::NAME) {
+            self.flows.push(T::NAME.into());
+        }
+        self.world.intern_flow(T::NAME)
     }
 }
 
@@ -792,6 +802,20 @@ pub enum ParamDecl {
         active: Vec<FilterDecl>,
         passive: Vec<FilterDecl>,
     },
+    /// A flow (`flows.rs`), by the slot the world keeps it in. `See` reads
+    /// it and the other uses write it, ordered as an event queue is, with
+    /// no apply node: a flow's use changes nothing in the world. `ty` is
+    /// what the plan check compares, and `ty_name` what it reports.
+    Flow {
+        slot: usize,
+        name: &'static str,
+        access: crate::flows::FlowAccess,
+        ty: std::any::TypeId,
+        ty_name: &'static str,
+    },
+    /// A parallel shape the system runs (`shape.rs`): touches nothing, but
+    /// tells the scheduler the node fans out, and how.
+    Shape(crate::shape::ShapeKind),
 }
 
 impl ParamDecl {
@@ -822,7 +846,7 @@ impl ParamDecl {
             ParamDecl::Spawner { .. } => true,
             ParamDecl::Events { write, .. } => *write,
             ParamDecl::Group(members) => members.iter().any(ParamDecl::changes),
-            ParamDecl::Dt | ParamDecl::Live { .. } => false,
+            ParamDecl::Dt | ParamDecl::Live { .. } | ParamDecl::Flow { .. } | ParamDecl::Shape(_) => false,
         }
     }
 }
@@ -2325,6 +2349,18 @@ pub fn check_conflicts(world: &World, name: &str, params: &[ParamDecl]) -> Resul
     for (i, &(q, w)) in queues.iter().enumerate() {
         if queues[i + 1..].iter().any(|&(r, v)| q == r && (w || v)) {
             return Err(format!("{name}: reads and writes one event type, or writes it twice"));
+        }
+    }
+    let flows: Vec<&str> = leaves
+        .iter()
+        .filter_map(|p| match p {
+            ParamDecl::Flow { name, .. } => Some(*name),
+            _ => None,
+        })
+        .collect();
+    for (i, f) in flows.iter().enumerate() {
+        if flows[i + 1..].contains(f) {
+            return Err(format!("{name}: uses the flow {f} twice; a system uses a flow once, and a stage that edits it takes `Pass`"));
         }
     }
     crate::live::check_live(world, name, &leaves)

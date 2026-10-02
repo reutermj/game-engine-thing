@@ -1,9 +1,11 @@
 # Flows
 
-**Status: proposed** (2026-10-02, get-znt.25). Nothing here is built yet.
-Stage 1 (get-znt.32) builds the mechanism and the shapes in `engine_ecs`,
-run on one thread; stage 2 (get-znt.33) moves physics2d's solve onto it;
-stage 3 (get-znt.34) has the scheduler run the shapes across threads.
+**Status: stage 1 built** (2026-10-02; designed in get-znt.25, built in
+get-znt.32): the mechanism and the shapes in `engine_ecs`
+(`engine/ecs/flows.rs`, `engine/ecs/shape.rs`), the shapes run on one
+thread, and the plan check in the loader's `schedule.rs`. Nothing uses
+them yet. Stage 2 (get-znt.33) moves physics2d's solve onto them; stage 3
+(get-znt.34) has the scheduler run the shapes across threads.
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -30,8 +32,8 @@ restating them.
   node.
 - **Values live in the world, by name**, out of sight of everything but
   the systems that declare them, and empty between frames. Each flow keeps
-  one emptied value as a recycling bin, dropped whenever a build that
-  uses the flow is installed.
+  one value for its allocations, a recycling bin, dropped whenever a build
+  that uses the flow is installed.
 - **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
   are parameters, and the kernels a system hands them are the only code
   that may run across threads. In stage 1 they run on the system's own
@@ -167,9 +169,10 @@ name, interned when a build declares a system that uses it.
   and `Pass`, moved out by `Take`. Each use takes the slot's lock with
   `try_*`, so two uses the graph should have ordered are a panic, never a
   race.
-- **The bin**: one emptied value, kept for the next `Make`. `Take` puts
-  its value back when dropped, and the end of the frame moves a value
-  nothing took into the bin. `Make` empties whatever it starts from.
+- **The bin**: one value, kept for its allocations for the next `Make`.
+  `Take` puts its value back when dropped, and the end of the frame moves
+  a value nothing took into the bin. `Make` empties whatever it starts
+  from.
 - **Between frames, a flow is empty.** Its bin holds allocations, not a
   value anyone can read. So flows are invisible to `WorldMut`, to hooks
   and message handlers, and to every inspection of the world
@@ -186,9 +189,10 @@ the build that made it. That's a problem for two reasons:
    solve it by keeping the build mapped (`EventQueue::_keepalive`).
 2. **Its layout may change.** `maker` v2 can declare `Bodies` with
    another field. A downcast by `TypeId` doesn't tell the two apart:
-   `TypeId` hashes the crate's name and the type's path, and two builds of
-   one crate by one Bazel target have the same. A v2 `Make` handed v1's
-   bin would read the wrong layout with no `unsafe` in sight.
+   `TypeId` hashes the crate's name and the type's path, not its fields,
+   so two builds of one crate can agree on it (reasoned, not measured).
+   A v2 `Make` handed v1's bin would then read the wrong layout with no
+   `unsafe` in sight.
 
 So:
 
@@ -243,9 +247,9 @@ repeats them), it refuses, with errors that name the fix:
 | a use before the `Make`, same phase | `` `See<test::Numbers>` in `b::view` runs before `Make<test::Numbers>` in `a::make`; add `.after("a::make")` to `b::view` `` |
 | a use before the `Make`, earlier phase | `` `See<…>` in `b::view` (phase update) runs before `Make<…>` in `a::make` (phase late); move `b::view` to phase late, with `.after("a::make")` `` |
 | a use with no `Make` loaded | `` `See<…>` in `b::view`: nothing loaded makes test::Numbers `` |
-| a second `Make` | `` `Make<…>` in `b::again` and in `a::make`: a flow has one maker; a stage that changes it takes `Pass<…>` `` |
+| a second `Make` | `` `Make<…>` in `b::again` and `Make<…>` in `a::make`: a flow has one maker; a stage that changes it takes `Pass<…>` `` |
 | a use after the `Take` | `` `See<…>` in `c::late` runs after `Take<…>` in `b::sink` took it; add `.before("b::sink")` to `c::late` `` (or move it, as above) |
-| a second `Take` | the same, ending "a flow has one taker: make one of them a `Pass` that runs before it" |
+| a second `Take` | `` `Take<…>` in `c::t2` runs after `Take<…>` in `b::t1` took it: a flow has one taker; make one of them a `Pass` that runs before the other `` |
 | uses in two groups | below |
 | two types under one name | `` test::Numbers is declared as two types: `a::Numbers` by `a::make` and `b::Numbers` by `b::view`; a flow shared between mods is declared once, in its mod's interface `` |
 

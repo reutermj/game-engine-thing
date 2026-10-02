@@ -69,6 +69,13 @@ declaration can't drift from the code:
 - **`Spawner<B>`**: spawns entities with the bundle `B`'s components.
 - **`EventReader<E>`**, **`EventWriter<E>`**: the events of type `E` this
   system hasn't seen yet, and sending them.
+- **`Make<T>`**, **`See<T>`**, **`Pass<T>`**, **`Take<T>`**: a flow, a
+  value systems hand one another within a frame, made, borrowed, edited
+  or owned. The plan is checked so each use comes in turn; see
+  [flows.md](flows.md).
+- **`ParMap`**, **`Reduce`**, **`Passes`**: the shapes a system's parallel
+  work takes, declared so the scheduler knows the node fans out
+  ([flows.md](flows.md#parallel-shapes)).
 
 A system has no other way into the world. **`cx.world()` panics in a
 frame**, failing the system's mod: the whole world is for hooks and message

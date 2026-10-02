@@ -171,7 +171,13 @@ impl<'w> WorldMut<'w> {
 
 /// The components a declaration names, for installing them: what the loader
 /// does when a load commits.
-pub fn install_all(world: &World, components: &[ComponentDesc], events: &[ComponentDesc], build: &Build) -> Result<Vec<String>, String> {
+pub fn install_all(
+    world: &World,
+    components: &[ComponentDesc],
+    events: &[ComponentDesc],
+    flows: &[String],
+    build: &Build,
+) -> Result<Vec<String>, String> {
     let mut reports = Vec::new();
     for desc in components {
         if let Some(report) = world.install(desc, build)? {
@@ -180,6 +186,9 @@ pub fn install_all(world: &World, components: &[ComponentDesc], events: &[Compon
     }
     for desc in events {
         world.install_event(desc, build)?;
+    }
+    for name in flows {
+        world.install_flow(name, build);
     }
     Ok(reports)
 }

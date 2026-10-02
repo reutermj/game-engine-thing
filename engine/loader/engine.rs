@@ -299,13 +299,15 @@ impl Engine {
             }
         }
 
-        // The new builds' components and events, now the old builds have let
-        // go of theirs: a changed layout migrates stored values here. The
-        // checks above rule out a refusal (an older layout, a changed storage).
+        // The new builds' components, events and flows, now the old builds
+        // have let go of theirs: a changed layout migrates stored values
+        // here, and a flow's bin, which an old build may have made, is
+        // dropped while that build is still mapped. The checks above rule out
+        // a refusal (an older layout, a changed storage).
         let loaded_at: Vec<u64> = opened.iter().map(|_| self.next_load()).collect();
         for (o, &loaded_at) in opened.iter().zip(&loaded_at) {
             let build = Build { name: o.name.clone(), loaded_at, keepalive: Some(o.lib.clone() as Keepalive) };
-            match engine_ecs::between::install_all(&self.world, &o.decls.components, &o.decls.events, &build) {
+            match engine_ecs::between::install_all(&self.world, &o.decls.components, &o.decls.events, &o.decls.flows, &build) {
                 Ok(reports) => reports.iter().for_each(|r| println!("[engine] {r}")),
                 Err(e) => eprintln!("[engine] {}: {e}", o.name),
             }

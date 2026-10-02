@@ -97,6 +97,15 @@ changing the ABI, the reload sequence or the Bazel rules.
     (and migrating values), and the guards each node takes.
   - `query.rs`, `events.rs` — system parameters: `Query`, `Spawner`, rows
     and their change log; `EventReader` and `EventWriter`.
+  - `flows.rs` — flows, values systems hand one another within a frame:
+    `Make`, `See`, `Pass` and `Take`, the world's store and its recycling
+    bins (dropped when a build using the flow is installed), and the plan
+    check the loader's `schedule.rs` runs. See
+    [docs/architecture/flows.md](docs/architecture/flows.md).
+  - `shape.rs` — parallel shapes, the form a system's parallel work takes
+    once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a
+    program of stages over items in colors), parameters the scheduler will
+    run across threads; on one thread for now.
   - `graph.rs` — footprints and the overlap rules the schedule's edges
     come from.
   - `live.rs` — live relations: a `Proximity` a mod declares (a spatial

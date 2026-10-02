@@ -165,8 +165,12 @@ one would have to ship those files with it.
   2026-10-02): the same staged run, lifted out of the solver into
   `flows::Colored::passes` (`engine/ecs/tests/flows.rs`), a stage a color
   of any items and the blocks, starts and marks as above; and Box2D's
-  coloring rule (`b2AddContactToGraph`) as `flows::Coloring::greedy`. Not
-  adopted.
+  coloring rule (`b2AddContactToGraph`) as `flows::Coloring::greedy`.
+- **Adopted in `engine_ecs`** (docs/architecture/flows.md, 2026-10-02,
+  get-znt.32): the coloring rule as `shape::Coloring::greedy`, and the
+  staged run's program as `shape::Passes`, run on one thread until the
+  scheduler runs its stages' blocks across threads (get-znt.34). Ideas
+  only; no code is copied.
 - **A kept index, in a spike** (docs/architecture/working-sets.md,
   2026-10-02): the awake set's `localIndex`, appended at creation and
   swap-removed with the moved body's index fixed up (`b2DestroyBody`,
@@ -457,7 +461,8 @@ one would have to ship those files with it.
   runs) and messages (double-buffered, read by any number of systems).
   The spike's flows take the typed hand-off from `pipe` and the kept
   allocations from `Local`, and differ in making each use a declared edge
-  of its own. Nothing is taken as code.
+  of its own. Nothing is taken as code. The same ideas are in
+  `engine/ecs/flows.rs` (docs/architecture/flows.md).
 
 ## Unity Physics
 
@@ -490,7 +495,8 @@ one would have to ship those files with it.
   wired explicitly between operators, messages moved and their buffers
   handed back by swapping (`Push::push(&mut Option<T>)`), and a stream
   with several readers cloned for all but the last. The spike's recycling
-  of a flow's allocations is the same idea at a frame's scale.
+  of a flow's allocations is the same idea at a frame's scale, and so is
+  `engine/ecs/flows.rs`'s (docs/architecture/flows.md).
 
 ## EnTT
 

@@ -11,6 +11,7 @@ rust_library(
         "component.rs",
         "erased.rs",
         "events.rs",
+        "flows.rs",
         "graph.rs",
         "harness.rs",
         "live.rs",
@@ -19,6 +20,7 @@ rust_library(
         "par.rs",
         "query.rs",
         "schema.rs",
+        "shape.rs",
         "spatial.rs",
         "world.rs",
     ],
@@ -180,6 +182,14 @@ rust_binary(
     name = "hierarchy_spike",
     srcs = ["tests/hierarchy_spike.rs"],
     tags = ["manual"],
+    deps = [":ecs"],
+)
+
+# Flows and parallel shapes (docs/architecture/flows.md): edges, the plan
+# check, ownership and recycling, and the shapes on one thread.
+rust_test(
+    name = "flow_test",
+    srcs = ["tests/flow_test.rs"],
     deps = [":ecs"],
 )
 

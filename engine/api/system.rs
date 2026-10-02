@@ -61,6 +61,9 @@ pub struct Declarations {
     pub phases: Vec<PhaseDesc>,
     pub components: Vec<ComponentDesc>,
     pub events: Vec<ComponentDesc>,
+    /// The flows its systems use, by name: installing each drops the flow's
+    /// recycling bin, which an older build may have made.
+    pub flows: Vec<String>,
     /// Why the declarations can't be used: a component whose storage changed,
     /// or a system whose queries conflict.
     pub error: Option<String>,
@@ -101,7 +104,9 @@ impl<T: Mod> Systems<'_, T> {
     /// Adds a system named `name` running `f`, in the `update` phase unless
     /// the builder says otherwise. `f` is a function of the mod's state, its
     /// transient part, its `Cx` and up to eight parameters (`Query`,
-    /// `Spawner`, `EventReader`, `EventWriter`), and must not capture
+    /// `Spawner`, `EventReader`, `EventWriter`, the flows `Make`, `See`,
+    /// `Pass` and `Take`, the shapes `ParMap`, `Reduce` and `Passes`), and
+    /// must not capture
     /// anything: a fn item, or a closure without captures.
     pub fn add<P, F: IntoSystem<T, P>>(&mut self, name: &str, f: F) -> SystemBuilder<'_> {
         let _ = f;
@@ -257,6 +262,7 @@ pub unsafe extern "C" fn __declare<T: Mod>(out: *mut c_void, world: *const World
         let Systems { mut decls, declare, .. } = systems;
         decls.components = declare.components;
         decls.events = declare.events;
+        decls.flows = declare.flows;
         if let Some(e) = declare.error {
             decls.error.get_or_insert(e);
         }

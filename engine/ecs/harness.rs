@@ -6,6 +6,7 @@
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::flows::{PlanStep, check_plan};
 use crate::graph::{Footprint, SystemView, applies_overlap, bound, exact, system_apply_overlap, systems_overlap};
 use crate::query::{Change, Declare, FrameCx, Log, Param, ParamDecl, check_conflicts};
 use crate::world::{Build, Structural, World};
@@ -46,7 +47,7 @@ macro_rules! into_system {
                 if let Some(e) = d.error {
                     panic!("{e}");
                 }
-                crate::between::install_all(world, &d.components, &d.events, &Build::default()).unwrap();
+                crate::between::install_all(world, &d.components, &d.events, &d.flows, &Build::default()).unwrap();
                 if let Err(e) = check_conflicts(world, name, &params) {
                     panic!("{e}");
                 }
@@ -133,6 +134,14 @@ impl Schedule {
             Node::System(i) => self.systems[i].name.clone(),
             Node::Apply(i) => format!("apply({})", self.systems[i].name),
         }
+    }
+
+    /// Checks the systems' flows in plan order, as the loader checks a
+    /// plan: all in one phase, once a frame.
+    pub fn check_flows(&self) -> Result<(), String> {
+        let steps: Vec<PlanStep<'_>> =
+            self.systems.iter().map(|s| PlanStep { system: &s.name, phase: "update", group: None, params: &s.params }).collect();
+        check_plan(&steps)
     }
 
     pub fn frame(&self) -> FrameState {

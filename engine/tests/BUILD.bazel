@@ -276,6 +276,35 @@ engine_mod(
     "v2",
 ]]
 
+# Builds of `streamer`, which makes a flow its interface declares (v2 changes
+# its layout), and `drain`, which sees and takes it. See mods/streamer.rs.
+[engine_mod(
+    name = "streamer_" + build,
+    srcs = ["mods/streamer.rs"],
+    crate_features = [build],
+    crate_root = "mods/streamer.rs",
+    interface = ["mods/streamer_interface_%s.rs" % build],
+    mod_name = "streamer",
+    deps = [":probe"],
+) for build in [
+    "v1",
+    "v2",
+]]
+
+[engine_mod(
+    name = "drain_" + build,
+    srcs = ["mods/drain.rs"],
+    crate_features = features,
+    crate_root = "mods/drain.rs",
+    mod_deps = [":streamer_" + streamer],
+    mod_name = "drain",
+    deps = [":probe"],
+) for build, streamer, features in [
+    ("v1", "v1", []),
+    ("v2", "v2", []),
+    ("seer", "v1", ["seer"]),
+]]
+
 # The reload fuzzer's builds that must be refused are these too.
 exports_files(
     [
@@ -313,6 +342,11 @@ TEST_MODS = {
     "PINGER": ":pinger",
     "LISTENER_V1": ":listener_v1",
     "LISTENER_V2": ":listener_v2",
+    "STREAMER_V1": ":streamer_v1",
+    "STREAMER_V2": ":streamer_v2",
+    "DRAIN_V1": ":drain_v1",
+    "DRAIN_V2": ":drain_v2",
+    "DRAIN_SEER": ":drain_seer",
     "VAULT_V1": ":vault_v1",
     "VAULT_V2": ":vault_v2",
     "TELLER": ":teller",

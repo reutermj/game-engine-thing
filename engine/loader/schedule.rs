@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use engine_api::engine_ecs::flows::{PlanStep, check_plan};
 use engine_api::{PhaseDesc, SystemDesc, phase};
 
 /// One mod's declarations, in load order.
@@ -138,7 +139,31 @@ pub fn plan(mods: &[ModDecls]) -> Result<Plan, String> {
             index.push((p, at));
         }
     }
+    check_flows(mods, &planned)?;
     Ok(Plan { phases: planned, index })
+}
+
+/// Refuses a plan whose flows are out of turn or cross a fixed-rate group
+/// (docs/architecture/flows.md, "The plan check"). Groups are found as the
+/// engine's frame finds them: consecutive phases at one rate.
+fn check_flows(mods: &[ModDecls], phases: &[PlannedPhase]) -> Result<(), String> {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for (i, p) in phases.iter().enumerate() {
+        let group = match p.fixed_hz {
+            None => None,
+            Some(hz) if i > 0 && phases[i - 1].fixed_hz == Some(hz) => groups[i - 1].clone(),
+            Some(hz) => Some(format!("{} at {hz} Hz", p.name)),
+        };
+        groups.push(group);
+    }
+    let mut steps = Vec::new();
+    for (p, group) in phases.iter().zip(&groups) {
+        for s in &p.systems {
+            let m = mods.iter().find(|m| m.name == s.module).expect("planned from these mods");
+            steps.push(PlanStep { system: &s.name, phase: &p.name, group: group.as_deref(), params: &m.systems[s.index].params });
+        }
+    }
+    check_plan(&steps)
 }
 
 /// The engine's phases and every declared one, in order.
@@ -191,7 +216,7 @@ fn topological<K: Ord>(n: usize, edges: &[(usize, usize)], rank: impl Fn(usize) 
 
 #[cfg(test)]
 mod tests {
-    use engine_api::engine_ecs::{FrameCx, ParamDecl};
+    use engine_api::engine_ecs::{FlowAccess, FrameCx, ParamDecl};
     use engine_api::{ModContext, Status};
 
     use super::*;
@@ -315,6 +340,65 @@ mod tests {
         assert_eq!(plan.system(0).map(|s| s.name.as_str()), Some("m::early"));
         assert_eq!(plan.system(1).map(|s| s.name.as_str()), Some("m::late"));
         assert_eq!(plan.system(2), None);
+    }
+
+    fn using(mut s: SystemDesc, access: FlowAccess) -> SystemDesc {
+        s.params.push(ParamDecl::Flow { slot: 0, name: "t::F", access, ty: std::any::TypeId::of::<u8>(), ty_name: "u8" });
+        s
+    }
+
+    fn rated(name: &str, after: &[&str], hz: f32) -> PhaseDesc {
+        PhaseDesc { fixed_hz: Some(hz), ..phase(name, after, &[phase::LATE]) }
+    }
+
+    #[test]
+    fn a_flow_seen_before_its_made_is_refused_naming_the_fix() {
+        let err = order(&[
+            ("v", vec![using(system("view", phase::UPDATE, &[], &[]), FlowAccess::See)], vec![]),
+            ("p", vec![using(system("make", phase::UPDATE, &[], &[]), FlowAccess::Make)], vec![]),
+        ])
+        .unwrap_err();
+        assert_eq!(err, "`See<t::F>` in `v::view` runs before `Make<t::F>` in `p::make`; add `.after(\"p::make\")` to `v::view`");
+        let fixed = order(&[
+            ("v", vec![using(system("view", phase::UPDATE, &["p::make"], &[]), FlowAccess::See)], vec![]),
+            ("p", vec![using(system("make", phase::UPDATE, &[], &[]), FlowAccess::Make)], vec![]),
+        ]);
+        assert_eq!(fixed.unwrap(), ["p::make", "v::view"]);
+    }
+
+    #[test]
+    fn a_flow_across_fixed_rate_groups_is_refused() {
+        let err = order(&[(
+            "p",
+            vec![
+                using(system("make", phase::SIMULATE, &[], &[]), FlowAccess::Make),
+                using(system("draw", phase::RENDER, &[], &[]), FlowAccess::See),
+            ],
+            vec![],
+        )])
+        .unwrap_err();
+        assert!(err.starts_with("`See<t::F>` in `p::draw` (once a frame) and `Make<t::F>` in `p::make` (simulate at 60 Hz)"), "{err}");
+        // A phase at simulate's rate right after it is the same group.
+        let same = order(&[(
+            "p",
+            vec![
+                using(system("make", phase::SIMULATE, &[], &[]), FlowAccess::Make),
+                using(system("look", "p::then", &[], &[]), FlowAccess::See),
+            ],
+            vec![rated("p::then", &[phase::SIMULATE], 60.0)],
+        )]);
+        assert_eq!(same.unwrap(), ["p::make", "p::look"]);
+        // At another rate, it's a group of its own.
+        let err = order(&[(
+            "p",
+            vec![
+                using(system("make", phase::SIMULATE, &[], &[]), FlowAccess::Make),
+                using(system("look", "p::then", &[], &[]), FlowAccess::See),
+            ],
+            vec![rated("p::then", &[phase::SIMULATE], 30.0)],
+        )])
+        .unwrap_err();
+        assert!(err.contains("(p::then at 30 Hz) and `Make<t::F>` in `p::make` (simulate at 60 Hz)"), "{err}");
     }
 
     #[test]
