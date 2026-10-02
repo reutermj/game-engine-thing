@@ -321,3 +321,80 @@ genrule(
     ]),
     tags = ["manual"],
 )
+
+# SPIKE (docs/architecture/flows-spike.md): the solve as a pipeline of
+# flows, its passes on a generic colored primitive, against the solve as
+# built, on the engine's own world; and the primitive's shapes against the
+# hand-tuned staged run. Not engine code; kept so the numbers can be taken
+# again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:flows_spike
+rust_binary(
+    name = "flows_spike",
+    srcs = [
+        "ecs.rs",
+        "flows_physics.rs",
+        "flows_spike.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        ":flows_spike_srcs",
+    ],
+    crate_root = "flows_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS + ["//engine/ecs:flows_spike"],
+)
+
+# The pipeline and every shape of the primitive bit for bit the solve as
+# built, on small scenes: the spike's claims, kept in the default suite.
+rust_test(
+    name = "flows_spike_test",
+    srcs = [
+        "ecs.rs",
+        "flows_physics.rs",
+        "flows_spike_test.rs",
+        "scene.rs",
+        "sim.rs",
+        "variants.rs",
+        ":flows_spike_srcs",
+    ],
+    crate_root = "flows_spike_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS + ["//engine/ecs:flows_spike"],
+)
+
+# As `colors_spike_srcs`, with solver.rs's `lanes` made public and the
+# spike's stages (flows_lanes.rs) included there, so they reach the lanes'
+# private kernels. One line patched; the grep fails the build if it stops
+# applying.
+genrule(
+    name = "flows_spike_srcs",
+    srcs = [
+        "flows_lanes.rs",
+        "//engine/std/physics2d:narrow.rs",
+        "//engine/std/physics2d:solver.rs",
+        "//engine/std/physics2d:tests/arrays.rs",
+        "//engine/std/physics2d:tests/pool.rs",
+        "//engine/std/physics2d:tests/split_impulse.rs",
+    ],
+    outs = [
+        "flows_spike_arrays.rs",
+        "flows_spike_lanes.rs",
+        "flows_spike_narrow.rs",
+        "flows_spike_pool.rs",
+        "flows_spike_solver.rs",
+        "flows_spike_split_impulse.rs",
+    ],
+    cmd = " && ".join([
+        "sed 's/^mod lanes {/pub mod lanes { include!(\"flows_spike_lanes.rs\");/' $(location //engine/std/physics2d:solver.rs) > $(location flows_spike_solver.rs)",
+        "grep -q 'include!(\"flows_spike_lanes.rs\")' $(location flows_spike_solver.rs)",
+        "cp $(location flows_lanes.rs) $(location flows_spike_lanes.rs)",
+        "cp $(location //engine/std/physics2d:narrow.rs) $(location flows_spike_narrow.rs)",
+        "cp $(location //engine/std/physics2d:tests/arrays.rs) $(location flows_spike_arrays.rs)",
+        "cp $(location //engine/std/physics2d:tests/pool.rs) $(location flows_spike_pool.rs)",
+        "cp $(location //engine/std/physics2d:tests/split_impulse.rs) $(location flows_spike_split_impulse.rs)",
+    ]),
+)

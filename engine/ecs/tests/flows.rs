@@ -59,6 +59,13 @@ impl<T> Recycle for Vec<T> {
     }
 }
 
+/// A value the producer sets whole each frame, such as its settings.
+impl<T> Recycle for Option<T> {
+    fn recycle(&mut self) {
+        *self = None;
+    }
+}
+
 macro_rules! scalar {
     ($($t:ty),*) => {
         $(impl Recycle for $t {
