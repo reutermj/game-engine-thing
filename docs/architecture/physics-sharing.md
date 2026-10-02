@@ -60,6 +60,7 @@ with this doc.
 | warm-start carry | turning points: normal from the last substep, tangent averaged (`Carry::Normal`, decided get-emj.61); a contact whose ends don't turn: the mean | the mean of both (`Carry::Mean`); `Last` a variant; B never tried | **no** | get-emj.82 (new) |
 | warm-start matching | by feature id (`ContactPoints::last`) | by feature id; nearest point within 1 cm a variant | same | – |
 | order, lanes, threads | turning: Box2D's colors, four lanes, across the host's threads bit for bit (`solve_across`); by level a variant; locked: one contact at a time in pair order | one contact at a time in pair order | 2D only | get-emj.52, get-emj.75, get-emj.74 |
+| the solve's systems (since 2026-10-02) | a pipeline of nine systems over five [flows](flows.md) (`pipeline.rs`), the colored passes on `Passes` | a pipeline of six systems over three flows (`pipeline.rs`), the solve whole in one system, no shape | same shape: settings, gathers, solve, scatters; 3D's solve isn't split, its pair order being its result | get-znt.33, get-znt.35 |
 | block solver | a variant (2x2 over a contact's two points) | none | 2D only, a variant | – |
 | **sleeping, islands** | islands by union-find over pressed contacts; `Asleep`, `Slept`, `Still`, `Resting` in the world; every wake a game can cause | none | 2D only | get-emj.77 (new) |
 | **sensors, layers, overlaps** | `layer`, `mask`, `senses`, `sensor`; `Overlap` entities | none: every pair collides | 2D only | get-emj.78 (new) |

@@ -14,6 +14,7 @@ engine_mod(
         "gjk.rs",
         "lib.rs",
         "narrow.rs",
+        "pipeline.rs",
         "solver.rs",
     ],
     interface = [
@@ -127,6 +128,20 @@ rust_test(
 rust_binary(
     name = "stages",
     srcs = ["tests/stages.rs"],
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"},
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+    ],
+)
+
+# The mod's solve and whole step, the median of fresh runs, on pile3d's
+# scenes (the source lists them):
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics3d:step_bench
+rust_binary(
+    name = "step_bench",
+    srcs = ["tests/step_bench.rs"],
     data = [":pile3d_game"],
     env = {"PILE3D": "$(rlocationpath :pile3d_game)"},
     deps = [

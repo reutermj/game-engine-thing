@@ -100,7 +100,8 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `flows.rs` — flows, values systems hand one another within a frame:
     `Make`, `See`, `Pass` and `Take`, the world's store and its recycling
     bins (dropped when a build using the flow is installed), and the plan
-    check the loader's `schedule.rs` runs. See
+    check the loader's `schedule.rs` runs. Both physics mods' solves are
+    pipelines of flows (each one's `pipeline.rs`). See
     [docs/architecture/flows.md](docs/architecture/flows.md).
   - `shape.rs` — parallel shapes, the form a system's parallel work takes
     once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a

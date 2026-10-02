@@ -1,11 +1,13 @@
 //! The 3D physics step, as a pipeline of systems in the `physics3d::step`
 //! phase, at the simulation's fixed rate: gravity into velocities, contacts,
-//! then the solver, which also moves and turns bodies. Experimental:
+//! then the solve, which also moves and turns bodies, a pipeline of its own
+//! handing flows along (`pipeline.rs`), as 2D's is. Experimental:
 //! spheres and boxes that turn; speculative contacts of up to four points;
 //! the 2D step's soft solver with angular terms; contacts as entities in an
 //! ordered table, as in 2D. Positions are a 3D spatial key whose box is
 //! each collider turned by its rotation, so the broadphase is `near_pairs`
-//! and the solve's apply node re-sorts bodies that moved or turned.
+//! and the solve's last apply node (`scatter_bodies`'s) re-sorts bodies
+//! that moved or turned.
 //!
 //! Everything a step carries to the next is in the world (contacts, their
 //! impulses and cached separating axes, the rotations and move a resting
@@ -19,6 +21,7 @@
 
 mod gjk;
 mod narrow;
+mod pipeline;
 mod solver;
 
 use std::time::Instant;
@@ -29,7 +32,6 @@ pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS,
     Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
 };
-use solver::{Constraint, ContactPoint, SolverBody};
 
 field_struct! {
     /// Nanoseconds in each system and stage, summed over steps: for the
@@ -45,8 +47,9 @@ field_struct! {
         broadphase: u64,
         narrowphase: u64,
         merge: u64,
-        /// Within `solve`: bodies and contacts gathered, the solver, and
-        /// the results written back.
+        /// Within `solve`, the pipeline's systems (`pipeline.rs`) summed:
+        /// the settings, bodies and contacts gathered, the solver, and the
+        /// results written back.
         solve_gather: u64,
         solver: u64,
         write_back: u64,
@@ -101,16 +104,25 @@ fn nanos(from: Instant, to: Instant) -> u64 {
 }
 
 /// Entities to positions in a list, by entity index, as in 2D.
+#[derive(Default)]
 struct Slots(Vec<(u32, u32)>);
 
 impl Slots {
     fn of(entities: impl Iterator<Item = Entity> + Clone) -> Slots {
+        let mut slots = Slots::default();
+        slots.fill(entities);
+        slots
+    }
+
+    /// Refilled in place, keeping its allocation: a flow's (`pipeline.rs`).
+    fn fill(&mut self, entities: impl IntoIterator<Item = Entity, IntoIter: Clone>) {
+        let entities = entities.into_iter();
         let len = entities.clone().map(|e| e.index as usize + 1).max().unwrap_or(0);
-        let mut slots = vec![(u32::MAX, u32::MAX); len];
+        self.0.clear();
+        self.0.resize(len, (u32::MAX, u32::MAX));
         for (k, e) in entities.enumerate() {
-            slots[e.index as usize] = (e.generation, k as u32);
+            self.0[e.index as usize] = (e.generation, k as u32);
         }
-        Slots(slots)
     }
 
     fn get(&self, e: Entity) -> Option<u32> {
@@ -242,8 +254,6 @@ fn warm(prev: Option<(&Manifold, &Impulse)>, m: &Manifold, how: Warm, count: &mu
     out
 }
 
-type Bodies<'w, 'a> = Query<'w, (&'a Body, &'a mut Velocity, &'a mut AngularVelocity, &'a mut Position, &'a mut Rotation)>;
-
 impl Physics3d {
     fn integrate_velocities(
         &mut self,
@@ -359,93 +369,6 @@ impl Physics3d {
         t.contacts += nanos(start, end);
         self.found = Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched, recycled: reused };
     }
-
-    fn solve(
-        &mut self,
-        _: &mut (),
-        _: &mut Cx,
-        dt: Dt,
-        (mut gravity, mut tuning): (Query<&Gravity>, Query<&Tuning>),
-        mut moving: Bodies<'_, '_>,
-        mut contacts: Query<(&ContactPair, &Manifold, &mut Impulse)>,
-    ) {
-        let start = Instant::now();
-        let how = solver::Tuning::of(&tuning.single(|_, t| *t).unwrap_or_default());
-        let g = gravity.single(|_, g| g.vec()).unwrap_or_default();
-        let dt = *dt;
-        let mut bodies = Vec::with_capacity(moving.len() + 1);
-        let mut entities = Vec::with_capacity(moving.len());
-        moving.for_each(|row, (body, v, w, _, q)| {
-            entities.push(row.entity());
-            let gravity = if body.inv_mass > 0.0 { g * dt } else { Vec3::ZERO };
-            let (v, w) = (Vec3::new(v.x, v.y, v.z), Vec3::new(w.x, w.y, w.z));
-            bodies.push(SolverBody::new(v, w, body.inv_mass, body.inv_inertia(), q.quat(), gravity));
-        });
-        // Statics all stand for one immovable body at the end.
-        let still = bodies.len() as u32;
-        bodies.push(SolverBody::default());
-        let slots = Slots::of(entities.iter().copied());
-        let index = |e: Entity| slots.get(e).unwrap_or(still);
-        let mut constraints = Vec::with_capacity(contacts.len());
-        contacts.for_each_ordered(|_, (pair, m, j)| {
-            let mut points = [ContactPoint::default(); narrow::MAX_POINTS];
-            for (k, p) in points[..m.count as usize].iter_mut().enumerate() {
-                let (ra, depth) = m.point(k);
-                *p = ContactPoint { ra, depth, jn: j.normal[k], speed: 0.0 };
-            }
-            constraints.push(Constraint {
-                a: index(pair.a),
-                b: index(pair.b),
-                normal: m.normal(),
-                offset: m.offset(),
-                friction: m.friction,
-                restitution: m.restitution,
-                count: m.count as usize,
-                points,
-                jt: Vec3::new(j.tx, j.ty, j.tz),
-                twist: j.twist,
-            })
-        });
-        let gathered = Instant::now();
-        solver::solve(&mut bodies, &mut constraints, dt, &how);
-        let solved = Instant::now();
-        let mut k = 0;
-        contacts.for_each_ordered_page(|page, (_, _, mut j)| {
-            let j = j.write_all();
-            for i in page.rows() {
-                let c = &constraints[k];
-                let mut normal = [0.0; narrow::MAX_POINTS];
-                for (n, p) in normal.iter_mut().zip(&c.points[..c.count]) {
-                    *n = p.jn;
-                }
-                j[i] = Impulse { normal, tx: c.jt.x, ty: c.jt.y, tz: c.jt.z, twist: c.twist };
-                k += 1;
-            }
-        });
-        let mut k = 0;
-        moving.for_each(|_, (_, mut v, mut w, mut p, mut q)| {
-            let b = &bodies[k];
-            k += 1;
-            (v.x, v.y, v.z) = (b.v.x, b.v.y, b.v.z);
-            (w.x, w.y, w.z) = (b.w.x, b.w.y, b.w.z);
-            // Written only when it moves, as in 2D: a write re-bounds the row.
-            let to = (p.x + b.moved.x, p.y + b.moved.y, p.z + b.moved.z);
-            if (to.0.to_bits(), to.1.to_bits(), to.2.to_bits()) != (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()) {
-                (p.x, p.y, p.z) = to;
-            }
-            // A write re-bounds the row (the rotation is an extent), so only
-            // a body that turned is written.
-            if b.turned != Quat::IDENTITY {
-                *q = Rotation::from(b.rotation());
-            }
-        });
-        let end = Instant::now();
-        let t = &mut self.time;
-        t.solve_gather += nanos(start, gathered);
-        t.solver += nanos(gathered, solved);
-        t.write_back += nanos(solved, end);
-        t.solve += nanos(start, end);
-    }
 }
 
 impl Mod for Physics3d {
@@ -458,7 +381,15 @@ impl Mod for Physics3d {
         s.phase(STEP).after(phase::SIMULATE).before(phase::LATE).fixed_hz(phase::SIMULATE_HZ);
         s.add("integrate_velocities", Self::integrate_velocities).phase(STEP);
         s.add("find_contacts", Self::find_contacts).phase(STEP).after("physics3d::integrate_velocities");
+        // The solve, a pipeline of systems handing flows along
+        // (`pipeline.rs`), each after the one before; `solve` first, so a
+        // pre-solve hook ordered before it runs before anything is gathered.
         s.add("solve", Self::solve).phase(STEP).after("physics3d::find_contacts");
+        s.add("gather_bodies", Self::gather_bodies).phase(STEP).after("physics3d::solve");
+        s.add("gather_contacts", Self::gather_contacts).phase(STEP).after("physics3d::gather_bodies");
+        s.add("solver", Self::solver).phase(STEP).after("physics3d::gather_contacts");
+        s.add("scatter_contacts", Self::scatter_contacts).phase(STEP).after("physics3d::solver");
+        s.add("scatter_bodies", Self::scatter_bodies).phase(STEP).after("physics3d::scatter_contacts");
     }
 
     /// `stats`: steps run, contacts held, and time per system; `stages`:

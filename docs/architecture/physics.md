@@ -2305,9 +2305,38 @@ before) or turning (`--rotate`).
 Since 2026-09-26 (`physics3d-land`) the step is a mod, laid out as 2D's:
 an interface crate other mods depend on (`components.rs` and `math.rs`,
 crate `physics3d`), and the mod (`lib.rs`, `narrow.rs`, `gjk.rs`,
-`solver.rs`): three systems, `integrate_velocities`, `find_contacts` and
-`solve`, in the phase `physics3d::step`, after `simulate` and before
-`late` at the simulation's rate, as `physics2d::step` is. Its messages are
+`solver.rs`, `pipeline.rs`): `integrate_velocities`, `find_contacts`
+and the solve, in the phase `physics3d::step`, after `simulate` and
+before `late` at the simulation's rate, as `physics2d::step` is. Since
+get-znt.35 the solve is a pipeline of [flows](flows.md), as 2D's is
+([The step](#the-step)), six systems in place of one:[^one-solve-3d]
+
+```text
+solve            world -> Make<Settings>                 the step's Tuning and Gravity
+gather_bodies    See<Settings>, world -> Make<Bodies>    the moving bodies, dense
+gather_contacts  See<Bodies>, world -> Make<Contacts>    the contacts, in pair order
+solver           See<Settings>, Pass<Bodies>,            solver::solve, whole
+                 Pass<Contacts>
+scatter_contacts Take<Contacts> -> world                 impulses
+scatter_bodies   Take<Bodies> -> world                   velocities, positions, rotations
+```
+
+- **`solve` comes first**, as in 2D, so a pre-solve hook ordered
+  `.before("physics3d::solve")` runs before anything is gathered (3D has
+  no hooks yet; the name keeps the rule one rule).
+- **`solver` is the solve one contact at a time in pair order**, unchanged,
+  and no shape: its result depends on that order, so a colored `Passes`
+  run would be a physics change, with a re-baseline, and belongs with
+  3D's lanes and threads (get-emj.52, get-emj.75). Bit for bit the one
+  system it replaced: every baseline value printed as it was, and the
+  reload replay's every frame, every float, the same.
+- **The sources read, the sinks write**, as 2D's: the gathers' queries are
+  read-only, with no apply node, and the scatters walk the same tables in
+  the same order (asserted); `scatter_bodies` is last, so its apply node
+  re-sorts the bodies that moved or turned.
+- **The flows are the mod's own**, not its interface's, as 2D's.
+
+Its messages are
 `stats` (steps, contacts, time per system), `stages` (time per stage, and
 the last step's pairs, contacts, points and warm starts) and
 `reset_timings`. `pile3d` (`tests/pile.rs`) is its scene mod: it builds
@@ -4490,6 +4519,14 @@ frame 508.
     split where its stages were, with the passes on `Passes` instead of
     `solve_across`, and no `Workers`: the scheduler owns parallelism
     (get-znt.28).
+
+[^one-solve-3d]: *(History, 2026-10-02.)* Until get-znt.35 physics3d's
+    solve was one system, `solve`, which read the settings, gathered the
+    moving bodies and the contacts into vectors of its own (and a `Slots`
+    built afresh), called `solver::solve`, and wrote the impulses and the
+    bodies back. The pipeline is that system's code, split where its
+    stages were. It never had `Workers`: 3D's solve, broadphase and
+    narrowphase were on one thread before and after.
 
 [^dead-test]: *(History, 2026-09-24.)* Before sleeping was storage, the
     solve looked each contact's ends up to skip resting ones, and did so

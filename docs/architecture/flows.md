@@ -8,7 +8,9 @@ built** (2026-10-02, get-znt.33): physics2d's solve is a pipeline of nine
 systems over five flows, its passes on `Passes`, bit for bit the solve it
 replaced ([below](#physicss-adoption-stage-2)); since get-znt.26 its
 kernels get plain memory on one thread ([On one thread](#on-one-thread)).
-Stage 3 (get-znt.34) has the scheduler run the shapes across threads.
+physics3d's solve followed (2026-10-02, get-znt.35): six systems over
+three flows, its solve whole in one system and no shape, bit for bit
+([below](#physics3d)). Stage 3 (get-znt.34) has the scheduler run the shapes across threads.
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -620,6 +622,62 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
 - **Kept colors** (parallel-relations.md, phase 1; get-emj.74) become an
   input of `prepare`, decided with stage 3, so one re-baseline covers
   both.
+
+### physics3d
+
+**Built** (2026-10-02, get-znt.35). physics3d's solve, one system until
+then, is the same pipeline less what 3D lacks
+(`engine/std/physics3d/pipeline.rs`; physics.md, "A mod"):
+
+```text
+solve            world -> Make<Settings>
+gather_bodies    See<Settings>, world -> Make<Bodies>
+gather_contacts  See<Bodies>, world -> Make<Contacts>
+solver           See<Settings>, Pass<Bodies>, Pass<Contacts>
+scatter_contacts Take<Contacts> -> world
+scatter_bodies   Take<Bodies> -> world
+```
+
+- **No shape.** 3D's solver is one contact at a time in pair order
+  (`solver::solve`, unchanged), whose result is that order's, so
+  `solver` runs it whole. Coloring it would move results: a physics
+  change, re-baselined, with 3D's lanes and threads (get-emj.52,
+  get-emj.75).
+- **No sleeping, sides or events** in 3D, so `scatter_bodies` writes
+  bodies alone, and the contacts are taken by `scatter_contacts`.
+- **No `Workers`** to remove: 3D never had them.
+
+**Bit for bit.** Every value of both baselines printed as it was (100
+default, 94 long, `baseline -- --all`, diffed whole), and the reload
+replay's 161 frames, every component value printed, were the same
+before and after but for the change ticks, which count systems. A
+one-ulp change in the gather (the gravity given back) or in the solver's
+kernel (a substep's share) failed one test, `quality_test`'s
+`piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do`, a bound
+from the references, not an exactness check; each moved 35 of the 100
+baseline values, all inside their bands, and all 161 replay frames.
+3D has no test that holds the mod to its arrays exactly, as 2D's
+`the_mod_is_the_arrays_bit_for_bit` does (get-emj.89); coloring it is
+get-emj.90.
+
+**What it costs**, `//engine/std/physics3d:step_bench` (`--config=bench`,
+`taskset -c 0-7`, the median of 7 runs, each a fresh engine stepped to
+the window and timed over 30 steps), µs a step, the solve system(s) / the
+whole step:
+
+| case | before | after |
+|---|---|---|
+| boxes 10 000, falling | 26242 / 32403 | 25556 / 31855 |
+| boxes 10 000, settled | 26719 / 29966 | 25019 / 27882 |
+| planks 1000, settled | 2805 / 3234 | 2748 / 3172 |
+| spheres 10 000, settled | 20754 / 23282 | 20241 / 22749 |
+| boxes 10 000 locked, settled | 24823 / 29456 | 24020 / 28354 |
+| stack 20 | 26 / 34 | 26 / 35 |
+
+Level: the gathers and write-backs are within 10% of a few hundred µs
+either way, and the 2 to 6% the solve gained is the solver's own time,
+whose code didn't change: the runs were one after the other, not
+alternated, so that is the machine's drift, not the port's.
 
 ## Out of scope
 
