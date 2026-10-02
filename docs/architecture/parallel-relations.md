@@ -18,15 +18,20 @@ measured by a spike, `//engine/std/physics2d/compare:colors_spike`
   kept colors at 8 threads: 5% faster (879 → 838 µs on the settled turning
   pile of 10 000, 585 → 556 on the 5050 pyramid). About 9% is projected
   once placing contacts in their batches runs across the threads too.
-- **The staged run moves into `engine_ecs`.** This is how the solve runs its
-  stages across the host's threads without a main thread. Any system could
-  then run dependent stages across the host's threads (phase 2, safe code).
+- **The staged run does not move into `engine_ecs` as proposed.** Phase 2
+  would have handed any system the host's threads to run its own stages on
+  a copy of world data. The user rejected that (2026-10-02): systems
+  shouldn't take the pool to run parallel work the ECS can't see. Who may
+  use the pool, and how, waits for the spike on dense working sets owned by
+  storage (get-8m9).
 - **The primitive waits for a second user.** A colored iteration that writes
   the entities a relation's rows reference, in world storage, has no second
   user yet, and it would need a sharing mechanism that CLAUDE.md's rule on
   unsafe code makes the user's decision (phase 3).
-- **The solve still copies.** Solving in world storage is still a no:
-  measured again, pages cost 10% on the passes to save an 11 µs copy.
+- **The solve still copies, for now.** Solving in pages as they are is
+  still a no: measured again, pages cost 10% on the passes to save an
+  11 µs copy. Whether storage itself can hold a dense working set, so the
+  copy stops being physics's own, is get-8m9's question.
 
 ## The problem
 
@@ -375,7 +380,8 @@ arrive and repacked on a schedule. It is like `Live`'s kept state, but it
 is state, not an exact view.
 
 **Execution.** Colors in turn, each cut into blocks, claimed by the host's
-threads: the solve's staged run (phase 2 below), which is safe code.
+threads: the solve's staged run, which is safe code, kept inside the
+primitive rather than offered to systems (phase 2 below, rejected).
 
 **The hard part is sharing, not scheduling.** Two rows of one color write
 two different bodies, which may be two rows of one page. `engine_ecs`
@@ -441,7 +447,7 @@ dependency, not a part:
 - **Stages need every task of a run to make progress** without waiting for
   a task to start: an executor promises that each task runs, not when. The
   solve already copes: any thread takes any block, and a late thread skips
-  what's done. A colored walk inherits that from the staged run (phase 2).
+  what's done. A colored walk would inherit that from the solve's protocol.
 - **Placement and warmth** help every primitive alike, and the sticky
   affinity measured in [Parallelism](physics.md#parallelism) (chunk `k` on
   thread `k % n`) would help a relation's walks as it helped the broadphase.
@@ -544,9 +550,18 @@ something besides physics needs it.
 - **Not worth it** if the rerun quality suites move a bound the wrong way:
   then colors stay a function of the contacts, and the serial part stays.
 
-### Phase 2: the staged run in `engine_ecs`
+### Phase 2: the staged run in `engine_ecs` (rejected as written)
 
-Move `lanes::run_across`'s protocol into `engine_ecs::par`: stages run in
+**Rejected by the user, 2026-10-02.** As written, phase 2 is a general API
+that lets any system take the host's pool and run its own parallel passes
+on a copy of world data. The scheduler sees none of that: `Workers`
+declares nothing. That makes physics's workaround the pattern for every
+system, when parallel work should go through what the ECS provides. Whether
+a staged run belongs in `engine_ecs` in some other form, such as over
+storage-owned working sets or behind a footprint that claims the pool,
+waits for get-8m9. Kept below for the record.
+
+The proposal: move `lanes::run_across`'s protocol into `engine_ecs::par`: stages run in
 order within one run of the executor, each cut into blocks, any thread
 taking any block (claimed by `fetch_max`), a count a stage, spinning with
 yields, no main thread, and a panic ending every wait:
@@ -580,7 +595,9 @@ relations.
 - keeping the contacts' table in color order: the merge 12 times slower;
 - colors as an exact live relation: the exact coloring isn't stable under
   change;
-- entity-level footprints in the scheduler: nothing needs them.
+- entity-level footprints in the scheduler: nothing needs them;
+- phase 2 as written, a staged run any system can use on a copy: rejected
+  (2026-10-02), pending get-8m9.
 
 ## Open questions
 
