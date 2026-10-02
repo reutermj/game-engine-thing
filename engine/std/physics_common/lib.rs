@@ -9,5 +9,7 @@
 //! unsafe code.
 
 mod slots;
+mod soft;
 
 pub use slots::Slots;
+pub use soft::Softness;

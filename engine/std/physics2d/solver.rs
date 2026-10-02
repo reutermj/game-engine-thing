@@ -51,6 +51,7 @@
 //! taken apart into its pipeline's stages (`lanes::staged`), its passes
 //! a shape the scheduler runs (physics.md, "The step").
 
+use physics_common::Softness;
 use physics2d::{Rot, Vec2};
 
 /// The default's substeps (`physics2d::Tuning`, which a world can change):
@@ -400,27 +401,6 @@ pub struct Constraint {
     /// Its points in the slice handed to `solve_points`, plus one: 0 for a
     /// contact with none.
     pub points: u32,
-}
-
-/// A soft contact's constants for a substep of `h`: how fast it pushes
-/// out per unit of penetration, and how much of a rigid impulse it takes
-/// (`mass`) and of its accumulated one it lets go (`impulse`). Box2D's
-/// `b2MakeSoft`.
-#[derive(Clone, Copy, Debug)]
-struct Softness {
-    rate: f32,
-    mass: f32,
-    impulse: f32,
-}
-
-impl Softness {
-    fn new(hertz: f32, zeta: f32, h: f32) -> Softness {
-        let omega = 2.0 * std::f32::consts::PI * hertz;
-        let a1 = 2.0 * zeta + h * omega;
-        let a2 = h * omega * a1;
-        let a3 = 1.0 / (1.0 + a2);
-        Softness { rate: omega / a1, mass: a2 * a3, impulse: a3 }
-    }
 }
 
 /// No points: a row at the contact's normal alone.

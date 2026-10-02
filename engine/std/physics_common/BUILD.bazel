@@ -15,6 +15,7 @@ rust_library(
     srcs = [
         "lib.rs",
         "slots.rs",
+        "soft.rs",
     ],
     # It runs inside the mods, so it can't print either.
     lint_config = "//engine:mod_lints",

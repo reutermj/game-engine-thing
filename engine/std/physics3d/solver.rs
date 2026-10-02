@@ -25,6 +25,8 @@
 //! starting needs no tangent basis that stays put from step to step: the
 //! last step's is projected onto this step's plane.
 
+use physics_common::Softness;
+
 use crate::narrow::MAX_POINTS;
 use crate::{Anchors, Carry, Closing, Inertia, Integrate, Mat3, Quat, Vec3};
 pub const DAMPING_RATIO: f32 = 10.0;
@@ -138,24 +140,6 @@ pub struct Constraint {
     /// as the points' normal ones. `jt` is in the tangent plane.
     pub jt: Vec3,
     pub twist: f32,
-}
-
-/// Box2D's `b2MakeSoft`, as in 2D.
-#[derive(Clone, Copy, Debug)]
-struct Softness {
-    rate: f32,
-    mass: f32,
-    impulse: f32,
-}
-
-impl Softness {
-    fn new(hertz: f32, zeta: f32, h: f32) -> Softness {
-        let omega = 2.0 * std::f32::consts::PI * hertz;
-        let a1 = 2.0 * zeta + h * omega;
-        let a2 = h * omega * a1;
-        let a3 = 1.0 / (1.0 + a2);
-        Softness { rate: omega / a1, mass: a2 * a3, impulse: a3 }
-    }
 }
 
 /// What the passes read and write of a body, in a cache line of its own:
