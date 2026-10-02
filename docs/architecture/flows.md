@@ -656,9 +656,13 @@ kernel (a substep's share) failed one test, `quality_test`'s
 `piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do`, a bound
 from the references, not an exactness check; each moved 35 of the 100
 baseline values, all inside their bands, and all 161 replay frames.
-3D has no test that holds the mod to its arrays exactly, as 2D's
-`the_mod_is_the_arrays_bit_for_bit` does (get-emj.89); coloring it is
-get-emj.90.
+3D has no arrays to hold the mod to, as 2D's
+`the_mod_is_the_arrays_bit_for_bit` does; since get-emj.89 (2026-10-02)
+`//engine/std/physics3d:exact_test` holds it to a pinned fingerprint
+instead, the mod's every frame and the solver alone, and fails on both
+of these changes, the first only in the mod's lines and the second in
+the solver's too (physics-testing.md, "The exact fingerprint"). Coloring
+it is get-emj.90.
 
 **What it costs**, `//engine/std/physics3d:step_bench` (`--config=bench`,
 `taskset -c 0-7`, the median of 7 runs, each a fresh engine stepped to

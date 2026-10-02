@@ -43,6 +43,7 @@ the fourth.
 | layer | what it compares | direction | targets | catches | misses |
 |---|---|---|---|---|---|
 | **Equivalence** | two implementations of the same step: the ECS against plain arrays (`:tax`), the mod against the arrays, the solver's colored four-lane path (the default) against its colors' order solved one contact at a time, which a parallel solve over the colors will have to pass too, and the level path (a variant) against pair order, a replay after a reload or at another frame rate | exact, bit for bit | `//engine/std/physics2d:tax`, `physics2d/compare:quality_test` (`the_mod_is_the_arrays_bit_for_bit`, `the_colored_solve_…`, `the_solve_by_level_…`), `physics2d_test` (replays), reload tests | the plumbing changing physics | nothing about quality: both sides change together |
+| **Exact fingerprint** | 3D, which has no second implementation: the physics3d mod and its solver against their own pinned bits ("The exact fingerprint", below) | exact, bit for bit | `physics3d:exact_test` | any change to a bit of the 3D step, and which layer it was in | why: a pin says only that something moved |
 | **Physical law** | a measured quantity against a formula | both ways, within a tolerance | `physics2d/compare:behaviour_test`, `physics3d/compare:behaviour_test` (landing with the card-house fix) | wrong friction, rolling, restitution; bleeding energy; sticky or slippery contacts | only the scenes with a formula |
 | **Reference floor** | our settling measures against the references' values on the same scenes, measured once and dated, turned into bounds by fixed rules | upper bounds only: rest, depth, energy, top moved, lean | `physics2d/compare:quality_test`, `quality_long_test`, `physics3d/compare:quality_test`, `quality_long_test` | falling below what shipped engines do | drift within the bounds; anything too good |
 | **Scene sanity** | contacts per body, islands, nothing escaped | lower and upper | inside the floor tests | a scene that isn't what we think (the columns pile) | – |
@@ -318,6 +319,73 @@ the merged tree and compared against *both* parents' files. A conflict in
 the file is never resolved by hand: it's regenerated. A value that differs
 from both parents is a finding about the combination, which is exactly
 the card-house case.
+
+### The exact fingerprint
+
+**Built** (2026-10-02, get-emj.89), for 3D. 2D's step is held bit for
+bit to a second implementation, the arrays; 3D has none, since its
+comparison runs the mod itself. So a one-ulp change to 3D's gather or
+solver kernel (the gravity given back, a substep's share) moved 35 of
+the 100 baseline values, all inside their bands, and failed one quality
+bound by chance (flows.md, "physics3d"); the reload replay can't see it,
+comparing the same code with and without reloads. The other side of the
+comparison is a pinned value instead: `//engine/std/physics3d:exact_test`
+against `engine/std/physics3d/tests/exact.txt`, in two layers
+(`tests/exact.rs`):
+
+- **The mod**: pile3d's scene in the engine (a mixed pile of spheres and
+  boxes free to turn, a plank and a cube thrown in spinning, a sphere
+  rolling, a locked box; contacts of one to four points; 44 bodies, 120
+  frames), one line a frame, a hash per component (position, rotation,
+  velocity, angular velocity, manifold, impulse) of every value, by
+  entity. A failure names the first frame and the components that moved
+  there: a manifold first is the narrowphase, a position alone the
+  write-back. The test also checks the scene is what it says (every
+  count of points seen, the locked box unturned).
+- **The kernel**: `solver::solve` alone, on bodies and contacts made from
+  a seed (`kernel_inputs`: bounces, friction at its limit, overlaps past
+  the push, gaps, a body that can't turn), three steps at each of twelve
+  tunings, one line a tuning. Nothing of the narrowphase, the gather or
+  the world is in it, so it moves when the arithmetic changes and holds
+  when only the order of the solve does. Two more tests check its inputs
+  exercise what they claim, and that reversing their order changes every
+  tuning's result.
+
+Values are hashed through `Debug`, which prints an `f32` as the shortest
+text that reads back to its bits. Neither scene calls libm (no sines or
+powers; `sqrt` is exact by IEEE 754), so the pin is the code, the compiler
+and its flags: `--config=bench` gives the same file. It runs in well under
+a second.
+
+**What it caught**, each planted alone (2026-10-02):
+
+| one-ulp change | `exact_test` | anything else in `//engine/std/physics3d/...` |
+|---|---|---|
+| the gravity given back (`gather_bodies`), larger | mod, from frame 21 | nothing |
+| a substep's `share` (`solver.rs`), larger | mod, from frame 1; kernel, every tuning | `quality_test`'s planks bound and its `baseline` |
+| a body's position written back (`scatter_bodies`) | mod, from frame 1 (position) | nothing |
+| a contact point's position (box-box clipping, `narrow.rs`) | mod, from frame 21 (manifold first) | nothing |
+| the last two contacts swapped around the solve (`pipeline.rs`) | mod, from frame 44; the kernel held | `behaviour_test`'s `baseline` |
+
+**Updating it.** Like the baselines, never by hand: `./bazel run
+//engine/std/physics3d:exact` says which lines differ, and `-- --write`
+writes the file, only in a commit that changes results on purpose, whose
+message says why (runbook 005, "The exact fingerprint"). A change that
+claims to keep results (a refactor, a speed change, a lanes kernel in
+pair order) leaves the file as it was; one that changes the order alone
+(colouring) rewrites the mod's lines and leaves the kernel's. Since every
+physics change rewrites it, the file's diff says nothing about better or
+worse: that is the baseline's job, and why a band and not a pin is the
+baseline (above). After merging physics branches, write it on the merged
+tree, as the baselines are.
+
+**For a kernel in lanes** (get-emj.52): it must be `solver::solve` bit for
+bit, so its test solves `kernel_inputs` both ways at each tuning and
+compares, no pin needed; then the mod, solving with it, still matches its
+pinned lines. Colouring (get-emj.90) moves the mod's lines and not the
+kernel's; its equivalence is the coloured solve against `solver::solve`
+over the contacts in the colours' order, as 2D's
+`the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`.
 
 ### Measurements that are themselves tested
 
@@ -600,7 +668,10 @@ which values moved, which way, and why that's accepted.
 ## Alternatives considered
 
 - **Golden outputs** (a hash of every body's final position). Catches
-  every change and explains none. Chaos makes every change a change.
+  every change and explains none. Chaos makes every change a change. Not
+  as the baseline, then; but where there is no second implementation to
+  be equal to, a pin is the only exact check, and 3D's is one ("The exact
+  fingerprint"), a hash a frame and a component so it says where.
 - **Statistics over many seeds** (compare distributions of rest times
   across randomized piles). The right tool for chaotic metrics, but ten to
   a hundred times the runtime. A candidate for the long suite later, if

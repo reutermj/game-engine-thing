@@ -101,6 +101,51 @@ rust_test(
     ],
 )
 
+# The solve held exactly to its pinned fingerprint, tests/exact.txt: the
+# mod in the engine every frame of a turning pile, and the solver alone on
+# inputs from a seed (tests/exact.rs; physics-testing.md, "The exact
+# fingerprint"). Its tool, which says what moved, and writes the file in a
+# commit that changes results on purpose:
+#   ./bazel run //engine/std/physics3d:exact [-- --write]
+EXACT_SRCS = [
+    "gjk.rs",
+    "narrow.rs",
+    "solver.rs",
+    "tests/exact.rs",
+]
+
+EXACT_DEPS = [
+    ":physics3d_interface",
+    "//engine/control",
+    "//engine/ecs",
+    "//engine/loader",
+]
+
+rust_test(
+    name = "exact_test",
+    srcs = EXACT_SRCS + ["tests/exact_test.rs"],
+    # The modules' own unit tests are core_test's.
+    args = [
+        "--skip=narrow::",
+        "--skip=solver::",
+    ],
+    compile_data = ["tests/exact.txt"],
+    crate_root = "tests/exact_test.rs",
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"} | POISON_ENV,
+    deps = EXACT_DEPS,
+)
+
+rust_binary(
+    name = "exact",
+    srcs = EXACT_SRCS + ["tests/exact_main.rs"],
+    compile_data = ["tests/exact.txt"],
+    crate_root = "tests/exact_main.rs",
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"},
+    deps = EXACT_DEPS,
+)
+
 # Twins of every mod the scene game has that isn't resident, by mod name:
 # see //engine/tests:replay.rs.
 PILE3D_TWINS = {
