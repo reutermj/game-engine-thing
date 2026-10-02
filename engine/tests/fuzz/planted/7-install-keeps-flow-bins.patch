@@ -1,0 +1,13 @@
+diff --git a/engine/ecs/flows.rs b/engine/ecs/flows.rs
+index e738fd8..c28d890 100644
+--- a/engine/ecs/flows.rs
++++ b/engine/ecs/flows.rs
+@@ -198,8 +198,6 @@ impl World {
+     pub fn install_flow(&self, name: &str, build: &Build) {
+         assert!(!self.frame_open(), "flows are installed between frames");
+         let slot = self.flows.get(self.intern_flow(name));
+-        drop(slot.value.take_write().take());
+-        drop(slot.bin().take());
+         if let Some(keepalive) = &build.keepalive {
+             slot.keepalives.lock().unwrap_or_else(PoisonError::into_inner).insert(build.name.clone(), keepalive.clone());
+         }

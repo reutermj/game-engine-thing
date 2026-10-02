@@ -1,0 +1,63 @@
+# Flows (docs/architecture/flows.md), written by hand when the flow mods
+# were added (get-znt.38), so every flow rule the model knows is reached in
+# the default suite whatever the seeds do: the plan check refusing loads
+# and unloads, a bin made by one build and dropped when another that uses
+# the flow is installed, a taker's allocation coming back, a failed maker
+# failing its readers, a maker that stops making, and a layout change.
+
+# A reader with nothing to make what it reads is refused.
+load channel_v1
+load peek_a
+load source_a
+load peek_a
+load relay_t
+frames 2
+send source get
+send relay get
+
+# Unloading the maker under its readers is refused by the plan check, not
+# a dependency: they depend on channel, not source.
+unload source
+
+# A taker before the maker is refused, and leaves relay_t running.
+load relay_x
+frames 1
+
+# Reloading the maker drops the bin a frame filled: b starts fresh.
+load source_b
+send source get
+frames 2
+send source get
+
+# A passer in the taker's place: the bin is dropped again, and nothing takes
+# the flow, so the frame's end puts it in the bin.
+load relay_p
+frames 2
+send peek get
+send relay get
+
+# A failed maker leaves the flow unmade: each reader fails at fetch.
+send source boom
+frames 1
+send peek get
+
+# A maker that stops making, with readers loaded, is refused; alone, it
+# loads and leaves the bin (and source_b mapped) as they were.
+load source_n
+unload relay
+unload peek
+load source_n
+frames 1
+
+# channel's new layout, and every user rebuilt against it.
+batch channel_v2 source_c peek_c relay_c
+frames 2
+send peek get
+send relay get
+
+# Unloaded, the users' builds stay mapped by the flow, which may hold a
+# value their code made, until the engine goes.
+unload relay
+unload peek
+frames 1
+unload source

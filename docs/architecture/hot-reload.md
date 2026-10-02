@@ -232,6 +232,12 @@ The mods are built several ways each, and each build reports which it is:
 - `ranker`: an ordered key whose glue changes (ascending, then descending)
   with its layout the same, and a layout change.
 - `anchor` and `tether`: residency, built resident and not.
+- `channel`, `source`, `peek` and `relay`: a flow
+  ([flows.md](flows.md)) declared in an interface of its own, in two
+  layouts; a maker that fills it each build's way, and a build that stops
+  making it; a see-only reader; a passer, a taker, and a taker placed
+  before the maker. So loads and unloads the plan check refuses, bins
+  dropped by installs, a failed maker failing its readers.
 - `clock`, `lockstep` (frames run from a message) and `sequential` (frames
   scheduled through a service), as the engine ships them; libraries that
   aren't mods, or are from another mod API.
@@ -242,18 +248,21 @@ and messages that spawn, despawn, write and flag components, send and
 queue events, call the service, or fail the mod. The model predicts each
 from this document and [mod-deps.md](mod-deps.md): which loads are refused
 and why (dependencies, interfaces, residency, one provider, a changed
-storage, open failures), and the exact reply; how each mod's state is
+storage, open failures, a flow's plan check), and the exact reply; how each mod's state is
 handed over; how each component's values migrate or reset when a newer
 build installs another layout; which events each reader sees, once; the
-order ordered rows are in; which mods have failed. After every operation
+order ordered rows are in; which mods have failed; what each frame's flow
+held and which build made it, and whether its bin survived the last
+install. After every operation
 the driver checks all of that against the engine, the world read through
 its own mirror of each layout, and the builds mapped (`/proc/self/maps`),
 which must be exactly the running builds and those the world keeps for its
-values. Dropping the engine must unmap them all.
+values (a flow keeps every build that used it), and what the flow holds
+and keeps mapped. Dropping the engine must unmap them all.
 
-Six bugs planted in the loader and the ECS, from a wrong numeric
-conversion to an event read twice across a reload, were each found within
-15 minutes (runbook 003 has them). It found one real bug on its first
+Seven bugs planted in the loader and the ECS, from a wrong numeric
+conversion to an event read twice across a reload and a flow's bin kept
+across one, were each found within 15 minutes (runbook 003 has them). It found one real bug on its first
 seeded runs: an event queue's cursors outlived the build that made them
 (see [lore](../lore/an-empty-hashmap-points-into-the-build-that-made-it.md)).
 

@@ -101,6 +101,42 @@ engine_mod(
     resident = True,
 )
 
+# Flows (docs/architecture/flows.md): `channel` declares the flow
+# `fz::Stream` in its interface (v2 changes its layout) and nothing else;
+# `source` makes it, `peek` sees it and `relay` passes or takes it, each
+# built against one of channel's interfaces.
+[engine_mod(
+    name = "channel_" + build,
+    srcs = ["mods/channel.rs"],
+    crate_root = "mods/channel.rs",
+    interface = ["mods/channel_%s.rs" % build],
+    mod_name = "channel",
+) for build in [
+    "v1",
+    "v2",
+]]
+
+[engine_mod(
+    name = "%s_%s" % (mod, build),
+    srcs = ["mods/%s.rs" % mod],
+    crate_features = [build],
+    crate_root = "mods/%s.rs" % mod,
+    mod_deps = [":channel_" + channel],
+    mod_name = mod,
+    deps = [":planted"],
+) for mod, build, channel in [
+    ("source", "a", "v1"),
+    ("source", "b", "v1"),
+    ("source", "c", "v2"),
+    ("source", "n", "v1"),
+    ("peek", "a", "v1"),
+    ("peek", "c", "v2"),
+    ("relay", "p", "v1"),
+    ("relay", "c", "v2"),
+    ("relay", "t", "v1"),
+    ("relay", "x", "v1"),
+]]
+
 # Builds that must be refused: not a library at all, one without the entry
 # points, and one from another mod API.
 genrule(
@@ -146,6 +182,18 @@ LIBS = {
         "anchor_b",
         "anchor_loose",
         "tether",
+        "channel_v1",
+        "channel_v2",
+        "source_a",
+        "source_b",
+        "source_c",
+        "source_n",
+        "peek_a",
+        "peek_c",
+        "relay_p",
+        "relay_c",
+        "relay_t",
+        "relay_x",
         "garbage",
         "no_entry",
         "wrong_api",

@@ -84,10 +84,19 @@ checked-in corpus after a 40-minute campaign.
 | `4-reload-rereads-events` | a reload resets event cursors: events seen twice | 753 s | 615 s |
 | `5-state-migrates-across-a-version-bump` | a state version bump migrates instead of resetting | 2 s | 8 s |
 | `6-world-holds-no-build` | the world keeps no build mapped for its values | 1 s | 8 s |
+| `7-install-keeps-flow-bins` | installing a build that uses a flow keeps its bin (2026-10-02) | 321 s | 118 s; 1 s from the corpus after its campaign |
 
 And `//engine/tests/fuzz:replay_test`, in the default suite, fails on each
 of the six (checked 2026-09-25): the corpus replay or the seeded sessions
-reach every one.
+reach every one. It fails on the seventh too, by the corpus replay alone,
+the seeded sessions and the flows script (checked 2026-10-02).
+
+The flow mods (2026-10-02, get-znt.38) changed the driver's weights: a
+fifth of the loads went to them, and some messages. Bug 4, the one the
+weights were set by, was then found in 17 s from the new corpus. Bug 7's
+second column is from the corpus as it was before the flow mods; the
+corpus was refreshed after a 30-minute campaign (6 workers, about 990 000
+sessions, coverage 4912 edges against 4373 before, no crashes).
 
 After changing the driver's choices, check some still fall: `git apply`
 one, run the fuzzer from a copy of the corpus, and `git apply -R` it. A

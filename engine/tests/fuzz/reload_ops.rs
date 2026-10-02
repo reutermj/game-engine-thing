@@ -50,6 +50,12 @@ enum Kind {
     Clock,
     Lockstep,
     Sequential,
+    /// The flow's interface and nothing else.
+    Channel,
+    /// The flow's maker, its see-only reader, and its passer or taker.
+    Source,
+    Peek,
+    Relay,
     /// Not a library.
     Garbage,
     /// A library without the entry points.
@@ -121,6 +127,18 @@ static SPECS: &[Spec] = &[
     build("FZ_CLOCK", "clock", Kind::Clock, "").iface("clock").resident(),
     build("FZ_LOCKSTEP", "lockstep", Kind::Lockstep, "").deps(&[("clock", "clock")]).resident(),
     build("FZ_SEQUENTIAL", "sequential", Kind::Sequential, "").provides("engine_api::scheduler::Scheduler"),
+    build("FZ_CHANNEL_V1", "channel", Kind::Channel, "v1").iface("chan1"),
+    build("FZ_CHANNEL_V2", "channel", Kind::Channel, "v2").iface("chan2"),
+    build("FZ_SOURCE_A", "source", Kind::Source, "a").deps(&[("channel", "chan1")]),
+    build("FZ_SOURCE_B", "source", Kind::Source, "b").deps(&[("channel", "chan1")]),
+    build("FZ_SOURCE_C", "source", Kind::Source, "c").deps(&[("channel", "chan2")]),
+    build("FZ_SOURCE_N", "source", Kind::Source, "n").deps(&[("channel", "chan1")]),
+    build("FZ_PEEK_A", "peek", Kind::Peek, "a").deps(&[("channel", "chan1")]),
+    build("FZ_PEEK_C", "peek", Kind::Peek, "c").deps(&[("channel", "chan2")]),
+    build("FZ_RELAY_P", "relay", Kind::Relay, "p").deps(&[("channel", "chan1")]),
+    build("FZ_RELAY_C", "relay", Kind::Relay, "c").deps(&[("channel", "chan2")]),
+    build("FZ_RELAY_T", "relay", Kind::Relay, "t").deps(&[("channel", "chan1")]),
+    build("FZ_RELAY_X", "relay", Kind::Relay, "x").deps(&[("channel", "chan1")]),
     build("FZ_GARBAGE", "", Kind::Garbage, ""),
     build("FZ_NO_ENTRY", "", Kind::NoEntry, ""),
     build("FZ_WRONG_API", "", Kind::WrongApi, ""),
@@ -128,7 +146,22 @@ static SPECS: &[Spec] = &[
 
 /// Every mod name the driver uses: each mod's, and a second name a herald
 /// build can be loaded as, which two providers of one service can't share.
-const NAMES: [&str; 10] = ["keeper", "herald", "hearer", "ranker", "anchor", "tether", "clock", "lockstep", "sequential", "herald2"];
+const NAMES: [&str; 14] = [
+    "keeper",
+    "herald",
+    "hearer",
+    "ranker",
+    "anchor",
+    "tether",
+    "clock",
+    "lockstep",
+    "sequential",
+    "herald2",
+    "channel",
+    "source",
+    "peek",
+    "relay",
+];
 
 /// Each build's library, from the paths in the environment.
 fn libs() -> &'static [PathBuf] {
@@ -369,6 +402,9 @@ enum State {
     Anchor { pings: u32, loads: u32 },
     Tether { pings: u32 },
     Lockstep { frame: u64 },
+    Source { made: u64, fresh: u64, kept: u64 },
+    Peek { saw: u64, last: u64 },
+    Relay { ran: u64, last: u64 },
     Empty,
 }
 
@@ -400,6 +436,9 @@ fn fresh(s: &Spec) -> State {
         Kind::Anchor => State::Anchor { pings: 0, loads: 0 },
         Kind::Tether => State::Tether { pings: 0 },
         Kind::Lockstep => State::Lockstep { frame: 0 },
+        Kind::Source => State::Source { made: 0, fresh: 0, kept: 0 },
+        Kind::Peek => State::Peek { saw: 0, last: 0 },
+        Kind::Relay => State::Relay { ran: 0, last: 0 },
         _ => State::Empty,
     }
 }
@@ -428,6 +467,112 @@ fn migrate(state: &mut State, to: &Spec) -> String {
         }
         other => unreachable!("only keeper and hearer change their state's layout, not {other:?}"),
     }
+}
+
+// ---- Flows ----
+
+/// How a system uses `fz::Stream`, named as the plan check names it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Use {
+    Make,
+    See,
+    Pass,
+    Take,
+}
+
+/// The system a build declares on `fz::Stream`: its name, how it uses the
+/// flow, and the systems it runs after and before. source n declares none,
+/// so loading it stops the flow being made.
+type FlowSystem = (&'static str, Use, &'static [&'static str], &'static [&'static str]);
+
+fn flow_system(s: &Spec) -> Option<FlowSystem> {
+    Some(match (s.kind, s.v) {
+        (Kind::Source, "n") => return None,
+        (Kind::Source, _) => ("make", Use::Make, &[], &[]),
+        (Kind::Peek, _) => ("see", Use::See, &["source::make"], &[]),
+        (Kind::Relay, "t") => ("run", Use::Take, &["source::make", "peek::see"], &[]),
+        (Kind::Relay, "x") => ("run", Use::Take, &[], &["source::make"]),
+        (Kind::Relay, _) => ("run", Use::Pass, &["source::make"], &["peek::see"]),
+        _ => return None,
+    })
+}
+
+const STREAM: &str = "fz::Stream";
+
+/// The flow's systems among `mods` (in the engine's order) in plan order,
+/// as indices into `mods`, or the plan check's refusal (flows.md, "The plan
+/// check"). Every flow system is in `update`, one a mod, so the plan is
+/// their constraints, ties going to load order (scheduling.md, "Phases
+/// and order"): what the loader's topological sort gives them, whatever
+/// else is in the phase, since nothing else names them.
+fn flow_plan(mods: &[(String, usize)]) -> Result<Vec<usize>, String> {
+    let nodes: Vec<(usize, String, FlowSystem)> = mods
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (name, s))| {
+            let system = flow_system(&SPECS[*s])?;
+            Some((i, format!("{name}::{}", system.0), system))
+        })
+        .collect();
+    let at = |name: &str| nodes.iter().position(|n| n.1 == name);
+    let mut edges = Vec::new();
+    for (k, (_, _, (_, _, after, before))) in nodes.iter().enumerate() {
+        edges.extend(after.iter().filter_map(|a| Some((at(a)?, k))));
+        edges.extend(before.iter().filter_map(|b| Some((k, at(b)?))));
+    }
+    let mut order: Vec<usize> = Vec::new();
+    while order.len() < nodes.len() {
+        let next = (0..nodes.len())
+            .find(|&k| !order.contains(&k) && edges.iter().all(|&(from, to)| to != k || order.contains(&from)))
+            .expect("model: the flow mods' constraints have no cycle");
+        order.push(next);
+    }
+    let what = |k: usize| format!("`{:?}<{STREAM}>` in `{}`", nodes[k].2.1, nodes[k].1);
+    enum Is {
+        Unmade,
+        Made(usize),
+        Taken(usize),
+    }
+    let mut is = Is::Unmade;
+    for (j, &k) in order.iter().enumerate() {
+        let use_ = nodes[k].2.1;
+        is = match (use_, is) {
+            (Use::Make, Is::Made(by)) => {
+                return Err(format!(
+                    "{} and `Make<{STREAM}>` in `{}`: a flow has one maker; a stage that changes it takes `Pass<{STREAM}>`",
+                    what(k),
+                    nodes[by].1
+                ));
+            }
+            (Use::Make, _) => Is::Made(k),
+            (_, Is::Unmade) => {
+                return Err(match order[j..].iter().find(|&&m| nodes[m].2.1 == Use::Make) {
+                    Some(&m) => format!("{} runs before {}; add `.after(\"{}\")` to `{}`", what(k), what(m), nodes[m].1, nodes[k].1),
+                    None => format!("{}: nothing loaded makes {STREAM}", what(k)),
+                });
+            }
+            (Use::Take, Is::Taken(t)) => {
+                return Err(format!(
+                    "{} runs after {} took it: a flow has one taker; make one of them a `Pass` that runs before the other",
+                    what(k),
+                    what(t)
+                ));
+            }
+            (_, Is::Taken(t)) => {
+                return Err(format!("{} runs after {} took it; add `.before(\"{}\")` to `{}`", what(k), what(t), nodes[t].1, nodes[k].1));
+            }
+            (Use::Take, Is::Made(_)) => Is::Taken(k),
+            (_, made) => made,
+        };
+    }
+    Ok(order.into_iter().map(|k| nodes[k].0).collect())
+}
+
+/// A value of `fz::Stream`, with both layouts' fields.
+#[derive(Clone, Debug)]
+struct Stream {
+    values: Vec<u64>,
+    tag: String,
 }
 
 struct Mod {
@@ -478,6 +623,16 @@ struct Model {
     cursors: HashMap<String, u64>,
     /// Whether lockstep has published its clock, an entity of its own.
     clock: bool,
+    /// `fz::Stream`'s value, while a frame runs (never between frames).
+    stream: Option<Stream>,
+    /// Whether its bin holds a value for the next `Make`'s allocation. Any
+    /// build that uses the flow drops it as it's installed: the bin's type
+    /// and drop code may be an older build's.
+    bin: bool,
+    /// The builds the flow keeps mapped, by mod name: the last of each mod
+    /// to install it, kept even once the mod is unloaded, since the bin may
+    /// hold a value its code made.
+    flow_keep: Vec<(String, u64)>,
 }
 
 /// What the engine should answer.
@@ -578,7 +733,16 @@ impl Model {
         if !problems.is_empty() {
             return Expect::Exactly(Err(problems.join("; ")));
         }
-        let mut report = self.commit(dependency_order(opened));
+        let order = dependency_order(opened);
+        // The plan after the batch, in the engine's order: a replaced build
+        // keeps its mod's place, a new one is added in dependency order.
+        let mut after: Vec<(String, usize)> =
+            self.mods.iter().map(|m| (m.name.clone(), order.iter().find(|(n, _)| *n == m.name).map_or(m.spec, |(_, s)| *s))).collect();
+        after.extend(order.iter().filter(|(n, _)| self.find(n).is_none()).cloned());
+        if let Err(e) = flow_plan(&after) {
+            return Expect::Exactly(Err(e));
+        }
+        let mut report = self.commit(order);
         report.extend(kept);
         report.extend(unchanged);
         Expect::Exactly(Ok(report.join("; ")))
@@ -722,6 +886,13 @@ impl Model {
             }
             _ => {}
         }
+        // A build whose systems use the flow drops its value and bin, and
+        // the flow keeps this build mapped in its predecessor's place.
+        if flow_system(s).is_some() {
+            (self.stream, self.bin) = (None, false);
+            self.flow_keep.retain(|(name, _)| name != s.name);
+            self.flow_keep.push((s.name.to_string(), at));
+        }
     }
 
     fn install_item(&mut self, layout: ItemLayout, at: u64) {
@@ -806,6 +977,10 @@ impl Model {
         if !dependents.is_empty() {
             return Expect::Exactly(Err(format!("{name} is needed by {}; unload them first", dependents.join(", "))));
         }
+        let after: Vec<(String, usize)> = self.mods.iter().filter(|m| m.name != name).map(|m| (m.name.clone(), m.spec)).collect();
+        if let Err(e) = flow_plan(&after) {
+            return Expect::Exactly(Err(e));
+        }
         self.mods.remove(i);
         Expect::Exactly(Ok(format!("unloaded {name}")))
     }
@@ -868,8 +1043,72 @@ impl Model {
                 _ => {}
             }
         }
+        self.flow_frame();
         let frame = self.frame;
         self.notes.retain(|n| n.frame >= frame);
+        // The end of the frame moves a value nothing took to the bin.
+        if self.stream.take().is_some() && !self.bin {
+            self.bin = true;
+        }
+    }
+
+    /// The flow's systems in plan order, each in `update`, apart from
+    /// everything else the frame runs. A use with no value to use panics at
+    /// fetch, which fails its mod.
+    fn flow_frame(&mut self) {
+        let mods: Vec<(String, usize)> = self.mods.iter().map(|m| (m.name.clone(), m.spec)).collect();
+        let order = flow_plan(&mods).unwrap_or_else(|e| panic!("model: a frame with a plan the check refuses: {e}"));
+        for i in order {
+            if self.mods[i].failed {
+                continue;
+            }
+            let v = self.mods[i].spec().v;
+            let (_, use_, _, _) = flow_system(self.mods[i].spec()).expect("a flow system");
+            if use_ != Use::Make && self.stream.is_none() {
+                self.mods[i].failed = true;
+                continue;
+            }
+            match (&mut self.mods[i].state, use_) {
+                (State::Source { made, fresh, kept }, Use::Make) => {
+                    // From a value an earlier step left, else the bin.
+                    let reused = self.stream.take().is_some() || std::mem::take(&mut self.bin);
+                    *made += 1;
+                    if reused {
+                        *kept += 1
+                    } else {
+                        *fresh += 1
+                    }
+                    let (values, tag) = match v {
+                        "a" => (vec![1, 2, 3], ""),
+                        "b" => (vec![10, 20], ""),
+                        _ => (vec![100], "c"),
+                    };
+                    self.stream = Some(Stream { values, tag: tag.into() });
+                }
+                (State::Peek { saw, last }, Use::See) => {
+                    let stream = self.stream.as_ref().expect("checked");
+                    *saw += 1;
+                    *last = stream.values.iter().sum::<u64>() + if v == "c" { stream.tag.len() as u64 * 1_000_000 } else { 0 };
+                }
+                (State::Relay { ran, last }, Use::Pass) => {
+                    let stream = self.stream.as_mut().expect("checked");
+                    stream.values.iter_mut().for_each(|x| *x += 1000);
+                    if v == "c" {
+                        stream.tag.push('r');
+                    }
+                    *ran += 1;
+                    *last = stream.values.iter().sum();
+                }
+                (State::Relay { ran, last }, Use::Take) => {
+                    let stream = self.stream.take().expect("checked");
+                    *ran += 1;
+                    *last = stream.values.iter().sum();
+                    // Dropped, it goes back to the bin.
+                    self.bin = true;
+                }
+                (state, use_) => unreachable!("model: {use_:?} by {state:?}"),
+            }
+        }
     }
 
     fn publish(&mut self, n: u64, v: &str, frame: u64) {
@@ -962,6 +1201,12 @@ impl Model {
                 }
             },
             Kind::Ranker => self.ranker(i, &words),
+            Kind::Source | Kind::Peek | Kind::Relay if words[0] == "get" => Ok(match &self.mods[i].state {
+                State::Source { made, fresh, kept } => format!("source:{v} made={made} fresh={fresh} kept={kept}"),
+                State::Peek { saw, last } => format!("peek:{v} saw={saw} last={last}"),
+                State::Relay { ran, last } => format!("relay:{v} ran={ran} last={last}"),
+                other => unreachable!("a flow mod's state, not {other:?}"),
+            }),
             Kind::Anchor => {
                 let State::Anchor { pings, loads } = &mut self.mods[i].state else { unreachable!() };
                 if words[0] == "ping" {
@@ -1102,6 +1347,7 @@ impl Model {
         builds.extend(self.flag.map(|(_, at)| at));
         builds.extend(self.rank.map(|(_, _, at)| at));
         builds.extend(self.note.map(|(_, at)| at));
+        builds.extend(self.flow_keep.iter().map(|(_, at)| *at));
         builds.sort();
         builds.dedup();
         builds
@@ -1239,13 +1485,19 @@ fn target(ch: &mut impl Choices) -> (String, usize) {
     // number of builds. Picking a build straight from all of them, the
     // fuzzer went 30 minutes without once reloading herald between two of
     // hearer's reads of a queued note.
-    let kinds: &[Kind] = match ch.below(20) {
+    let kinds: &[Kind] = match ch.below(24) {
         0..4 => &[Kind::Keeper],
         4..8 => &[Kind::Herald],
         8..12 => &[Kind::Hearer],
         12..15 => &[Kind::Ranker],
         15..17 => &[Kind::Anchor, Kind::Tether],
         17..19 => &[Kind::Clock, Kind::Lockstep, Kind::Sequential],
+        // The flow's mods by mod, so channel, which every other needs, is
+        // loaded as often as each of them.
+        19 => &[Kind::Channel],
+        20 => &[Kind::Source],
+        21 => &[Kind::Peek],
+        22 => &[Kind::Relay],
         _ => &[Kind::Garbage, Kind::NoEntry, Kind::WrongApi],
     };
     let of: Vec<usize> = (0..SPECS.len()).filter(|&s| kinds.contains(&SPECS[s].kind)).collect();
@@ -1278,7 +1530,7 @@ fn choose(ch: &mut impl Choices) -> Op {
 /// A message some mod takes; `boom`, which fails it, now and then.
 fn message(ch: &mut impl Choices) -> (&'static str, String) {
     let id = ch.below(4);
-    match ch.below(20) {
+    match ch.below(22) {
         0..6 => (
             "keeper",
             match ch.below(20) {
@@ -1327,7 +1579,9 @@ fn message(ch: &mut impl Choices) -> (&'static str, String) {
             },
         ),
         17 => (pick(ch, &["anchor", "tether"]), pick(ch, &["ping", "get"]).to_string()),
-        _ => (pick(ch, &["lockstep", "clock", "sequential"]), "frame".to_string()),
+        18..20 => (pick(ch, &["lockstep", "clock", "sequential"]), "frame".to_string()),
+        // Failing source leaves the flow unmade, which fails its readers.
+        _ => (pick(ch, &["source", "peek", "relay"]), if ch.below(5) == 0 { "boom" } else { "get" }.to_string()),
     }
 }
 
@@ -1370,6 +1624,9 @@ pub const TALLIED: &[&str] = &[
     "err ProviderFailed",
     "has no tags",
     "@herald",
+    "nothing loaded makes",
+    "runs before `Make<",
+    " kept=1",
 ];
 
 struct Session {
@@ -1505,6 +1762,18 @@ impl Session {
                 self.fail(&format!("the rank table holds {found:?}, and the model {:?}", model.rank_order()));
             }
         }
+        // The flow is empty between frames, and its bin is there only if no
+        // build using it was installed since a frame filled it.
+        let holds = world.flow_holds(STREAM);
+        if holds != (false, model.bin) {
+            self.fail(&format!("fz::Stream holds (value, bin) {holds:?}, and the model (false, {})", model.bin));
+        }
+        let mut keep: Vec<String> = model.flow_keep.iter().map(|(name, _)| name.clone()).collect();
+        keep.sort();
+        let kept = world.flow_keepalives(STREAM);
+        if kept != keep {
+            self.fail(&format!("fz::Stream keeps {kept:?} mapped, and the model {keep:?}"));
+        }
         let (mapped, builds) = (mapped_builds(&self.dir), model.mapped());
         if mapped != builds.len() {
             self.fail(&format!("{mapped} build(s) mapped, and the model expects {}: the builds loaded at {builds:?}", builds.len()));
@@ -1518,6 +1787,7 @@ impl Session {
                 Kind::Keeper | Kind::Hearer | Kind::Ranker => "dump",
                 Kind::Herald | Kind::Anchor | Kind::Tether => "get",
                 Kind::Lockstep => "frame",
+                Kind::Source | Kind::Peek | Kind::Relay => "get",
                 _ => continue,
             };
             let name = m.name.clone();
