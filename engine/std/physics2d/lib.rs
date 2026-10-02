@@ -21,6 +21,7 @@ use engine_api::{
     Adds, AnyOf, Cx, Despawns, Dt, Entity, EventWriter, Live, Mod, OrderKey, Proximity, Query, Removes, Spawner, Systems, With, Without,
     Workers, export_mod, field_struct, phase,
 };
+use physics_common::Slots;
 use physics2d::{
     Asleep, Body, Collider, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Overlap, Placed, Position,
     Response, Resting, Rotation, STATIC, Shape, Sleep, Slept, Spin, Still, Touching, Trigger, Vec2, Velocity,
@@ -119,44 +120,6 @@ engine_api::mod_state! {
         /// How many `Slept` physics has given and not taken off, after its
         /// last system: see `wake_by_games`.
         sleepers: u64,
-    }
-}
-
-/// Entities to positions in a list, by entity index: ids are small dense
-/// integers, so a vector by index finds one in O(1), where sorting the list
-/// and binary-searching it was most of gathering. The generation is kept,
-/// so a stale id (despawned since, its index reused) finds nothing.
-#[derive(Default)]
-struct Slots(Vec<(u32, u32)>);
-
-impl Slots {
-    fn of(entities: impl Iterator<Item = Entity> + Clone) -> Slots {
-        let mut slots = Slots::default();
-        slots.fill(entities);
-        slots
-    }
-
-    /// Refilled in place, keeping its allocation.
-    fn fill(&mut self, entities: impl IntoIterator<Item = Entity, IntoIter: Clone>) {
-        let entities = entities.into_iter();
-        let len = entities.clone().map(|e| e.index as usize + 1).max().unwrap_or(0);
-        self.0.clear();
-        self.0.resize(len, (u32::MAX, u32::MAX));
-        for (k, e) in entities.enumerate() {
-            self.0[e.index as usize] = (e.generation, k as u32);
-        }
-    }
-
-    fn get(&self, e: Entity) -> Option<u32> {
-        self.0.get(e.index as usize).filter(|(g, k)| *g == e.generation && *k != u32::MAX).map(|(_, k)| *k)
-    }
-
-    fn insert(&mut self, e: Entity, k: u32) {
-        let i = e.index as usize;
-        if self.0.len() <= i {
-            self.0.resize(i + 1, (u32::MAX, u32::MAX));
-        }
-        self.0[i] = (e.generation, k);
     }
 }
 

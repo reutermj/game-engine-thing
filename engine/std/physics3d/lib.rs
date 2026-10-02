@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
+use physics_common::Slots;
 pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS,
     Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
@@ -101,33 +102,6 @@ engine_api::mod_state! {
 
 fn nanos(from: Instant, to: Instant) -> u64 {
     (to - from).as_nanos() as u64
-}
-
-/// Entities to positions in a list, by entity index, as in 2D.
-#[derive(Default)]
-struct Slots(Vec<(u32, u32)>);
-
-impl Slots {
-    fn of(entities: impl Iterator<Item = Entity> + Clone) -> Slots {
-        let mut slots = Slots::default();
-        slots.fill(entities);
-        slots
-    }
-
-    /// Refilled in place, keeping its allocation: a flow's (`pipeline.rs`).
-    fn fill(&mut self, entities: impl IntoIterator<Item = Entity, IntoIter: Clone>) {
-        let entities = entities.into_iter();
-        let len = entities.clone().map(|e| e.index as usize + 1).max().unwrap_or(0);
-        self.0.clear();
-        self.0.resize(len, (u32::MAX, u32::MAX));
-        for (k, e) in entities.enumerate() {
-            self.0[e.index as usize] = (e.generation, k as u32);
-        }
-    }
-
-    fn get(&self, e: Entity) -> Option<u32> {
-        self.0.get(e.index as usize).filter(|(g, k)| *g == e.generation && *k != u32::MAX).map(|(_, k)| *k)
-    }
 }
 
 struct Item {

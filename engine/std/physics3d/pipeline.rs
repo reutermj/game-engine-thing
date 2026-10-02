@@ -23,7 +23,7 @@
 
 use std::time::Instant;
 
-use engine_api::{Cx, Dt, Entity, Make, Pass, Query, Recycle, See, Take, flow};
+use engine_api::{Cx, Dt, Entity, Make, Pass, Query, See, Take, flow};
 
 use crate::solver::{self, Constraint, ContactPoint, SolverBody};
 use crate::{
@@ -53,12 +53,6 @@ flow! {
     /// The contacts in pair order, their ends the bodies' indices.
     pub(crate) struct Contacts: "physics3d::flow::Contacts" {
         constraints: Vec<Constraint>,
-    }
-}
-
-impl Recycle for Slots {
-    fn recycle(&mut self) {
-        self.0.clear();
     }
 }
 

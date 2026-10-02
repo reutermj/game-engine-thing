@@ -21,11 +21,16 @@ PHYSICS_INTERFACE = [
     "spatial.rs",
 ]
 
+# The implementation's deps, never the interface's: see
+# //engine/std/physics_common.
+PHYSICS_DEPS = ["//engine/std/physics_common"]
+
 engine_mod(
     name = "physics2d",
     srcs = PHYSICS_SRCS,
     twin = True,
     interface = PHYSICS_INTERFACE,
+    deps = PHYSICS_DEPS,
     visibility = ["//visibility:public"],
 )
 
@@ -36,6 +41,7 @@ engine_mod(
     srcs = PHYSICS_SRCS,
     crate_features = ["v2"],
     interface = PHYSICS_INTERFACE,
+    deps = PHYSICS_DEPS,
     mod_name = "physics2d",
 )
 
@@ -108,6 +114,7 @@ rust_test(
     deps = [
         ":physics2d_interface",
         "//engine/api",
+        "//engine/std/physics_common",
     ],
 )
 
@@ -187,6 +194,7 @@ rust_binary(
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",
+        "//engine/std/physics_common",
     ],
 )
 
@@ -200,7 +208,10 @@ rust_binary(
         "tests/narrow_bench.rs",
     ],
     crate_root = "tests/narrow_bench.rs",
-    deps = [":physics2d_interface"],
+    deps = [
+        ":physics2d_interface",
+        "//engine/std/physics_common",
+    ],
 )
 
 # Why `solve` copies bodies out of the world: the same solve over the same
@@ -245,6 +256,7 @@ rust_binary(
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",
+        "//engine/std/physics_common",
     ],
 )
 

@@ -1,0 +1,31 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# What the 2D and 3D physics mods (//engine/std/physics2d,
+# //engine/std/physics3d) share apart from the dimension: a dependency of
+# their implementations, and of what compiles their sources by path (the
+# arrays twin, the benches, the comparisons), never of their interfaces.
+# So a change here rebuilds and reloads both mods and no game: engine_mod
+# passes `deps` to the library alone, and the interface digest
+# (`_mod_links`) covers the interface's sources only. Linked into each
+# mod's library and swapped with it, so it holds no statics. See lib.rs,
+# and docs/architecture/physics-sharing.md, "Phase 1".
+rust_library(
+    name = "physics_common",
+    srcs = [
+        "lib.rs",
+        "slots.rs",
+    ],
+    # It runs inside the mods, so it can't print either.
+    lint_config = "//engine:mod_lints",
+    visibility = [
+        "//engine/std/physics2d:__subpackages__",
+        "//engine/std/physics3d:__subpackages__",
+    ],
+    deps = ["//engine/ecs"],
+)
+
+rust_test(
+    name = "physics_common_test",
+    crate = ":physics_common",
+)

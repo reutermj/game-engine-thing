@@ -22,6 +22,9 @@ engine_mod(
         "math.rs",
     ],
     twin = True,
+    # The implementation's, never the interface's: see
+    # //engine/std/physics_common.
+    deps = ["//engine/std/physics_common"],
     visibility = ["//visibility:public"],
 )
 
@@ -73,7 +76,10 @@ rust_test(
         "tests/core_test.rs",
     ],
     crate_root = "tests/core_test.rs",
-    deps = [":physics3d_interface"],
+    deps = [
+        ":physics3d_interface",
+        "//engine/std/physics_common",
+    ],
 )
 
 # The mod in a running engine: bodies that turn (tipping, rolling,

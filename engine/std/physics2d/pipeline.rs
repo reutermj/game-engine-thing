@@ -142,12 +142,6 @@ impl Recycle for Colors {
     fn recycle(&mut self) {}
 }
 
-impl Recycle for Slots {
-    fn recycle(&mut self) {
-        self.0.clear();
-    }
-}
-
 /// Awake bodies, read: the walk `scatter_bodies` writes back in, so the
 /// same tables in the same order, but declared read-only, so the source has
 /// no apply node to re-sort the bodies after it.
