@@ -5,8 +5,8 @@
 //! solve            world -> Make<Settings>
 //! gather_bodies    See<Settings>, world -> Make<Bodies>
 //! gather_contacts  See<Bodies>, world -> Make<Contacts>
-//! prepare          See<Settings>, Pass<Bodies>, Pass<Contacts> -> Make<Graph>
-//! passes           See<Bodies>, Pass<Graph>, Passes
+//! prepare          See<Settings>, Pass<Bodies>, See<Contacts> -> Make<Graph>
+//! passes           See<Bodies>, See<Contacts>, Pass<Graph>, Passes
 //! finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Contacts>
 //! scatter_contacts Take<Contacts> -> world
 //! scatter_bodies   Take<Bodies> -> world
@@ -15,7 +15,8 @@
 //! The sources copy the moving bodies and the contacts out of the world;
 //! `prepare`, `passes` and `finish` are the solver's (`solver::Staged`), its
 //! passes a program of stages declared as a shape the scheduler runs
-//! (`Passes`), as 2D's; the sinks write the results back. The contacts are
+//! (`Passes`), as 2D's, the first of them filling the batches from the
+//! contacts, which only `finish` changes; the sinks write the results back. The contacts are
 //! grouped by `Tuning`'s order: in Box2D's colors (the default since
 //! get-emj.90), the sweep over the colors' order, which threads can
 //! share, or by level, the sweep in pair order bit for bit (physics.md,
@@ -162,34 +163,35 @@ impl Physics3d {
         self.gathered(start);
     }
 
-    /// The contacts grouped and into their lanes, the bodies as states,
-    /// where the step goes in lanes four wide.
+    /// The contacts grouped and seated in their lanes, the bodies as
+    /// states, where the step goes in lanes four wide: the batches are
+    /// filled by the passes' first stage.
     pub(crate) fn prepare(
         &mut self,
         _: &mut (),
         _: &mut Cx,
         (dt, s): (Dt, See<Settings>),
-        (mut b, mut c): (Pass<Bodies>, Pass<Contacts>),
+        (mut b, c): (Pass<Bodies>, See<Contacts>),
         mut g: Make<Graph>,
     ) {
         let start = Instant::now();
         let how = s.how.expect("made by `solve`");
         let Graph { lanes, staged, .. } = &mut *g;
-        *lanes = how.lanes == LANES && staged.prepare(&mut b.bodies, &mut c.constraints, *dt, &how);
+        *lanes = how.lanes == LANES && staged.prepare(&mut b.bodies, &c.constraints, *dt, &how);
         let [groups, overflow, batches, widest, narrowest] = if *lanes { staged.layout() } else { [0; 5] }.map(|x| x as u64);
         let f = &mut self.found;
         (f.groups, f.overflow, f.batches, f.widest, f.narrowest) = (groups, overflow, batches, widest, narrowest);
         self.solver_time(start, |t, x| t.prepare += x);
     }
 
-    /// The substeps and restitution: every pass a stage over the groups'
-    /// batches or the bodies' states, which the scheduler runs.
-    pub(crate) fn passes(&mut self, _: &mut (), _: &mut Cx, b: See<Bodies>, mut g: Pass<Graph>, passes: Passes) {
+    /// The batches' fill, the substeps and restitution: every pass a stage
+    /// over the batches or the bodies' states, which the scheduler runs.
+    pub(crate) fn passes(&mut self, _: &mut (), _: &mut Cx, (b, c): (See<Bodies>, See<Contacts>), mut g: Pass<Graph>, passes: Passes) {
         let start = Instant::now();
         let Graph { lanes, staged, program } = &mut *g;
         if *lanes {
             staged.program(program);
-            let (layout, mut items, states, kernels) = staged.split(&b.bodies);
+            let (layout, mut items, states, kernels) = staged.split(&b.bodies, &c.constraints);
             // The kernels are generic over the states' view (`Bodies`), so
             // each view is matched once a call, not once a body (flows.md,
             // "On one thread").
@@ -198,9 +200,9 @@ impl Physics3d {
                 &mut items,
                 states,
                 program,
-                |k, _, block, s| match s {
-                    States::Plain(s) => kernels.block(k, block, s),
-                    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+                |k, at, block, s| match s {
+                    States::Plain(s) => kernels.block(k, at, block, s),
+                    States::Shared(s) => kernels.block(k, at, block, &mut Shared(s)),
                 },
                 |k, r, s| match s {
                     States::Plain(s) => kernels.each(k, r, s),

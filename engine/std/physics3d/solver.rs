@@ -696,7 +696,7 @@ pub mod lanes {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use engine_ecs::shape::{Colored, Coloring, Shareable, Stage, UNSOLVED};
+    use engine_ecs::shape::{Colored, Coloring, EMPTY, Shareable, Stage, UNSOLVED};
     use physics_common::lanes::F;
 
     /// `Vec3`, lane by lane: each operation spelled as `Vec3`'s is, so
@@ -858,8 +858,8 @@ pub mod lanes {
         };
     }
 
-    /// `N` contacts, field by field: `Row`, lane by lane, its points
-    /// `pts[start..start + points]`, as many as its lanes' most. A lane
+    /// `N` contacts, field by field: `Row`, lane by lane, its points apart
+    /// (`Item::pts`), as many as its lanes' most. A lane
     /// with no contact (the last of a level) points both ends at a body
     /// past the real ones, whose writes nothing reads.
     #[derive(Clone, Copy)]
@@ -898,7 +898,6 @@ pub mod lanes {
         twists: [bool; N],
         /// Whether any lane can bounce.
         bounces: bool,
-        start: usize,
         points: usize,
     }
 
@@ -932,7 +931,6 @@ pub mod lanes {
                 rubs: [false; N],
                 twists: [false; N],
                 bounces: false,
-                start: 0,
                 points: 0,
             }
         }
@@ -1088,18 +1086,18 @@ pub mod lanes {
         }
         let mut program = Vec::new();
         staged.program(&mut program);
-        let (_, mut items, states, kernels) = staged.split(bodies);
+        let (_, mut items, states, kernels) = staged.split(bodies, contacts);
         run(&program, &mut items, states, &kernels);
         staged.finish(bodies, contacts);
     }
 
-    /// `Passes::run`'s stages on one thread: an `Items` stage the batches
-    /// in order (the overflow's, then each group's), an `Each` stage the
-    /// bodies' states.
+    /// `Passes::run`'s stages on one thread: an `Items` or `All` stage the
+    /// batches in order (the overflow's, then each group's), an `Each`
+    /// stage the bodies' states.
     fn run<const N: usize>(program: &[Stage<Step>], items: &mut [Item<'_, N>], states: &mut [State], kernels: &Kernels<'_, N>) {
         for stage in program {
             match *stage {
-                Stage::Items(k) | Stage::All(k) => kernels.block(k, items, states),
+                Stage::Items(k) | Stage::All(k) => kernels.block(k, 0, items, states),
                 Stage::Each(k, n) => kernels.each(k, 0..n, states),
             }
         }
@@ -1245,6 +1243,9 @@ pub mod lanes {
     /// caps no turn rate, so 3D's is its own.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum Step {
+        /// Over every batch at once: the batches filled from the contacts
+        /// their lanes seat.
+        Fill,
         /// Over bodies: a substep's share of gravity, the turn rate capped.
         Gravity,
         Warm,
@@ -1263,19 +1264,21 @@ pub mod lanes {
         Bounce,
     }
 
-    /// A batch and its points, as a stage over batches gets them.
+    /// A batch, its points and their anchors (empty but under
+    /// `Anchors::Exact`), as a stage over batches gets them.
     pub struct Item<'a, const N: usize> {
         o: &'a mut Batch<N>,
         pts: &'a mut [Pt<N>],
+        anchors: &'a mut [[V<N>; 2]],
     }
 
-    /// `f` of each batch and its points, in order: generic, so the kernel
-    /// it calls is inlined into the loop (a kernel behind `&dyn Fn` cost 1
-    /// to 4%, flows.md).
+    /// `f` of each batch, its points and their anchors, in order: generic,
+    /// so the kernel it calls is inlined into the loop (a kernel behind
+    /// `&dyn Fn` cost 1 to 4%, flows.md).
     #[inline(always)]
-    fn per_batch<const N: usize>(items: &mut [Item<'_, N>], mut f: impl FnMut(&mut Batch<N>, &mut [Pt<N>])) {
+    fn per_batch<const N: usize>(items: &mut [Item<'_, N>], mut f: impl FnMut(&mut Batch<N>, &mut [Pt<N>], &[[V<N>; 2]])) {
         for it in items.iter_mut() {
-            f(&mut *it.o, &mut *it.pts);
+            f(&mut *it.o, &mut *it.pts, &*it.anchors);
         }
     }
 
@@ -1285,16 +1288,24 @@ pub mod lanes {
     pub struct Staged<const N: usize> {
         how: Tuning,
         begun: Begun,
+        dt: f32,
         moves: Vec<bool>,
         coloring: Coloring,
         masks: Vec<u64>,
-        place: Vec<Option<(u32, u32)>>,
+        /// Each batch's contacts, lane by lane (`Coloring::seat`): what
+        /// the fill fills it from.
+        seats: Vec<u32>,
         layout: Colored,
         states: Vec<State>,
+        /// The batches, their points and the points' anchors (which only
+        /// `Anchors::Exact` reads), written whole by the fill
+        /// (`Step::Fill`), so kept as the last step left them, grown but
+        /// never emptied here. A batch's points are as many as its lanes'
+        /// most, from `starts[batch]` to the next batch's.
         out: Vec<Batch<N>>,
         pts: Vec<Pt<N>>,
-        /// Each point's anchors, which only `Anchors::Exact` reads.
         anchors: Vec<[V<N>; 2]>,
+        starts: Vec<usize>,
     }
 
     impl<const N: usize> Default for Staged<N> {
@@ -1302,15 +1313,17 @@ pub mod lanes {
             Staged {
                 how: Tuning::default(),
                 begun: Begun::NONE,
+                dt: 0.0,
                 moves: Vec::new(),
                 coloring: Coloring::default(),
                 masks: Vec::new(),
-                place: Vec::new(),
+                seats: Vec::new(),
                 layout: Colored::default(),
                 states: Vec::new(),
                 out: Vec::new(),
                 pts: Vec::new(),
                 anchors: Vec::new(),
+                starts: Vec::new(),
             }
         }
     }
@@ -1319,23 +1332,40 @@ pub mod lanes {
     /// states: `Sync`, for a primitive that may share them out.
     pub struct Kernels<'a, const N: usize> {
         bodies: &'a [SolverBody],
-        anchors: &'a [[V<N>; 2]],
         how: Tuning,
         begun: Begun,
+        /// What the fill reads.
+        contacts: &'a [Constraint],
+        seats: &'a [u32],
+        coloring: &'a Coloring,
+        dt: f32,
+    }
+
+    /// `vec` at `n` long, what it held kept and only new room written:
+    /// for what a stage writes whole.
+    fn room<T: Clone>(vec: &mut Vec<T>, n: usize, empty: T) {
+        if vec.len() < n {
+            vec.resize(n, empty);
+        }
+        vec.truncate(n);
     }
 
     impl<const N: usize> Staged<N> {
-        /// The step's start: the contacts grouped and into their batches'
-        /// lanes, the bodies into states, and whether the step goes in
-        /// lanes at all. If not, nothing has been changed, and the step is
-        /// `in_order`'s, the same result one contact at a time.
-        pub fn prepare(&mut self, bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, how: &Tuning) -> bool {
+        /// The step's start but the batches' fill, which is the program's
+        /// first stage (`Step::Fill`): the contacts grouped and seated in
+        /// their batches' lanes, the bodies into states, room for the
+        /// batches and their points, and whether the step goes in lanes at
+        /// all. If not, nothing has been changed, and the step is
+        /// `in_order`'s, the same result one contact at a time. The
+        /// contacts aren't changed either way: the fill reads them, and
+        /// `finish` writes them.
+        pub fn prepare(&mut self, bodies: &mut [SolverBody], contacts: &[Constraint], dt: f32, how: &Tuning) -> bool {
             moving(bodies, &mut self.moves);
             if !shareable(bodies, &self.moves) {
                 return false;
             }
             group(contacts, &self.moves, how.order, &mut self.coloring, &mut self.masks);
-            self.layout = self.coloring.pack(N, &mut self.place);
+            self.layout = self.coloring.seat(N, &mut self.seats);
             // Lanes only where they pay: a batch costs about two and a half
             // contacts solved one at a time, so batches under half full (a
             // stack by level, a chain, a handful of contacts: a group a
@@ -1344,65 +1374,34 @@ pub mod lanes {
             if how.sparse_alone && contacts.len() * 2 < self.layout.items() * N {
                 return false;
             }
-            self.how = *how;
+            (self.how, self.dt) = (*how, dt);
             self.begun = begin(bodies, dt, how);
-            let Begun { share, soft, .. } = self.begun;
-            let exact = how.anchors == Anchors::Exact;
             // One more body than there are, standing still: where a batch's
             // empty lanes point.
             let nowhere = bodies.len() as u32;
             self.states.clear();
             self.states.extend(bodies.iter().map(|b| State { v: b.v - b.gravity, w: b.w, ..State::STILL }));
             self.states.push(State::STILL);
-            let out = &mut self.out;
-            out.clear();
-            out.resize(self.layout.items(), Batch::<N>::empty(nowhere));
-            for (c, at) in contacts.iter().zip(&self.place) {
-                let (batch, _) = at.expect("every contact has a group");
-                let o = &mut out[batch as usize];
-                o.points = o.points.max(c.count.min(MAX_POINTS));
+            let starts = &mut self.starts;
+            starts.clear();
+            starts.push(0);
+            let mut at = 0;
+            for seats in self.seats.as_chunks::<N>().0 {
+                at += seats.iter().filter(|i| **i != EMPTY).map(|&i| contacts[i as usize].count.min(MAX_POINTS)).max().unwrap_or(0);
+                starts.push(at);
             }
-            let mut start = 0;
-            for o in out.iter_mut() {
-                o.start = start;
-                start += o.points;
-            }
-            let pts = &mut self.pts;
-            pts.clear();
-            pts.resize(start, Pt::<N>::EMPTY);
-            let anchors = &mut self.anchors;
-            anchors.clear();
-            anchors.resize(if exact { start } else { 0 }, [V::<N>::ZERO; 2]);
-            // Each contact's row made in pair order, as the contacts are
-            // stored, and written straight into its lane: no rows kept.
-            let mut ps = [PointRow::default(); MAX_POINTS];
-            for (c, at) in contacts.iter_mut().zip(&self.place) {
-                let r = row(bodies, c, &mut ps, share, soft, (how.closing, dt));
-                let (batch, l) = at.expect("every contact has a group");
-                let (o, l) = (&mut out[batch as usize], l as usize);
-                put(o, l, &r, c, bodies);
-                for (k, p) in ps[..r.count].iter().enumerate() {
-                    let q = &mut pts[o.start + k];
-                    q.rna.set(l, p.rna);
-                    q.rnb.set(l, p.rnb);
-                    q.ia.set(l, p.ia);
-                    q.ib.set(l, p.ib);
-                    (q.base.0[l], q.arm.0[l], q.mass.0[l], q.jn.0[l]) = (p.base, (p.rb - p.ra).dot(r.n), p.mass, p.jn);
-                    (q.lever.0[l], q.speed.0[l]) = (p.lever, c.points[k].speed);
-                    (q.on[l], q.solid[l]) = (true, p.mass != 0.0);
-                    if exact {
-                        anchors[o.start + k][0].set(l, p.ra);
-                        anchors[o.start + k][1].set(l, p.rb);
-                    }
-                }
-            }
+            room(&mut self.out, self.layout.items(), Batch::<N>::empty(nowhere));
+            room(&mut self.pts, at, Pt::<N>::EMPTY);
+            room(&mut self.anchors, if how.anchors == Anchors::Exact { at } else { 0 }, [V::<N>::ZERO; 2]);
             true
         }
 
-        /// The substeps and restitution as stages, in order, into `out`:
-        /// `one_at_a_time`'s loops, each a stage over batches or bodies.
+        /// The batches' fill, then the substeps and restitution as stages,
+        /// in order, into `out`: `one_at_a_time`'s loops, each a stage over
+        /// batches or bodies.
         pub fn program(&self, out: &mut Vec<Stage<Step>>) {
             out.clear();
+            out.push(Stage::All(Step::Fill));
             let (n_sub, bodies) = (self.begun.n_sub, self.states.len() - 1);
             for sub in 0..n_sub {
                 out.push(Stage::Each(Step::Gravity, bodies));
@@ -1421,17 +1420,28 @@ pub mod lanes {
         }
 
         /// The groups' layout, the batches with their points, the states
-        /// and the kernels, for the program.
-        pub fn split<'a>(&'a mut self, bodies: &'a [SolverBody]) -> (&'a Colored, Vec<Item<'a, N>>, &'a mut [State], Kernels<'a, N>) {
+        /// and the kernels, for the program: the bodies and contacts as
+        /// `prepare` left them, for the fill.
+        #[allow(clippy::type_complexity)]
+        pub fn split<'a>(
+            &'a mut self,
+            bodies: &'a [SolverBody],
+            contacts: &'a [Constraint],
+        ) -> (&'a Colored, Vec<Item<'a, N>>, &'a mut [State], Kernels<'a, N>) {
             let mut items = Vec::with_capacity(self.out.len());
-            let mut rest = &mut self.pts[..];
-            // A batch's points follow the last batch's (`prepare`).
-            for o in self.out.iter_mut() {
-                let (pts, tail) = std::mem::take(&mut rest).split_at_mut(o.points);
-                rest = tail;
-                items.push(Item { o, pts });
+            let (mut pts, mut anchors) = (&mut self.pts[..], &mut self.anchors[..]);
+            // A batch's points follow the last batch's (`prepare`), and so
+            // do their anchors, where there are any.
+            let exact = !anchors.is_empty();
+            for (o, n) in self.out.iter_mut().zip(self.starts.windows(2).map(|w| w[1] - w[0])) {
+                let (p, rest) = std::mem::take(&mut pts).split_at_mut(n);
+                pts = rest;
+                let (a, rest) = std::mem::take(&mut anchors).split_at_mut(if exact { n } else { 0 });
+                anchors = rest;
+                items.push(Item { o, pts: p, anchors: a });
             }
-            let kernels = Kernels { bodies, anchors: &self.anchors, how: self.how, begun: self.begun };
+            let kernels =
+                Kernels { bodies, how: self.how, begun: self.begun, contacts, seats: &self.seats, coloring: &self.coloring, dt: self.dt };
             (&self.layout, items, &mut self.states, kernels)
         }
 
@@ -1447,16 +1457,18 @@ pub mod lanes {
 
         /// The step's impulses into the contacts, and the states into the
         /// bodies, as `one_at_a_time` leaves them, `Carry` and
-        /// `Inertia::Substep` included.
+        /// `Inertia::Substep` included; and each point's closing speed,
+        /// which `row` gave the fill's copy of the contact.
         pub fn finish(&self, bodies: &mut [SolverBody], contacts: &mut [Constraint]) {
             let (carry, k) = (self.how.carry, self.begun.n_sub as f32);
-            for (c, at) in contacts.iter_mut().zip(&self.place) {
-                let (batch, l) = at.expect("every contact has a group");
-                let (o, l) = (&self.out[batch as usize], l as usize);
+            for (c, to) in contacts.iter_mut().zip(self.coloring.seats(N)) {
+                let to = to.expect("every contact has a group");
+                let (batch, l) = (to / N, to % N);
+                let (o, pts) = (&self.out[batch], &self.pts[self.starts[batch]..]);
                 let count = c.count.min(MAX_POINTS);
-                for (j, cp) in c.points[..count].iter_mut().enumerate() {
-                    let p = &self.pts[o.start + j];
+                for (p, cp) in pts.iter().zip(c.points[..count].iter_mut()) {
                     cp.jn = if carry != Carry::Mean { p.jn.0[l] * k } else { p.sum_jn.0[l] };
+                    cp.speed = p.speed.0[l];
                 }
                 if carry == Carry::Last {
                     c.jt = (o.t[0].get(l) * o.jt[0].0[l] + o.t[1].get(l) * o.jt[1].0[l]) * k;
@@ -1477,33 +1489,106 @@ pub mod lanes {
     }
 
     impl<const N: usize> Kernels<'_, N> {
-        /// A stage over consecutive batches of one group, the states plain
-        /// or shared: which pass it is decided once a block, as 2D's.
+        /// A stage over consecutive batches from `at`, the states plain or
+        /// shared: which pass it is decided once a block, as 2D's.
         #[inline(always)]
-        pub fn block<B: Bodies + ?Sized>(&self, k: Step, items: &mut [Item<'_, N>], s: &mut B) {
-            let (a, inv_h) = (self.anchors, self.begun.inv_h);
+        pub fn block<B: Bodies + ?Sized>(&self, k: Step, at: usize, items: &mut [Item<'_, N>], s: &mut B) {
+            let inv_h = self.begun.inv_h;
             let exact = self.how.anchors == Anchors::Exact;
             let i = items;
             match k {
-                Step::Warm => per_batch(i, |o, p| warm_start(o, p, s)),
+                Step::Fill if at == 0 && i.len() * N == self.seats.len() => self.fill_all(i),
+                Step::Fill => self.fill(at, i),
+                Step::Warm => per_batch(i, |o, p, _| warm_start(o, p, s)),
                 Step::Push => match (self.how.friction_in_push, exact) {
-                    (false, false) => per_batch(i, |o, p| pass::<N, true, false, false, COMPUTE, B>(o, p, a, s, inv_h)),
-                    (false, true) => per_batch(i, |o, p| pass::<N, true, false, true, COMPUTE, B>(o, p, a, s, inv_h)),
-                    (true, false) => per_batch(i, |o, p| pass::<N, true, true, false, COMPUTE, B>(o, p, a, s, inv_h)),
-                    (true, true) => per_batch(i, |o, p| pass::<N, true, true, true, COMPUTE, B>(o, p, a, s, inv_h)),
+                    (false, false) => per_batch(i, |o, p, a| pass::<N, true, false, false, COMPUTE, B>(o, p, a, s, inv_h)),
+                    (false, true) => per_batch(i, |o, p, a| pass::<N, true, false, true, COMPUTE, B>(o, p, a, s, inv_h)),
+                    (true, false) => per_batch(i, |o, p, a| pass::<N, true, true, false, COMPUTE, B>(o, p, a, s, inv_h)),
+                    (true, true) => per_batch(i, |o, p, a| pass::<N, true, true, true, COMPUTE, B>(o, p, a, s, inv_h)),
                 },
                 // Bodies don't move between relaxing passes, so neither do
                 // separations: the first finds each point's bias, the
                 // others read it, the same bits.
                 Step::Relax(first) => match (first, exact) {
-                    (true, false) => per_batch(i, |o, p| pass::<N, false, true, false, STORE, B>(o, p, a, s, inv_h)),
-                    (true, true) => per_batch(i, |o, p| pass::<N, false, true, true, STORE, B>(o, p, a, s, inv_h)),
-                    (false, _) => per_batch(i, |o, p| pass::<N, false, true, false, LOAD, B>(o, p, a, s, inv_h)),
+                    (true, false) => per_batch(i, |o, p, a| pass::<N, false, true, false, STORE, B>(o, p, a, s, inv_h)),
+                    (true, true) => per_batch(i, |o, p, a| pass::<N, false, true, true, STORE, B>(o, p, a, s, inv_h)),
+                    (false, _) => per_batch(i, |o, p, a| pass::<N, false, true, false, LOAD, B>(o, p, a, s, inv_h)),
                 },
-                Step::Refresh => per_batch(i, |o, p| refresh(o, p, self.bodies, s)),
-                Step::Sum => per_batch(i, sum),
-                Step::Bounce => per_batch(i, |o, p| restitute(o, p, s)),
+                Step::Refresh => per_batch(i, |o, p, _| refresh(o, p, self.bodies, s)),
+                Step::Sum => per_batch(i, |o, p, _| sum(o, p)),
+                Step::Bounce => per_batch(i, |o, p, _| restitute(o, p, s)),
                 Step::Gravity | Step::Move(_) => unreachable!("a stage over bodies"),
+            }
+        }
+
+        /// Batches `at..` from the contacts their lanes seat, each batch,
+        /// its points and their anchors written whole, so what they held
+        /// before is never read.
+        #[inline(always)]
+        fn fill(&self, at: usize, items: &mut [Item<'_, N>]) {
+            for (it, seats) in items.iter_mut().zip(self.seats[at * N..].as_chunks::<N>().0) {
+                self.empty(it);
+                for (l, &i) in seats.iter().enumerate() {
+                    if i != EMPTY {
+                        self.enter(it, l, &self.contacts[i as usize]);
+                    }
+                }
+            }
+        }
+
+        /// `fill` of every batch, contact by contact in pair order, each
+        /// into the seat the coloring gives it: the same values, read in
+        /// the order the contacts are stored, as 2D's `fill_all`; but it
+        /// writes any batch, so it's the fill of a block that has them all.
+        #[inline(always)]
+        fn fill_all(&self, items: &mut [Item<'_, N>]) {
+            items.iter_mut().for_each(|it| self.empty(it));
+            for (c, to) in self.contacts.iter().zip(self.coloring.seats(N)) {
+                let to = to.expect("every contact has a group");
+                self.enter(&mut items[to / N], to % N, c);
+            }
+        }
+
+        #[inline(always)]
+        fn empty(&self, it: &mut Item<'_, N>) {
+            *it.o = Batch::empty(self.nowhere());
+            it.o.points = it.pts.len();
+            it.pts.fill(Pt::EMPTY);
+            it.anchors.fill([V::ZERO; 2]);
+        }
+
+        /// The body past the real ones, where a batch's empty lanes point.
+        #[inline(always)]
+        fn nowhere(&self) -> u32 {
+            self.bodies.len() as u32
+        }
+
+        /// Contact `c`'s row made, as `prepare` made it before the fill
+        /// was a stage, into lane `l` of its batch and points. `row` zeroes
+        /// what it reads of the contact for the sums to come, so it's
+        /// given a copy: the contact is `finish`'s, which writes what
+        /// `row` would have, the closing speeds included.
+        #[inline(always)]
+        fn enter(&self, it: &mut Item<'_, N>, l: usize, c: &Constraint) {
+            let Begun { share, soft, .. } = self.begun;
+            let mut c = *c;
+            let mut ps = [PointRow::default(); MAX_POINTS];
+            let r = row(self.bodies, &mut c, &mut ps, share, soft, (self.how.closing, self.dt));
+            put(it.o, l, &r, &c, self.bodies);
+            let exact = !it.anchors.is_empty();
+            for (k, p) in ps[..r.count].iter().enumerate() {
+                let q = &mut it.pts[k];
+                q.rna.set(l, p.rna);
+                q.rnb.set(l, p.rnb);
+                q.ia.set(l, p.ia);
+                q.ib.set(l, p.ib);
+                (q.base.0[l], q.arm.0[l], q.mass.0[l], q.jn.0[l]) = (p.base, (p.rb - p.ra).dot(r.n), p.mass, p.jn);
+                (q.lever.0[l], q.speed.0[l]) = (p.lever, c.points[k].speed);
+                (q.on[l], q.solid[l]) = (true, p.mass != 0.0);
+                if exact {
+                    it.anchors[k][0].set(l, p.ra);
+                    it.anchors[k][1].set(l, p.rb);
+                }
             }
         }
 
@@ -1581,7 +1666,7 @@ pub mod lanes {
     /// `pass`, lane by lane: soft and pushing out when `PUSH`, else rigid;
     /// with friction when `FRICTION`; separations by `Anchors::Exact` when
     /// `EXACT`, else `Anchors::Linear`, or none read when `SEP` is `LOAD`.
-    /// `pts` are the batch's own; `anchors` every batch's.
+    /// `pts` are the batch's own, and `anchors` their anchors.
     #[inline(always)]
     fn pass<const N: usize, const PUSH: bool, const FRICTION: bool, const EXACT: bool, const SEP: u8, B: Bodies + ?Sized>(
         o: &mut Batch<N>,
@@ -1599,7 +1684,6 @@ pub mod lanes {
         let (n, one) = (o.n, F::splat(1.0));
         let (mut total, mut twisting) = (F::ZERO, F::ZERO);
         for k in 0..o.points {
-            let i = o.start + k;
             let p = &mut pts[k];
             if !any(&p.solid) {
                 continue;
@@ -1608,7 +1692,7 @@ pub mod lanes {
                 (p.bias, one, F::ZERO)
             } else {
                 let sep = if EXACT {
-                    let [ra, rb] = anchors[i];
+                    let [ra, rb] = anchors[k];
                     p.base + (dmoved + rotate(qb, rb) - rotate(qa, ra)).dot(n)
                 } else {
                     p.base + dmoved.dot(n) + p.arm + theta_b.dot(p.rnb) - theta_a.dot(p.rna)
