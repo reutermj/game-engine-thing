@@ -658,6 +658,13 @@ fn colored_passes_relax_the_edges_color_by_color() {
                 let lanes = &seats[(at + j) * 4..(at + j + 1) * 4];
                 item.extend(lanes.iter().filter(|e| **e != engine_ecs::shape::EMPTY).map(|e| edges[*e as usize]));
             }
+            // A block takes a while, as a real fill's does, so a stage let
+            // start before the fill is done overlaps it, and shows: without
+            // it the fill was over before any thread reached the next.
+            let t = std::time::Instant::now();
+            while t.elapsed() < std::time::Duration::from_micros(20) {
+                std::hint::spin_loop();
+            }
         }
     };
     let relax = move |x: &mut States<'_, f32>, (a, b): (u32, u32), k: f32| {
