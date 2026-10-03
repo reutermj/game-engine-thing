@@ -261,3 +261,59 @@ rust_binary(
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     deps = QUALITY_DEPS,
 )
+
+# SPIKE (docs/architecture/dispatch-spike.md, get-znt.30): the mod's
+# passes handed out across threads by a general scheduler's protocols
+# (dispatch.rs: a stage counter as run_across's, a task graph, the graph
+# with affine blocks, work stealing, parking) against run_across, bit for
+# bit the solve on one thread. Not engine code; kept so the numbers can be
+# taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:dispatch_spike
+DISPATCH_SRCS = [
+    "dispatch.rs",
+    "dispatch_2d.rs",
+    "ecs.rs",
+    "scene.rs",
+    "sim.rs",
+    "variants.rs",
+    "//engine/std/physics2d:narrow.rs",
+    "//engine/std/physics2d:solver.rs",
+    "//engine/std/physics2d:tests/arrays.rs",
+    "//engine/std/physics2d:tests/pool.rs",
+    "//engine/std/physics2d:tests/split_impulse.rs",
+]
+
+rust_binary(
+    name = "dispatch_spike",
+    srcs = DISPATCH_SRCS + ["dispatch_spike.rs"],
+    crate_root = "dispatch_spike.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    tags = ["manual"],
+    deps = QUALITY_DEPS,
+)
+
+# SPIKE (as dispatch_spike): every dispatcher is the one-thread solve bit
+# for bit at 1 to 8 threads, kept, spawned and late; and the check sees a
+# block run twice or a stage started early.
+rust_test(
+    name = "dispatch_test",
+    srcs = DISPATCH_SRCS + ["dispatch_test.rs"],
+    # The physics modules' own unit tests are the mod's.
+    args = [
+        "--skip=narrow::",
+        "--skip=solver::",
+        "--skip=split_impulse::",
+    ],
+    crate_root = "dispatch_test.rs",
+    data = [":scene_game"],
+    env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
+    deps = QUALITY_DEPS,
+)
+
+# The spike's dispatchers, for physics3d's half of it.
+exports_files(
+    ["dispatch.rs"],
+    visibility = ["//engine/std/physics3d:__pkg__"],
+)

@@ -206,3 +206,43 @@ rust_binary(
         "//engine/loader",
     ],
 )
+
+# SPIKE (docs/architecture/dispatch-spike.md, get-znt.30): the colored
+# passes handed out across threads by the dispatch spike's protocols
+# (//engine/std/physics2d/compare:dispatch.rs), on inputs gathered from
+# pile3d's world, bit for bit the solve on one thread. Not engine code;
+# kept so the numbers can be taken again.
+#
+#   taskset -c 0-7 ./bazel run --config=bench //engine/std/physics3d:dispatch_spike3d
+DISPATCH_SRCS = EXACT_SRCS[:3] + [
+    "tests/dispatch_3d.rs",
+    "//engine/std/physics2d/compare:dispatch.rs",
+    "//engine/std/physics2d:tests/pool.rs",
+]
+
+rust_binary(
+    name = "dispatch_spike3d",
+    srcs = DISPATCH_SRCS + ["tests/dispatch_spike3d.rs"],
+    crate_root = "tests/dispatch_spike3d.rs",
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"},
+    tags = ["manual"],
+    deps = EXACT_DEPS,
+)
+
+# SPIKE (as dispatch_spike3d): every protocol is the one-thread solve bit
+# for bit at 1 to 8 threads, and the check sees a block run twice.
+rust_test(
+    name = "dispatch_test3d",
+    srcs = DISPATCH_SRCS + ["tests/dispatch_test3d.rs"],
+    # The modules' own unit tests are core_test's.
+    args = [
+        "--skip=narrow::",
+        "--skip=solver::",
+        "--skip=gjk::",
+    ],
+    crate_root = "tests/dispatch_test3d.rs",
+    data = [":pile3d_game"],
+    env = {"PILE3D": "$(rlocationpath :pile3d_game)"} | POISON_ENV,
+    deps = EXACT_DEPS,
+)

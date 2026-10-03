@@ -283,8 +283,12 @@ exports_files(
     visibility = ["//engine/std/physics2d/compare:__pkg__"],
 )
 
-# The benchmarks' kept threads.
+# The benchmarks' kept threads (physics3d's for the dispatch spike,
+# docs/architecture/dispatch-spike.md).
 exports_files(
     ["tests/pool.rs"],
-    visibility = ["//engine/std/physics2d/compare:__pkg__"],
+    visibility = [
+        "//engine/std/physics2d/compare:__pkg__",
+        "//engine/std/physics3d:__pkg__",
+    ],
 )

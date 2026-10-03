@@ -35,7 +35,12 @@ look slower than 2.
   between jobs (spinning, which costs the cores it spins on) or the
   machine runs the `performance` governor, parallel physics would get
   about half the speedup the bench shows. Worth measuring when the
-  scheduler's workers exist (get-znt.5).
+  scheduler's workers exist (get-znt.5). Measured since against a
+  frame's idle, not yet in a frame loop (the dispatch spike, 2026-10-03,
+  [dispatch-spike.md](../architecture/dispatch-spike.md)): with 16 ms of
+  sleep before each solve, the 2D settled pile's passes at 8 kept threads
+  took 1163 µs against 650 warm (+79%), pinned or not, and on one thread
+  5591 against 3586, since the calling thread slept too.
 
 Check the governor with
 `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`, and a core's
