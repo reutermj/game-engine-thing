@@ -12,10 +12,11 @@
 //!
 //! The sources copy the moving bodies and the contacts out of the world,
 //! `solver` solves them (`solver::solve`), and the sinks write the results
-//! back. The solve is one contact at a time in pair order, whose result
-//! depends on that order, so it is one system and no shape: 2D's colors
-//! and lanes, which a shape can split, would change 3D's results, and are
-//! a physics change of their own (get-emj.52, get-emj.75).
+//! back. The solve's result is the sweep's one contact at a time in pair
+//! order: in lanes by level since get-emj.52, which is that sweep bit for
+//! bit, so it is one system and no shape. Colors, which a shape can
+//! split, would change 3D's results, a physics change of its own
+//! (get-emj.90, get-emj.75).
 //!
 //! The flows are this mod's alone, not its interface's: what they carry is
 //! the solver's own layout, and a mod that saw them would be rebuilt for
@@ -133,7 +134,8 @@ impl Physics3d {
         self.gathered(start);
     }
 
-    /// The solve, whole, one contact at a time (`solver::solve`).
+    /// The solve, whole (`solver::solve`): in lanes by level, the sweep in
+    /// pair order bit for bit.
     pub(crate) fn solver(&mut self, _: &mut (), _: &mut Cx, (dt, s): (Dt, See<Settings>), (mut b, mut c): (Pass<Bodies>, Pass<Contacts>)) {
         let start = Instant::now();
         let how = s.how.expect("made by `solve`");

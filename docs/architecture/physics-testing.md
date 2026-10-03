@@ -379,10 +379,16 @@ worse: that is the baseline's job, and why a band and not a pin is the
 baseline (above). After merging physics branches, write it on the merged
 tree, as the baselines are.
 
-**For a kernel in lanes** (get-emj.52): it must be `solver::solve` bit for
-bit, so its test solves `kernel_inputs` both ways at each tuning and
-compares, no pin needed; then the mod, solving with it, still matches its
-pinned lines. Colouring (get-emj.90) moves the mod's lines and not the
+**For a kernel in lanes** (get-emj.52, built 2026-10-03): it must be the
+solve one contact at a time bit for bit, so
+`the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit` solves
+`kernel_inputs`, and the same with a kinematic body, a contact neither end
+of which moves and warm twist on ends that can't turn (`odd_inputs`), at
+widths 1, 4 and 8 and at `lanes=0` (`solver::one_at_a_time`), at each
+tuning and `int=exact`, and compares every body and contact after every
+step as `Debug` prints them, no pin needed; the kernel's pinned lines,
+solved at the default's four lanes, and the mod's, held as they were
+(physics.md, "The solver in lanes", for what it caught). Colouring (get-emj.90) moves the mod's lines and not the
 kernel's; its equivalence is the coloured solve against `solver::solve`
 over the contacts in the colours' order, as 2D's
 `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`.

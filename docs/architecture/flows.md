@@ -638,11 +638,11 @@ scatter_contacts Take<Contacts> -> world
 scatter_bodies   Take<Bodies> -> world
 ```
 
-- **No shape.** 3D's solver is one contact at a time in pair order
-  (`solver::solve`, unchanged), whose result is that order's, so
-  `solver` runs it whole. Coloring it would move results: a physics
-  change, re-baselined, with 3D's lanes and threads (get-emj.52,
-  get-emj.75).
+- **No shape.** 3D's solve is the sweep one contact at a time in pair
+  order (`solver::solve`; in lanes by level since get-emj.52, which is
+  that sweep bit for bit), whose result is that order's, so `solver`
+  runs it whole. Coloring it would move results: a physics change,
+  re-baselined (get-emj.90), then threads (get-emj.75).
 - **No sleeping, sides or events** in 3D, so `scatter_bodies` writes
   bodies alone, and the contacts are taken by `scatter_contacts`.
 - **No `Workers`** to remove: 3D never had them.

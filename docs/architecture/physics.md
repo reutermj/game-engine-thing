@@ -2324,12 +2324,13 @@ scatter_bodies   Take<Bodies> -> world                   velocities, positions, 
 - **`solve` comes first**, as in 2D, so a pre-solve hook ordered
   `.before("physics3d::solve")` runs before anything is gathered (3D has
   no hooks yet; the name keeps the rule one rule).
-- **`solver` is the solve one contact at a time in pair order**, unchanged,
-  and no shape: its result depends on that order, so a colored `Passes`
-  run would be a physics change, with a re-baseline, and belongs with
-  3D's lanes and threads (get-emj.52, get-emj.75). Bit for bit the one
-  system it replaced: every baseline value printed as it was, and the
-  reload replay's every frame, every float, the same.
+- **`solver`'s result is the solve one contact at a time in pair order**,
+  and it is no shape: its result depends on that order, so a colored
+  `Passes` run would be a physics change, with a re-baseline (get-emj.90,
+  get-emj.75). Bit for bit the one system it replaced: every baseline
+  value printed as it was, and the reload replay's every frame, every
+  float, the same. Since get-emj.52 it runs in lanes by level, which is
+  that order to the bit ([The solver in lanes](#the-solver-in-lanes)).
 - **The sources read, the sinks write**, as 2D's: the gathers' queries are
   read-only, with no apply node, and the scatters walk the same tables in
   the same order (asserted); `scatter_bodies` is last, so its apply node
@@ -2416,6 +2417,149 @@ the step's systems.
 [^static3d]: 2026-09-26: `TUNING` and `TIMINGS` were static `Mutex`es in
     the experimental step (plain systems on the ECS harness, "one
     simulation runs at a time"). Removed when it became a mod.
+
+### The solver in lanes
+
+**Status: built** (2026-10-03, get-emj.52). The passes solve four
+contacts at a time, and the result is the solve one contact at a time
+in pair order, to the bit: the same values in every baseline and in the
+exact fingerprint. It is the step before colouring the solve on
+`Passes` (get-emj.90), and keeps "is the kernel right" apart from "the
+order changed".
+
+- **Grouped by level**, as 2D's lanes first were ([The solver's
+  speed](#the-solvers-speed)): a contact's level is one past the latest
+  level of the contacts before it in pair order that share a body it
+  moves, so solving the levels in turn, each contact sees its moving
+  bodies as the sweep would have left them, and no two contacts of a
+  level share one. The rule is dimension-free over `(a, b, moves)`, so it
+  moved to `physics_common::levels`, which 2D's `Wide::Levels` now calls
+  too. It went in `physics_common`, not beside `Coloring::greedy` in
+  `engine_ecs::shape`: it is there for a physics result (the sweep's),
+  not for a schedule, it never overflows or packs differently, and a
+  change to `engine_ecs` is a change every mod links. It writes a
+  `Coloring`, so `Coloring::pack` lays the levels out as it lays out
+  colors. A contact neither end of which moves (`UNSOLVED`) still sums
+  its impulses as the sweep does, so 3D puts it in level 0.
+- **Box2D's wide layout** (`b2ContactConstraintSIMD`, as 2D's lanes have
+  it), on `physics_common::lanes::F`: a batch of `N` contacts field by
+  field (normal, tangents, the centroid's crossed arms through each
+  inverse inertia, the 2x2 tangent mass, twist), its points in an array
+  apart, as many as its lanes' most; body velocities gathered into lanes
+  and scattered back; inverse masses kept by each contact; a batch's
+  empty lanes pointed at one body past the real ones.
+- **Each lane is the scalar code, operation for operation.** `V<N>` is
+  `Vec3` lane by lane, spelled as `Vec3` is (Rust neither reassociates
+  nor contracts `f32`); the clamp to the friction disc takes the square
+  root in every lane and keeps it where the scalar code branches; `max`
+  is `f32::max` itself per lane, not `F::max`'s select, which may differ
+  on `max(-0.0, 0.0)`. Where the scalar code skips (a point a contact
+  doesn't have or one with no mass, no tangent or twist mass, a point
+  that doesn't bounce), the lane computes and a select leaves the result
+  out: a zero impulse pushed instead would turn a velocity's `-0.0` into
+  `0.0`, which the sweep wouldn't.
+- **Every `Tuning` variant is in lanes**, none left scalar: `int` (the
+  bodies' stage, which both share), `inertia=substep` (the rows'
+  angular terms refreshed per lane through `Mat3::apply` itself),
+  `anchors` (both separations, a const parameter), `fpush`, `carry`,
+  `closing` (the rows, made by the scalar code's `row` for both), and
+  `sub`, `relax`, `stiff`, `static`.
+- **What stays one at a time** (`solver::one_at_a_time`), the same result
+  either way: a step whose batches would be under half full (a stack, a
+  chain: a level a contact, where a batch costs more than the contacts
+  it holds), and a step where a body that doesn't move has a `-0.0`, an
+  infinity or a NaN in its velocity or gravity (the lanes write such a
+  body back as each read it, which is the sweep's value only when no
+  zero impulse can change it; 2D's `shareable` is the same rule for its
+  threads). Neither happens in the scenes or the tests' inputs but the
+  stack's first.
+- **Four lanes, a variant for the rest**: `Tuning`'s `lanes=4` (the
+  default), `lanes=8`, `lanes=1` (the layout and the level order without
+  lanes) and `lanes=0` (the loop in pair order, the reference). Eight
+  were slower than four on the dense pile below (14.6 ms against 12.0):
+  a 3D batch's two ends are twelve registers of velocities where 2D's
+  are six, and the four-lane kernel already spills (about 5000 `movaps`
+  in `lanes::solve::<4>` against 1400 `mulps`).
+- **Exact-preserving savings**, each the same bits: a contact's row made
+  in pair order and written straight into its lane, no rows kept to
+  transpose (the start of a step 3.8 → 1.6 ms on the pile below); the
+  first relaxing pass stores each point's bias and the second reads it,
+  since bodies don't move between them (2D's too); a pass gathers only
+  what its separation reads (`theta` not under `Anchors::Exact`).
+
+**The speed.** `//engine/std/physics3d:step_bench` (`--config=bench`,
+`taskset -c 0-7`), one frozen build, `TUNE=lanes=0` and the default
+alternated, two rounds of five runs each; the mean of the two rounds'
+medians, µs a step:
+
+| scene | solver, one at a time | solver, lanes | | whole step, one at a time | whole step, lanes |
+|---|---|---|---|---|---|
+| boxes 10 000, falling (steps 61-90) | 24 165 | 18 331 | −24% | 30 943 | 25 081 |
+| boxes 10 000, settled (901-930) | 24 569 | 18 513 | −25% | 28 696 | 22 201 |
+| planks 1000, settled (601-630) | 2662 | 2503 | −6% | 3164 | 3013 |
+| spheres 10 000, settled (901-930) | 19 339 | 15 795 | −18% | 22 584 | 19 205 |
+| boxes 10 000 locked, settled (901-930) | 23 439 | 17 101 | −27% | 28 574 | 22 182 |
+| stack 20 (301-330) | 25 | 26 | +1 µs | 35.5 | 36 |
+
+The stack is solved one at a time; its extra microsecond is finding
+that out (the levels and the layout, before falling back). By stage, on
+a synthetic dense pile (10 000 boxes in columns with side contacts,
+13 200 contacts of four points; a throwaway harness, never
+committed[^lanes3d-harness]), µs a step: one at a time 18 800; in four
+lanes 12 000, of which the start 1600, warm starts 1250, the pushing
+passes 2760, moving bodies 1180, the relaxing passes 5100. The passes
+alone are about 1.7 times faster than one at a time, where 2D's were
+twice: 3D's scalar code was already partly vectorized by LLVM, three
+components a vector op, which 2D's two-component one wasn't, and 3D's
+kernel spills. Moving bodies is the same code both ways, and the start
+is mostly building each row.
+
+**The tests.** `exact_test`'s
+`the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit` solves the
+kernel's inputs, and the same with a kinematic body, a contact neither
+end of which moves, and warm twist on ends that can't turn
+(`odd_inputs`), at 1, 4 and 8 lanes against `lanes=0`, under the twelve
+pinned tunings and `int=exact`, three steps each, every body and
+contact compared as `Debug` prints them (so `-0.0` isn't `0.0`), the
+fill rule off so the lanes are what's compared. The fingerprint's
+kernel and mod lines are solved at the default's four lanes, and
+didn't move. Planted, each alone:
+
+| planted | equivalence | kernel lines | mod lines |
+|---|---|---|---|
+| a positive normal impulse one ulp larger (`lanes::pass`) | fails (1 lane) | fail | fail, from frame 21 |
+| each lane's point mask read from the next lane | fails (4 lanes) | fail | fail, from frame 21 |
+| a level one too low (`levels`: `next = level`), so two lanes share a body | fails (4 lanes; one lane is still the sweep) | fail | fail, from frame 34 |
+| twist solved where only friction is (the twist mask dropped) | fails, on `odd_inputs` only | hold | hold |
+| a contact neither end of which moves not put in level 0 | fails, on `odd_inputs` only (no level: it panics) | hold | hold |
+| the warm start's points pushed in every lane, padding's zeros included | **passes** | hold | hold |
+| `shareable` dropped (lanes for a body that doesn't move with a `-0.0`) | **passes** | hold | hold |
+
+The last two are the sign of a zero: a padding point's impulse is zero,
+and pushing it changes a velocity only where one is exactly `-0.0`,
+which neither the inputs nor the scenes reach; nor does a body that
+doesn't move with a `-0.0` velocity. The selects and the check are kept
+for the rule, not because a test sees it (get-emj.95).
+
+**What get-emj.90 builds on.** The kernels (`warm_start`, `pass`, `rub`,
+`restitute`, `refresh`) take a `Batch` and the bodies, and don't care
+how batches were grouped: coloring by `Coloring::greedy` instead of
+`levels`, and packing by the same `Coloring::pack`, gives colored
+batches for the same kernels, and a color's batches share no moving
+body, as a level's don't. The stages, in order, are gravity with the
+turn cap (bodies), warm start, the pushing pass, moving bodies, the
+refresh (contacts, under `Inertia::Substep`), the relaxing passes (the
+first storing the bias, the rest reading it), the sums (contacts), then
+restitution once: 2D's `staged::Step` names neither the refresh nor the
+sums, so it stays 2D's until get-emj.90 decides. The equivalence it
+needs is 2D's: the colored lanes against `one_at_a_time` over the
+contacts in the colors' order.
+
+[^lanes3d-harness]: 2026-10-03: a binary compiling `solver.rs` by path
+    with timers between the lanes' stages, on a generated pile (25 × 25
+    columns 16 high, each box on the one below or the floor, a side
+    contact every third box), median of nine solves. Deleted before the
+    first commit that has the lanes; what it measured is above.
 
 ### The choices, measured
 
@@ -3732,8 +3876,9 @@ and the level schedule applies to it unchanged. Alone, rows reordered by
 level one at a time, it gained 1 to 2% (boxes of 10 000 turning 25 072 →
 24 793 µs of solver, planks 32 514 → 31 841, bit for bit), so it wasn't
 landed: the gain is the lanes, and 3D's kernel is its own (four points,
-friction on a disc at the centroid, twist, the `Tuning` variants), a
-port, not a change (get-emj.52).
+friction on a disc at the centroid, twist, the `Tuning` variants). Built
+since (get-emj.52, [The solver in lanes](#the-solver-in-lanes)), bit for
+bit, by the same levels, now `physics_common::levels`.
 
 ### Why colors let the pyramid fall
 

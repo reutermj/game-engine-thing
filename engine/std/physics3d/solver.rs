@@ -24,6 +24,12 @@
 //! in Box3D. The tangent impulse is kept as a world vector, so warm
 //! starting needs no tangent basis that stays put from step to step: the
 //! last step's is projected onto this step's plane.
+//!
+//! The passes run four contacts at a time (`lanes`), grouped by level of
+//! the sweep in pair order, so the result is the loop one contact at a
+//! time in pair order (`one_at_a_time`) bit for bit, under every `Tuning`;
+//! a step whose levels would leave the batches under half full runs that
+//! loop instead. Physics.md, "The solver in lanes".
 
 pub use physics_common::{BOUNCE_THRESHOLD, DAMPING_RATIO, MAX_PUSH, Softness};
 
