@@ -126,13 +126,16 @@ one would have to ship those files with it.
     `b2GatherBodies`, `b2ScatterBodies`), inverse masses kept by each
     contact, and restitution skipping a batch with nothing to bounce
     (`b2ApplyRestitutionTask`). Read in v3.1.1's `contact_solver.c`. The
-    grouping is not Box2D's graph coloring (kept as a variant,
-    `Wide::Colored`, with its rule that a contact on a static body isn't in
-    color 0) but the levels of the sweep in pair order, which keep the
-    sweep's result bit for bit: level scheduling, from the numerical
-    literature on sparse triangular solves (E. Anderson and Y. Saad,
-    "Solving sparse triangular linear systems on parallel computers",
-    1989), not from any engine here (physics.md, "The solver's speed").
+    lane array, Box2D's `b2FloatW` and its operations (`b2AddW`,
+    `b2MaxW` and the rest) written as plain arrays for LLVM to vectorize,
+    is `physics_common::lanes::F` since get-emj.86, for 3D's lanes to
+    share. The grouping was first the levels of the sweep in pair order,
+    which keep the sweep's result bit for bit: level scheduling, from the
+    numerical literature on sparse triangular solves (E. Anderson and
+    Y. Saad, "Solving sparse triangular linear systems on parallel
+    computers", 1989), not from any engine here (physics.md, "The
+    solver's speed"), a variant now (`Wide::Levels`); the default is
+    Box2D's graph coloring since get-emj.61 (below).
   - the 3D step (`//engine/std/physics3d`, experimental) descends from the
     2D one, and so inherits the same ideas: the soft step, speculative
     contacts, and mixing friction and restitution per contact
@@ -172,7 +175,10 @@ one would have to ship those files with it.
   get-znt.32): the coloring rule as `shape::Coloring::greedy`, and the
   staged run's program as `shape::Passes`, run on one thread until the
   scheduler runs its stages' blocks across threads (get-znt.34). Ideas
-  only; no code is copied.
+  only; no code is copied. Since get-emj.86 the arrays' solve colors by
+  the same `Coloring::greedy` and packs by `Coloring::pack`
+  (physics2d's `lanes::group`), so the mod and the arrays share one
+  coloring.
 - **A kept index, in a spike** (docs/architecture/working-sets.md,
   2026-10-02): the awake set's `localIndex`, appended at creation and
   swap-removed with the moved body's index fixed up (`b2DestroyBody`,

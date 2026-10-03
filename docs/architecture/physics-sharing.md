@@ -1,8 +1,9 @@
 # Physics in 2D and 3D: what to share
 
-**Status: accepted; phase 1 built** (proposed 2026-09-29, its beads
+**Status: accepted; phases 1 and 2 built** (proposed 2026-09-29, its beads
 get-emj.77 to get-emj.87; phase 1, `physics_common`, built 2026-10-02 with
-two of its items left, see "Phase 1"). Before it, `//engine/std/physics2d`
+two of its items left, see "Phase 1"; phase 2, as flows rescoped it, built
+2026-10-02, see "Phase 2"). Before it, `//engine/std/physics2d`
 (2D) and `//engine/std/physics3d` (3D) shared no physics code: each had its
 own math, narrowphase, solver, settings and contact handling, over one ECS
 whose spatial storage (`const D`) and live relations (`Live<R>`) are
@@ -62,7 +63,7 @@ with this doc.
 | friction mixing | the smaller of the two | `sqrt(a b)` (Box2D's and Box3D's; Rapier averages) | **no, and not decided**; restitution the larger in both; neither in `physics_common` until get-emj.81 decides | get-emj.81 |
 | warm-start carry | turning points: normal from the last substep, tangent averaged (`Carry::Normal`, decided get-emj.61); a contact whose ends don't turn: the mean | the mean of both (`Carry::Mean`); `Last` a variant; B never tried | **no** | get-emj.82 (new) |
 | warm-start matching | by feature id (`ContactPoints::last`, in the interface) | by feature id (`lib.rs`, `warm`); nearest point within 1 cm a variant | same, not shared: 2D's is a method of an interface component, which can't use `physics_common` | get-emj.91 |
-| order, lanes, threads | turning: Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy` and placing since flows, `Passes` running the program), four lanes, across the host's threads bit for bit (`solve_across`); by level a variant; locked: one contact at a time in pair order | one contact at a time in pair order | 2D only | get-emj.52, get-emj.75, get-emj.74 |
+| order, lanes, threads | turning: Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy` and `pack`, in the mod and the arrays alike since get-emj.86; `Passes` running the program), four lanes of `physics_common::lanes::F`, across the host's threads bit for bit (`solve_across`, the arrays' reference); by level a variant; locked: one contact at a time in pair order | one contact at a time in pair order | 2D only; the lane array and the coloring shared, the kernels not | get-emj.52, get-emj.75, get-emj.74 |
 | the solve's systems (since 2026-10-02) | a pipeline of nine systems over five [flows](flows.md) (`pipeline.rs`), the colored passes on `Passes` | a pipeline of six systems over three flows (`pipeline.rs`), the solve whole in one system, no shape | same shape: settings, gathers, solve, scatters; 3D's solve isn't split, its pair order being its result | get-znt.33, get-znt.35 |
 | block solver | a variant (2x2 over a contact's two points) | none | 2D only, a variant | – |
 | **sleeping, islands** | islands by union-find over pressed contacts; `Asleep`, `Slept`, `Still`, `Resting` in the world; every wake a game can cause | none | 2D only | get-emj.77 (new) |
@@ -426,6 +427,39 @@ colors and runs the program), and the staged run is the scheduler's
 What is left for `physics_common` is `F<N>`, the lane array, and whatever
 lanes helpers 3D's kernel shares with 2D's; 2D's `lanes::group` should
 then give way to `shape::Coloring` if that is bit for bit.
+
+**Built 2026-10-02 (get-emj.86).** What was left in 2D's `lanes`
+(`solver.rs`), piece by piece, by who uses it and whether a 3D lanes
+kernel would take it unchanged:
+
+| piece | used by | 3D unchanged? | now |
+|---|---|---|---|
+| `F<N>` and its operations | every kernel (`warm_start`, `pass`, `restitute`), on every path | yes: lanes of `f32`, no dimension | `physics_common::lanes::F`, with the comment on why its loops vectorize and a test that each lane is the scalar operation to the bit |
+| coloring (`group`), colored | `lanes::solve` (the arrays' `solve_with`), `solve_across`, `order` | yes, and already generic | `group` calls `Coloring::greedy`, the call the mod's `prepare` makes; its own copy of the rule removed |
+| placing (`place`, the block sizes in `head`) | `lanes::solve`, `solve_across` | yes, and already generic | removed: `Coloring::pack` |
+| grouping by level (`group`, `Wide::Levels`) | the variants (`rot/levels=<n>`), `solver_bench`, its equivalence test, `order`'s test | no generic counterpart | stays 2D's, written into a `Coloring` so `pack` lays out both |
+| `order` | the colored order's equivalence test (`rot/order=4`), `solver::tests` | – | stays, over `group` |
+| `State`, `Vel`, `Pt`, `Batch`, `Lane`, `Bodies`, `Atom`, `Shared`, gathers and scatters, `Head`, `start`, `put`, `enter`, `finish`, the kernels | the mod (`staged`) and the arrays | no: fields of `Vec2` and `Rot`, two points, 2D's friction per point | stay; 3D writes its own, after this pattern |
+| `staged`: `Step`, `program`, `Moves`, `Staged`, `Kernels` | the mod's pipeline (`pipeline.rs`) | `Step` and `program` perhaps: the soft step's stages carry no dimension, but 3D's step also caps the turn rate in gravity's stage, refreshes its rows after the move under `Inertia::Substep` (a stage over contacts that `Step` doesn't name) and sums impulses after the relaxing passes | stay until 3D's kernel shows whether its stages fit (noted on get-emj.52) |
+| `solve`, `setup`, `run` | the arrays (`solve_with`, so `:tax`, the comparison's `ours`, `solver_bench`), the reference the mod is held to (`the_mod_is_the_arrays_*`) | no | stay |
+| `solve_across`, `run_across`, `shareable`, and the stage loop's `Work`, `Part`, `Block`, `Count`, `Failing`, `first_block`, `blocks_of` | `solver::solve_across` only: the variants' `rot/threads=<n>` (with `variants.rs`' `Gang`), `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`, `solver_bench`; not the mod | the stage loop is dimension-free (Box2D's `b2SolverStage`), but superseded: the scheduler runs `Passes` across threads (get-znt.28), so 3D never needs it | stay as the reference across threads until the scheduler's run of the mod's `Passes` has its own equivalence test; then removed (get-emj.93) |
+
+So 3D's lanes kernel (get-emj.52) builds on `F<N>` and, once on
+`Passes` (get-emj.90), on `Coloring` and `pack`; nothing else in 2D's
+`lanes` is both dimension-free and still needed. Moved without moving a
+value: `F<N>` is the same code in another crate (Rust neither
+reassociates nor contracts `f32`), and the coloring is the same integer
+rule, now one copy. Both baselines' `--all` and `--long --all` output
+byte-identical to `c82710d`; `:tax`, the mod-against-arrays tests, the
+colored-order, by-level and across-threads equivalence tests and the long
+suites pass; physics3d's exact fingerprint as pinned. Two planted changes
+showed the coloring is still checked now that the arrays and the mod
+share it: coloring without Box2D's color-0 rule fails
+`contacts_are_colored_as_box2d_colors_them` (which the equivalence tests
+can't see) and the mod-against-arrays tests; levels by one end alone fail
+the by-level equivalence test. The mod's implementation now depends on
+`//engine/ecs` directly (for `Coloring`), which its interface doesn't:
+`bazel run //engine/std/physics2d` reloads it under a running `//game`.
 
 ### Phase 3: the bookkeeping 3D lacks (spike get-emj.87)
 
