@@ -20,7 +20,6 @@ use engine_ecs::par::{carve, even};
 use engine_ecs::{Executor, Scoped, Workers};
 
 use super::arrays::{Cached, DT};
-use super::pool::Pool;
 use super::solver::{Constraint, SolverBody};
 use super::*;
 use engine_ecs::World;
@@ -49,7 +48,10 @@ impl Executor for Inline {
 
 fn executor(kind: Kind, threads: usize) -> Arc<dyn Executor> {
     match kind {
-        Kind::Pool => Arc::new(Pool::new(threads)),
+        Kind::Pool => {
+            let settings = engine_threads::Settings { threads: Some(threads), ..Default::default() };
+            Arc::new(engine_threads::Pool::new(&engine_threads::OneCcd, &settings))
+        }
         Kind::Scoped => Arc::new(Scoped(threads)),
         Kind::Inline => Arc::new(Inline),
     }

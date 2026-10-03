@@ -44,12 +44,11 @@
 //! the colors' order (`order`), which is what a parallel solve over the
 //! same colors has to be too. Grouped by level of the pair-order sweep
 //! (`Wide::Levels`) it is instead the loop in pair order bit for bit, a
-//! variant. Why colors: physics.md, "The solver's speed". Colored, the
-//! passes can be shared between the host's threads a color at a time
-//! (`solve_across`), which is the solve on one thread bit for bit:
-//! physics.md, "Solving across threads". The mod runs the colored solve
-//! taken apart into its pipeline's stages (`lanes::staged`), its passes
-//! a shape the scheduler runs (physics.md, "The step").
+//! variant. Why colors: physics.md, "The solver's speed". The mod runs the
+//! colored solve taken apart into its pipeline's stages (`lanes::staged`),
+//! its passes a shape the scheduler runs across its threads, the solve on
+//! one thread bit for bit (physics.md, "The step", "Solving across
+//! threads").
 
 pub use physics_common::{BOUNCE_THRESHOLD, Closing, DAMPING_RATIO, MAX_PUSH, Softness};
 use physics2d::{Rot, Vec2};
@@ -476,47 +475,6 @@ pub fn solve_with(
             _ => lanes::solve::<1>(params, (bodies, spinning), contacts, points, dt),
         }
     }
-}
-
-/// Threads a solve can share its passes between: the host's executor, which
-/// the mod hands over from its `Workers` (physics.md, "Solving across
-/// threads"). A mod can't own threads (physics.md, "Parallelism"), so this
-/// is only a way to reach the host's.
-pub trait Gang: Sync {
-    /// How many threads run tasks, the caller's included.
-    fn threads(&self) -> usize;
-    /// Runs `f(0)` to `f(tasks - 1)`, each once, on any threads, returning
-    /// once all have. They needn't run at once: a solve waits only on
-    /// work a thread has already taken.
-    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync));
-}
-
-/// `solve_with`, its passes shared between `gang`'s threads where the step
-/// is graph-colored in lanes (the default where something turns) and there
-/// is more than one: bit for bit `solve_with` at any thread count
-/// (`lanes::solve_across`), so it changes the time a step takes and no
-/// value. Everywhere else, `solve_with`.
-#[allow(dead_code)]
-pub fn solve_across(
-    params: &Params,
-    (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
-    contacts: &mut [Constraint],
-    points: &mut [Points],
-    dt: f32,
-    gang: &dyn Gang,
-) {
-    let in_lanes =
-        !(points.is_empty() && spinning.is_empty()) && params.wide != Wide::Off && params.separation == Separation::Turned && !params.block;
-    if gang.threads() > 1 && in_lanes && lanes::shareable(bodies, spinning) {
-        let parts = ((&mut *bodies, &mut *spinning), &mut *contacts, &mut *points);
-        match params.wide {
-            Wide::Colored(8) => return lanes::solve_across::<8>(params, parts.0, parts.1, parts.2, dt, gang),
-            Wide::Colored(4) => return lanes::solve_across::<4>(params, parts.0, parts.1, parts.2, dt, gang),
-            Wide::Colored(_) => return lanes::solve_across::<1>(params, parts.0, parts.1, parts.2, dt, gang),
-            _ => (),
-        }
-    }
-    solve_with(params, (bodies, spinning), contacts, points, dt);
 }
 
 #[inline(always)]
@@ -985,8 +943,7 @@ mod lanes {
     use engine_ecs::shape::{Colored, Coloring, OVERFLOW, UNSOLVED};
     use physics_common::lanes::F;
     use std::ops::Range;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A body as the passes read and write it, Box2D's `b2BodyState`: what
     /// a pass reads of a body in one 32-byte line, its masses kept by each
@@ -1041,9 +998,9 @@ mod lanes {
 
     /// A `State` threads share, field by field an `f32`'s bits, loaded and
     /// stored relaxed: on x86 a plain `mov` each, and no unsafe code. Which
-    /// thread writes which body is the colors' business (`solve_across`):
-    /// within a stage no two threads write one field of one body, and a
-    /// stage's writes reach the next through its count (`Count`).
+    /// thread writes which body is the colors' business: within a stage no
+    /// two threads write one field of one body, and a stage's writes reach
+    /// the next through the stage's completion (`engine_ecs`'s dispatch).
     #[repr(C, align(32))]
     pub struct Atom([AtomicU32; 7]);
 
@@ -1228,13 +1185,10 @@ mod lanes {
         contact: u32,
         at: u32,
         count: u8,
-        /// Its closing speed: the contact's, which `solve_across` writes
-        /// back after its first stage finds it (`setup` writes it at once).
-        speed: f32,
     }
 
     impl Lane {
-        const NONE: Lane = Lane { contact: NONE, at: NONE, count: 0, speed: 0.0 };
+        const NONE: Lane = Lane { contact: NONE, at: NONE, count: 0 };
     }
 
     const NONE: u32 = u32::MAX;
@@ -1515,7 +1469,7 @@ mod lanes {
                 unsolved(params, c, (&pts, at, n_points), kept);
                 continue;
             };
-            lanes[batch][l] = Lane { contact: i as u32, at, count: n_points as u8, speed };
+            lanes[batch][l] = Lane { contact: i as u32, at, count: n_points as u8 };
             put(&mut out[batch], l, c, bodies, hd, (&pts, at, n_points));
         }
     }
@@ -1662,126 +1616,6 @@ mod lanes {
         }
     }
 
-    /// `solve`, its work shared between `gang`'s threads a stage at a time:
-    /// a stage is a group's batches, or the bodies', and every thread takes
-    /// blocks of it until none is left, then waits for the rest to be done
-    /// before the next (`run_across`). No two batches of a group share a
-    /// body that moves, so a stage's blocks can go in any order on any
-    /// thread and the stage's result is the same: this is `solve` bit for
-    /// bit, at any thread count. Coloring the contacts and placing them in
-    /// their lanes stay on the calling thread (Box2D colors as contacts
-    /// begin); filling the lanes is the first stage.
-    ///
-    /// Not where a body that doesn't move carries a negative zero
-    /// (`shareable`), or where an impulse is infinite: batches of one group
-    /// write such a body's velocity back unchanged, which is the same
-    /// value whoever writes last, but for `-0.0 - -0.0`, which is `0.0`,
-    /// and `inf * 0.0`, which is NaN.
-    pub fn solve_across<const N: usize>(
-        params: &Params,
-        (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
-        contacts: &mut [Constraint],
-        points: &mut [Points],
-        dt: f32,
-        gang: &dyn Gang,
-    ) {
-        let (hd, layout, place) = head::<N>(params, (bodies, spinning), contacts, dt);
-        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; layout.items()];
-        // `setup`'s loop, but for starting the contacts that are solved,
-        // which is the first stage's: what's left is where each goes, and
-        // which contact each point is, for writing them back.
-        let (mut kept, mut solved) = (Vec::new(), Vec::new());
-        let mut slot = vec![(NONE, 0u32); contacts.len()];
-        let mut owner = vec![NONE; points.len()];
-        for (i, c) in contacts.iter_mut().enumerate() {
-            if c.points > 0 {
-                owner[c.points as usize - 1] = i as u32;
-            }
-            let Some((batch, l)) = place[i] else {
-                let (jn, jt) = (c.jn, c.jt);
-                (c.jn, c.jt) = (0.0, 0.0);
-                let (pts, at, n_points, speed) = start(params, c, (jn, jt), bodies, &hd, points, dt);
-                c.speed = speed;
-                if at != NONE {
-                    solved.push(at as usize);
-                }
-                unsolved(params, c, (&pts, at, n_points), &mut kept);
-                continue;
-            };
-            lanes[batch as usize][l as usize].contact = i as u32;
-            slot[i] = (batch, l);
-        }
-        let gravity: Vec<Vec2> = bodies.iter().map(|b| b.gravity).collect();
-        let mut angle = vec![0.0f32; spinning.len()];
-        let shared = (&*bodies, &*spinning, &*contacts, &*points);
-        let (atoms, outs) = run_across::<N>(params, shared, (&hd, &layout, &gravity, dt), (&mut lanes, &mut angle), gang);
-
-        // What `clear` and `finish` write, split between the threads by
-        // what they write: each task its own run of contacts, points, bodies
-        // and spinning bodies, reading any batch, which nothing writes now.
-        let flat: Vec<&Batch<N>> = outs.iter().flatten().collect();
-        let tasks = gang.threads();
-        let mut work = Vec::with_capacity(tasks);
-        let (mut cs, mut ps, mut bs, mut ss) = (&mut *contacts, &mut *points, &mut *bodies, &mut *spinning);
-        for k in 0..tasks {
-            let cut = |n: usize| n * (k + 1) / tasks - n * k / tasks;
-            let at = |n: usize| n * k / tasks;
-            let (c, rest) = std::mem::take(&mut cs).split_at_mut(cut(slot.len()));
-            cs = rest;
-            let (p, rest) = std::mem::take(&mut ps).split_at_mut(cut(owner.len()));
-            ps = rest;
-            let (b, rest) = std::mem::take(&mut bs).split_at_mut(cut(atoms.len() - 1));
-            bs = rest;
-            let (s, rest) = std::mem::take(&mut ss).split_at_mut(cut(angle.len()));
-            ss = rest;
-            let from = (at(slot.len()), at(owner.len()), at(atoms.len() - 1), at(angle.len()));
-            work.push(Mutex::new((from, c, p, b, s)));
-        }
-        let (substeps, sh) = (params.substeps, Shared(&atoms));
-        gang.run(tasks, &|k| {
-            let mut part = work[k].try_lock().expect("a task's own");
-            let ((c0, p0, b0, s0), cs, ps, bs, ss) = &mut *part;
-            for (i, c) in (*c0..).zip(cs.iter_mut()) {
-                let (batch, l) = slot[i];
-                if batch != NONE {
-                    let lane = &lanes[batch as usize][l as usize];
-                    (c.jn, c.jt) = impulses(flat[batch as usize], l as usize, lane);
-                    c.speed = lane.speed;
-                }
-            }
-            for (p, to) in (*p0..).zip(ps.iter_mut()) {
-                to.solved = false;
-                for q in to.point.iter_mut() {
-                    (q.jn, q.jt) = (0.0, 0.0);
-                }
-                let Some(&(batch, l)) = slot.get(owner[p] as usize) else { continue };
-                if batch != NONE && lanes[batch as usize][l as usize].at as usize == p {
-                    to.solved = true;
-                    let lane = &lanes[batch as usize][l as usize];
-                    carried(params.carry, substeps, flat[batch as usize], l as usize, lane.count as usize, to);
-                }
-            }
-            for (i, b) in (*b0..).zip(bs.iter_mut()) {
-                let st = sh.load(i);
-                (b.v, b.moved) = (st.v, st.moved);
-            }
-            for (j, sp) in (*s0..).zip(ss.iter_mut()) {
-                let st = sh.load(sp.body as usize);
-                (sp.w, sp.turned, sp.angle) = (st.w, st.turned, angle[j]);
-            }
-        });
-        drop(work);
-        // The contacts that aren't solved, as `clear` leaves them.
-        for at in solved {
-            points[at].solved = true;
-        }
-        for (at, j) in kept {
-            for (q, j) in points[at].point.iter_mut().zip(j) {
-                (q.jn, q.jt) = j;
-            }
-        }
-    }
-
     /// A contact's impulses over the step, from its lane: `finish`'s.
     #[inline(always)]
     fn impulses<const N: usize>(o: &Batch<N>, l: usize, lane: &Lane) -> (f32, f32) {
@@ -1800,323 +1634,6 @@ mod lanes {
             let last = (p.jn.0[l] * substeps as f32, p.jt.0[l] * substeps as f32);
             (q.jn, q.jt) = carry.of(last, (p.sum_jn.0[l], p.sum_jt.0[l]));
         }
-    }
-
-    /// Whether `solve_across` is `solve` bit for bit on these bodies: no
-    /// body that doesn't move has a negative zero where a batch writes it
-    /// back or gravity adds to it (see `solve_across`). Conservative: a body
-    /// that turns but doesn't translate counts as still.
-    pub fn shareable(bodies: &[SolverBody], spinning: &[Spinning]) -> bool {
-        let neg = |x: f32| x.to_bits() == (-0.0f32).to_bits();
-        let still = |b: &SolverBody| b.inv_mass == 0.0;
-        bodies.iter().all(|b| !still(b) || ![b.v.x, b.v.y, b.gravity.x, b.gravity.y].into_iter().any(neg))
-            && spinning.iter().all(|sp| !still(&bodies[sp.body as usize]) || sp.inv_inertia > 0.0 || !neg(sp.w))
-    }
-
-    /// What a stage does to each of its blocks.
-    #[derive(Clone, Copy)]
-    enum Work {
-        /// Filling the batches' lanes: `setup`'s loop, a batch at a time.
-        Prepare,
-        Gravity,
-        Warm,
-        /// The pushing pass; whether it's the substep's last.
-        Push(bool),
-        Move,
-        /// A relaxing pass: whether it's the substep's first (which finds
-        /// the bias) and its last.
-        Relax(bool, bool),
-        Bounce,
-    }
-
-    /// A stage's unit of work, which one thread takes at a time: batches of
-    /// one group with their lanes (the batches filled by the first stage,
-    /// into room made on the calling thread), bodies by index, or bodies
-    /// that turn, with their angles.
-    enum Part<'a, const N: usize> {
-        Batches(Vec<Batch<N>>, &'a mut [[Lane; N]]),
-        Bodies(Range<usize>),
-        Spins(Range<usize>, &'a mut [f32]),
-    }
-
-    /// A block: one past the last stage that took it, and its part. A
-    /// thread takes it for stage `t` by raising the mark to `t + 1`, which
-    /// only one thread can do while it's lower (Box2D's `syncIndex`, taken
-    /// by compare and swap): a thread still in an older stage can't, so it
-    /// never holds a block the current stage needs. The lock is only how
-    /// the taker has the part: nobody else holds it then (`try_lock`).
-    /// Padded to its own lines, as Box2D's blocks aren't, so taking one
-    /// doesn't evict a neighbour another thread is taking.
-    #[repr(align(128))]
-    struct Block<'a, const N: usize> {
-        mark: AtomicUsize,
-        part: Mutex<Part<'a, N>>,
-    }
-
-    fn block<const N: usize>(part: Part<'_, N>) -> Block<'_, N> {
-        Block { mark: AtomicUsize::new(0), part: Mutex::new(part) }
-    }
-
-    /// A block of these lanes' batches, with room made for them here, on
-    /// the calling thread, so the memory is that thread's
-    /// (docs/lore/memory-a-task-allocates-is-its-threads.md).
-    fn batches<const N: usize>(lanes: &mut [[Lane; N]]) -> Block<'_, N> {
-        block(Part::Batches(Vec::with_capacity(lanes.len()), lanes))
-    }
-
-    /// How many of a stage's blocks are done, on its own lines.
-    #[repr(align(128))]
-    #[derive(Default)]
-    struct Count(AtomicUsize);
-
-    /// Set when a thread of the solve panics, so the others stop waiting
-    /// for blocks it won't finish, and the executor can re-raise it.
-    struct Failing<'a>(&'a AtomicBool);
-
-    impl Drop for Failing<'_> {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                self.0.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// Where thread `w` of `threads` starts in a stage of `n` blocks: its
-    /// share's first, so that with every thread there each takes the same
-    /// blocks stage after stage, and finds them in its cache (Box2D's
-    /// `GetWorkerStartIndex`). With more threads than blocks, Box2D's extra
-    /// workers take none and wait on its main thread; here every thread
-    /// can take any block (the rest start at `w % n`), since none is sure
-    /// to come.
-    fn first_block(w: usize, n: usize, threads: usize) -> usize {
-        if n <= threads {
-            return w % n;
-        }
-        let (per, rest) = (n / threads, n % threads);
-        per * w + rest.min(w)
-    }
-
-    /// `0..n` in blocks of at least `least`, at most four a thread: Box2D's
-    /// block sizes (`b2SolverStage`: four blocks a worker, so a thread that
-    /// starts late has its share taken, and a block a few microseconds).
-    fn blocks_of(n: usize, least: usize, threads: usize) -> impl Iterator<Item = Range<usize>> {
-        let count = if n > least * 4 * threads { 4 * threads } else { n.div_ceil(least) };
-        (0..count).map(move |k| n * k / count..n * (k + 1) / count)
-    }
-
-    /// The stages of `solve_across`, shared by `gang`'s threads: the
-    /// states and every batch, filled, as `run` leaves them. Each thread
-    /// runs every stage in order: takes blocks from its own start forward,
-    /// then back from it, until a block is taken already, adds what it ran
-    /// to the stage's count, and waits for the count to be the stage's
-    /// blocks. Box2D's `b2SolverStage` loop (`solver.c`), without its main
-    /// thread: whichever thread finishes a stage's last block lets every
-    /// waiter on, so a thread that comes late, or never, holds up nobody,
-    /// and one thread alone runs every stage. A thread that comes late
-    /// skips the stages already done, as a straggler fast-forwards in
-    /// Rapier 0.36's staged solver (`StageSync`, which also advances a
-    /// stage on work done, not threads arrived).
-    fn run_across<const N: usize>(
-        params: &Params,
-        (bodies, spinning, contacts, points): (&[SolverBody], &[Spinning], &[Constraint], &[Points]),
-        (hd, layout, gravity, dt): (&Head, &Colored, &[Vec2], f32),
-        (lanes, angle): (&mut [[Lane; N]], &mut [f32]),
-        gang: &dyn Gang,
-    ) -> (Vec<Atom>, Vec<Vec<Batch<N>>>) {
-        let threads = gang.threads();
-        let (h, inv_h, share) = (hd.h, hd.inv_h, hd.share);
-        // `setup`'s states: less the step's gravity, which the substeps
-        // give back a share at a time.
-        let atoms: Vec<Atom> =
-            hd.s.iter()
-                .enumerate()
-                .map(|(i, st)| {
-                    let mut st = *st;
-                    if let Some(g) = gravity.get(i) {
-                        st.v -= *g;
-                    }
-                    Atom::new(&st)
-                })
-                .collect();
-
-        let mut blocks: Vec<Block<N>> = Vec::new();
-        let mut rest: &mut [[Lane; N]] = lanes;
-        // The overflow is one block: its batches share bodies, and are
-        // solved in order, as Box2D solves its overflow on one thread.
-        let overflowed = if layout.overflow > 0 {
-            let (head, tail) = rest.split_at_mut(layout.overflow);
-            rest = tail;
-            blocks.push(batches(head));
-            Some(blocks.len() - 1..blocks.len())
-        } else {
-            None
-        };
-        let mut colors = Vec::new();
-        for &n in layout.colors.iter() {
-            let (mut group, tail) = rest.split_at_mut(n);
-            rest = tail;
-            let from = blocks.len();
-            for r in blocks_of(group.len(), 4, threads) {
-                let (head, tail) = group.split_at_mut(r.len());
-                group = tail;
-                blocks.push(batches(head));
-            }
-            if blocks.len() > from {
-                colors.push(from..blocks.len());
-            }
-        }
-        let filled = 0..blocks.len();
-        let from = blocks.len();
-        blocks.extend(blocks_of(atoms.len(), 32, threads).map(|r| block(Part::Bodies(r))));
-        let bodies_at = from..blocks.len();
-        let mut turning: &mut [f32] = angle;
-        for r in blocks_of(spinning.len(), 32, threads) {
-            let (head, tail) = turning.split_at_mut(r.len());
-            turning = tail;
-            blocks.push(block(Part::Spins(r, head)));
-        }
-        let moving = bodies_at.start..blocks.len();
-
-        // The stages, in the order `run` makes its passes: in each pass the
-        // overflow, then each group in turn.
-        let mut stages: Vec<(Work, Range<usize>)> = vec![(Work::Prepare, filled)];
-        let pass_of = |stages: &mut Vec<(Work, Range<usize>)>, work: Work| {
-            stages.extend(overflowed.iter().chain(colors.iter()).map(|b| (work, b.clone())));
-        };
-        for _ in 0..params.substeps {
-            stages.push((Work::Gravity, bodies_at.clone()));
-            pass_of(&mut stages, Work::Warm);
-            pass_of(&mut stages, Work::Push(params.relax == 0));
-            stages.push((Work::Move, moving.clone()));
-            for r in 0..params.relax {
-                pass_of(&mut stages, Work::Relax(r == 0, r + 1 == params.relax));
-            }
-        }
-        pass_of(&mut stages, Work::Bounce);
-
-        let exec = |work: Work, part: &mut Part<'_, N>, sh: &mut Shared| match (work, part) {
-            (Work::Prepare, Part::Batches(out, lanes)) => {
-                for ln in lanes.iter_mut() {
-                    let mut o = Batch::empty(hd.nowhere);
-                    for (l, lane) in ln.iter_mut().enumerate() {
-                        if lane.contact == NONE {
-                            continue;
-                        }
-                        let c = &contacts[lane.contact as usize];
-                        let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, hd, points, dt);
-                        put(&mut o, l, c, bodies, hd, (&pts, at, n_points));
-                        (lane.at, lane.count, lane.speed) = (at, n_points as u8, speed);
-                    }
-                    out.push(o);
-                }
-            }
-            (Work::Warm, Part::Batches(b, _)) => b.iter_mut().for_each(|o| warm_start(o, sh)),
-            (Work::Push(last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, true, COMPUTE>(o, sh, inv_h, last)),
-            (Work::Relax(true, last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, false, STORE>(o, sh, inv_h, last)),
-            (Work::Relax(false, last), Part::Batches(b, _)) => b.iter_mut().for_each(|o| pass::<N, false, LOAD>(o, sh, inv_h, last)),
-            (Work::Bounce, Part::Batches(b, _)) => {
-                for o in b.iter_mut() {
-                    if o.restitution.0.iter().any(|e| *e != 0.0) {
-                        restitute(o, sh, params.bounce);
-                    }
-                }
-            }
-            // `run`'s loops over the bodies, a body at a time, the same
-            // operations; the one standing still (last) has no gravity.
-            (Work::Gravity, Part::Bodies(r)) => {
-                let g = &gravity[r.start.min(gravity.len())..r.end.min(gravity.len())];
-                for (a, g) in atoms[r.clone()].iter().zip(g) {
-                    let mut st = a.state();
-                    st.v += *g * share;
-                    a.put(0, st.v.x);
-                    a.put(1, st.v.y);
-                }
-            }
-            (Work::Move, Part::Bodies(r)) => {
-                for a in atoms[r.clone()].iter() {
-                    let mut st = a.state();
-                    st.moved += st.v * h;
-                    a.put(3, st.moved.x);
-                    a.put(4, st.moved.y);
-                }
-            }
-            (Work::Move, Part::Spins(r, angle)) => {
-                for (sp, angle) in spinning[r.clone()].iter().zip(angle.iter_mut()) {
-                    let a = &atoms[sp.body as usize];
-                    let b = a.state();
-                    *angle += h * b.w;
-                    let turned = match params.integrate {
-                        Integrate::Rotation => b.turned.integrate(h * b.w),
-                        Integrate::Angle => Rot::from_angle(*angle),
-                    };
-                    a.put(5, turned.c);
-                    a.put(6, turned.s);
-                }
-            }
-            _ => unreachable!("a stage over another stage's blocks"),
-        };
-
-        let done: Vec<Count> = stages.iter().map(|_| Count::default()).collect();
-        let failed = AtomicBool::new(false);
-        let each = |w: usize| {
-            let _failing = Failing(&failed);
-            let mut sh = Shared(&atoms);
-            for (t, (work, on)) in stages.iter().enumerate() {
-                let (n, count) = (on.len(), &done[t].0);
-                if count.load(Ordering::Acquire) == n {
-                    continue;
-                }
-                let mut take = |k: usize| {
-                    let b = &blocks[on.start + k];
-                    if b.mark.fetch_max(t + 1, Ordering::AcqRel) > t {
-                        return false;
-                    }
-                    exec(*work, &mut b.part.try_lock().expect("a block's taker alone has it"), &mut sh);
-                    true
-                };
-                let (start, mut ran) = (first_block(w, n, threads), 0);
-                let mut k = start;
-                while take(k) {
-                    ran += 1;
-                    k = if k + 1 == n { 0 } else { k + 1 };
-                }
-                let mut k = start;
-                loop {
-                    k = if k == 0 { n - 1 } else { k - 1 };
-                    if !take(k) {
-                        break;
-                    }
-                    ran += 1;
-                }
-                if ran > 0 {
-                    count.fetch_add(ran, Ordering::Release);
-                }
-                // Spinning: a stage is microseconds, and a wake-up tens of
-                // them. Yielding now and then gives a thread holding a
-                // block its core back, on a busy machine.
-                let mut spins = 0u32;
-                while count.load(Ordering::Acquire) < n {
-                    if failed.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::hint::spin_loop();
-                    spins = spins.wrapping_add(1);
-                    if spins.is_multiple_of(1024) {
-                        std::thread::yield_now();
-                    }
-                }
-            }
-        };
-        gang.run(threads, &each);
-        let outs = blocks
-            .into_iter()
-            .filter_map(|b| match b.part.into_inner() {
-                Ok(Part::Batches(out, _)) => Some(out),
-                Ok(_) => None,
-                Err(_) => unreachable!("a thread of the solve panicked, and the gang re-raised it"),
-            })
-            .collect();
-        (atoms, outs)
     }
 
     /// The ends' velocities after an impulse `(ix, iy)` on `b` and its
@@ -2302,6 +1819,20 @@ mod lanes {
         }
 
         pub use super::{Atom, Bodies, Shared, State};
+
+        /// Whether the passes across threads are the passes on one thread
+        /// bit for bit on these bodies: no body that doesn't move has a
+        /// negative zero where a batch writes it back or gravity adds to it.
+        /// Batches of one color write such a body back unchanged, the same
+        /// value whoever writes last, but for `-0.0 - -0.0`, which is `0.0`
+        /// (get-znt.39). Conservative: a body that turns but doesn't
+        /// translate counts as still.
+        pub fn shareable(bodies: &[SolverBody], spinning: &[Spinning]) -> bool {
+            let neg = |x: f32| x.to_bits() == (-0.0f32).to_bits();
+            let still = |b: &SolverBody| b.inv_mass == 0.0;
+            bodies.iter().all(|b| !still(b) || ![b.v.x, b.v.y, b.gravity.x, b.gravity.y].into_iter().any(neg))
+                && spinning.iter().all(|sp| !still(&bodies[sp.body as usize]) || sp.inv_inertia > 0.0 || !neg(sp.w))
+        }
 
         /// A `State` as threads share it, and back: what a primitive that
         /// shares the states between threads makes them into (the mod's

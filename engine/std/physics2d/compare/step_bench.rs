@@ -11,10 +11,14 @@
 //!
 //! `SHARED=1` hands the solver's kernels their states shared, as threads
 //! will, on one thread (`World::set_shapes_shared`): what sharing costs.
-//! `RUNS` (5), `ONLY=<case>`, and `THREADS=1,8` (1) for the host's threads,
-//! kept between steps (`tests/pool.rs`). Until the scheduler runs declared
-//! shapes across threads (get-znt.34), the solve runs on one thread
-//! whatever the host has; only the broadphase and narrowphase use them.
+//! `RUNS` (5), `EACH=1` (every run's passes and step, on stderr), `ONLY=<case>`, and `THREADS=1,8` (1) for the scheduler's
+//! threads: the pool the `threads` mod installs (`engine_threads::Pool`),
+//! pinned to one CCD unless `PIN=0` (the calling thread to its first core
+//! unless `PIN_CALLER=0`), warm for `WARM_US` (its default) after each
+//! dispatch; at 1, no pool. The solve's passes run across them
+//! (`Passes`), and the broadphase and narrowphase (`Workers`). The pool
+//! pins its own threads, so no `taskset` with it; the calling thread is the
+//! pool's to place (docs/architecture/threads.md, "Placement").
 
 #[allow(dead_code)]
 #[path = "../tests/arrays.rs"]
@@ -24,9 +28,6 @@ mod ecs;
 #[allow(dead_code)]
 #[path = "../narrow.rs"]
 mod narrow;
-#[allow(dead_code)]
-#[path = "../tests/pool.rs"]
-mod pool;
 #[allow(dead_code)]
 mod scene;
 #[allow(dead_code)]
@@ -55,8 +56,18 @@ fn median(mut xs: Vec<f64>) -> f64 {
 /// frame.
 fn run(manifest: &engine_control::Manifest, scene: &Scene, turning: bool, (before, window): (u32, u32), threads: usize) -> [f64; 8] {
     let mut ecs = ecs::Ecs::new(manifest, scene, false, turning);
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+    let settings = engine_threads::Settings {
+        threads: Some(threads),
+        pin: env("PIN") != Some(0),
+        warm: env("WARM_US").map_or(engine_threads::WARM, std::time::Duration::from_micros),
+        // The bench's thread steps the engine, as a game's frame thread does.
+        pin_caller: env("PIN_CALLER") != Some(0),
+    };
+    // At one thread, no pool: the process's shared one replaced either way.
+    ecs.engine().world().set_executor(None);
     if threads > 1 {
-        ecs = ecs.on_threads(Arc::new(pool::Pool::new(threads)));
+        ecs = ecs.on_threads(Arc::new(engine_threads::Pool::new(&engine_threads::OneCcd, &settings)));
     }
     ecs.engine().world().set_shapes_shared(std::env::var("SHARED").is_ok_and(|s| s == "1"));
     ecs.step(before);
@@ -94,6 +105,10 @@ fn main() {
     for (name, scene, turning, at) in cases.iter().filter(|c| only.is_empty() || c.0.contains(only.as_str())) {
         for &n in &threads {
             let all: Vec<[f64; 8]> = (0..runs).map(|_| run(&manifest, scene, *turning, *at, n)).collect();
+            if std::env::var_os("EACH").is_some() {
+                // Every run's passes and whole step, not only the median.
+                eprintln!("{name} {n}: {:?}", all.iter().map(|r| (r[6] as u64, r[4] as u64)).collect::<Vec<_>>());
+            }
             let m = |k: usize| median(all.iter().map(|r| r[k]).collect());
             println!(
                 "| {name} | {n} | {:.0} | {:.0} | {:.0} ({:.0}, {:.0}, {:.0}) | {:.0} | {:.0} |",

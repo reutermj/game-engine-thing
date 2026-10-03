@@ -5,12 +5,14 @@ the ideas our code takes from them. One section a library, so entries
 merge cleanly. Authors and licenses were read from each project's fetched
 source, not from memory.
 
-None of them is part of the engine or of any game: each is linked only
-into a comparison bench (`//engine/std/physics2d/compare` for 2D,
-`//engine/std/physics3d/compare` for 3D), so our own solvers can be measured against
-established ones on identical scenes. Flecs, EnTT, Bevy, Unity Physics
-and Timely Dataflow, last, were read for the ECS's design, and aren't
-built at all.
+Two are part of the engine: rayon and core_affinity, linked into the
+scheduler's thread pool (`//engine/std/threads`), which every game loads
+unless it says otherwise. The rest are not part of the engine or of any
+game: each is linked only into a comparison bench
+(`//engine/std/physics2d/compare` for 2D, `//engine/std/physics3d/compare`
+for 3D), so our own solvers can be measured against established ones on
+identical scenes. Flecs, EnTT, Bevy, Unity Physics and Timely Dataflow,
+last, were read for the ECS's design, and aren't built at all.
 
 Where the notices live: every library's license text is in its fetched
 source (Bazel's external repository for it), or committed or fetched
@@ -170,8 +172,10 @@ one would have to ship those files with it.
     Read in v3.1.1's source. Ours also lets a fat box go when it is more
     than twice the margin past its box, and finds new pairs among the
     spatial pages rather than a tree (spatial-storage.md, "Keeping pairs").
-  - the colored solve across threads (2026-09-29, `solver.rs`,
-    `lanes::run_across`; physics.md, "Solving across threads"): Box2D's
+  - the colored solve across threads (2026-09-29, then `solver.rs`'s
+    `lanes::run_across`, removed 2026-10-03 for the same protocol in the
+    engine, `engine/ecs/dispatch.rs`, which every `Passes` program runs
+    on; physics.md, "Solving across threads"; threads.md): Box2D's
     solver stages, read in v3.1.1's `solver.c` (`b2SolverStage`,
     `b2ExecuteStage`, `b2SolverTask`): its stages in its order, a stage a
     color, a stage's blocks four batches or four a worker
@@ -258,7 +262,10 @@ one would have to ship those files with it.
   (`dynamics/solver/staged_island_solver/`): stages that advance on work
   completed rather than on threads arrived, so a thread that comes late
   fast-forwards (`sync.rs`, `StageSync`), which ours does too
-  (`solver.rs`, `lanes::run_across`); and its bodies shared between
+  (`engine/ecs/dispatch.rs`, before it `lanes::run_across`); and its
+  workers started once a solve in a rayon scope (`in_place_scope`, a
+  spawn a worker), as our pool starts a dispatch's (threads.md); and its
+  bodies shared between
   workers by raw pointers (`SharedCtx`, `unsafe impl Sync`), which ours
   aren't: relaxed atomics, measured against a raw-pointer spike like it.
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
@@ -582,3 +589,43 @@ one would have to ship those files with it.
   scenes of the 3D comparison (`engine/std/physics3d/tests/scenes.rs`)
   and the kernel's inputs of physics3d's exact fingerprint
   (`engine/std/physics3d/tests/exact.rs`). Nothing is linked.
+
+## Rayon
+
+- **Project:** Rayon, data parallelism for Rust: `rayon` 1.12.0 and
+  `rayon-core` 1.13.0. <https://github.com/rayon-rs/rayon>
+- **Authors:** the Rayon developers; the packages name none, and
+  `LICENSE-MIT` reads "Copyright (c) 2010 The Rust Project Developers".
+- **License:** MIT or Apache-2.0 (`Cargo.toml`: "MIT OR Apache-2.0").
+- **Version we use:** as `Cargo.lock` resolves `rayon = "1"` in
+  `engine/std/threads/Cargo.toml`.
+- **What for:** the host of the scheduler's threads
+  (`engine/std/threads/pool.rs`; docs/architecture/threads.md): an
+  explicit `ThreadPool` that keeps its threads, a scope a dispatch that
+  starts each worker once (`in_place_scope`), and `spawn_broadcast` for
+  the workers' warm spin. Its work stealing hands out none of a shape's
+  blocks; our dispatch (`engine/ecs/dispatch.rs`) does.
+- **Linked with it:** `crossbeam-deque` 0.8.8, `crossbeam-epoch` 0.9.21
+  and `crossbeam-utils` 0.8.23 ("Copyright (c) 2019 The Crossbeam Project
+  Developers"), and `either` 1.18.0, all MIT or Apache-2.0. Their MIT
+  texts, and rayon's and rayon-core's, are kept in
+  `engine/std/threads/licenses/`, the `threads` mod's and the pool
+  library's `data`, so they travel in the runfiles of every game and
+  binary that links them.
+
+## core_affinity
+
+- **Project:** `core_affinity` 0.8.3, "Manages CPU affinities".
+  <https://github.com/Elzair/core_affinity_rs>
+- **Author:** Philip Woods (`Cargo.toml`: "Philip Woods
+  <elzairthesorcerer@gmail.com>"); `LICENSE-MIT` reads "Copyright (c)
+  2014 The Rust Project Developers".
+- **License:** MIT or Apache-2.0 (`Cargo.toml`: "MIT/Apache-2.0").
+- **What for:** pinning each of the pool's workers to a core of one CCD in
+  rayon's `start_handler` (`set_for_current`, its `sched_setaffinity`),
+  and the CPUs this process may run on (`get_core_ids`), which the
+  placement chooses among (threads.md, "Placement"). Its unsafe FFI is
+  the only unsafe code the pool has.
+- **Linked with it:** `libc` 0.2.190 and `num_cpus` 1.17.0 (Sean
+  McArthur), MIT or Apache-2.0; their MIT texts are kept beside the
+  others in `engine/std/threads/licenses/`.

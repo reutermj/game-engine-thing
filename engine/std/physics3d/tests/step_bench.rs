@@ -1,12 +1,15 @@
-//! The 3D mod's solve and its whole step, in the engine (lockstep, one
-//! thread), on pile3d's scenes, the comparison's (`scenes.rs`): piles of
+//! The 3D mod's solve and its whole step, in the engine (lockstep, on the
+//! scheduler's threads: the `threads` mod's pool, `ENGINE_THREADS` of
+//! them, pinned to one CCD), on pile3d's scenes, the comparison's (`scenes.rs`): piles of
 //! boxes falling and settled, planks and spheres settled, a locked pile,
 //! and a stack. Each run builds its scene in a fresh engine, steps it to
 //! the window, and times the window: the mod's own timings for its solve
 //! (gather, solver, write-back) and the frame's wall time. The median of
 //! the runs, as 2D's `step_bench` (physics2d/compare) measures the 2D mod.
 //!
-//!     taskset -c 0-7 ./bazel run --config=bench //engine/std/physics3d:step_bench
+//!     ENGINE_THREADS=8 ./bazel run --config=bench //engine/std/physics3d:step_bench
+//!
+//! No `taskset`: the pool pins its own threads (docs/architecture/threads.md).
 //!
 //! `RUNS` (5), `ONLY=<case>`, `TUNE=<variant>` (pile3d's `tune`, so
 //! `TUNE=lanes=0` times the solve one contact at a time on the same
@@ -44,7 +47,7 @@ struct Case {
 /// (physics3d's `stages`): contacts, groups (levels or colors), the
 /// overflow's batches, all batches, and the most and fewest batches a
 /// group has; zeros where it solved them whole.
-fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 11] {
+fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 14] {
     let dir = std::env::temp_dir().join(format!("physics3d-step-bench-{}-{k}", std::process::id()));
     let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
     e.load_batch(&manifest.mods).expect("loading the pile");
@@ -69,7 +72,23 @@ fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 11] 
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
     let [contacts, groups, overflow, batches, widest, narrowest] = layout;
-    [gather + solver + write_back, gather, solver, write_back, frame, contacts, groups, overflow, batches, widest, narrowest]
+    let (prepare, passes, finish) = (field(&stages, "prepare"), field(&stages, "passes"), field(&stages, "finish"));
+    [
+        gather + solver + write_back,
+        gather,
+        solver,
+        write_back,
+        frame,
+        contacts,
+        groups,
+        overflow,
+        batches,
+        widest,
+        narrowest,
+        prepare,
+        passes,
+        finish,
+    ]
 }
 
 fn main() {
@@ -85,18 +104,20 @@ fn main() {
         Case { name: "stack 20, steps 301-330", build: "stack 20", locked: false, at: (300, 30) },
     ];
     println!("µs a step, the median of {runs} runs\n");
-    println!("| case | solve | gather | solver | write-back | whole step | contacts | groups | overflow | batches | widest | narrowest |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!(
+        "| case | solve | gather | solver | write-back | whole step | contacts | groups | overflow | batches | widest | narrowest | prepare | passes | finish |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut k = 0;
     for case in cases.iter().filter(|c| only.is_empty() || c.name.contains(only.as_str())) {
-        let all: Vec<[f64; 11]> = (0..runs)
+        let all: Vec<[f64; 14]> = (0..runs)
             .map(|_| {
                 k += 1;
                 run(&manifest, case, k)
             })
             .collect();
         let m = |i: usize| median(all.iter().map(|r| r[i]).collect());
-        let cells: Vec<String> = (0..11).map(|i| format!("{:.0}", m(i))).collect();
+        let cells: Vec<String> = (0..14).map(|i| format!("{:.0}", m(i))).collect();
         println!("| {} | {} |", case.name, cells.join(" | "));
     }
 }

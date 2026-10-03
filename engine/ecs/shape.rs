@@ -10,14 +10,19 @@
 //!   ([`Colored`]) and the states they share, Box2D v3's staged solve made
 //!   generic.
 //!
-//! Each gives the same result on any number of threads, and on one, which
-//! is how they run until the scheduler runs them across threads
-//! (get-znt.34). This module fixes what that result is.
+//! Each gives the same result on any number of threads, and on one. This
+//! module fixes what that result is. `Passes` runs across the world's
+//! executor where it has more than one thread, as a task graph
+//! (`dispatch`; docs/architecture/threads.md); `ParMap` and `Reduce` run on
+//! the system's thread (threads.md, "ParMap and Reduce").
 
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
+use crate::dispatch::{Plan, block_range, blocks_of, dispatch};
+use crate::par::Executor;
 use crate::query::{Declare, FrameCx, Param, ParamDecl};
 use crate::world::World;
 
@@ -89,10 +94,13 @@ impl Reduce<'_> {
 }
 
 /// Runs a program of stages over items in colors.
+#[derive(Clone)]
 pub struct Passes<'w> {
     /// Hand kernels the shared form of the states even on one thread
     /// (`World::set_shapes_shared`).
     shared: bool,
+    /// The world's executor, where it has more than one thread.
+    across: Option<Arc<dyn Executor>>,
     _world: PhantomData<&'w World>,
 }
 
@@ -104,7 +112,8 @@ impl Param for Passes<'static> {
     }
 
     fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Passes<'w> {
-        Passes { shared: cx.world.shapes_shared.load(Ordering::Relaxed), _world: PhantomData }
+        let across = cx.world.executor().filter(|e| e.threads() > 1);
+        Passes { shared: cx.world.shapes_shared.load(Ordering::Relaxed), across, _world: PhantomData }
     }
 }
 
@@ -219,6 +228,23 @@ pub enum Stage<K> {
 }
 
 impl Passes<'_> {
+    /// The next `run` on the system's thread, plain, when `serial`: for a
+    /// program whose kernels would give another result across threads this
+    /// time, which only their owner can tell (get-znt.39: physics2d's still
+    /// bodies carrying a negative zero, which batches of one color write
+    /// back racing).
+    pub fn serial(mut self, serial: bool) -> Self {
+        if serial {
+            self.across = None;
+        }
+        self
+    }
+
+    /// How many threads `run` hands its stages out across.
+    pub fn threads(&self) -> usize {
+        self.across.as_ref().map_or(1, |e| e.threads())
+    }
+
     /// Runs `program` over `items`, laid out as `layout` says, and the
     /// states they share: each stage done before the next starts, an
     /// `Items` stage the overflow's items and then each color's. `block`
@@ -231,8 +257,13 @@ impl Passes<'_> {
     /// A color's items share no moving state, so any order of its blocks
     /// gives the same states.
     ///
-    /// Box2D v3's staged solve (`b2SolverStage`, `solver.c`), generic, as
-    /// physics2d's `lanes::run_across` is that solve.
+    /// Across threads a stage is the overflow's one block, a color's
+    /// blocks, or an `Each`'s ranges, sized as Box2D sizes them, each block
+    /// run once, after the stage before (`dispatch`). Every kernel call has
+    /// returned when `run` does, so no mod code is on another thread once
+    /// the system has; a kernel's panic is raised again here.
+    ///
+    /// Box2D v3's staged solve (`b2SolverStage`, `solver.c`), generic.
     pub fn run<I: Send, T: Shareable, K: Copy + Sync>(
         &self,
         layout: &Colored,
@@ -243,6 +274,9 @@ impl Passes<'_> {
         each: impl Fn(K, Range<usize>, States<'_, T>) + Sync,
     ) {
         assert_eq!(items.len(), layout.items(), "items as the coloring laid them out");
+        if let Some(exec) = &self.across {
+            return across(&**exec, layout, items, states, program, &block, &each);
+        }
         if self.shared {
             let shared: Vec<T::Shared> = states.iter().map(T::share).collect();
             stages(layout, items, program, &block, &each, States::Shared(&shared));
@@ -281,6 +315,103 @@ fn stages<I, T: Shareable, K: Copy>(
             Stage::Each(k, n) if n > 0 => each(k, 0..n, states.reborrow()),
             Stage::Each(..) => {}
         }
+    }
+}
+
+/// What a stage of the plan runs a block of.
+#[derive(Clone, Copy)]
+enum Work<K> {
+    /// The kernel's argument, and the stage's first block of items.
+    Items(K, usize),
+    /// The kernel's argument, the states' count, and the stage's ranges.
+    Each(K, usize, usize),
+}
+
+/// The fewest items a block of a color takes, and states a range: Box2D's
+/// minimum block sizes (`b2SolverStage`), as `run_across` had them.
+const ITEMS_A_BLOCK: usize = 4;
+const STATES_A_BLOCK: usize = 32;
+
+/// `Passes::run` across `exec`'s threads: the overflow one block (its
+/// items share states, so they go in order on one thread, as Box2D's
+/// overflow does), each color's items in blocks, each `Each` in ranges;
+/// a stage a color of an `Items` stage, and a stage an `Each`. Stages over
+/// the same blocks share their marks, so a thread takes the same blocks
+/// pass after pass and finds them in its cache.
+fn across<I: Send, T: Shareable, K: Copy + Sync>(
+    exec: &dyn Executor,
+    layout: &Colored,
+    items: &mut [I],
+    states: &mut [T],
+    program: &[Stage<K>],
+    block: &(impl Fn(K, &mut [I], States<'_, T>) + Sync),
+    each: &(impl Fn(K, Range<usize>, States<'_, T>) + Sync),
+) {
+    let threads = exec.threads();
+    let mut plan = Plan::default();
+    // Each block's items, behind a lock only its taker takes (`try_lock`):
+    // how a block hands its kernel `&mut` items in safe Rust.
+    let mut blocks: Vec<Mutex<&mut [I]>> = Vec::new();
+    // Each non-empty group's first block and its count: the overflow's,
+    // then each color's.
+    let mut groups = Vec::new();
+    let mut rest = items;
+    for (i, n) in std::iter::once(layout.overflow).chain(layout.colors.iter().copied()).enumerate() {
+        let (mut group, tail) = std::mem::take(&mut rest).split_at_mut(n);
+        rest = tail;
+        if n == 0 {
+            continue;
+        }
+        let (first, count) = (blocks.len(), if i == 0 { 1 } else { blocks_of(n, ITEMS_A_BLOCK, threads) });
+        for k in 0..count {
+            let (head, tail) = std::mem::take(&mut group).split_at_mut(block_range(n, k, count).len());
+            group = tail;
+            blocks.push(Mutex::new(head));
+        }
+        groups.push((first, count));
+    }
+    let item_marks = plan.marks(blocks.len());
+    // Each `Each`'s marks, by its count: stages over the same states are
+    // over the same ranges.
+    let mut each_marks: Vec<(usize, usize)> = Vec::new();
+    let mut work = Vec::new();
+    plan.chain();
+    for stage in program {
+        match *stage {
+            Stage::Items(k) => {
+                for &(first, count) in &groups {
+                    plan.stage(count, item_marks + first);
+                    work.push(Work::Items(k, first));
+                }
+            }
+            Stage::Each(k, n) if n > 0 => {
+                let count = blocks_of(n, STATES_A_BLOCK, threads);
+                let mark = match each_marks.iter().find(|(m, _)| *m == n) {
+                    Some(&(_, mark)) => mark,
+                    None => {
+                        let mark = plan.marks(count);
+                        each_marks.push((n, mark));
+                        mark
+                    }
+                };
+                plan.stage(count, mark);
+                work.push(Work::Each(k, n, count));
+            }
+            Stage::Each(..) => {}
+        }
+    }
+    let shared: Vec<T::Shared> = states.iter().map(T::share).collect();
+    dispatch(exec, &plan, &|t, b| match work[t] {
+        Work::Items(k, first) => {
+            // Never contended: the protocol gives a block to one thread a
+            // stage, so a block found taken is a dispatch bug, and fails.
+            let mut items = blocks[first + b].try_lock().expect("a block's taker alone has it");
+            block(k, &mut items, States::Shared(&shared));
+        }
+        Work::Each(k, n, count) => each(k, block_range(n, b, count), States::Shared(&shared)),
+    });
+    for (s, x) in states.iter_mut().zip(&shared) {
+        *s = T::load(x);
     }
 }
 

@@ -43,7 +43,12 @@ impl Ours {
         let manifest = engine_control::read_manifest(env!("PILE3D")).unwrap();
         let dir = std::env::temp_dir().join(format!("physics3d-bench-{}-{run}", std::process::id()));
         let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
-        engine.load_batch(&manifest.mods).expect("loading pile3d");
+        // pile3d's game less its thread host, and the process's one pool in
+        // its place: a harness makes thousands of engines, and each load of
+        // the host costs a TLS key (`engine_threads::shared`).
+        let mods: Vec<_> = manifest.mods.iter().filter(|(name, _)| name != engine_threads::MOD_NAME).cloned().collect();
+        engine.load_batch(&mods).expect("loading pile3d");
+        engine.world().set_executor(engine_threads::shared().map(|p| p as std::sync::Arc<dyn engine_ecs::Executor>));
         // A bounce's substeps, as a game sets them: in the world's Tuning.
         let tune = match (config.tune, config.substeps) {
             (t, 0) => t.to_string(),

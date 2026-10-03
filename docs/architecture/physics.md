@@ -2585,7 +2585,10 @@ solve before it, and the default until then). Coloring is what threads
 need (get-emj.75): a pile of 10 000 boxes has 246 levels and 11 colors.
 It is a physics change: the measurements below were made with by level
 the default, and are what the decision was taken on. "The default" in
-them is by level with the mean carry (Lm).
+them is by level with the mean carry (Lm). **Threads since**
+(2026-10-03, get-znt.34): the colored passes run across the scheduler's
+pool in the running engine, the fingerprint and both baselines unchanged
+at 1 to 8 threads; what they gain is threads.md's "Measured".
 
 **What was compared.** Order (by level, colored) against what a contact
 carries to the next step (`Carry`): **C**, the mean of the substeps for
@@ -4468,18 +4471,20 @@ variants: `rot/levels=4/carry=0` is A to the bit, `rot/carry=2` C colored.
 
 ## Solving across threads
 
-**Status: built** (2026-09-29, get-znt.5, get-emj.32), **and out of the
-mod until the scheduler runs shapes** (2026-10-02, get-znt.33). The turning
-default's colored solve runs across threads
-(`solver::solve_across`, `lanes::run_across`), bit for bit the solve on
-one thread at any thread count, so going parallel moves no value a test
-bounds, and whatever holds the one-thread solve holds it. The mod handed
-the solver its `Workers` until its solve became a pipeline of flows ([The
-step](#the-step)), whose passes are a declared shape the scheduler will
-run across threads (get-znt.34, [flows.md](flows.md#parallel-shapes)) by
-this protocol; until then the mod solves on one thread, and
-`solve_across` is the benches' and the comparison's (`rot/threads=<n>`).
-What follows measured it in the mod. On one CCD with kept threads, the solver alone is 4.9
+**Status: built** (2026-09-29, get-znt.5, get-emj.32), **and in the
+running engine on the scheduler's threads** (2026-10-03, get-znt.34,
+[threads.md](threads.md)). The turning default's colored solve runs across
+threads bit for bit the solve on one thread at any thread count, so going
+parallel moves no value a test bounds, and whatever holds the one-thread
+solve holds it. Its passes are a declared shape (`Passes`, [The
+step](#the-step)) that `engine_ecs` runs across the `threads` mod's pool
+by this protocol, rewritten as a task graph (`engine/ecs/dispatch.rs`);
+both mods' solves run on it, 3D's colored one too (get-emj.75). What
+follows measured the protocol first in the solver itself
+(`solver::solve_across`, `lanes::run_across`, removed 2026-10-03 with the
+comparison's `rot/threads=<n>` and `solver_bench`'s `THREADS`, get-emj.93:
+they build at commit `4daabfc`); what the running engine gets is
+threads.md's "Measured". On one CCD with kept threads, the solver alone is 4.9
 times faster at 8 threads on the turning pile of 10 000 and the 5050
 pyramid, and 4.1 on rain, where Box2D's own multithreaded solver gains 5.0,
 5.2 and 4.2 on the same scenes. What stops it: the solve's serial part
@@ -4582,8 +4587,11 @@ captured inputs:
   faster for it (the pile 4506 → 4243 µs, the pyramid 2989 → 2847), and no
   baseline value moved.
 
-**The tests.** `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`
-(`:quality_test`) holds the solve across 2, 4, 8 and 16 threads, and
+**The tests**, as they were for `solve_across` (since 2026-10-03 the mod's
+passes on the pool are held to the arrays' solve instead, by
+`the_mod_across_threads_is_the_arrays_bit_for_bit`; threads.md,
+"Determinism"). `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`
+(`:quality_test`) held the solve across 2, 4, 8 and 16 threads, and
 across 4 that come one at a time, the last first (`rot/threads=4/late=1`),
 to the default on one thread, bit for bit on the turning pile and pyramid
 of the other equivalence tests over 150 steps. Planted, it fails on a
@@ -4636,8 +4644,13 @@ nothing shared.
 
 ### The host's threads
 
+**Built since** (2026-10-03, [threads.md](threads.md)): the `threads`
+mod's rayon pool, kept, pinned to one CCD and warm, is every game's
+executor. What follows is what the solver measured before it, and why
+the pool is shaped as it is.
+
 The threads are the host's: `Workers` reaches whatever executor the world
-has. In the engine that is nothing yet: `engine_ecs` has only `Scoped`,
+has. In the engine that was nothing then: `engine_ecs` has only `Scoped`,
 threads spawned for each run, because keeping threads that run a borrowed
 closure takes unsafe code whose soundness depends on concurrency
 ([Parallelism](#parallelism)); the benchmarks use `tests/pool.rs`'s kept

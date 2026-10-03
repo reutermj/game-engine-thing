@@ -9,4 +9,6 @@ members = [
     # The physics comparisons: Rapier 2D and 3D, bench-only.
     "engine/std/physics2d/compare",
     "engine/std/physics3d/compare",
+    # The scheduler's thread pool: rayon and core_affinity.
+    "engine/std/threads",
 ]

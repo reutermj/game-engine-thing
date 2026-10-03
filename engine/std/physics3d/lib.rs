@@ -54,6 +54,10 @@ field_struct! {
         solve_gather: u64,
         solver: u64,
         write_back: u64,
+        /// Within `solver`: its three systems.
+        prepare: u64,
+        passes: u64,
+        finish: u64,
     }
 }
 
@@ -392,7 +396,7 @@ impl Mod for Physics3d {
             "stages" => {
                 let f = self.found;
                 let times = format!(
-                    "gravity {:.1} gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1}",
+                    "gravity {:.1} gather {:.1} broadphase {:.1} narrowphase {:.1} merge {:.1} solve_gather {:.1} solver {:.1} write_back {:.1} prepare {:.1} passes {:.1} finish {:.1}",
                     per(t.gravity),
                     per(t.gather),
                     per(t.broadphase),
@@ -400,7 +404,10 @@ impl Mod for Physics3d {
                     per(t.merge),
                     per(t.solve_gather),
                     per(t.solver),
-                    per(t.write_back)
+                    per(t.write_back),
+                    per(t.prepare),
+                    per(t.passes),
+                    per(t.finish)
                 );
                 Ok(times
                     + &format!(

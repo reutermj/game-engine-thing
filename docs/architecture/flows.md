@@ -10,7 +10,10 @@ replaced ([below](#physicss-adoption-stage-2)); since get-znt.26 its
 kernels get plain memory on one thread ([On one thread](#on-one-thread)).
 physics3d's solve followed (2026-10-02, get-znt.35): six systems over
 three flows, its solve whole in one system and no shape, bit for bit
-([below](#physics3d)). Stage 3 (get-znt.34) has the scheduler run the shapes across threads.
+([below](#physics3d)). **Stage 3 built** (2026-10-03, get-znt.34): the
+scheduler's threads, a resident mod's pool, and `Passes` run across them
+as a task graph, both physics solves among them, bit for bit
+([threads.md](threads.md)).
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -41,8 +44,9 @@ restating them.
   that uses the flow is installed.
 - **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
   are parameters, and the kernels a system hands them are the only code
-  that may run across threads. In stage 1 they run on the system's own
-  thread, with the results stage 3 must reproduce at any thread count.
+  that may run across threads. Stage 1 fixed their results on the
+  system's own thread; since stage 3 `Passes` reproduces them across the
+  scheduler's threads, at any count.
 
 ## What a flow is, and isn't
 
@@ -382,13 +386,14 @@ runs them is the scheduler's. That is the line get-znt.28 draws:
   runs, which nodes fan out and how (a map, a reduction, a colored run).
   Stage 3 sizes its work by it, and keeps such a node from waiting behind
   threads another system's tasks hold;
-- **the execution** is the scheduler's. In stage 3 `Passes::run` turns
-  the program into (stage, block) tasks on the scheduler's threads, each
-  stage's blocks after the last stage's, in the spike's protocol (any
-  thread takes any block, a late thread skips stages already done). The
-  system's thread waits for them, and every kernel has returned when
-  `run` does, so no mod code is on a worker's stack once the node ends
-  (get-znt.29's rule for hot reload);
+- **the execution** is the scheduler's. `Passes::run` turns the program
+  into (stage, block) tasks on the scheduler's threads, each stage's
+  blocks after the last stage's, as a task graph (built, stage 3:
+  [threads.md](threads.md#dispatch); any thread takes any block, a late
+  thread skips stages already done). The system's thread is one of the
+  workers, and every kernel has returned when `run` does, so no mod code
+  is on a worker's stack once the node ends (get-znt.29's rule for hot
+  reload);
 - **the system holds no pool.** Its parameters give it no way to start a
   thread, and `Workers` goes once its users have moved (get-znt.31).
 
@@ -497,9 +502,12 @@ system's own thread:
   for the overflow and once for each color, in order; an `Each` stage
   calls `each` once, over every state.
 
-That is the result stage 3 must reproduce. A world with an executor
-installed (benchmarks, physics's tests) still runs shapes on one thread
-in stage 1: `Workers` is the only way onto it, until stage 3.
+That is the result stage 3 must reproduce, and does: since stage 3
+(2026-10-03, [threads.md](threads.md)) `Passes` runs across the world's
+executor where it has more than one thread, and this path where it
+doesn't, or where the system says `serial` (get-znt.39). `ParMap` and
+`Reduce` stay on one thread until they have users (threads.md, "ParMap
+and Reduce").
 
 `API_VERSION` goes up: `ParamDecl` gains `Flow` and `Shape`, the world a
 flow store, and `Declarations` the flows a build uses.
@@ -528,8 +536,10 @@ Each tier proves what the others can't (CLAUDE.md):
   bin outliving its maker drops with its code mapped.
 - **End to end**: nothing new. The manifest, runfiles and socket don't
   change.
-- **Stage 3** adds what only threads can show: every shape bit for bit at
-  1, 2, 3 and 8 threads, as the spike's tests do.
+- **Stage 3** adds what only threads can show: `Passes` bit for bit at 1
+  to 8 threads, at once, late and one by one, on test executors
+  (`flow_test`) and on the real pool (`//engine/std/threads:pool_test`);
+  the mods held to one thread across it (threads.md, "Determinism").
 
 ## Physics's adoption (stage 2)
 
@@ -604,14 +614,14 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
   relaxed atomics; level where nothing does. Since get-znt.26 the passes
   get plain memory on one thread, and the pipeline is level with the
   solve it replaced or faster (below, "On one thread").
-- **Eight threads: the solve's threads are gone until stage 3**, as
-  planned. With no shape run across threads the solve takes its
+- **Eight threads: the solve's threads were gone until stage 3**, as
+  planned (they are back, on the scheduler's pool: threads.md,
+  "Measured"). With no shape run across threads the solve takes its
   one-thread time (5327 against 1415 settled), and the step loses what
   the solve gained. The broadphase and
-  narrowphase still split across `Workers` (get-znt.31). No benchmark of
-  the mod at 8 threads measures the solve's threads until get-znt.34;
-  `solver_bench`'s `THREADS` and the comparison's `rot/threads=<n>` still
-  time `solve_across` on arrays.
+  narrowphase still split across `Workers` (get-znt.31). (History:
+  `solver_bench`'s `THREADS` and the comparison's `rot/threads=<n>` timed
+  `solve_across` on arrays until stage 3 removed it, 2026-10-03.)
 - **The batch fill stayed in `prepare`.** Moving it into the passes' first
   stage closed most of the spike's 8-thread gap, and changes nothing on
   one thread, where everything runs now; it is measurable only with stage

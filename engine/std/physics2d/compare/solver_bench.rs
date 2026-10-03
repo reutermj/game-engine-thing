@@ -11,19 +11,10 @@
 //! `ONLY=<scene text>` runs one scene; `REPS` (9) solves each input that
 //! many times, reporting the median.
 //!
-//! `THREADS=1,2,4,8,16` times the default solved across that many threads
-//! instead (`solver::solve_across`), each result checked bit for bit
-//! against the solve on one: body, point and contact, every value. The
-//! threads are kept between solves (`tests/pool.rs`, whose `SPIN_US` says
-//! how long they spin before parking), or with `POOL=scoped` spawned for
-//! each (`engine_ecs::Scoped`), or with `POOL=late` all on the calling
-//! thread, one after another (what sharing costs with nothing shared:
-//! `variants::Backwards`); each count's threads are kept busy for
-//! `WARM_MS` (300) first, so the cores are clocked up
-//! (docs/lore/idle-cores-run-a-parallel-solve-at-half-speed.md). Which
-//! cores they run on is `taskset`'s: `taskset -c 0-7` is one CCD here
-//! (docs/lore/cpus-16-to-31-are-the-same-cores-as-0-to-15.md). The scenes
-//! then include rain 10 000, falling bodies arriving and leaving.
+//! (History: `THREADS=1,2,..` timed the default solved across threads by
+//! `solver::solve_across`, removed 2026-10-03 with it, get-emj.93: the mod's
+//! passes run across the scheduler's threads, which `step_bench` times in
+//! the engine; docs/architecture/threads.md.)
 
 #[allow(dead_code)]
 #[path = "../tests/arrays.rs"]
@@ -32,9 +23,6 @@ mod arrays;
 mod ecs;
 #[path = "../narrow.rs"]
 mod narrow;
-#[allow(dead_code)]
-#[path = "../tests/pool.rs"]
-mod pool;
 #[allow(dead_code)]
 mod scene;
 #[allow(dead_code)]
@@ -50,8 +38,7 @@ mod variants;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub use sim::{Dyn, Sim};
 
@@ -140,90 +127,6 @@ fn solve(params: &Params, i: &mut Input) {
     solver::solve_with(params, (&mut i.bodies, &mut i.spinning), &mut i.contacts, &mut i.points, arrays::DT);
 }
 
-/// Every value a solve leaves, as bits: the bodies' velocities and moves,
-/// the spinning's turns, every contact's and point's impulses.
-fn bits(i: &Input) -> Vec<u32> {
-    let mut out = Vec::new();
-    for b in &i.bodies {
-        out.extend([b.v.x, b.v.y, b.moved.x, b.moved.y].map(f32::to_bits));
-    }
-    for s in &i.spinning {
-        out.extend([s.w, s.turned.c, s.turned.s, s.angle].map(f32::to_bits));
-    }
-    for c in &i.contacts {
-        out.extend([c.jn, c.jt, c.speed].map(f32::to_bits));
-    }
-    for p in &i.points {
-        out.push(p.solved as u32);
-        for q in &p.point {
-            out.extend([q.jn, q.jt].map(f32::to_bits));
-        }
-    }
-    out
-}
-
-/// `THREADS`: the default across threads against it on one (see the
-/// module's docs).
-fn across(inputs: &[Input], reps: usize, counts: &[usize]) {
-    let pool = std::env::var("POOL").unwrap_or_default();
-    let warm_ms: u64 = std::env::var("WARM_MS").ok().and_then(|r| r.parse().ok()).unwrap_or(300);
-    let bases: Vec<Vec<u32>> = inputs
-        .iter()
-        .map(|i| {
-            let mut o = i.clone();
-            solve(&PARAMS, &mut o);
-            bits(&o)
-        })
-        .collect();
-    let one = time(inputs, reps, |i| solve(&PARAMS, i));
-    println!("| threads | µs (median of {reps}, mean over inputs) | against one thread | bit for bit |");
-    println!("|---|---|---|---|");
-    println!("| one thread, `solve_with` | {one:.0} | 1.00× | – |");
-    for &n in counts {
-        let exec: Arc<dyn engine_ecs::Executor> = match pool.as_str() {
-            "scoped" => Arc::new(engine_ecs::Scoped(n)),
-            "late" => Arc::new(variants::Backwards(n)),
-            _ => Arc::new(pool::Pool::new(n)),
-        };
-        let gang = engine_ecs::Workers::new(Some(exec));
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(warm_ms) {
-            engine_ecs::Workers::run(&gang, n, |_| {
-                let t = Instant::now();
-                while t.elapsed() < Duration::from_millis(1) {
-                    std::hint::spin_loop();
-                }
-            });
-        }
-        let dt = arrays::DT;
-        let us = time(inputs, reps, |i| {
-            solver::solve_across(&PARAMS, (&mut i.bodies, &mut i.spinning), &mut i.contacts, &mut i.points, dt, &gang)
-        });
-        let same = inputs.iter().zip(&bases).all(|(i, base)| {
-            let mut o = i.clone();
-            solver::solve_across(&PARAMS, (&mut o.bodies, &mut o.spinning), &mut o.contacts, &mut o.points, dt, &gang);
-            bits(&o) == *base
-        });
-        println!("| {n} | {us:.0} | {:.2}× | {} |", one / us, if same { "yes" } else { "NO" });
-    }
-}
-
-/// The median of `reps` runs of `f` on each input, averaged over them.
-fn time(inputs: &[Input], reps: usize, f: impl Fn(&mut Input)) -> f64 {
-    let mut us = 0.0;
-    for input in inputs {
-        let mut times = Vec::with_capacity(reps);
-        for _ in 0..reps {
-            let mut i = input.clone();
-            let t = Instant::now();
-            f(&mut i);
-            times.push(t.elapsed().as_secs_f64() * 1e6);
-        }
-        us += median(times) / inputs.len() as f64;
-    }
-    us
-}
-
 fn main() {
     let reps: usize = std::env::var("REPS").ok().and_then(|r| r.parse().ok()).unwrap_or(9);
     let only = std::env::var("ONLY").unwrap_or_default();
@@ -234,19 +137,11 @@ fn main() {
         (Scene::Pyramid { base: 20 }, vec![601, 630, 660]),
         (Scene::Pyramid { base: 100 }, vec![601, 630, 660]),
     ];
-    let counts: Option<Vec<usize>> =
-        std::env::var("THREADS").ok().map(|t| t.split(',').map(|n| n.parse().expect("THREADS=1,2,..")).collect());
-    let rain = (Scene::Rain { n: 10000, width: 801.0 }, vec![scene::RAIN_LIFE + 241, scene::RAIN_LIFE + 270, scene::RAIN_LIFE + 300]);
-    let cases: Vec<_> = cases.into_iter().chain(counts.as_ref().map(|_| rain)).collect();
     let solvers = solvers();
     for (scene, at) in cases.iter().filter(|(s, _)| only.is_empty() || s.text() == only) {
         let inputs = capture(scene, at);
         let contacts = inputs.iter().map(|i| i.contacts.len()).sum::<usize>() / inputs.len();
         println!("\n### {}, turning, steps {at:?}: {contacts} contacts\n", scene.text());
-        if let Some(counts) = &counts {
-            across(&inputs, reps, counts);
-            continue;
-        }
         println!("| solver | µs (median of {reps}, mean over inputs) | ns a contact | bodies differing | most dv / dw |");
         println!("|---|---|---|---|---|");
         let bases: Vec<Input> = inputs

@@ -66,6 +66,10 @@ field_struct! {
         solve_turning: u64,
         /// Within `write_back`: sleeping's bookkeeping after the solve.
         sleeping: u64,
+        /// Steps whose passes ran across threads, and on one where the
+        /// world has more (not `shareable`, get-znt.39): counts, not ns.
+        passes_across: u64,
+        passes_held: u64,
     }
 }
 
@@ -1099,13 +1103,15 @@ impl Mod for Physics {
                     per(t.solver),
                     per(t.write_back)
                 ) + &format!(
-                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1} prepare {:.1} passes {:.1} finish {:.1}",
+                    " solve_bodies {:.1} solve_turning {:.1} sleeping {:.1} prepare {:.1} passes {:.1} finish {:.1} passes_across {} passes_held {}",
                     per(t.solve_bodies),
                     per(t.solve_turning),
                     per(t.sleeping),
                     per(t.prepare),
                     per(t.passes),
-                    per(t.finish)
+                    per(t.finish),
+                    t.passes_across,
+                    t.passes_held
                 ))
             }
             "sleeping" => {

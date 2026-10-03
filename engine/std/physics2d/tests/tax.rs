@@ -18,8 +18,6 @@ mod arrays;
 mod narrow;
 #[path = "tax_par.rs"]
 mod par;
-#[path = "pool.rs"]
-mod pool;
 #[path = "../solver.rs"]
 mod solver;
 

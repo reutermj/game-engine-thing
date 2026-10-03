@@ -38,7 +38,7 @@ use physics2d::{
 
 use crate::Turning as TurningQ;
 use crate::sleep::Sleepers;
-use crate::solver::staged::{Atom, Shared, Staged, State, Step};
+use crate::solver::staged::{self, Atom, Shared, Staged, State, Step};
 use crate::solver::{self, Constraint, ContactPoint, Points, SolverBody, Spinning};
 use crate::{Moving, Physics, Records, RestingContacts, SleepingBodies, Slots, Stills, mark, nanos, sleeping_by};
 
@@ -99,6 +99,9 @@ flow! {
         /// Whether the step is solved in lanes; if not, `finish` solves it
         /// whole.
         lanes: bool,
+        /// Whether the passes may run across threads: not where a still
+        /// body carries a negative zero (`staged::shareable`, get-znt.39).
+        shareable: bool,
         staged: Staged<LANES>,
         colors: Colors,
         program: Vec<Stage<Step>>,
@@ -290,9 +293,10 @@ impl Physics {
         let start = Instant::now();
         let params = s.params();
         let Contacts { constraints, points, .. } = &mut *c;
-        let Graph { lanes, staged, colors, .. } = &mut *g;
+        let Graph { lanes, shareable, staged, colors, .. } = &mut *g;
         *lanes = Staged::<LANES>::takes(&params, &t.spinning, points);
         if *lanes {
+            *shareable = staged::shareable(&b.bodies, &t.spinning);
             let moves = staged.begin(&params, (&b.bodies, &t.spinning), *dt);
             // Box2D's rule (`b2AddContactToGraph`): an edge with an end that
             // doesn't move stays out of color 0. The call the arrays'
@@ -317,7 +321,7 @@ impl Physics {
     ) {
         let start = Instant::now();
         let params = s.params();
-        let Graph { lanes, staged, colors, program } = &mut *g;
+        let Graph { lanes, shareable, staged, colors, program } = &mut *g;
         if *lanes {
             program.clear();
             solver::staged::program(&params, staged.states(), t.spinning.len(), |k, each| {
@@ -331,6 +335,14 @@ impl Physics {
             // The kernels are generic over the lanes' view of the states
             // (`Bodies`), so each view is matched once a call, not once a
             // body (docs/architecture/flows.md, "On one thread").
+            // Across threads only where the result is the one thread's.
+            let threads = passes.threads();
+            let passes = passes.serial(!*shareable);
+            if passes.threads() > 1 {
+                self.time.passes_across += 1;
+            } else if threads > 1 {
+                self.time.passes_held += 1;
+            }
             passes.run(
                 &colors.layout,
                 items,

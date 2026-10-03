@@ -136,7 +136,9 @@ def _engine_mod_impl(ctx):
         DefaultInfo(
             executable = exe,
             files = depset([library]),
-            runfiles = ctx.runfiles(files = [library]).merge(modctl_runfiles),
+            # The library's own runfiles too: the license texts of what it
+            # links travel with it (docs/CREDITS.md).
+            runfiles = ctx.runfiles(files = [library]).merge(ctx.attr.library[DefaultInfo].default_runfiles).merge(modctl_runfiles),
         ),
         RunEnvironmentInfo(environment = {
             "ENGINE_MOD_NAME": ctx.attr.mod_name,
@@ -290,11 +292,21 @@ def _engine_game_impl(ctx):
         fail("%s is %s's bootstrap, which runs the frame loop, so it must be resident: engine_mod(resident = True)" %
              (_pretty(ctx.attr.bootstrap.label), _pretty(ctx.label)))
 
+    # The threads run their mod's code between frames, so it can never be
+    # swapped under them.
+    threads = [ctx.attr.threads] if ctx.attr.threads else []
+    for t in threads:
+        if not t[EngineModInfo].resident:
+            fail("%s is %s's thread host, whose threads run its code between frames, so it must be resident: engine_mod(resident = True)" %
+                 (_pretty(t.label), _pretty(ctx.label)))
+
     # Dependencies first, and each mod once, including dependencies the game
-    # didn't list.
+    # didn't list. The thread host first, so it is closed last, after every
+    # mod whose shapes ran on its threads.
     scheduler = [ctx.attr.scheduler] if ctx.attr.scheduler else []
     closure = depset(
-        transitive = [bootstrap.closure] + [m[EngineModInfo].closure for m in scheduler + ctx.attr.mods],
+        transitive = [t[EngineModInfo].closure for t in threads] + [bootstrap.closure] +
+                     [m[EngineModInfo].closure for m in scheduler + ctx.attr.mods],
         order = "postorder",
     ).to_list()
     lines = ["reload %s" % ctx.attr.reload_label]
@@ -305,6 +317,10 @@ def _engine_game_impl(ctx):
     ctx.actions.write(manifest, "\n".join(lines) + "\n")
 
     game_runfiles = ctx.runfiles(files = [manifest] + [m.library for m in closure])
+    for t in threads:
+        # Its libraries' license texts, which travel with what links them
+        # (docs/CREDITS.md).
+        game_runfiles = game_runfiles.merge(t[DefaultInfo].default_runfiles)
     exe, engine_runfiles = _launcher(ctx, ctx.attr._engine)
     return [
         DefaultInfo(
@@ -325,6 +341,7 @@ _engine_game = rule(
         "bootstrap": attr.label(mandatory = True, providers = [EngineModInfo]),
         "mods": attr.label_list(providers = [EngineModInfo]),
         "scheduler": attr.label(providers = [EngineModInfo]),
+        "threads": attr.label(providers = [EngineModInfo]),
         "reload_label": attr.string(mandatory = True),
         "_engine": attr.label(
             default = "//engine/loader:engine",
@@ -362,6 +379,7 @@ def engine_game(
         mods = [],
         bootstrap = "//engine/std/realtime",
         scheduler = "//engine/std/sequential",
+        threads = "//engine/std/threads",
         visibility = None):
     """The engine plus the mods loaded at startup, and a target to reload them.
 
@@ -375,6 +393,12 @@ def engine_game(
       scheduler: The mod providing `engine_api::scheduler::Scheduler`, which
         decides when each system runs. `None` leaves it to the loader's own
         sequential frame.
+      threads: The resident mod that owns the threads shapes run across, and
+        installs them as the world's executor: the default puts one a core
+        on one CCD (docs/architecture/threads.md). `None` runs everything
+        on the frame's thread. A game wanting another count sets
+        `ENGINE_THREADS`; another placement, its own mod over
+        `//engine/std/threads:pool`.
       visibility: Visibility of both targets.
 
     Also declares a reload target: `bazel run` on it sends every mod's current
@@ -389,6 +413,7 @@ def engine_game(
         bootstrap = bootstrap,
         mods = mods,
         scheduler = scheduler,
+        threads = threads,
         reload_label = "//%s:%s" % (native.package_name(), reload),
         visibility = visibility,
     )

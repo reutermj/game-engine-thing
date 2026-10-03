@@ -107,8 +107,14 @@ changing the ABI, the reload sequence or the Bazel rules.
     once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a
     program of stages over items in colors, its kernels handed the states
     plain on one thread and shared on several, `States`), parameters the
-    scheduler will run across threads; on one thread for now. physics2d's
-    solve is their first user (its `pipeline.rs`).
+    scheduler runs across threads (`Passes` does; `ParMap` and `Reduce`
+    stay on one until they have users). Both physics solves' passes are
+    `Passes` programs (each one's `pipeline.rs`).
+  - `dispatch.rs` — the task graph `Passes` runs across the world's
+    executor: stages of blocks claimed from each thread's share, published
+    by whoever completes the stage before, no main thread, a kernel's
+    panic raised on the caller. Safe Rust. See
+    [docs/architecture/threads.md](docs/architecture/threads.md).
   - `graph.rs` — footprints and the overlap rules the schedule's edges
     come from.
   - `live.rs` — live relations: a `Proximity` a mod declares (a spatial
@@ -151,7 +157,11 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/std/` — the mods the engine ships, which `engine_game` uses by
   default: `realtime` (the frame loop in real time) and `lockstep` (frames
   only when sent `step N`), both resident bootstraps; `clock` (the `Clock`
-  both publish); `sequential`, the default scheduler; and `physics2d`, 2D
+  both publish); `sequential`, the default scheduler; `threads`, resident,
+  the scheduler's thread pool (rayon pinned to one CCD with
+  core_affinity, installed as the world's executor and loaded first; its
+  library `:pool` for benches and tests;
+  [threads.md](docs/architecture/threads.md)); and `physics2d`, 2D
   rigid bodies with spatial queries, which a game gets by depending on it
   (see [docs/architecture/physics.md](docs/architecture/physics.md)).
   `physics3d` is experimental: 3D spheres and boxes that turn, a mod like

@@ -10,14 +10,21 @@
 //! already hold. Without an executor installed in the world, everything
 //! runs on the system's thread, in the same order.
 
+use std::any::Any;
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::query::{Declare, FrameCx, Param, ParamDecl};
 
 /// Runs tasks on threads. `run` returns once every task has, and a task's
-/// panic is re-raised by `run`.
+/// panic is re-raised by `run`. The engine's own callers (`Workers::run`,
+/// `Passes::run`) never let a task panic into it: they catch it on the
+/// task's thread and raise it again on theirs, since an executor is
+/// normally another library's code, with another copy of std, whose
+/// `catch_unwind` aborts on a panic from ours
+/// (docs/architecture/threads.md, "Panics").
 pub trait Executor: Send + Sync {
     /// How many threads run tasks, the caller's included.
     fn threads(&self) -> usize;
@@ -79,7 +86,7 @@ impl Workers {
     /// one task or one thread, so work too small to split pays no hand-off.
     pub fn run(&self, tasks: usize, f: impl Fn(usize) + Sync) {
         match &self.0 {
-            Some(e) if tasks > 1 && e.threads() > 1 => e.run(tasks, &f),
+            Some(e) if tasks > 1 && e.threads() > 1 => run_caught(&**e, tasks, &f),
             _ => (0..tasks).for_each(f),
         }
     }
@@ -113,6 +120,20 @@ impl Workers {
             cells[k].lock().expect("a task's own cell").1 = Some(out);
         });
         cells.into_iter().map(|c| c.into_inner().expect("a finished task").1.expect("every task ran")).collect()
+    }
+}
+
+/// `executor.run(tasks, f)`, a task's panic caught on its thread and
+/// raised again on this one, the first if several did (see `Executor`).
+fn run_caught(executor: &dyn Executor, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+    let caught: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
+    executor.run(tasks, &|k| {
+        if let Err(p) = catch_unwind(AssertUnwindSafe(|| f(k))) {
+            caught.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(p);
+        }
+    });
+    if let Some(p) = caught.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        resume_unwind(p);
     }
 }
 

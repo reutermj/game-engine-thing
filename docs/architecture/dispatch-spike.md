@@ -1,8 +1,11 @@
 # Dispatching a program's stages: spike results
 
-**Status: spike results** (2026-10-03, get-znt.30). Nothing in the engine
-changed: no `engine_ecs` code, no physics code, no baseline. The spike is
-four targets over the mods' own kernels:
+**Status: spike results** (2026-10-03, get-znt.30), **built** the same day
+as [threads.md](threads.md): the `affine` protocol in `engine_ecs`
+(`dispatch.rs`), on a rayon pool pinned to one CCD. Nothing in the engine
+changed for the spike itself: no `engine_ecs` code, no physics code, no
+baseline. The spike was four targets over the mods' own
+kernels:[^spike-code]
 
 - `//engine/std/physics2d/compare:dispatch_spike` (`dispatch.rs`,
   `dispatch_2d.rs`, `dispatch_spike.rs`): five dispatchers, each running
@@ -547,3 +550,13 @@ other.
   path left) wasn't varied. With two equal programs it didn't matter.
 - **SMT.** All numbers are on 8 cores without their siblings; physics.md
   measured SMT at +5% for `run_across`.
+
+[^spike-code]: *(History, 2026-10-03.)* The spike's code was removed once
+    its findings were written here and the protocol landed in the engine
+    (threads.md): spikes are built to answer a question and then thrown
+    away. `dispatch.rs`, `dispatch_2d.rs`, `dispatch_spike.rs` and
+    `dispatch_test.rs` (physics2d/compare), `tests/dispatch_3d.rs`,
+    `tests/dispatch_spike3d.rs` and `tests/dispatch_test3d.rs` (physics3d),
+    the kept pool they ran on (`physics2d/tests/pool.rs`) and the
+    `solve_across` they were measured against all build and run at commit
+    `4daabfc`, the last commit with the spike building.

@@ -66,8 +66,10 @@ over one table doesn't have:
   computes the same thing, because a color's rows are independent.
 - The result is then a function of the coloring (which rows are in which
   color, and the colors' order) alone, never of the threads. The solver's
-  test holds it bit for bit across 1 to 16 threads
-  (`the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`), and
+  test held it bit for bit across 1 to 16 threads
+  (`the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`; since
+  2026-10-03 the mod's passes on the scheduler's pool,
+  `the_mod_across_threads_is_the_arrays_bit_for_bit`, threads.md), and
   the spike asserts it for colors kept across steps too.
 
 The general shape: **a system over a relation table whose rows write the
@@ -136,7 +138,9 @@ order of the phases below.
   and hands out the executor the host installed (`engine_ecs::par`), with
   `par_for_each` and the page walks split over it.
 
-**Outside it, in the solve system's per-step copy** (`solver::solve_across`):
+**Outside it, in the solve system's per-step copy** (`solver::solve_across`
+when this was written; since 2026-10-03 the pipeline's flows, its passes on
+`Passes` and the stages in `engine_ecs`'s dispatch, threads.md):
 
 | what | where | why it is outside |
 |---|---|---|
@@ -456,8 +460,11 @@ dependency, not a part:
   affinity measured in [Parallelism](physics.md#parallelism) (chunk `k` on
   thread `k % n`) would help a relation's walks as it helped the broadphase.
 
-Whether the pool is rayon's or our own, and how it pins, stays the user's
-decision (get-znt.20). Nothing here depends on the choice.
+Whether the pool is rayon's or our own, and how it pins, was the user's
+decision (get-znt.20). **Built** (2026-10-03, [threads.md](threads.md)):
+rayon as the thread host, pinned to one CCD with core_affinity, in a
+resident mod that installs it as the world's executor; one pool for
+`Workers` and the shapes alike.
 
 ### (e) Others considered
 

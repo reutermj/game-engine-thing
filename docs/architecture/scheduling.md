@@ -238,8 +238,13 @@ bootstraps, the `clock` they publish, and the `sequential` scheduler.
 game can replace either, or fold scheduling into its own bootstrap.
 
 A scheduler that owns no threads isn't running between frames, so it
-needn't be resident: `sequential` hot-reloads like gameplay. The parallel one
-(step 2) will own worker threads, and so will be resident.
+needn't be resident: `sequential` hot-reloads like gameplay. **The threads
+are a mod of their own** (2026-10-03, [threads.md](threads.md)): `threads`,
+resident, keeps a pool on one CCD and installs it as the world's executor,
+which `engine_game` loads first unless a game names another (`threads =
+...`, or `None`). Shapes run across it (`Passes`), so a scheduler needn't
+own threads to have its frame's work use them, and stays reloadable; one
+that runs systems at once (step 2) reaches the same pool.
 
 ## Toward parallelism
 
@@ -266,8 +271,11 @@ The four steps, of which this document is the first:
    ([physics.md](physics.md#solving-across-threads)): tasks of a run may
    wait for work another task has taken, never for a task to start, since
    an executor promises that every task runs, not that they run at once.
-   What that measured of the host's pool (kept threads, placed on one CCD,
-   warm) is get-znt.5's to build.
+   Since get-znt.28 a system declares its parallel work as a shape
+   ([flows.md](flows.md#parallel-shapes)) and the scheduler runs it; the
+   host's pool and the shapes' dispatch across it are built
+   ([threads.md](threads.md), 2026-10-03), and `Workers` reaches the same
+   pool until get-znt.31 retires it.
 4. **Pipeline parallelism.** The next frame's simulation during this
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.
@@ -277,8 +285,10 @@ data parallelism must work on column slices only.
 
 **Open question:** worker threads and `thread_local!`. glibc keeps a library
 mapped while a thread has TLS destructors registered in it, so a reloadable
-mod using TLS on a long-lived worker leaks its old builds. Recycling workers
-at a reload's drain is the likely answer.
+mod using TLS on a long-lived worker leaks its old builds. The pool's
+workers are long-lived now ([threads.md](threads.md#hot-reload)); physics's
+kernels leave nothing there, which `physics2d_test` checks. Recycling
+workers at a reload's drain is the likely answer for a mod that does.
 
 [^step]: *(History, 2026-09-23.)* Mods used to have one per-frame hook,
     `Mod::step`, which also served as the bootstrap's session. For the first

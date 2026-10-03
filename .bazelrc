@@ -4,6 +4,12 @@ common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 
 try-import %workspace%/user.bazelrc
 
+# Tests run side by side, many engines to a test, and each engine's thread
+# pool pinned to one CCD would pile them all on its cores: in tests the OS
+# places the pools' threads (docs/architecture/threads.md, "Placement").
+# On common, so build, test and run keep one configuration.
+common --test_env=ENGINE_PIN=0
+
 # Optimized by default, tests and games alike. The physics tests are pure
 # number-crunching and run about 40 times faster (quality_test 49 s to about
 # 1 s, results bit for bit the same: rustc doesn't reorder float arithmetic),

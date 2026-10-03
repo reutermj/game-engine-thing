@@ -9,6 +9,7 @@ rust_library(
     srcs = [
         "between.rs",
         "component.rs",
+        "dispatch.rs",
         "erased.rs",
         "events.rs",
         "flows.rs",

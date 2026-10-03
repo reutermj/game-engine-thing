@@ -13,6 +13,7 @@
 
 pub mod between;
 pub mod component;
+mod dispatch;
 pub mod erased;
 pub mod events;
 pub mod flows;

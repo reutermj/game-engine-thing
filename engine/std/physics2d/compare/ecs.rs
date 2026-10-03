@@ -64,7 +64,12 @@ impl Ecs {
         let run = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("physics-compare-{}-{run}", std::process::id()));
         let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
-        engine.load_batch(&manifest.mods).expect("loading the scene");
+        // The scene game less its thread host, and the process's one pool in
+        // its place: a harness makes thousands of engines, and each load of
+        // the host costs a TLS key (`engine_threads::shared`).
+        let mods: Vec<_> = manifest.mods.iter().filter(|(name, _)| name != engine_threads::MOD_NAME).cloned().collect();
+        engine.load_batch(&mods).expect("loading the scene");
+        engine.world().set_executor(engine_threads::shared().map(|p| p as std::sync::Arc<dyn engine_ecs::Executor>));
         // The mod reads the scene back from its text.
         assert_eq!(Scene::parse(&scene.text()), Some(*scene));
         // Its phase is fixed-rate: only the arrays step at another.
@@ -84,12 +89,21 @@ impl Ecs {
         Ecs { engine, dir, label, wall: 0.0, ticks: 0 }
     }
 
-    /// On the threads of `executor`, the host's, as physics.md, "Solving
-    /// across threads", measures them.
+    /// On the threads of `executor` in place of the process's pool
+    /// (`engine_threads::shared`, which the quality tests and the baseline
+    /// run on, as `ENGINE_THREADS` sets it).
     #[allow(dead_code)] // The comparison sets it; the quality tests don't.
     pub fn on_threads(mut self, executor: std::sync::Arc<dyn engine_ecs::Executor>) -> Ecs {
         self.label += &format!(", {} threads", executor.threads());
         self.engine.world().set_executor(Some(executor));
+        self
+    }
+
+    /// On the frame's thread alone: no pool, as the other engines are
+    /// timed.
+    #[allow(dead_code)] // The comparison's; the quality tests run on the game's threads.
+    pub fn alone(self) -> Ecs {
+        self.engine.world().set_executor(None);
         self
     }
 }

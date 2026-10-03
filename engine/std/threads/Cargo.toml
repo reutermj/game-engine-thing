@@ -1,0 +1,21 @@
+[package]
+name = "engine-threads"
+version = "0.0.0"
+edition = "2024"
+# Keep in step with the toolchain version in MODULE.bazel (see
+# engine/loader/Cargo.toml).
+rust-version = "1.98"
+publish = false
+
+[lib]
+path = "pool.rs"
+
+[dependencies]
+# The thread host of the scheduler's pool: an explicit `ThreadPool`, never
+# rayon's global one, whose scope starts the workers once a dispatch.
+# Rayon's own work stealing never hands out a shape's blocks
+# (docs/architecture/threads.md).
+rayon = "1"
+# Pins each of the pool's threads to a core of one CCD, in rayon's
+# `start_handler` (docs/architecture/threads.md, "Placement").
+core_affinity = "0.8"

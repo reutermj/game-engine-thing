@@ -1,0 +1,45 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_mod")
+
+# The license texts of rayon, core_affinity and the crates they link (all
+# MIT or Apache-2.0, the MIT text kept), which travel with whatever links
+# them: see docs/CREDITS.md.
+LICENSES = glob(["licenses/*"])
+
+# The scheduler's thread pool: rayon as the thread host, pinned to one CCD
+# with core_affinity. A library, so a benchmark or test can install one in
+# its world directly, and a game can build its own thread mod with another
+# placement. See docs/architecture/threads.md.
+rust_library(
+    name = "pool",
+    srcs = ["pool.rs"],
+    crate_name = "engine_threads",
+    crate_root = "pool.rs",
+    data = LICENSES,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/ecs",
+        "@crates//:core_affinity",
+        "@crates//:rayon",
+    ],
+)
+
+rust_test(
+    name = "pool_test",
+    crate = ":pool",
+    # One test at a time: one counts the process's pool threads by name.
+    env = {"RUST_TEST_THREADS": "1"},
+)
+
+# The pool as a resident mod, installed as the world's executor: what
+# `engine_game` loads first unless a game says otherwise. Resident, since
+# its threads run its code between frames.
+engine_mod(
+    name = "threads",
+    srcs = ["lib.rs"],
+    data = LICENSES,
+    resident = True,
+    visibility = ["//visibility:public"],
+    deps = [":pool"],
+)

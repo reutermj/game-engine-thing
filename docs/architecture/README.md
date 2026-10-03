@@ -43,12 +43,17 @@ monolithic design doc.
   `Take` and their rules, edges in the graph, the world's store and its
   recycling bins across reloads, the plan check and its errors, fixed-rate
   groups, and parallel shapes (`ParMap`, `Reduce`, `Passes`) declared as
-  parameters and run by the scheduler (stage 1 built: on one thread)
+  parameters and run by the scheduler (built: `Passes` across threads)
 - [dispatch-spike.md](dispatch-spike.md) — how a scheduler hands a
   `Passes` program's stages out across threads: how Box2D, Box3D, Jolt
   and Rapier dispatch staged work, five protocols run over both physics
   solves bit for bit against `run_across`, where idle time goes, two
-  programs in one dispatch, and what the pool must provide (spike results)
+  programs in one dispatch, and what the pool must provide (spike results;
+  built as [threads.md](threads.md))
+- [threads.md](threads.md) — the scheduler's threads: a resident mod's
+  rayon pool on one CCD as the world's executor, why it lives there, the
+  task graph `Passes` runs across it, warmth, panics and hot reload, and
+  what it measures in the running engine (built)
 - [contiguous-columns.md](contiguous-columns.md) — why storage can't be
   indexed as a plain array, and whether it could: a table column in one
   block or in reserved address space against today's pages, measured for

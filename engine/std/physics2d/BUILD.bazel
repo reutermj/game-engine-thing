@@ -144,10 +144,7 @@ TEST_DATA = {
 # The mod in a running engine, on the test scenes.
 rust_test(
     name = "physics2d_test",
-    srcs = [
-        "tests/physics2d_test.rs",
-        "tests/pool.rs",
-    ],
+    srcs = ["tests/physics2d_test.rs"],
     crate_root = "tests/physics2d_test.rs",
     data = TEST_DATA.values(),
     env = {var: "$(rlocationpath %s)" % target for var, target in TEST_DATA.items()} | POISON_ENV,
@@ -156,6 +153,7 @@ rust_test(
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",
+        "//engine/std/threads:pool",
         "@rules_rust//rust/runfiles",
     ],
 )
@@ -177,9 +175,9 @@ rust_binary(
 # computation bit for bit:
 #   ./bazel run --config=bench //engine/std/physics2d:tax
 # and split across 1 to 16 threads, each checked bit for bit against one
-# (REPS and THREADS=1,2,.. in the environment override the defaults;
-# STICKY, SPIN_US and TASK_ALLOC change the pool and the arrays' lists: see
-# tests/pool.rs and tests/tax_par.rs):
+# (REPS and THREADS=1,2,.. in the environment override the defaults, the
+# threads the scheduler's pool's, //engine/std/threads; TASK_ALLOC changes
+# the arrays' lists: see tests/tax_par.rs):
 #   ./bazel run --config=bench //engine/std/physics2d:tax -- parallel
 rust_binary(
     name = "tax",
@@ -187,7 +185,6 @@ rust_binary(
         "narrow.rs",
         "solver.rs",
         "tests/arrays.rs",
-        "tests/pool.rs",
         "tests/tax.rs",
         "tests/tax_par.rs",
     ],
@@ -200,6 +197,7 @@ rust_binary(
         "//engine/ecs",
         "//engine/loader",
         "//engine/std/physics_common",
+        "//engine/std/threads:pool",
     ],
 )
 
@@ -281,14 +279,4 @@ exports_files(
         "tests/split_impulse.rs",
     ],
     visibility = ["//engine/std/physics2d/compare:__pkg__"],
-)
-
-# The benchmarks' kept threads (physics3d's for the dispatch spike,
-# docs/architecture/dispatch-spike.md).
-exports_files(
-    ["tests/pool.rs"],
-    visibility = [
-        "//engine/std/physics2d/compare:__pkg__",
-        "//engine/std/physics3d:__pkg__",
-    ],
 )

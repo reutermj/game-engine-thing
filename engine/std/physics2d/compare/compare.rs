@@ -19,8 +19,9 @@
 //! steps in, at rest), `VARIANTS` (more settings, comma-separated:
 //! `box2d:<substeps>`, `rapier:<iterations>`, `arrays:<solver>`, our
 //! step with another solver from `variants.rs`, and `threads:<n>`, the
-//! mod on `n` kept threads (`tests/pool.rs`) and Box2D's multithreaded
-//! step on as many, the shim's task system's), `SETTLE=<steps>` (how
+//! mod on `n` of the scheduler's threads (`engine_threads::Pool`, pinned
+//! to one CCD) and Box2D's multithreaded step on as many, the shim's task
+//! system's; plain, ours is on one thread, as the others are), `SETTLE=<steps>` (how
 //! soon each comes to rest instead of the timings; `TRACE=1` names what
 //! moves again; `SCENES=pile 800 41,stack 10` other scenes). What it found: docs/architecture/physics.md, "Against
 //! other engines" and "Settling".
@@ -48,9 +49,6 @@ mod ecs;
 mod family;
 #[path = "../narrow.rs"]
 mod narrow;
-#[allow(dead_code)]
-#[path = "../tests/pool.rs"]
-mod pool;
 mod quality;
 mod rapier;
 mod scene;
@@ -179,7 +177,8 @@ fn main() {
     let sleep = env("SLEEP").is_some();
 
     // By name, which `ENGINES` picks from before any is built.
-    let mut engines: Vec<(String, Make)> = vec![("ours (ECS)".into(), Box::new(|s, t| Box::new(ecs::Ecs::new(&manifest, s, sleep, t))))];
+    let mut engines: Vec<(String, Make)> =
+        vec![("ours (ECS)".into(), Box::new(|s, t| Box::new(ecs::Ecs::new(&manifest, s, sleep, t).alone())))];
     if !sleep {
         engines.push(("ours (arrays)".into(), Box::new(|s, t| Box::new(ecs::Flat::ours(s, t, "", "ours (arrays)")))));
     }
@@ -197,7 +196,11 @@ fn main() {
             let manifest = &manifest;
             let ours = move |s: &Scene, t| {
                 let ecs = ecs::Ecs::new(manifest, s, sleep, t);
-                Box::new(ecs.on_threads(std::sync::Arc::new(pool::Pool::new(n)))) as Box<dyn Sim>
+                let pool = engine_threads::Pool::new(
+                    &engine_threads::OneCcd,
+                    &engine_threads::Settings { threads: Some(n), ..Default::default() },
+                );
+                Box::new(ecs.on_threads(std::sync::Arc::new(pool))) as Box<dyn Sim>
             };
             engines.push((format!("ours (ECS), {n} threads"), Box::new(ours)));
             engines.push((format!("Box2D, {n} threads"), Box::new(move |s, t| Box::new(box2d::Box2d::on_threads(s, 4, sleep, t, n)))));

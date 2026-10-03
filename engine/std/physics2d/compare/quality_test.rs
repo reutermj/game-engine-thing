@@ -496,29 +496,54 @@ fn the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit() {
     }
 }
 
-/// Solved across threads (`solver::solve_across`), the default is the
-/// solve on one thread bit for bit, at 2, 4, 8 and 16 threads, and with
-/// threads that come one at a time, the last first (`late=1`), on the
-/// turning pile and pyramid the equivalence tests run: the colors decide
-/// the computation, not the threads, which is what makes going parallel
-/// speed work alone (physics.md, "Solving across threads"). At one thread
-/// it is the solve on one (it falls back to it). Planted, it fails on a
-/// block that takes the next color's first batch too, and on the colors
-/// solved last first.
+/// The mod's passes across the scheduler's threads (`Passes` on a pool,
+/// the world's executor) are the arrays' solve on one thread bit for bit,
+/// at 2, 4, 8 and 16 threads, and on threads that come one at a time, the
+/// last first, on the turning pile and pyramid the equivalence tests run:
+/// the colors decide the computation, not the threads, which is what makes
+/// going parallel speed work alone (physics.md, "Solving across threads";
+/// threads.md). At one thread the passes run plain. Planted, it fails on a
+/// block run twice and a stage let start early (threads.md, "Testing").
 #[test]
-fn the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit() {
-    let specs = ["rot/threads=1", "rot/threads=2", "rot/threads=4", "rot/threads=8", "rot/threads=16", "rot/threads=4/late=1"];
-    let built = |s: &Scene| ecs::Flat::new(s, true, Box::new(solver::solve_points), "ours");
-    let across: Vec<Box<dyn Fn(&Scene) -> ecs::Flat>> = specs
-        .iter()
-        .map(|spec| Box::new(move |s: &Scene| ecs::Flat::variant(s, true, spec, spec)) as Box<dyn Fn(&Scene) -> ecs::Flat>)
-        .collect();
-    let mut runs: Vec<&dyn Fn(&Scene) -> ecs::Flat> = vec![&built];
-    runs.extend(across.iter().map(|f| f.as_ref()));
-    for (scene, runs) in equivalence_runs(&runs) {
-        for (spec, run) in specs.iter().zip(&runs[1..]) {
-            assert_eq!(differ(&runs[0], run), 0, "{}: {spec} isn't the solve on one thread", scene.text());
+fn the_mod_across_threads_is_the_arrays_bit_for_bit() {
+    use engine_ecs::Executor;
+    use std::sync::Arc;
+
+    /// Says it has `n` threads and runs every task on the caller's, the
+    /// last first: each thread comes once the one before has left.
+    struct OneByOne(usize);
+
+    impl Executor for OneByOne {
+        fn threads(&self) -> usize {
+            self.0
         }
+
+        fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+            (0..tasks).rev().for_each(f);
+        }
+    }
+
+    let unpinned = |n| engine_threads::Settings { threads: Some(n), pin: false, ..Default::default() };
+    let executors: Vec<(String, Arc<dyn Executor>)> = [1, 2, 4, 8, 16]
+        .into_iter()
+        .map(|n| (format!("{n} threads"), Arc::new(engine_threads::Pool::new(&engine_threads::OneCcd, &unpinned(n))) as Arc<dyn Executor>))
+        .chain([("4 one by one".to_string(), Arc::new(OneByOne(4)) as Arc<dyn Executor>)])
+        .collect();
+    for scene in [Scene::Pile { n: 400, width: 41.0, stagger: true }, Scene::Pyramid { base: 20 }] {
+        let mut a = ecs::Flat::new(&scene, true, Box::new(solver::solve_points), "ours");
+        a.step(150);
+        let want = a.bodies();
+        std::thread::scope(|s| {
+            for (name, executor) in &executors {
+                let want = &want;
+                s.spawn(move || {
+                    let mut m = runs::mod_in_engine(&scene, true, false);
+                    m.engine().world().set_executor(Some(executor.clone()));
+                    m.step(150);
+                    assert_eq!(differ(&m.bodies(), want), 0, "{}: {name}: bodies differ from the arrays", scene.text());
+                });
+            }
+        });
     }
 }
 

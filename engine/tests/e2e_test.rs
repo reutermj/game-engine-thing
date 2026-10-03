@@ -221,7 +221,7 @@ fn a_game_reload_reloads_only_the_mods_that_changed() {
     assert!(reload.status.success(), "{}", describe(&reload));
     assert_eq!(
         stdout(&reload).trim(),
-        "reloaded counter (generation 1); clock unchanged; realtime unchanged; sequential unchanged; base unchanged; user unchanged"
+        "reloaded counter (generation 1); threads unchanged; clock unchanged; realtime unchanged; sequential unchanged; base unchanged; user unchanged"
     );
 
     // A per-mod reload that would strand a dependent is refused, naming the

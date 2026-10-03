@@ -86,6 +86,7 @@ rust_library(
         "//engine/loader",
         "//engine/std/physics3d:physics3d_interface",
         "//engine/std/physics_testkit",
+        "//engine/std/threads:pool",
         "@crates//:rapier3d",
     ],
 )

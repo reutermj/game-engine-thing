@@ -8,9 +8,6 @@ use engine_loader::engine::Engine;
 use physics2d::{Asleep, Body, Collider, ContactPair, DYNAMIC, Overlap, Position, Resting, Slept, Still, Touching, Velocity};
 use runfiles::Runfiles;
 
-#[path = "pool.rs"]
-mod pool;
-
 fn path(var: &str) -> PathBuf {
     Runfiles::create().unwrap().rlocation(std::env::var(var).unwrap()).unwrap()
 }
@@ -1189,8 +1186,9 @@ mod runner {
     }
 }
 
-/// Host threads running physics's tasks: its parallel stages, on threads
-/// that aren't the mod's (docs/architecture/physics.md, "Parallelism").
+/// Host threads running physics's tasks: its solve's passes (`Passes`) and
+/// its broadphase and narrowphase (`Workers`), on the scheduler's threads,
+/// which the game's `threads` mod installs (docs/architecture/threads.md).
 mod threads {
     use std::path::Path;
     use std::sync::Arc;
@@ -1199,38 +1197,61 @@ mod threads {
 
     use super::*;
 
+    /// A pool of `n` threads, where the OS puts them: tests run side by
+    /// side.
+    fn pool(n: usize) -> engine_threads::Pool {
+        engine_threads::Pool::new(&engine_threads::OneCcd, &engine_threads::Settings { threads: Some(n), pin: false, ..Default::default() })
+    }
+
     /// How many of the staged builds under `dir` the process has mapped:
-    /// each load stages a copy of its library there.
+    /// each load stages a copy of its library there, named for its mod. Not
+    /// the thread host's (`threads`, resident): spawning its threads leaves
+    /// a destructor in its std on the spawning thread, which keeps it mapped
+    /// until that thread exits
+    /// (docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
     fn images(dir: &Path) -> usize {
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
         let dir = dir.to_string_lossy();
-        let mut paths: Vec<&str> =
-            maps.lines().filter_map(|l| l.splitn(6, ' ').nth(5)).map(str::trim_start).filter(|p| p.starts_with(&*dir)).collect();
+        let host = format!("{dir}/threads-");
+        let mut paths: Vec<&str> = maps
+            .lines()
+            .filter_map(|l| l.splitn(6, ' ').nth(5))
+            .map(str::trim_start)
+            .filter(|p| p.starts_with(&*dir) && !p.starts_with(&host))
+            .collect();
         paths.sort_unstable();
         paths.dedup();
         paths.len()
     }
 
     /// Threads that ran a build's tasks don't keep it mapped once it's
-    /// reloaded, nor after its engine is dropped, kept between runs (a
-    /// pool) or spawned for each: the same builds are mapped at each point
-    /// as with no threads at all. The bodies turn, as they did when the
-    /// solver's stages were among the tasks; its passes are a declared shape
-    /// now, on one thread until the scheduler runs shapes across threads
-    /// (get-znt.34). Tasks run only inside
-    /// the system that made them, and physics's leave nothing on a thread (a thread-local
-    /// with a destructor would keep the build mapped until the thread
-    /// exits: docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
+    /// reloaded, nor after its engine is dropped, kept between runs (the
+    /// game's pool, or one installed here) or spawned for each: the same
+    /// builds are mapped at each point as with no threads at all. The
+    /// bodies turn, so the solve's passes are among the tasks. Tasks run
+    /// only inside the system that made them, and physics's leave nothing
+    /// on a thread (a thread-local with a destructor would keep the build
+    /// mapped until the thread exits:
+    /// docs/lore/a-mod-that-spawns-a-thread-is-never-unmapped.md).
     #[test]
     fn threads_that_ran_a_builds_tasks_do_not_keep_it_mapped() {
-        let executors: [(&str, Option<Arc<dyn Executor>>); 3] =
-            [("none", None), ("spawned", Some(Arc::new(Scoped(4)))), ("kept", Some(Arc::new(super::pool::Pool::new(4))))];
+        let executors: [(&str, Option<Option<Arc<dyn Executor>>>); 4] = [
+            ("none", Some(None)),
+            ("spawned", Some(Some(Arc::new(Scoped(4))))),
+            ("kept", Some(Some(Arc::new(pool(4))))),
+            ("the game's", None),
+        ];
         let mut seen = Vec::new();
         for (name, executor) in executors {
-            let test = format!("images_{name}");
+            let test = format!("images_{}", name.replace(['\'', ' '], "_"));
             let dir = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap()).join(&test);
             let e = game("PILE", &test);
-            e.world().set_executor(executor.clone());
+            match &executor {
+                Some(executor) => e.world().set_executor(executor.clone()),
+                None => {
+                    send(&e, "threads", "threads 4");
+                }
+            }
             send(&e, "pile", "drop 400 turning");
             step(&e, 30);
             let loaded = images(&dir);
@@ -1250,6 +1271,79 @@ mod threads {
         }
     }
 
+    /// A body that doesn't move carrying a negative zero keeps the solve's
+    /// passes on one thread (get-znt.39): batches of one color write it back
+    /// as they read it, the same value whoever writes last but for
+    /// `-0.0 - -0.0`, which is `0.0`, so across threads the result could be
+    /// another than one thread's. The race needs particular impulses to show
+    /// (it didn't in 20 tries on the dispatch spike's scene), so this checks
+    /// the guard itself: a kinematic body spawned at `(-0.0, 0.0)` holds the
+    /// first step's passes on one thread (the step writes it back a plain
+    /// `0.0`, so the steps after run across threads), where at `(0.0, 0.0)` every step's run across four; and the
+    /// pile ends where it does on one thread.
+    #[test]
+    fn a_still_body_with_a_negative_zero_keeps_the_passes_on_one_thread() {
+        let run = |threads: usize, vx: &str, test: &str| {
+            let e = game("PILE", test);
+            send(&e, "threads", &format!("threads {threads}"));
+            send(&e, "pile", "widen 41");
+            send(&e, "pile", "drop 300 staggered turning");
+            send(&e, "pile", &format!("pusher 20 4 {vx} 0"));
+            step(&e, 90);
+            let stages = send(&e, "physics2d", "stages");
+            let w = e.world();
+            let mut all: Vec<_> = w.values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
+            all.sort_unstable();
+            (all, field(&stages, "passes_across"), field(&stages, "passes_held"))
+        };
+        let (one, ..) = run(1, "-0", "negative_zero_one_thread");
+        let (four, across, held) = run(4, "-0", "negative_zero_four_threads");
+        assert_eq!((across, held), (89.0, 1.0), "the first step's passes held on one thread, the rest across four");
+        assert!(one == four, "the pile on four threads isn't the pile on one");
+        let (_, across, held) = run(4, "0", "positive_zero_four_threads");
+        assert_eq!((across, held), (90.0, 0.0), "with a plain zero, every step's passes across threads");
+    }
+
+    /// The game's pool's dispatches, from its `status`.
+    fn dispatches(e: &Engine) -> u64 {
+        let status = send(e, "threads", "status");
+        let words: Vec<&str> = status.split_whitespace().collect();
+        let at = words.iter().position(|w| *w == "dispatches").unwrap_or_else(|| panic!("no dispatches in {status}"));
+        words[at - 1].parse().unwrap_or_else(|_| panic!("no count in {status}"))
+    }
+
+    /// Reloading physics while the game's pool runs its passes is reloading
+    /// it on one thread: the pile ends bit for bit where it does with no
+    /// pool, through a threaded step, the reload, and threaded steps after.
+    /// Every kernel has returned before `Passes::run` does, so no physics
+    /// code is on a worker's stack when the old build goes; poison mode is
+    /// on, so if one were, its next instruction would fault in the unmapped
+    /// build (threads.md, "Hot reload").
+    #[test]
+    fn reloading_physics_under_the_pool_is_reloading_it_on_one_thread() {
+        let run = |threads: usize, test: &str| {
+            let e = game("PILE", test);
+            send(&e, "threads", &format!("threads {threads}"));
+            send(&e, "pile", "widen 41");
+            send(&e, "pile", "drop 600 staggered turning");
+            step(&e, 60);
+            let before = if threads > 1 { dispatches(&e) } else { 0 };
+            assert_eq!(e.load("physics2d", &path("PHYSICS_V2")).unwrap(), "reloaded physics2d (generation 1)");
+            assert_eq!(e.build_of("physics2d").as_deref(), Some("//engine/std/physics2d:physics2d_v2"));
+            step(&e, 60);
+            if threads > 1 {
+                assert!(dispatches(&e) > before, "the reloaded build's steps ran on the pool");
+            }
+            let w = e.world();
+            let mut all: Vec<_> = w.values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
+            all.sort_unstable();
+            all
+        };
+        let one = run(1, "reload_one_thread");
+        assert!(one.len() > 600, "the pile");
+        assert!(one == run(4, "reload_four_threads"), "the reload under four threads isn't the reload on one");
+    }
+
     /// The pile at four threads is where it is at one, bit for bit, over
     /// its fall and settling, with every body sensing the others (an
     /// `Overlap` each) and asking what it touches: `:tax -- parallel`
@@ -1259,12 +1353,11 @@ mod threads {
         on_four_threads_as_on_one("drop 600 staggered", "");
     }
 
-    /// The same with every body turning, on threads kept between steps and
-    /// spawned for each. The solver's passes are a declared shape (`Passes`),
-    /// which runs on one thread until the scheduler runs shapes across threads
-    /// (get-znt.34); then this holds the scheduler's run to the solve on one.
-    /// The colored solve's own test across threads is `quality_test`'s
-    /// `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`.
+    /// The same with every body turning, on threads kept between steps (the
+    /// scheduler's pool) and spawned for each: the solver's passes
+    /// (`Passes`) among the tasks. `quality_test`'s
+    /// `the_mod_across_threads_is_the_arrays_bit_for_bit` holds the passes
+    /// across threads to the arrays' solve on one.
     #[test]
     fn a_turning_pile_on_four_threads_lands_where_it_does_on_one() {
         on_four_threads_as_on_one("drop 600 staggered turning", "_turning");
@@ -1294,7 +1387,7 @@ mod threads {
         let one = run(None, "one_thread");
         assert!(one.1.len() > 700, "{} contacts: a pile", one.1.len());
         assert!(one.2.len() > 500 && one.3.iter().filter(|t| t.1[0]).count() > 400, "overlaps, and bodies standing on something");
-        let kept: Arc<dyn Executor> = Arc::new(super::pool::Pool::new(4));
+        let kept: Arc<dyn Executor> = Arc::new(pool(4));
         for (four, how) in [(run(Some(kept), "four_threads"), "kept"), (run(Some(Arc::new(Scoped(4))), "four_spawned"), "spawned")] {
             assert!(one.0 == four.0 && one.1 == four.1, "{how}: the same bodies where they were, and the same contacts, entities and all");
             assert!(one.2 == four.2 && one.3 == four.3, "{how}: the same overlaps, and sides touched");

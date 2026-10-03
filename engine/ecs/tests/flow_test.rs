@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use engine_ecs::flows::{PlanStep, check_plan};
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
 use engine_ecs::{
-    Build, Colored, Coloring, Make, ParMap, ParamDecl, Pass, Passes, Reduce, See, ShapeKind, Stage, States, Take, World, flow,
+    Build, Colored, Coloring, Executor, Make, ParMap, ParamDecl, Pass, Passes, Reduce, Scoped, See, ShapeKind, Stage, States, Take, World,
+    flow,
 };
 
 flow! {
@@ -472,6 +473,92 @@ fn passes_run_stages_in_order_the_overflow_first_then_each_color() {
     });
 }
 
+/// `serial` keeps a program on the system's thread, its states plain,
+/// where the world's executor would share it out; without it, the same
+/// program runs in blocks across the threads, and a kernel's panic reaches
+/// the system.
+#[test]
+fn passes_run_across_the_worlds_threads_unless_serial() {
+    let w = World::new();
+    w.set_executor(Some(Arc::new(Scoped(4))));
+    let s = schedule(vec![
+        (|_: &mut Cx, passes: Passes| {
+            let layout = Colored { overflow: 1, colors: vec![400, 3] };
+            let mut items: Vec<u32> = (0..404).collect();
+            let mut states = vec![0.0f32; 4];
+            let program = [Stage::Items(()), Stage::Each((), 4)];
+            let mut calls = |passes: Passes| {
+                let views = Mutex::new(Vec::new());
+                let threads = passes.threads();
+                passes.run(
+                    &layout,
+                    &mut items.clone(),
+                    &mut states,
+                    &program,
+                    |_, block, s| views.lock().unwrap().push((block.len(), matches!(s, States::Plain(_)))),
+                    |_, _, _| {},
+                );
+                (threads, views.into_inner().unwrap())
+            };
+            let (threads, serial) = calls(passes.clone().serial(true));
+            assert_eq!(threads, 1);
+            assert_eq!(serial, [(1, true), (400, true), (3, true)], "a block a color, plain");
+            let (threads, across) = calls(passes.clone());
+            assert_eq!(threads, 4);
+            assert!(across.len() > 3 && across.iter().all(|(_, plain)| !plain), "blocks of colors, shared: {across:?}");
+            let text = panic_text(|| {
+                passes.run(
+                    &layout,
+                    &mut items,
+                    &mut states,
+                    &program,
+                    |_, block, _| assert!(!block.contains(&200), "item 200"),
+                    |_, _, _| {},
+                )
+            });
+            assert_eq!(text, "item 200");
+        })
+        .system(&w, "passes"),
+    ]);
+    s.run_sequential(&w);
+}
+
+/// Threads that start one at a time, each later than the last: a stage's
+/// blocks taken by whoever is there.
+struct Late(usize);
+
+impl Executor for Late {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        std::thread::scope(|s| {
+            for k in 1..tasks {
+                s.spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_micros(50 * k as u64));
+                    f(k)
+                });
+            }
+            f(0);
+        });
+    }
+}
+
+/// Tasks one after another on the calling thread, the last first: one
+/// thread does every stage alone, and the others come once it's done.
+struct OneByOne(usize);
+
+impl Executor for OneByOne {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..tasks).rev().for_each(f);
+    }
+}
+
 /// A ring of springs with chords: an edge pulls its two ends' values
 /// together, Gauss-Seidel, so the result depends on the order edges run in.
 fn graph(n: u32) -> (Vec<(u32, u32)>, Vec<bool>) {
@@ -546,13 +633,24 @@ fn colored_passes_relax_the_edges_color_by_color() {
         relax(&mut States::Plain(&mut want), edges[i], 0.5);
     }
     want.iter_mut().for_each(|x| *x *= 0.99);
-    // Plain, as on one thread, and shared, as on several.
-    for shared in [false, true] {
+    // Plain, as on one thread, and shared, as on several; then across
+    // threads, which share them, on executors whose threads come at once,
+    // late, or one after another.
+    let mut runs: Vec<(bool, Option<Arc<dyn Executor>>)> = vec![(false, None), (true, None)];
+    for n in [1, 2, 3, 4, 8] {
+        runs.push((false, Some(Arc::new(Scoped(n)))));
+        runs.push((false, Some(Arc::new(Late(n)))));
+        runs.push((false, Some(Arc::new(OneByOne(n)))));
+    }
+    for (shared, executor) in runs {
+        let threads = executor.as_ref().map_or(1, |e| e.threads());
+        let shared = shared || threads > 1;
         let (layout, items, want, relax) = (layout.clone(), Mutex::new(items.clone()), want.clone(), relax.clone());
         let states = Mutex::new(start.clone());
         let views = Mutex::new(Vec::new());
         let w = World::new();
-        w.set_shapes_shared(shared);
+        w.set_shapes_shared(shared && threads == 1);
+        w.set_executor(executor);
         let s = schedule(vec![
             (move |_: &mut Cx, passes: Passes| {
                 let seen = |s: &States<'_, f32>| views.lock().unwrap().push(matches!(s, States::Shared(_)));
@@ -571,8 +669,12 @@ fn colored_passes_relax_the_edges_color_by_color() {
                     },
                 );
                 let got = states.lock().unwrap();
-                assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()), "shared {shared}: the colors' order");
+                assert!(
+                    got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "shared {shared}, {threads} threads: the colors' order"
+                );
                 assert!(views.lock().unwrap().iter().all(|v| *v == shared), "shared {shared}: every kernel saw the states so");
+                assert!(threads == 1 || views.lock().unwrap().len() > layout.colors.len() + 1, "{threads} threads: blocks, not colors");
             })
             .system(&w, "relax"),
         ]);

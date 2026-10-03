@@ -179,7 +179,7 @@ impl Physics3d {
         let [groups, overflow, batches, widest, narrowest] = if *lanes { staged.layout() } else { [0; 5] }.map(|x| x as u64);
         let f = &mut self.found;
         (f.groups, f.overflow, f.batches, f.widest, f.narrowest) = (groups, overflow, batches, widest, narrowest);
-        self.solver_time(start);
+        self.solver_time(start, |t, x| t.prepare += x);
     }
 
     /// The substeps and restitution: every pass a stage over the groups'
@@ -208,7 +208,7 @@ impl Physics3d {
                 },
             );
         }
-        self.solver_time(start);
+        self.solver_time(start, |t, x| t.passes += x);
     }
 
     /// The step's impulses and states back into the contacts and bodies;
@@ -232,11 +232,12 @@ impl Physics3d {
         } else {
             solver::solve(bodies, contacts, *dt, &how);
         }
-        self.solver_time(start);
+        self.solver_time(start, |t, x| t.finish += x);
     }
 
-    fn solver_time(&mut self, start: Instant) {
+    fn solver_time(&mut self, start: Instant, part: impl FnOnce(&mut crate::Timings, u64)) {
         let t = crate::nanos(start, Instant::now());
+        part(&mut self.time, t);
         (self.time.solver, self.time.solve) = (self.time.solver + t, self.time.solve + t);
     }
 
