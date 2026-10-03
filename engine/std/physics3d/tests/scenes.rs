@@ -112,6 +112,45 @@ pub enum Kind {
     /// One bounce of the bounce families (engine/std/physics3d/compare, `bounces.rs`):
     /// n is a `Hit`, packed (`Hit::pack`).
     Hit,
+    /// The edge-of-stability scenes of the families (compare's
+    /// `family.rs`), each n packed with its friction (`Edge::pack`): a
+    /// pyramid of unit cubes as 2D's: one deep, flush, `base` wide, each
+    /// cube on two below. (Square, each cube on four, bases 4 to 12 at
+    /// friction 0.2 to 0.8 all stood, most at rest from the first step: no
+    /// edge to measure, 2026-10-03.)
+    Pyramid,
+    /// Planks on edge, two a layer, each layer across the one below (a
+    /// log cabin of Kapla planks), `layers` high, each layer set off a
+    /// little as a stack's boxes are.
+    Cabin,
+    /// Box2D's card house (its sample's, as 2D's `Scene::Cards`) made 3D:
+    /// cards 2 tall and 1.4 wide, pairs leaning `lean`° into each other, a
+    /// flat card across each two pairs, `rows` storeys.
+    Cards,
+}
+
+/// What an edge-of-stability scene (`Kind::Pyramid`, `Cabin`, `Cards`)
+/// is, packed into its n: its size (a pyramid's base, a cabin's layers, a
+/// card house's storeys), its lean in tenths of a degree (cards only, 0
+/// otherwise), and its friction in hundredths, on every body and the
+/// floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    pub size: usize,
+    pub lean: f32,
+    pub mu: f32,
+}
+
+impl Edge {
+    pub fn pack(&self) -> usize {
+        let (lean, mu) = ((self.lean * 10.0).round() as usize, (self.mu * 100.0).round() as usize);
+        assert!(self.size < 100 && lean < 1000 && mu < 1000, "{self:?} doesn't pack");
+        self.size + 100 * lean + 100_000 * mu
+    }
+
+    pub fn unpack(n: usize) -> Edge {
+        Edge { size: n % 100, lean: (n / 100 % 1000) as f32 / 10.0, mu: (n / 100_000) as f32 / 100.0 }
+    }
 }
 
 /// What a `Kind::Hit` throws, and at what.
@@ -335,6 +374,9 @@ impl Kind {
             Kind::Ratio => "ratio",
             Kind::Mixed => "mixed",
             Kind::Hit => "hit",
+            Kind::Pyramid => "pyramid",
+            Kind::Cabin => "cabin",
+            Kind::Cards => "cards",
         }
     }
 
@@ -355,7 +397,7 @@ impl Kind {
 
 /// Every kind, in an order that only grows: the scene mod keeps a kind as
 /// its place here.
-pub const KINDS: [Kind; 12] = [
+pub const KINDS: [Kind; 15] = [
     Kind::SpherePile,
     Kind::BoxPile,
     Kind::PlankPile,
@@ -368,6 +410,9 @@ pub const KINDS: [Kind; 12] = [
     Kind::Ratio,
     Kind::Mixed,
     Kind::Hit,
+    Kind::Pyramid,
+    Kind::Cabin,
+    Kind::Cards,
 ];
 
 /// How far above the floor `Kind::Bounce` drops its ball.
@@ -408,7 +453,71 @@ pub fn build(kind: Kind, n: usize) -> Scene {
         Kind::Ratio => ratio(n),
         Kind::Mixed => pile(kind, n, mixed),
         Kind::Hit => hit(n),
+        Kind::Pyramid | Kind::Cabin | Kind::Cards => edge(kind, n),
     }
+}
+
+/// An edge-of-stability scene (`Edge`) on a floor of its friction, 600
+/// steps, timed whole.
+fn edge(kind: Kind, n: usize) -> Scene {
+    let e = Edge::unpack(n);
+    let material = |s: Spec| Spec { friction: e.mu, ..s };
+    let body = |half: [f32; 3], pos: [f32; 3]| material(Spec::new(Shape::Box(half), pos, false));
+    let mut bodies = Vec::new();
+    match kind {
+        Kind::Pyramid => {
+            for row in 0..e.size {
+                let count = e.size - row;
+                for i in 0..count {
+                    let x = i as f32 - (count - 1) as f32 / 2.0;
+                    bodies.push(body([HALF; 3], [x, 0.5 + row as f32, 0.0]));
+                }
+            }
+        }
+        Kind::Cabin => {
+            // A stack's set-offs (`stack`), so the cabin leans a little.
+            let off = |i: usize, k: usize| ((i * k) % 9) as f32 / 100.0 - 0.04;
+            for k in 0..e.size {
+                let (dx, dz, y) = (off(k, 7919), off(k, 104_729), 0.25 + 0.5 * k as f32);
+                for side in [-0.375, 0.375] {
+                    bodies.push(if k % 2 == 0 {
+                        body([0.5, 0.25, 0.125], [dx, y, side + dz])
+                    } else {
+                        body([0.125, 0.25, 0.5], [side + dx, y, dz])
+                    });
+                }
+            }
+        }
+        _ => {
+            // Box2D's sample (`CardHouse`, y up), every length five times,
+            // as 2D's `cards`, the cards 1.4 deep.
+            let s = 5.0;
+            let (height, thick, deep) = (0.2 * s, 0.001 * s, 0.14 * s);
+            let about_z = |deg: f32| {
+                let a = deg.to_radians() / 2.0;
+                [0.0, 0.0, a.sin(), a.cos()]
+            };
+            let card = |x: f32, y: f32, deg: f32| Spec { rot: about_z(deg), ..body([thick, height, deep], [x, y, 0.0]) };
+            let (mut x0, mut y, mut storeys) = (0.0, height - 0.02 * s, e.size);
+            while storeys > 0 {
+                let mut x = x0;
+                for i in 0..storeys {
+                    if i != storeys - 1 {
+                        bodies.push(card(x + 0.25 * s, y + height - 0.015 * s, 90.0));
+                    }
+                    bodies.push(card(x, y, -e.lean));
+                    x += 0.175 * s;
+                    bodies.push(card(x, y, e.lean));
+                    x += 0.175 * s;
+                }
+                y += 2.0 * height - 0.03 * s;
+                x0 += 0.175 * s;
+                storeys -= 1;
+            }
+        }
+    }
+    let floor = material(fixed_box([0.0, -2.0, 0.0], [50.0, 2.0, 50.0]));
+    Scene { bounds: ([-50.0, -0.1, -50.0], [50.0, f32::MAX, 50.0]), ..one(kind, n, vec![floor], bodies, 600) }
 }
 
 /// A mixed pile's body `i`, the same in every engine: its own seeded draw.

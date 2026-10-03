@@ -93,6 +93,23 @@ pub fn behave(scene: &Scene, backend: &mut dyn Backend) -> Behaviour {
             b.put("jitter", t[t.len() - 60..].iter().map(|s| fastest(s)).fold(0.0, f32::max) as f64);
             b.put("stands", ((a.pos[1] - z.pos[1]) < 0.5) as u8 as f64);
         }
+        // The families' scenes (`family.rs`), as 2D's measures them: a
+        // stack, pyramid or cabin stands while its top body stays within
+        // half a box of where it began; a card has fallen once it has
+        // moved a quarter of its half height.
+        Kind::Stack | Kind::Pyramid | Kind::Cabin | Kind::Cards => {
+            let moved = |a: &State, z: &State| {
+                let d = [0, 1, 2].map(|k| z.pos[k] - a.pos[k]);
+                dot(d, d).sqrt() as f64
+            };
+            let top = first.len() - 1;
+            let off = moved(&first[top], &end[top]);
+            b.put("top moved", off);
+            b.put("most moved", first.iter().zip(end).map(|(a, z)| moved(a, z)).fold(0.0, f64::max));
+            b.put("fallen", first.iter().zip(end).filter(|(a, z)| moved(a, z) > 0.25).count() as f64);
+            let stands = if scene.kind == Kind::Cards { b.get("fallen") == 0.0 } else { off < 0.5 };
+            b.put("stands", stands as u8 as f64);
+        }
         k => panic!("{} is not a behaviour scene", k.name()),
     }
     let still = t.iter().rposition(|s| fastest(s) >= REST_SPEED).map_or(0, |k| k + 1);

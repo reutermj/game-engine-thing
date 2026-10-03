@@ -41,7 +41,11 @@ one would have to ship those files with it.
   idea of a heavy box on light ones ("HighMassRatio1"), each rebuilt in
   `engine/std/physics2d/compare/scene.rs` with y turned down (the card house
   also five times larger); its arch ("Arch") needs polygons, so a ladder
-  stands in.
+  stands in. The card house is also made 3D (cards 1.4 deep) for
+  physics3d's edge families (`engine/std/physics3d/tests/scenes.rs`,
+  `Kind::Cards`; get-emj.90), and 3D's colored order
+  (`physics3d`'s `Order::Colored`) colors by the same rule
+  (`Coloring::greedy`).
 - **Notice:** MIT asks that the copyright and permission notice go with
   copies of the software. We don't commit Box2D's source or ship a
   binary; the fetched archive keeps its `LICENSE`, which the build exports

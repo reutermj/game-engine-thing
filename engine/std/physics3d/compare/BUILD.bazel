@@ -56,6 +56,7 @@ rust_library(
         "behave.rs",
         "bounces.rs",
         "box3d.rs",
+        "family.rs",
         "ffi.rs",
         "jolt.rs",
         "lib.rs",

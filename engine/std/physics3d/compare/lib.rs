@@ -14,6 +14,7 @@ pub use physics_testkit::baseline;
 pub mod behave;
 pub mod bounces;
 pub mod box3d;
+pub mod family;
 mod ffi;
 pub mod jolt;
 pub mod measure;

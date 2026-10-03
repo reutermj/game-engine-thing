@@ -26,10 +26,18 @@
 //! values:
 //!
 //!     bench -- ours,rapier,box3d --bounces --each
+//!
+//! --families[=names] measures the edge-of-stability families instead
+//! (`family.rs`: stacks, pyramids, cabins of planks on edge, card
+//! houses), each engine's share of runs that stood, which stood, and the
+//! median step they came to rest from; --each with every run's values:
+//!
+//!     bench -- ours,rapier,box3d,jolt --families
+//!     bench -- ours --families=cards --tune=order=colored,carry=normal
 
 use physics3d_compare::measure::{self, Run};
 use physics3d_compare::scenes::{self, Kind, Scene};
-use physics3d_compare::{BACKENDS, Config, Iters, behave, bounces, make_backend, runs};
+use physics3d_compare::{BACKENDS, Config, Iters, behave, bounces, family, make_backend, runs};
 
 fn list<'a>(arg: Option<&'a String>, all: &[&'a str]) -> Vec<&'a str> {
     match arg.map(String::as_str) {
@@ -48,10 +56,13 @@ fn main() {
     let mut tune = "";
     let mut behave = false;
     let (mut bounces, mut long, mut each) = (None, false, false);
+    let mut families = None;
     for f in flags {
         match f.as_str() {
             "--bounces" => bounces = Some("all".to_string()),
             f if f.starts_with("--bounces=") => bounces = Some(f["--bounces=".len()..].to_string()),
+            "--families" => families = Some("all".to_string()),
+            f if f.starts_with("--families=") => families = Some(f["--families=".len()..].to_string()),
             "--long" => long = true,
             "--each" => each = true,
             "--iters8" => iters = Iters::Eight,
@@ -66,6 +77,11 @@ fn main() {
     if let Some(names) = bounces {
         let backends = list(positional.first().copied(), &["ours", "rapier", "box3d"]);
         bounce_families(&names, long, each, &backends, tune);
+        return;
+    }
+    if let Some(names) = families {
+        let backends = list(positional.first().copied(), &["ours", "rapier", "box3d", "jolt"]);
+        edge_families(&names, each, &backends, tune);
         return;
     }
     let scenes = list(positional.first().copied(), &["spheres", "boxes", "planks", "rain"]);
@@ -136,6 +152,35 @@ fn bounce_families(names: &str, long: bool, each: bool, backends: &[&str], tune:
             }
             let stats: Vec<String> = bounces::stats(&f, &all).iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
             println!("bounces {} ({}, {} runs), {b}: {}", f.name, if long { "long" } else { "short" }, all.len(), stats.join(", "));
+        }
+    }
+}
+
+/// `--families`: each engine's share of each edge-of-stability family
+/// that stood, which did (`S`), and the median step they came to rest
+/// from; with `each` every run's values.
+fn edge_families(names: &str, each: bool, backends: &[&str], tune: &'static str) {
+    for f in family::families() {
+        if names != "all" && !names.split(',').any(|n| n == f.name) {
+            continue;
+        }
+        for b in backends {
+            let one = |&(kind, n): &(Kind, usize)| {
+                let scene = scenes::build(kind, n);
+                let config = Config::of(&scene, true, tune);
+                behave::behave(&scene, make_backend(b, &config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut())
+            };
+            // Box3D's worlds, made in threads side by side, crash it: the
+            // C engines one at a time.
+            let all: Vec<_> = if *b == "box3d" || *b == "jolt" { f.scenes.iter().map(one).collect() } else { runs::par(&f.scenes, one) };
+            if each {
+                for ((kind, n), r) in f.scenes.iter().zip(&all) {
+                    let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k}={v:.6}")).collect();
+                    println!("run {} {b} | {} {n} {:?} | {}", f.name, kind.name(), scenes::Edge::unpack(*n), values.join(" "));
+                }
+            }
+            let (stood, marks, rest) = family::share(&all);
+            println!("family {} {b}: {stood}/{} stood, at rest from {rest} (median) | {marks}", f.name, all.len());
         }
     }
 }
