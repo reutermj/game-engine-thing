@@ -52,12 +52,17 @@ pub struct Tuning {
     /// at a time in pair order (`one_at_a_time`), the reference the lanes
     /// are held to.
     pub lanes: usize,
+    /// Where the lanes' batches would be under half full, the contacts
+    /// one at a time instead (`lanes::solve`): the same result, sooner.
+    /// Off only to hold the lanes themselves to the loop on few contacts.
+    pub sparse_alone: bool,
 }
 
 impl Tuning {
     pub fn of(t: &crate::Tuning) -> Tuning {
         Tuning {
             lanes: t.lanes().width(),
+            sparse_alone: true,
             substeps: t.substeps as usize,
             relax: t.relax as usize,
             stiffness: t.stiffness,
@@ -224,7 +229,17 @@ pub fn solve(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, ho
 /// The solve one contact at a time in pair order: the reference the
 /// lanes are held to, and where they fall back to (`lanes::solve`).
 pub fn one_at_a_time(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, how: &Tuning) {
-    let Begun { n_sub, h, inv_h, share, max_w, mut points, mut rows, mut hot } = begin(bodies, contacts, dt, how);
+    let Begun { n_sub, h, inv_h, share, max_w, soft, mut hot } = begin(bodies, dt, how);
+    let mut points = Vec::with_capacity(contacts.len() * 2);
+    let mut rows: Vec<Row> = contacts
+        .iter_mut()
+        .map(|c| {
+            let mut ps = [PointRow::default(); MAX_POINTS];
+            let r = Row { start: points.len(), ..row(bodies, c, &mut ps, share, soft, (how.closing, dt)) };
+            points.extend_from_slice(&ps[..r.count]);
+            r
+        })
+        .collect();
     // Apart from the hot bodies: only `Anchors::Exact` reads it in a pass.
     let mut turned = vec![Quat::IDENTITY; bodies.len()];
     let exact = how.anchors == Anchors::Exact;
@@ -293,21 +308,21 @@ pub fn one_at_a_time(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt:
 }
 
 /// The step's start, the same whether contacts go one at a time or in
-/// lanes: its constants, the bodies' world inverse inertias, every
-/// contact as a row (`row`), and the bodies as the passes take them.
+/// lanes: its constants, the bodies' world inverse inertias, and the
+/// bodies as the passes take them. The contacts' rows are each way's
+/// (`row`).
 struct Begun {
     n_sub: usize,
     h: f32,
     inv_h: f32,
     share: f32,
     max_w: f32,
-    points: Vec<PointRow>,
-    rows: Vec<Row>,
+    soft: (Softness, Softness),
     hot: Vec<Hot>,
 }
 
 #[inline(always)]
-fn begin(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, how: &Tuning) -> Begun {
+fn begin(bodies: &mut [SolverBody], dt: f32, how: &Tuning) -> Begun {
     let n_sub = how.substeps.max(1);
     let h = dt / n_sub as f32;
     let inv_h = 1.0 / h;
@@ -317,11 +332,9 @@ fn begin(bodies: &mut [SolverBody], contacts: &mut [Constraint], dt: f32, how: &
     for b in bodies.iter_mut() {
         b.form_inertia(b.q);
     }
-    let mut points = Vec::with_capacity(contacts.len() * 2);
-    let rows: Vec<Row> = contacts.iter_mut().map(|c| row(bodies, c, &mut points, share, (moving, fixed), (how.closing, dt))).collect();
     let hot: Vec<Hot> =
         bodies.iter().map(|b| Hot { v: b.v - b.gravity, w: b.w, moved: Vec3::ZERO, inv_mass: b.inv_mass, theta: Vec3::ZERO }).collect();
-    Begun { n_sub, h, inv_h, share, max_w: MAX_ROTATION / dt, points, rows, hot }
+    Begun { n_sub, h, inv_h, share, max_w: MAX_ROTATION / dt, soft: (moving, fixed), hot }
 }
 
 /// A substep's share of the step's gravity given back, and each body's
@@ -380,12 +393,14 @@ fn closing(how: Closing, c: f32, g: f32, sep: f32, dt: f32) -> f32 {
     how.speed(c, g, sep, dt, 0.0)
 }
 
-/// A contact as the substeps solve it, from what was found, and its
+/// A contact as the substeps solve it, from what was found, its points
+/// into `points` (its row's `start` left for the caller), and its
 /// impulses zeroed to be summed again.
+#[inline(always)]
 fn row(
     bodies: &[SolverBody],
     c: &mut Constraint,
-    points: &mut Vec<PointRow>,
+    points: &mut [PointRow; MAX_POINTS],
     share: f32,
     (moving, fixed): (Softness, Softness),
     (how, dt): (Closing, f32),
@@ -397,9 +412,8 @@ fn row(
     let t = [t1, n.cross(t1)];
     let m = a.inv_mass + b.inv_mass;
     let count = c.count.min(MAX_POINTS);
-    let start = points.len();
     let mut centroid = Vec3::ZERO;
-    for cp in c.points[..count].iter_mut() {
+    for (cp, p) in c.points[..count].iter_mut().zip(points.iter_mut()) {
         let (ra, rb) = (cp.ra, cp.ra + c.offset);
         let (rna, rnb) = (ra.cross(n), rb.cross(n));
         let (ia, ib) = (a.inv_i.apply(rna), b.inv_i.apply(rnb));
@@ -410,13 +424,13 @@ fn row(
         // share of it is where each substep starts.
         let jn = cp.jn * share;
         let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
-        points.push(PointRow { ra, rb, rna, rnb, ia, ib, base: -cp.depth - n.dot(c.offset), mass, jn, lever: 0.0 });
+        *p = PointRow { ra, rb, rna, rnb, ia, ib, base: -cp.depth - n.dot(c.offset), mass, jn, lever: 0.0 };
         cp.jn = 0.0;
         centroid += ra;
     }
     let ca = centroid * (1.0 / count.max(1) as f32);
     let cb = ca + c.offset;
-    for p in points[start..].iter_mut() {
+    for p in points[..count].iter_mut() {
         let d = p.ra - ca;
         p.lever = (d - n * d.dot(n)).len();
     }
@@ -437,7 +451,7 @@ fn row(
         b: bi,
         n,
         t,
-        start,
+        start: 0,
         count,
         soft: if a.inv_mass == 0.0 || b.inv_mass == 0.0 { fixed } else { moving },
         friction: c.friction,
@@ -717,6 +731,9 @@ mod lanes {
         mass: F<N>,
         jn: F<N>,
         lever: F<N>,
+        /// The relaxing passes' bias, which the substep's first finds and
+        /// the others read (`STORE`, `LOAD`).
+        bias: F<N>,
         /// The substeps' impulses summed, as `ContactPoint::jn` carries
         /// them, and the closing speed before the step.
         sum_jn: F<N>,
@@ -738,6 +755,7 @@ mod lanes {
             mass: F::ZERO,
             jn: F::ZERO,
             lever: F::ZERO,
+            bias: F::ZERO,
             sum_jn: F::ZERO,
             speed: F::ZERO,
             on: [false; N],
@@ -887,17 +905,14 @@ mod lanes {
         }
     }
 
-    /// How far each lane's body at `at` has moved and turned (`Hot::moved`
-    /// and `theta`).
+    /// A field of each lane's body at `at` (`Hot::moved`, `theta`).
     #[inline(always)]
-    fn pose<const N: usize>(hot: &[Hot], at: &[u32; N]) -> (V<N>, V<N>) {
-        let (mut moved, mut theta) = (V::ZERO, V::ZERO);
+    fn field<const N: usize>(hot: &[Hot], at: &[u32; N], f: impl Fn(&Hot) -> Vec3) -> V<N> {
+        let mut v = V::ZERO;
         for l in 0..N {
-            let x = &hot[at[l] as usize];
-            moved.set(l, x.moved);
-            theta.set(l, x.theta);
+            v.set(l, f(&hot[at[l] as usize]));
         }
-        (moved, theta)
+        v
     }
 
     #[inline(always)]
@@ -933,8 +948,6 @@ mod lanes {
         if !shareable(bodies, &moves) {
             return one_at_a_time(bodies, contacts, dt, how);
         }
-        let Begun { n_sub, h, inv_h, share, max_w, points, rows, mut hot } = begin(bodies, contacts, dt, how);
-        let exact = how.anchors == Anchors::Exact;
         let mut levels = physics_common::levels(contacts.len(), |i| (contacts[i].a, contacts[i].b), &moves);
         // A contact neither end of which moves still sums its impulses as
         // the sweep does; it changes no body, so any level will do.
@@ -948,16 +961,26 @@ mod lanes {
         }
         let mut place = Vec::new();
         let layout = levels.pack(N, &mut place);
+        // Lanes only where they pay: a batch costs about two and a half
+        // contacts solved one at a time, so batches under half full (a
+        // stack, a chain, a handful of contacts: a level a contact) are
+        // solved one at a time, which is the same result (physics.md, "The
+        // solver in lanes").
+        if how.sparse_alone && contacts.len() * 2 < layout.items() * N {
+            return one_at_a_time(bodies, contacts, dt, how);
+        }
+        let Begun { n_sub, h, inv_h, share, max_w, soft, mut hot } = begin(bodies, dt, how);
+        let exact = how.anchors == Anchors::Exact;
         // One more body than there are, standing still: where a batch's
         // empty lanes point.
         let nowhere = bodies.len() as u32;
         hot.push(Hot::default());
         let mut turned = vec![Quat::IDENTITY; bodies.len() + 1];
         let mut out = vec![Batch::<N>::empty(nowhere); layout.items()];
-        for (r, at) in rows.iter().zip(&place) {
+        for (c, at) in contacts.iter().zip(&place) {
             let (batch, _) = at.expect("every contact has a level");
             let o = &mut out[batch as usize];
-            o.points = o.points.max(r.count);
+            o.points = o.points.max(c.count.min(MAX_POINTS));
         }
         let mut start = 0;
         for o in out.iter_mut() {
@@ -967,11 +990,15 @@ mod lanes {
         let mut pts = vec![Pt::<N>::EMPTY; start];
         // Each point's anchors, which only `Anchors::Exact` reads.
         let mut anchors = vec![[V::<N>::ZERO; 2]; if exact { start } else { 0 }];
-        for ((r, c), at) in rows.iter().zip(contacts.iter()).zip(&place) {
+        // Each contact's row made in pair order, as the contacts are
+        // stored, and written straight into its lane: no rows kept.
+        let mut ps = [PointRow::default(); MAX_POINTS];
+        for (c, at) in contacts.iter_mut().zip(&place) {
+            let r = row(bodies, c, &mut ps, share, soft, (how.closing, dt));
             let (batch, l) = at.expect("every contact has a level");
             let (o, l) = (&mut out[batch as usize], l as usize);
-            put(o, l, r, c, bodies);
-            for (k, p) in points[r.start..r.start + r.count].iter().enumerate() {
+            put(o, l, &r, c, bodies);
+            for (k, p) in ps[..r.count].iter().enumerate() {
                 let q = &mut pts[o.start + k];
                 q.rna.set(l, p.rna);
                 q.rnb.set(l, p.rnb);
@@ -986,7 +1013,6 @@ mod lanes {
                 }
             }
         }
-        drop((rows, points));
 
         for sub in 0..n_sub {
             give_gravity(&mut hot, bodies, share, max_w);
@@ -995,10 +1021,10 @@ mod lanes {
             }
             let s = (&mut pts[..], &anchors[..], &mut hot[..], &turned[..], inv_h);
             match (how.friction_in_push, exact) {
-                (false, false) => passes::<N, true, false, false>(&mut out, s),
-                (false, true) => passes::<N, true, false, true>(&mut out, s),
-                (true, false) => passes::<N, true, true, false>(&mut out, s),
-                (true, true) => passes::<N, true, true, true>(&mut out, s),
+                (false, false) => passes::<N, true, false, false, COMPUTE>(&mut out, s),
+                (false, true) => passes::<N, true, false, true, COMPUTE>(&mut out, s),
+                (true, false) => passes::<N, true, true, false, COMPUTE>(&mut out, s),
+                (true, true) => passes::<N, true, true, true, COMPUTE>(&mut out, s),
             }
             move_bodies(&mut hot, bodies, &mut turned, how, h, sub + 1 == n_sub);
             if how.inertia == Inertia::Substep {
@@ -1006,11 +1032,15 @@ mod lanes {
                     refresh(o, &mut pts, bodies);
                 }
             }
-            for _ in 0..how.relax {
+            for r in 0..how.relax {
+                // Bodies don't move between relaxing passes, so neither do
+                // separations: the first finds each point's bias, the
+                // others read it, the same bits.
                 let s = (&mut pts[..], &anchors[..], &mut hot[..], &turned[..], inv_h);
-                match exact {
-                    false => passes::<N, false, true, false>(&mut out, s),
-                    true => passes::<N, false, true, true>(&mut out, s),
+                match (r == 0, exact) {
+                    (true, false) => passes::<N, false, true, false, STORE>(&mut out, s),
+                    (true, true) => passes::<N, false, true, true, STORE>(&mut out, s),
+                    (false, _) => passes::<N, false, true, false, LOAD>(&mut out, s),
                 }
             }
             for o in out.iter_mut() {
@@ -1086,24 +1116,30 @@ mod lanes {
         e.scatter(hot, o);
     }
 
+    /// How a pass finds a point's bias (`pass`'s `SEP`): from its
+    /// separation, storing it too, or as the last pass stored it.
+    const COMPUTE: u8 = 0;
+    const STORE: u8 = 1;
+    const LOAD: u8 = 2;
+
     type Solving<'a, const N: usize> = (&'a mut [Pt<N>], &'a [[V<N>; 2]], &'a mut [Hot], &'a [Quat], f32);
 
     /// A pass over every batch, in order: the levels in turn.
     #[inline(always)]
-    fn passes<const N: usize, const PUSH: bool, const FRICTION: bool, const EXACT: bool>(
+    fn passes<const N: usize, const PUSH: bool, const FRICTION: bool, const EXACT: bool, const SEP: u8>(
         out: &mut [Batch<N>],
         (pts, anchors, hot, turned, inv_h): Solving<'_, N>,
     ) {
         for o in out.iter_mut() {
-            pass::<N, PUSH, FRICTION, EXACT>(o, pts, anchors, hot, turned, inv_h);
+            pass::<N, PUSH, FRICTION, EXACT, SEP>(o, pts, anchors, hot, turned, inv_h);
         }
     }
 
     /// `pass`, lane by lane: soft and pushing out when `PUSH`, else rigid;
     /// with friction when `FRICTION`; separations by `Anchors::Exact` when
-    /// `EXACT`, else `Anchors::Linear`.
+    /// `EXACT`, else `Anchors::Linear`, or none read when `SEP` is `LOAD`.
     #[inline(always)]
-    fn pass<const N: usize, const PUSH: bool, const FRICTION: bool, const EXACT: bool>(
+    fn pass<const N: usize, const PUSH: bool, const FRICTION: bool, const EXACT: bool, const SEP: u8>(
         o: &mut Batch<N>,
         pts: &mut [Pt<N>],
         anchors: &[[V<N>; 2]],
@@ -1112,9 +1148,12 @@ mod lanes {
         inv_h: f32,
     ) {
         let mut e = Ends::gather(hot, o);
-        let ((moved_a, theta_a), (moved_b, theta_b)) = (pose(hot, &o.a), pose(hot, &o.b));
-        let dmoved = moved_b - moved_a;
-        let (qa, qb) = if EXACT { (quats(turned, &o.a), quats(turned, &o.b)) } else { ((V::ZERO, F::ZERO), (V::ZERO, F::ZERO)) };
+        // Only what this pass's separation reads.
+        let dmoved = if SEP == LOAD { V::ZERO } else { field(hot, &o.b, |x| x.moved) - field(hot, &o.a, |x| x.moved) };
+        let (theta_a, theta_b) =
+            if SEP == LOAD || EXACT { (V::ZERO, V::ZERO) } else { (field(hot, &o.a, |x| x.theta), field(hot, &o.b, |x| x.theta)) };
+        let (qa, qb) =
+            if EXACT && SEP != LOAD { (quats(turned, &o.a), quats(turned, &o.b)) } else { ((V::ZERO, F::ZERO), (V::ZERO, F::ZERO)) };
         let (n, one) = (o.n, F::splat(1.0));
         let (mut total, mut twisting) = (F::ZERO, F::ZERO);
         for k in 0..o.points {
@@ -1123,21 +1162,29 @@ mod lanes {
             if !any(&p.solid) {
                 continue;
             }
-            let sep = if EXACT {
-                let [ra, rb] = anchors[i];
-                p.base + (dmoved + rotate(qb, rb) - rotate(qa, ra)).dot(n)
+            let (bias, mass, relax) = if SEP == LOAD {
+                (p.bias, one, F::ZERO)
             } else {
-                p.base + dmoved.dot(n) + p.arm + theta_b.dot(p.rnb) - theta_a.dot(p.rna)
-            };
-            let (bias, mass, relax) = if PUSH {
-                let soft = max(o.rate * sep, F::splat(-MAX_PUSH));
-                (
-                    sep.positive_then(sep * F::splat(inv_h), soft),
-                    sep.positive_then(one, o.soft_mass),
-                    sep.positive_then(F::ZERO, o.soft_impulse),
-                )
-            } else {
-                (sep.positive_then(sep * F::splat(inv_h), F::ZERO), one, F::ZERO)
+                let sep = if EXACT {
+                    let [ra, rb] = anchors[i];
+                    p.base + (dmoved + rotate(qb, rb) - rotate(qa, ra)).dot(n)
+                } else {
+                    p.base + dmoved.dot(n) + p.arm + theta_b.dot(p.rnb) - theta_a.dot(p.rna)
+                };
+                if PUSH {
+                    let soft = max(o.rate * sep, F::splat(-MAX_PUSH));
+                    (
+                        sep.positive_then(sep * F::splat(inv_h), soft),
+                        sep.positive_then(one, o.soft_mass),
+                        sep.positive_then(F::ZERO, o.soft_impulse),
+                    )
+                } else {
+                    let bias = sep.positive_then(sep * F::splat(inv_h), F::ZERO);
+                    if SEP == STORE {
+                        p.bias = bias;
+                    }
+                    (bias, one, F::ZERO)
+                }
             };
             let vn = (e.vb - e.va).dot(n) + e.wb.dot(p.rnb) - e.wa.dot(p.rna);
             let jn = max(p.jn - p.mass * mass * (vn + bias) - relax * p.jn, F::ZERO);

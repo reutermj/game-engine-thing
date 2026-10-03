@@ -302,7 +302,8 @@ pub fn kernel_run(tuning: &str, bodies: &mut [SolverBody], contacts: &mut [Const
 }
 
 /// `kernel_run`, `lanes` at a time whatever `tuning` says
-/// (`solver::Tuning::lanes`; 0 is one at a time in pair order).
+/// (`solver::Tuning::lanes`; 0 is one at a time in pair order), and in
+/// lanes however few contacts fill them (`sparse_alone` off).
 pub fn kernel_run_in(
     tuning: &str,
     lanes: usize,
@@ -310,7 +311,7 @@ pub fn kernel_run_in(
     contacts: &mut [Constraint],
     each: impl FnMut(&[SolverBody], &[Constraint]),
 ) {
-    let how = solver::Tuning { lanes, ..solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning")) };
+    let how = solver::Tuning { lanes, sparse_alone: false, ..solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning")) };
     run_at(&how, bodies, contacts, each)
 }
 

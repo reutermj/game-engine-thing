@@ -141,6 +141,21 @@ one would have to ship those files with it.
     contacts, and mixing friction and restitution per contact
     (`engine/std/physics3d/solver.rs`, `lib.rs`). What it takes for
     rotation is Box3D's (below).
+  - the turning 3D solve in lanes (2026-10-03, get-emj.52,
+    `engine/std/physics3d/solver.rs`, `lanes`): Box2D's wide solver as
+    2D's lanes took it (above), carried to 3D's contacts: batches laid
+    out field by field (`b2ContactConstraintSIMD`), body velocities
+    gathered into lanes and scattered back (`b2GatherBodies`,
+    `b2ScatterBodies`), inverse masses kept by each contact, a batch's
+    empty lanes at a body nothing reads, and restitution skipping a batch
+    with nothing to bounce (`b2ApplyRestitutionTask`); on the same lane
+    array (`physics_common::lanes::F`, Box2D's `b2FloatW`). Read in
+    v3.1.1's `contact_solver.c`. Its points (up to four, a batch's
+    points as many as its lanes' most), friction on a disc at the
+    centroid and twist are 3D's own kernel (Box3D's terms, below), and
+    its grouping is the levels of the sweep in pair order
+    (`physics_common::levels`, Anderson and Saad's level scheduling, as
+    above), not Box2D's colors.
   - the broadphase that keeps its pairs (2026-09-27,
     `engine/ecs/live.rs`): each shape's fat box, its box grown by a
     margin (`B2_AABB_MARGIN`, 0.05 m, the margin we measured best too),
