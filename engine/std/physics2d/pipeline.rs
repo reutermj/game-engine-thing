@@ -7,7 +7,7 @@
 //! gather_turning   See<Bodies>, world -> Make<Turning>
 //! gather_contacts  See<Bodies>, world -> Make<Contacts>
 //! prepare          See<Settings>, See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
-//! passes           See<Settings>, See<Turning>, Pass<Graph>, Passes
+//! passes           See<Settings>, See<Turning>, See<Bodies>, See<Contacts>, Pass<Graph>, Passes
 //! finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
 //! scatter_contacts See<Settings>, Pass<Contacts> -> world
 //! scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts> -> world
@@ -15,7 +15,9 @@
 //!
 //! The sources copy the awake bodies and the contacts out of the world;
 //! `prepare`, `passes` and `finish` are the solver's (`solver::staged`), its
-//! passes declared as a shape the scheduler runs (`Passes`); the sinks write
+//! passes declared as a shape the scheduler runs (`Passes`), the first of
+//! them filling the batches from the contacts (so `passes` sees them, and
+//! `prepare` changes only those no batch solves); the sinks write
 //! the results back, with the contacts' sides and events, and sleeping. A
 //! step where nothing turns is solved one contact at a time, in pair order,
 //! by `finish` (`solver::solve_with`), which no shape can split.
@@ -108,12 +110,12 @@ flow! {
     }
 }
 
-/// The contacts' colors, and how the lanes lay them out.
+/// The contacts' colors, and how the lanes lay them out (where each
+/// contact's lane is, `Staged`'s seats).
 #[derive(Default)]
 struct Colors {
     coloring: Coloring,
     layout: Colored,
-    place: Vec<Option<(u32, u32)>>,
     masks: Vec<u64>,
 }
 
@@ -280,7 +282,8 @@ impl Physics {
         (self.time.solve_gather, self.time.solve) = (self.time.solve_gather + t, self.time.solve + t);
     }
 
-    /// The bodies as states, the contacts colored and in their lanes.
+    /// The bodies as states, the contacts colored and seated in their
+    /// lanes: the batches are filled by the passes' first stage.
     pub(crate) fn prepare(
         &mut self,
         _: &mut Sleepers,
@@ -301,21 +304,23 @@ impl Physics {
             // Box2D's rule (`b2AddContactToGraph`): an edge with an end that
             // doesn't move stays out of color 0. The call the arrays'
             // `lanes::group` makes, so the colors are theirs (`lanes::solve`).
-            let Colors { coloring, layout, place, masks } = colors;
+            // Greedy in pair order, so on this thread: the colors would be
+            // another computation's otherwise.
+            let Colors { coloring, layout, masks } = colors;
             coloring.greedy(constraints.len(), |i| (constraints[i].a, constraints[i].b), moves, true, masks);
-            *layout = coloring.pack(LANES, place);
-            staged.fill(&params, (&b.bodies, t.spinning.len()), (constraints, points), (place, layout.items()), *dt);
+            *layout = staged.place(&params, (&b.bodies, t.spinning.len()), (constraints, points), coloring, *dt);
         }
         self.solver_time(start, |time, t| time.prepare += t);
     }
 
-    /// The substeps and restitution: every pass a stage over the colors'
-    /// batches or the bodies' states, which the scheduler runs.
+    /// The batches' fill, the substeps and restitution: every pass a stage
+    /// over the batches or the bodies' states, which the scheduler runs.
     pub(crate) fn passes(
         &mut self,
         _: &mut Sleepers,
         _: &mut Cx,
-        (s, t): (See<Settings>, See<Turning>),
+        (dt, s, t): (Dt, See<Settings>, See<Turning>),
+        (b, c): (See<Bodies>, See<Contacts>),
         mut g: Pass<Graph>,
         passes: Passes,
     ) {
@@ -323,15 +328,10 @@ impl Physics {
         let params = s.params();
         let Graph { lanes, shareable, staged, colors, program } = &mut *g;
         if *lanes {
-            program.clear();
-            solver::staged::program(&params, staged.states(), t.spinning.len(), |k, each| {
-                program.push(match each {
-                    None => Stage::Items(k),
-                    Some(n) => Stage::Each(k, n),
-                })
-            });
+            solver::staged::program(&params, staged.states(), t.spinning.len(), program);
             let n = staged.states();
-            let (items, states, kernels) = staged.split(&params, &t.spinning);
+            let read = ((&b.bodies[..], &t.spinning[..]), (&c.constraints[..], &c.points[..]));
+            let (mut items, states, kernels) = staged.split(&params, read.0, read.1, &colors.coloring, *dt);
             // The kernels are generic over the lanes' view of the states
             // (`Bodies`), so each view is matched once a call, not once a
             // body (docs/architecture/flows.md, "On one thread").
@@ -345,12 +345,12 @@ impl Physics {
             }
             passes.run(
                 &colors.layout,
-                items,
+                &mut items,
                 states,
                 program,
-                |k, _, block, s| match s {
-                    States::Plain(s) => kernels.block(k, block, s),
-                    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+                |k, at, block, s| match s {
+                    States::Plain(s) => kernels.block(k, at, block, s),
+                    States::Shared(s) => kernels.block(k, at, block, &mut Shared(s)),
                 },
                 |k, r, s| match s {
                     States::Plain(s) => kernels.each(k, r, s, n),
