@@ -331,7 +331,7 @@ impl Physics {
             solver::staged::program(&params, staged.states(), t.spinning.len(), program);
             let n = staged.states();
             let read = ((&b.bodies[..], &t.spinning[..]), (&c.constraints[..], &c.points[..]));
-            let (mut items, states, kernels) = staged.split(&params, read.0, read.1, &colors.coloring, *dt);
+            let (items, states, kernels) = staged.split(&params, read.0, read.1, &colors.coloring, *dt);
             // The kernels are generic over the lanes' view of the states
             // (`Bodies`), so each view is matched once a call, not once a
             // body (docs/architecture/flows.md, "On one thread").
@@ -345,7 +345,7 @@ impl Physics {
             }
             passes.run(
                 &colors.layout,
-                &mut items,
+                items,
                 states,
                 program,
                 |k, at, block, s| match s {

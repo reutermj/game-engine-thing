@@ -1193,13 +1193,34 @@ mod lanes {
         const NONE: Lane = Lane { contact: NONE, at: NONE, count: 0, speed: 0.0 };
     }
 
-    /// A batch and its lanes, as the staged solve's stages get them: apart,
-    /// so the passes stream batches alone and `finish` reads the lanes
-    /// packed, and together, so the stage that fills a batch fills its
-    /// lanes too.
-    pub struct Item<'a, const N: usize> {
-        o: &'a mut Batch<N>,
-        lanes: &'a mut [Lane; N],
+    /// A `Lane` as relaxed atomics of its fields' bits: the staged solve's
+    /// fill writes each batch's lanes through the shared reference every
+    /// kernel has, as the `Move` stage writes the angles, while the passes
+    /// get the batches alone. Apart from the batches so the passes stream
+    /// nothing they don't read and `finish` reads the lanes packed; not in
+    /// a stage's items, which would have the passes go through a reference
+    /// a batch. (History, 2026-10-03: as items of a batch and its lanes,
+    /// references to each, the settled pile's solve on one thread was
+    /// 1.4-1.8% slower than before the fill was a stage, and with these
+    /// 0.7%; with the lanes in the batch, `finish` read a line more a
+    /// batch, 155 µs against 112.)
+    #[derive(Default)]
+    struct LaneCell([AtomicU32; 4]);
+
+    impl LaneCell {
+        #[inline(always)]
+        fn set(&self, lane: Lane) {
+            let bits = [lane.contact, lane.at, lane.count as u32, lane.speed.to_bits()];
+            for (x, b) in self.0.iter().zip(bits) {
+                x.store(b, Ordering::Relaxed);
+            }
+        }
+
+        #[inline(always)]
+        fn get(&self) -> Lane {
+            let [contact, at, count, speed] = self.0.each_ref().map(|x| x.load(Ordering::Relaxed));
+            Lane { contact, at, count: count as u8, speed: f32::from_bits(speed) }
+        }
     }
 
     const NONE: u32 = u32::MAX;
@@ -1381,17 +1402,17 @@ mod lanes {
         }
     }
 
-    /// Contact `i` into lane `l` of its batch, as `start` started it.
+    /// Contact `i` into lane `l` of its batch, as `start` started it; the
+    /// lane's record, for the caller to keep.
     #[inline(always)]
     fn put<const N: usize>(
-        (o, lane): (&mut Batch<N>, &mut Lane),
+        o: &mut Batch<N>,
         l: usize,
         (i, c): (usize, &Constraint),
         bodies: &[SolverBody],
         k: &Fixed,
         (pts, at, n_points, speed): (&[Point; 2], u32, usize, f32),
-    ) {
-        *lane = Lane { contact: i as u32, at, count: n_points as u8, speed };
+    ) -> Lane {
         let (a, b) = (c.a as usize, c.b as usize);
         let (ma, mb) = (bodies[a].inv_mass, bodies[b].inv_mass);
         let (moving, fixed) = k.soft;
@@ -1410,6 +1431,7 @@ mod lanes {
             (q.rna.0[l], q.rnb.0[l], q.rta.0[l], q.rtb.0[l]) = (p.rna, p.rnb, p.rta, p.rtb);
             (q.jn.0[l], q.jt.0[l], q.speed.0[l]) = (p.jn, p.jt, p.speed);
         }
+        Lane { contact: i as u32, at, count: n_points as u8, speed }
     }
 
     /// What the solve one contact at a time gives a contact neither end of
@@ -1493,17 +1515,17 @@ mod lanes {
                 unsolved(params, c, (&pts, at, n_points), kept);
                 continue;
             };
-            put((&mut out[batch], &mut lanes[batch][l]), l, (i, c), bodies, &hd.k, (&pts, at, n_points, speed));
+            lanes[batch][l] = put(&mut out[batch], l, (i, c), bodies, &hd.k, (&pts, at, n_points, speed));
         }
     }
 
     /// Batches `at..` as the substeps start them, each from the contacts
     /// its lanes seat (`Coloring::seat`, `EMPTY` an empty lane): `enter`,
     /// batch by batch, for the staged solve's first stage, which threads
-    /// share by batches. Each batch and its lanes are written whole, so
-    /// what they held before is never read. Reads the contacts and points
-    /// as the last step left them, which `staged::Staged::finish` changes
-    /// only after.
+    /// share by batches. Each batch and its lanes (`lanes[at..]`) are
+    /// written whole, so what they held before is never read. Reads the
+    /// contacts and points as the last step left them, which
+    /// `staged::Staged::finish` changes only after.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn fill<const N: usize, B: Bodies + ?Sized>(
@@ -1512,19 +1534,20 @@ mod lanes {
         bodies: &[SolverBody],
         (contacts, points): (&[Constraint], &[Points]),
         dt: f32,
-        (seats, at): (&[u32], usize),
-        items: &mut [Item<'_, N>],
+        (seats, lanes, at): (&[u32], &[[LaneCell; N]], usize),
+        out: &mut [Batch<N>],
     ) {
-        for (it, seats) in items.iter_mut().zip(seats[at * N..].as_chunks::<N>().0) {
-            *it.o = Batch::empty(k.nowhere);
-            *it.lanes = [Lane::NONE; N];
-            for (l, &i) in seats.iter().enumerate() {
+        let (seats, lanes) = (seats[at * N..].as_chunks::<N>().0, &lanes[at..]);
+        for ((o, seats), cells) in out.iter_mut().zip(seats).zip(lanes) {
+            *o = Batch::empty(k.nowhere);
+            for (l, (&i, cell)) in seats.iter().zip(cells).enumerate() {
                 if i == EMPTY {
+                    cell.set(Lane::NONE);
                     continue;
                 }
                 let c = &contacts[i as usize];
                 let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, (k, s), points, dt);
-                put((&mut *it.o, &mut it.lanes[l]), l, (i as usize, c), bodies, k, (&pts, at, n_points, speed));
+                cell.set(put(o, l, (i as usize, c), bodies, k, (&pts, at, n_points, speed)));
             }
         }
     }
@@ -1543,18 +1566,16 @@ mod lanes {
         bodies: &[SolverBody],
         (contacts, points): (&[Constraint], &[Points]),
         dt: f32,
-        coloring: &Coloring,
-        items: &mut [Item<'_, N>],
+        (coloring, lanes): (&Coloring, &[[LaneCell; N]]),
+        out: &mut [Batch<N>],
     ) {
-        for it in items.iter_mut() {
-            *it.o = Batch::empty(k.nowhere);
-            *it.lanes = [Lane::NONE; N];
-        }
+        out.fill(Batch::empty(k.nowhere));
+        lanes.iter().flatten().for_each(|cell| cell.set(Lane::NONE));
         for ((i, c), to) in contacts.iter().enumerate().zip(coloring.seats(N)) {
             let Some(to) = to else { continue };
             let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, (k, s), points, dt);
-            let (it, l) = (&mut items[to / N], to % N);
-            put((&mut *it.o, &mut it.lanes[l]), l, (i, c), bodies, k, (&pts, at, n_points, speed));
+            let (batch, l) = (to / N, to % N);
+            lanes[batch][l].set(put(&mut out[batch], l, (i, c), bodies, k, (&pts, at, n_points, speed)));
         }
     }
 
@@ -1582,7 +1603,7 @@ mod lanes {
         let mut p = setup::<N>(params, (bodies, spinning), contacts, points, dt);
         run(&mut p, params, spinning);
         let Solve { s, out, lanes, angle, .. } = p;
-        finish(params, out.iter().zip(lanes.iter()), (bodies, spinning), (&s[..], angle), contacts, points);
+        finish(params, out.iter().zip(lanes.iter().copied()), (bodies, spinning), (&s[..], angle), contacts, points);
     }
 
     /// The substeps' start: bodies into states, contacts colored (or
@@ -1672,7 +1693,7 @@ mod lanes {
     #[inline(always)]
     fn finish<'a, const N: usize>(
         params: &Params,
-        batches: impl Iterator<Item = (&'a Batch<N>, &'a [Lane; N])>,
+        batches: impl Iterator<Item = (&'a Batch<N>, impl IntoIterator<Item = Lane>)>,
         (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
         (s, angle): (&(impl Bodies + ?Sized), impl IntoIterator<Item = f32>),
         contacts: &mut [Constraint],
@@ -1680,12 +1701,12 @@ mod lanes {
     ) {
         let substeps = params.substeps;
         for (o, lanes) in batches {
-            for (l, lane) in lanes.iter().enumerate() {
+            for (l, lane) in lanes.into_iter().enumerate() {
                 if lane.contact == NONE {
                     continue;
                 }
                 let c = &mut contacts[lane.contact as usize];
-                (c.jn, c.jt) = impulses(o, l, lane);
+                (c.jn, c.jt) = impulses(o, l, &lane);
                 c.speed = lane.speed;
                 if lane.at != NONE {
                     let to = &mut points[lane.at as usize];
@@ -1993,11 +2014,11 @@ mod lanes {
             hd: Head,
             moves: Vec<bool>,
             gravity: Vec<Vec2>,
-            /// The batches and their lanes, written whole by the fill
-            /// (`Step::Fill`), so kept as the last step left them, grown but
-            /// never emptied here.
+            /// The batches and their lanes (`LaneCell`), written whole by the
+            /// fill (`Step::Fill`), so kept as the last step left them, grown
+            /// but never emptied here.
             items: Vec<Batch<N>>,
-            lanes: Vec<[Lane; N]>,
+            lanes: Vec<[LaneCell; N]>,
             /// Each batch's contacts, lane by lane (`Coloring::seat`): what
             /// the fill fills it from.
             seats: Vec<u32>,
@@ -2030,7 +2051,7 @@ mod lanes {
 
         /// The passes' kernels, over what they read besides the batches and
         /// states: `Sync`, for a primitive that may share them out.
-        pub struct Kernels<'a> {
+        pub struct Kernels<'a, const N: usize> {
             params: Params,
             k: &'a Fixed,
             gravity: &'a [Vec2],
@@ -2041,6 +2062,7 @@ mod lanes {
             contacts: &'a [Constraint],
             points: &'a [Points],
             seats: &'a [u32],
+            lanes: &'a [[LaneCell; N]],
             coloring: &'a Coloring,
             dt: f32,
         }
@@ -2082,7 +2104,7 @@ mod lanes {
                 let (n, nowhere) = (layout.items(), self.hd.k.nowhere);
                 if self.items.len() < n {
                     self.items.resize(n, Batch::empty(nowhere));
-                    self.lanes.resize(n, [Lane::NONE; N]);
+                    self.lanes.resize_with(n, || std::array::from_fn(|_| LaneCell::default()));
                 }
                 self.items.truncate(n);
                 self.lanes.truncate(n);
@@ -2127,8 +2149,7 @@ mod lanes {
                 (contacts, points): (&'a [Constraint], &'a [Points]),
                 coloring: &'a Coloring,
                 dt: f32,
-            ) -> (Vec<Item<'a, N>>, &'a mut [State], Kernels<'a>) {
-                let items = self.items.iter_mut().zip(self.lanes.iter_mut()).map(|(o, lanes)| Item { o, lanes }).collect();
+            ) -> (&'a mut [Batch<N>], &'a mut [State], Kernels<'a, N>) {
                 let kernels = Kernels {
                     params: *params,
                     k: &self.hd.k,
@@ -2139,10 +2160,11 @@ mod lanes {
                     contacts,
                     points,
                     seats: &self.seats,
+                    lanes: &self.lanes,
                     coloring,
                     dt,
                 };
-                (items, &mut self.hd.s, kernels)
+                (&mut self.items, &mut self.hd.s, kernels)
             }
 
             /// The step's impulses into the contacts and points, and the
@@ -2157,35 +2179,35 @@ mod lanes {
             ) {
                 clear(points, self.solved.iter().copied(), &self.kept);
                 let angle = self.angle.iter().map(|a| f32::from_bits(a.load(Ordering::Relaxed)));
-                let batches = self.items.iter().zip(self.lanes.iter());
+                let batches = self.items.iter().zip(self.lanes.iter().map(|cells| cells.iter().map(LaneCell::get)));
                 finish(params, batches, (bodies, spinning), (&self.hd.s[..], angle), contacts, points);
             }
         }
 
-        impl Kernels<'_> {
+        impl<const N: usize> Kernels<'_, N> {
             /// A stage over consecutive batches from `at`, over the states
             /// plain or shared: which pass it is decided once a block, as
             /// `run_across` decided it, since deciding it a batch at a
             /// time, or calling a kernel an edge, lost the lanes' gain
             /// (flows-spike.md).
             #[inline(always)]
-            pub fn block<const N: usize, B: Bodies + ?Sized>(&self, k: Step, at: usize, items: &mut [Item<'_, N>], s: &mut B) {
+            pub fn block<B: Bodies + ?Sized>(&self, k: Step, at: usize, items: &mut [Batch<N>], s: &mut B) {
                 let inv_h = self.k.inv_h;
                 match k {
                     Step::Fill => {
                         let (read, ks) = ((self.contacts, self.points), (self.k, &*s));
                         if at == 0 && items.len() * N == self.seats.len() {
-                            fill_all(&self.params, ks, self.bodies, read, self.dt, self.coloring, items);
+                            fill_all(&self.params, ks, self.bodies, read, self.dt, (self.coloring, self.lanes), items);
                         } else {
-                            fill(&self.params, ks, self.bodies, read, self.dt, (self.seats, at), items);
+                            fill(&self.params, ks, self.bodies, read, self.dt, (self.seats, self.lanes, at), items);
                         }
                     }
-                    Step::Warm => items.iter_mut().for_each(|it| warm_start(it.o, s)),
-                    Step::Push(last) => items.iter_mut().for_each(|it| pass::<N, true, COMPUTE>(it.o, s, inv_h, last)),
-                    Step::Relax(true, last) => items.iter_mut().for_each(|it| pass::<N, false, STORE>(it.o, s, inv_h, last)),
-                    Step::Relax(false, last) => items.iter_mut().for_each(|it| pass::<N, false, LOAD>(it.o, s, inv_h, last)),
+                    Step::Warm => items.iter_mut().for_each(|o| warm_start(o, s)),
+                    Step::Push(last) => items.iter_mut().for_each(|o| pass::<N, true, COMPUTE>(o, s, inv_h, last)),
+                    Step::Relax(true, last) => items.iter_mut().for_each(|o| pass::<N, false, STORE>(o, s, inv_h, last)),
+                    Step::Relax(false, last) => items.iter_mut().for_each(|o| pass::<N, false, LOAD>(o, s, inv_h, last)),
                     Step::Bounce => {
-                        for o in items.iter_mut().map(|it| &mut *it.o) {
+                        for o in items.iter_mut() {
                             if o.restitution.0.iter().any(|e| *e != 0.0) {
                                 restitute(o, s, self.params.bounce);
                             }
