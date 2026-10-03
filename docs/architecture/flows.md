@@ -350,17 +350,23 @@ nothing else: no footprint, no apply node.
       Items(K),
       /// Each of `n` states, by range.
       Each(K, usize),
+      /// Every item at once, colors ignored: for a kernel that writes its
+      /// items alone, such as one that fills them.
+      All(K),
   }
   ```
 
-  `block(k, &mut [I], States<T>)` gets a block of consecutive items of
-  one color, and `each(k, Range<usize>, States<T>)` a range of states.
-  `layout` is a `Colored`, made by `Coloring::greedy` and `pack` (Box2D
-  v3's rule and layout, from the spike). The states are a `&mut [T]`,
-  which kernels get as `States`: the slice itself on one thread, and on
-  several its shared form (`T: Shareable`, relaxed atomics in physics),
-  which kernels write only where their items' edges are ("On one
-  thread", below).
+  `block(k, first, &mut [I], States<T>)` gets a block of consecutive
+  items from index `first`, of one color in an `Items` stage and of any
+  in an `All` stage, and `each(k, Range<usize>, States<T>)` a range of
+  states. `layout` is a `Colored`, made by `Coloring::greedy` and `pack`
+  or `seat` (Box2D v3's rule and layout, from the spike; `seat` is
+  `pack`'s places the other way round, each item's edges by lane). The
+  states are a `&mut [T]`, which kernels get as `States`: the slice
+  itself on one thread, and on several its shared form (`T: Shareable`,
+  relaxed atomics in physics), which kernels write only where their
+  items' edges are, and never in an `All` stage ("On one thread",
+  below).
 
 Why each choice, from the spike:
 
@@ -376,6 +382,18 @@ Why each choice, from the spike:
 - **The shapes are closed.** Colors of items, stages over items or
   ranges, a map, a fixed-order reduction. Physics's whole staged solve
   fits in them with no physics in the shape.
+- **The fill is a stage, `All`, given the index** (get-znt.40,
+  2026-10-03). Physics fills its batches from the contacts each lane
+  holds in the program's first stage, across threads, where `prepare`
+  had filled them on one. The shape gives a block its first item's
+  index and nothing about lanes: the mod keeps the place map the other
+  way round (`Coloring::seat`, each item's edges) and looks its items up
+  by it. *Considered:* an `Each` over the item count, whose kernel gets
+  a range and the states but not the items, so it couldn't write them
+  in safe Rust; and a stage given the place map, which would put lanes
+  (`pack`'s width) and an edge-to-item scatter in the shape, when the
+  index is all a kernel needs to find its own. What it cost and bought:
+  physics.md, "The fill as the passes' first stage".
 
 ### Declared, and run by the scheduler
 
@@ -419,7 +437,12 @@ construction, and stage 1 fixes what that result is:
   overflow's block first and then each color's. The kernel must treat a
   block's items independently: how a color is cut into blocks is the
   scheduler's, and only colors are promised. A color's items share no
-  moving state, so blocks in any order give the same states.
+  moving state, so blocks in any order give the same states. An `All`
+  stage's blocks are the colors' blocks taken together, in any order;
+  its kernel writes only its items, so any split gives the same items.
+  On one thread it is one block of every item, which a kernel may treat
+  as a whole (physics fills it contact by contact, in the contacts'
+  order, which reads faster).
 
 ### On one thread
 
@@ -499,8 +522,9 @@ system's own thread:
 
 - `ParMap` and `Reduce` loop in order, `Reduce` still chunked as asked.
 - `Passes` runs each stage in order: an `Items` stage calls `block` once
-  for the overflow and once for each color, in order; an `Each` stage
-  calls `each` once, over every state.
+  for the overflow and once for each color, in order; an `All` stage
+  calls it once, over every item; an `Each` stage calls `each` once,
+  over every state.
 
 That is the result stage 3 must reproduce, and does: since stage 3
 (2026-10-03, [threads.md](threads.md)) `Passes` runs across the world's
@@ -553,7 +577,7 @@ gather_bodies    See<Settings>, world -> Make<Bodies>
 gather_turning   See<Bodies>, world -> Make<Turning>
 gather_contacts  See<Bodies>, world -> Make<Contacts>
 prepare          See<Settings>, See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
-passes           See<Settings>, See<Turning>, Pass<Graph>, Passes
+passes           See<Settings>, See<Turning>, See<Bodies>, See<Contacts>, Pass<Graph>, Passes
 finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
 scatter_contacts See<Settings>, Pass<Contacts> -> world
 scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts> -> world
@@ -622,10 +646,11 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
   narrowphase still split across `Workers` (get-znt.31). (History:
   `solver_bench`'s `THREADS` and the comparison's `rot/threads=<n>` timed
   `solve_across` on arrays until stage 3 removed it, 2026-10-03.)
-- **The batch fill stayed in `prepare`.** Moving it into the passes' first
-  stage closed most of the spike's 8-thread gap, and changes nothing on
-  one thread, where everything runs now; it is measurable only with stage
-  3, so it is stage 3's call.
+- **The batch fill stayed in `prepare`**, then: moving it into the
+  passes' first stage closed most of the spike's 8-thread gap, and
+  changed nothing on one thread, where everything ran; it was measurable
+  only with stage 3. It moved with get-znt.40 (2026-10-03, `Stage::All`,
+  above; physics.md, "The fill as the passes' first stage").
 - **Bodies in entity order** (get-emj.88) is left for later: the
   renumbering it needs costs what it saves on a falling pile, and folding
   it in would have made the port's measurements two changes'.

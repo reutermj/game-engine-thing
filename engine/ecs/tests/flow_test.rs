@@ -455,21 +455,22 @@ fn passes_run_stages_in_order_the_overflow_first_then_each_color() {
         let layout = Colored { overflow: 2, colors: vec![0, 3, 1] };
         let mut items: Vec<u32> = (0..6).collect();
         let calls = Mutex::new(Vec::new());
-        let program = [Stage::Items('a'), Stage::Each('e', 4), Stage::Each('z', 0), Stage::Items('b')];
+        let program = [Stage::All('f'), Stage::Items('a'), Stage::Each('e', 4), Stage::Each('z', 0), Stage::Items('b')];
         let mut none: [f32; 0] = [];
         passes.run(
             &layout,
             &mut items,
             &mut none,
             &program,
-            |k, block, _| {
+            |k, at, block, _| {
                 block.iter_mut().for_each(|x| *x += 10);
-                calls.lock().unwrap().push(format!("{k}{:?}", block.iter().map(|x| x % 10).collect::<Vec<_>>()));
+                calls.lock().unwrap().push(format!("{k}{at}{:?}", block.iter().map(|x| x % 10).collect::<Vec<_>>()));
             },
             |k, r, _| calls.lock().unwrap().push(format!("{k}{r:?}")),
         );
-        assert_eq!(*calls.lock().unwrap(), ["a[0, 1]", "a[2, 3, 4]", "a[5]", "e0..4", "b[0, 1]", "b[2, 3, 4]", "b[5]"]);
-        assert_eq!(items, [20, 21, 22, 23, 24, 25]);
+        let want = ["f0[0, 1, 2, 3, 4, 5]", "a0[0, 1]", "a2[2, 3, 4]", "a5[5]", "e0..4", "b0[0, 1]", "b2[2, 3, 4]", "b5[5]"];
+        assert_eq!(*calls.lock().unwrap(), want);
+        assert_eq!(items, [30, 31, 32, 33, 34, 35]);
     });
 }
 
@@ -495,7 +496,7 @@ fn passes_run_across_the_worlds_threads_unless_serial() {
                     &mut items.clone(),
                     &mut states,
                     &program,
-                    |_, block, s| views.lock().unwrap().push((block.len(), matches!(s, States::Plain(_)))),
+                    |_, _, block, s| views.lock().unwrap().push((block.len(), matches!(s, States::Plain(_)))),
                     |_, _, _| {},
                 );
                 (threads, views.into_inner().unwrap())
@@ -512,7 +513,7 @@ fn passes_run_across_the_worlds_threads_unless_serial() {
                     &mut items,
                     &mut states,
                     &program,
-                    |_, block, _| assert!(!block.contains(&200), "item 200"),
+                    |_, _, block, _| assert!(!block.contains(&200), "item 200"),
                     |_, _, _| {},
                 )
             });
@@ -598,6 +599,38 @@ fn a_coloring_keeps_moving_states_apart_and_packs_in_edge_order() {
         last[k] = Some((item, lane));
     }
     assert_eq!(layout.items(), coloring.count.iter().map(|c| c.div_ceil(4)).sum::<usize>());
+    // `seat` is `pack` the other way round, every lane it fills an edge's
+    // place, every other lane empty.
+    let mut seats = Vec::new();
+    assert_eq!(coloring.seat(4, &mut seats), layout);
+    assert_eq!(seats.len(), layout.items() * 4);
+    let mut want = vec![engine_ecs::shape::EMPTY; seats.len()];
+    for (i, p) in place.iter().enumerate() {
+        if let Some((item, lane)) = *p {
+            want[item as usize * 4 + lane as usize] = i as u32;
+        }
+    }
+    assert_eq!(seats, want);
+}
+
+/// `seat` with an overflow: past the colors, one edge an item, lane 0.
+#[test]
+fn edges_past_the_colors_are_seated_one_an_item_first() {
+    // A star: every edge at state 0, which moves, so the 65th overflows.
+    let edges: Vec<(u32, u32)> = (1..=70).map(|i| (0, i)).collect();
+    let moves = vec![true; 71];
+    let mut coloring = Coloring::default();
+    coloring.greedy(edges.len(), |i| edges[i], &moves, true, &mut Vec::new());
+    assert_eq!(coloring.overflow, 6);
+    let (mut place, mut seats) = (Vec::new(), Vec::new());
+    let layout = coloring.pack(4, &mut place);
+    assert_eq!(coloring.seat(4, &mut seats), layout);
+    for (i, p) in place.iter().enumerate() {
+        let (item, lane) = p.expect("every edge solved");
+        assert_eq!(seats[item as usize * 4 + lane as usize], i as u32);
+    }
+    let empty = engine_ecs::shape::EMPTY;
+    assert_eq!(seats[..24].chunks(4).map(|s| s[1..] == [empty; 3]).filter(|e| *e).count(), 6, "an overflowed edge alone");
 }
 
 #[test]
@@ -607,12 +640,26 @@ fn colored_passes_relax_the_edges_color_by_color() {
     coloring.greedy(edges.len(), |i| edges[i], &moves, true, &mut Vec::new());
     let mut place = Vec::new();
     let layout = coloring.pack(4, &mut place);
-    let mut items: Vec<Vec<(u32, u32)>> = vec![Vec::new(); layout.items()];
+    let mut packed: Vec<Vec<(u32, u32)>> = vec![Vec::new(); layout.items()];
     for (i, p) in place.iter().enumerate() {
         if let Some((item, _)) = p {
-            items[*item as usize].push(edges[i]);
+            packed[*item as usize].push(edges[i]);
         }
     }
+    // The items are filled by the program's first stage, from their seats:
+    // an item filled twice relaxes its edges twice, one missed none, and a
+    // stage let start before the fill is done finds items empty.
+    let mut seats = Vec::new();
+    coloring.seat(4, &mut seats);
+    let fill = {
+        let edges = edges.clone();
+        move |at: usize, block: &mut [Vec<(u32, u32)>]| {
+            for (j, item) in block.iter_mut().enumerate() {
+                let lanes = &seats[(at + j) * 4..(at + j + 1) * 4];
+                item.extend(lanes.iter().filter(|e| **e != engine_ecs::shape::EMPTY).map(|e| edges[*e as usize]));
+            }
+        }
+    };
     let relax = move |x: &mut States<'_, f32>, (a, b): (u32, u32), k: f32| {
         let (a, b) = (a as usize, b as usize);
         let d = (x.get(b) - x.get(a)) * k;
@@ -645,7 +692,8 @@ fn colored_passes_relax_the_edges_color_by_color() {
     for (shared, executor) in runs {
         let threads = executor.as_ref().map_or(1, |e| e.threads());
         let shared = shared || threads > 1;
-        let (layout, items, want, relax) = (layout.clone(), Mutex::new(items.clone()), want.clone(), relax.clone());
+        let (layout, want, relax, fill, packed) = (layout.clone(), want.clone(), relax.clone(), fill.clone(), packed.clone());
+        let items = Mutex::new(vec![Vec::new(); layout.items()]);
         let states = Mutex::new(start.clone());
         let views = Mutex::new(Vec::new());
         let w = World::new();
@@ -658,16 +706,21 @@ fn colored_passes_relax_the_edges_color_by_color() {
                     &layout,
                     &mut items.lock().unwrap(),
                     &mut states.lock().unwrap(),
-                    &[Stage::Items(0.5f32), Stage::Each(0.99f32, 300)],
-                    |k, block, mut s| {
+                    &[Stage::All(None), Stage::Items(Some(0.5f32)), Stage::Each(Some(0.99f32), 300)],
+                    |k, at, block, mut s| {
                         seen(&s);
-                        block.iter().flatten().for_each(|&e| relax(&mut s, e, k))
+                        match k {
+                            None => fill(at, block),
+                            Some(k) => block.iter().flatten().for_each(|&e| relax(&mut s, e, k)),
+                        }
                     },
                     |k, r, mut s| {
                         seen(&s);
+                        let k = k.expect("a stage over states scales");
                         r.for_each(|i| s.set(i, s.get(i) * k))
                     },
                 );
+                assert!(*items.lock().unwrap() == packed, "{threads} threads: every item filled once");
                 let got = states.lock().unwrap();
                 assert!(
                     got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),

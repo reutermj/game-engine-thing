@@ -21,7 +21,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::dispatch::{Plan, block_range, blocks_of, dispatch};
+use crate::dispatch::{Plan, block_range, blocks_of, dispatch, first_block};
 use crate::par::Executor;
 use crate::query::{Declare, FrameCx, Param, ParamDecl};
 use crate::world::World;
@@ -220,11 +220,17 @@ impl<T: Shareable> States<'_, T> {
 }
 
 /// A stage of [`Passes::run`]: every item, a color at a time (the overflow
-/// first), or each of `n` states by range.
+/// first); each of `n` states by range; or every item at once.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Stage<K> {
     Items(K),
     Each(K, usize),
+    /// Every item in one stage, colors and overflow alike: for a kernel
+    /// that writes its items alone and only reads the states, such as one
+    /// that fills them (physics's batches, from the contacts each item's
+    /// lanes hold). Items of different colors share states, so a kernel
+    /// here that wrote one would race.
+    All(K),
 }
 
 impl Passes<'_> {
@@ -247,21 +253,24 @@ impl Passes<'_> {
 
     /// Runs `program` over `items`, laid out as `layout` says, and the
     /// states they share: each stage done before the next starts, an
-    /// `Items` stage the overflow's items and then each color's. `block`
-    /// gets consecutive items of one color: all of them on one thread,
-    /// some on several, so it must treat them independently. `each` gets a
-    /// range of `0..n`. Kernels get the states as [`States`]: the slice
-    /// itself on one thread (`Plain`), and on several the shared form,
-    /// made from it before the first stage and written back after the last
-    /// (`Shared`), which kernels write only where their items' edges are.
-    /// A color's items share no moving state, so any order of its blocks
+    /// `Items` stage the overflow's items and then each color's, an `All`
+    /// stage every item at once. `block` gets consecutive items, from the
+    /// index it's given, of one color in an `Items` stage, of any in an
+    /// `All` stage: all of them on one thread, some on several, so it must
+    /// treat them independently. `each` gets a range of `0..n`. Kernels get
+    /// the states as [`States`]: the slice itself on one thread (`Plain`),
+    /// and on several the shared form, made from it before the first stage
+    /// and written back after the last (`Shared`), which kernels write only
+    /// where their items' edges are, and never in an `All` stage. A
+    /// color's items share no moving state, so any order of its blocks
     /// gives the same states.
     ///
     /// Across threads a stage is the overflow's one block, a color's
-    /// blocks, or an `Each`'s ranges, sized as Box2D sizes them, each block
-    /// run once, after the stage before (`dispatch`). Every kernel call has
-    /// returned when `run` does, so no mod code is on another thread once
-    /// the system has; a kernel's panic is raised again here.
+    /// blocks, every one of those blocks (`All`), or an `Each`'s ranges,
+    /// sized as Box2D sizes them, each block run once, after the stage
+    /// before (`dispatch`). Every kernel call has returned when `run` does,
+    /// so no mod code is on another thread once the system has; a kernel's
+    /// panic is raised again here.
     ///
     /// Box2D v3's staged solve (`b2SolverStage`, `solver.c`), generic.
     pub fn run<I: Send, T: Shareable, K: Copy + Sync>(
@@ -270,7 +279,7 @@ impl Passes<'_> {
         items: &mut [I],
         states: &mut [T],
         program: &[Stage<K>],
-        block: impl Fn(K, &mut [I], States<'_, T>) + Sync,
+        block: impl Fn(K, usize, &mut [I], States<'_, T>) + Sync,
         each: impl Fn(K, Range<usize>, States<'_, T>) + Sync,
     ) {
         assert_eq!(items.len(), layout.items(), "items as the coloring laid them out");
@@ -294,26 +303,28 @@ fn stages<I, T: Shareable, K: Copy>(
     layout: &Colored,
     items: &mut [I],
     program: &[Stage<K>],
-    block: &impl Fn(K, &mut [I], States<'_, T>),
+    block: &impl Fn(K, usize, &mut [I], States<'_, T>),
     each: &impl Fn(K, Range<usize>, States<'_, T>),
     mut states: States<'_, T>,
 ) {
     for stage in program {
         match *stage {
             Stage::Items(k) => {
-                let mut rest = &mut items[..];
+                let (mut rest, mut at) = (&mut items[..], 0);
                 for n in std::iter::once(layout.overflow).chain(layout.colors.iter().copied()) {
                     let (color, tail) = std::mem::take(&mut rest).split_at_mut(n);
                     rest = tail;
                     // A color can be empty: the greedy coloring keeps color
                     // 0 from edges at a fixed state.
                     if !color.is_empty() {
-                        block(k, color, states.reborrow());
+                        block(k, at, color, states.reborrow());
                     }
+                    at += n;
                 }
             }
+            Stage::All(k) if !items.is_empty() => block(k, 0, items, states.reborrow()),
             Stage::Each(k, n) if n > 0 => each(k, 0..n, states.reborrow()),
-            Stage::Each(..) => {}
+            Stage::All(_) | Stage::Each(..) => {}
         }
     }
 }
@@ -323,6 +334,9 @@ fn stages<I, T: Shareable, K: Copy>(
 enum Work<K> {
     /// The kernel's argument, and the stage's first block of items.
     Items(K, usize),
+    /// The kernel's argument: every block of items, in `across`'s `all`
+    /// order.
+    All(K),
     /// The kernel's argument, the states' count, and the stage's ranges.
     Each(K, usize, usize),
 }
@@ -344,18 +358,19 @@ fn across<I: Send, T: Shareable, K: Copy + Sync>(
     items: &mut [I],
     states: &mut [T],
     program: &[Stage<K>],
-    block: &(impl Fn(K, &mut [I], States<'_, T>) + Sync),
+    block: &(impl Fn(K, usize, &mut [I], States<'_, T>) + Sync),
     each: &(impl Fn(K, Range<usize>, States<'_, T>) + Sync),
 ) {
     let threads = exec.threads();
     let mut plan = Plan::default();
-    // Each block's items, behind a lock only its taker takes (`try_lock`):
-    // how a block hands its kernel `&mut` items in safe Rust.
-    let mut blocks: Vec<Mutex<&mut [I]>> = Vec::new();
+    // Each block's first item, and its items behind a lock only its taker
+    // takes (`try_lock`): how a block hands its kernel `&mut` items in safe
+    // Rust.
+    let mut blocks: Vec<(usize, Mutex<&mut [I]>)> = Vec::new();
     // Each non-empty group's first block and its count: the overflow's,
     // then each color's.
     let mut groups = Vec::new();
-    let mut rest = items;
+    let (mut rest, mut at) = (items, 0);
     for (i, n) in std::iter::once(layout.overflow).chain(layout.colors.iter().copied()).enumerate() {
         let (mut group, tail) = std::mem::take(&mut rest).split_at_mut(n);
         rest = tail;
@@ -364,13 +379,17 @@ fn across<I: Send, T: Shareable, K: Copy + Sync>(
         }
         let (first, count) = (blocks.len(), if i == 0 { 1 } else { blocks_of(n, ITEMS_A_BLOCK, threads) });
         for k in 0..count {
-            let (head, tail) = std::mem::take(&mut group).split_at_mut(block_range(n, k, count).len());
+            let len = block_range(n, k, count).len();
+            let (head, tail) = std::mem::take(&mut group).split_at_mut(len);
             group = tail;
-            blocks.push(Mutex::new(head));
+            blocks.push((at, Mutex::new(head)));
+            at += len;
         }
         groups.push((first, count));
     }
     let item_marks = plan.marks(blocks.len());
+    // An `All` stage's blocks, in the order its claims take them.
+    let all = all_order(&groups, threads);
     // Each `Each`'s marks, by its count: stages over the same states are
     // over the same ranges.
     let mut each_marks: Vec<(usize, usize)> = Vec::new();
@@ -397,22 +416,57 @@ fn across<I: Send, T: Shareable, K: Copy + Sync>(
                 plan.stage(count, mark);
                 work.push(Work::Each(k, n, count));
             }
-            Stage::Each(..) => {}
+            // The groups' blocks, one stage: claims over them are claims
+            // over every item once, and they share the groups' marks, a
+            // stage like any over the same blocks.
+            Stage::All(k) if !blocks.is_empty() => {
+                plan.stage(blocks.len(), item_marks);
+                work.push(Work::All(k));
+            }
+            Stage::All(_) | Stage::Each(..) => {}
         }
     }
     let shared: Vec<T::Shared> = states.iter().map(T::share).collect();
+    // Never contended: the protocol gives a block to one thread a stage, so
+    // a block found taken is a dispatch bug, and fails.
+    let run = |k: K, b: usize| {
+        let (at, items) = &blocks[b];
+        block(k, *at, &mut items.try_lock().expect("a block's taker alone has it"), States::Shared(&shared));
+    };
     dispatch(exec, &plan, &|t, b| match work[t] {
-        Work::Items(k, first) => {
-            // Never contended: the protocol gives a block to one thread a
-            // stage, so a block found taken is a dispatch bug, and fails.
-            let mut items = blocks[first + b].try_lock().expect("a block's taker alone has it");
-            block(k, &mut items, States::Shared(&shared));
-        }
+        Work::Items(k, first) => run(k, first + b),
+        Work::All(k) => run(k, all[b]),
         Work::Each(k, n, count) => each(k, block_range(n, b, count), States::Shared(&shared)),
     });
     for (s, x) in states.iter_mut().zip(&shared) {
         *s = T::load(x);
     }
+}
+
+/// The blocks of `groups` (each its first block and count) in the order an
+/// `All` stage hands them out: worker after worker, each its share of
+/// every group, the blocks its claims start from in that group's stages
+/// (`first_block`). So a worker that fills its items finds them in its
+/// cache when it solves them, if the claims come out as planned. Measured
+/// on physics2d's step_bench at 8 threads, against item order: the passes
+/// 826-833 µs against 852-853 on the settled pile of 10 000, 514-516
+/// against 529-532 on the pyramid of 5050, and `finish` 154 against 165 on
+/// the pile (2026-10-03).
+fn all_order(groups: &[(usize, usize)], threads: usize) -> Vec<usize> {
+    let total = groups.last().map_or(0, |&(first, count)| first + count);
+    let mut order = Vec::with_capacity(total);
+    for w in 0..threads {
+        for &(first, count) in groups {
+            let share = if count <= threads {
+                if w < count { w..w + 1 } else { 0..0 }
+            } else {
+                first_block(w, count, threads)..if w + 1 == threads { count } else { first_block(w + 1, count, threads) }
+            };
+            order.extend(share.map(|k| first + k));
+        }
+    }
+    debug_assert_eq!(order.len(), total);
+    order
 }
 
 /// Not in any color: neither end moves, so solving it changes nothing.
@@ -504,7 +558,51 @@ impl Coloring {
         }));
         Colored { overflow: self.overflow, colors }
     }
+
+    /// `pack`'s places the other way round: each item's edges, `width` to
+    /// an item, lane by lane (`seats[item * width + lane]`), `EMPTY` where a
+    /// lane has none; and the same layout. What a stage that fills its
+    /// items from their edges reads (`Stage::All`), where `pack`'s places
+    /// would have it look every edge up.
+    pub fn seat(&self, width: usize, seats: &mut Vec<u32>) -> Colored {
+        let colors: Vec<usize> = self.count.iter().map(|c| c.div_ceil(width)).collect();
+        seats.clear();
+        seats.resize((self.overflow + colors.iter().sum::<usize>()) * width, EMPTY);
+        for (i, to) in self.seats(width).enumerate() {
+            if let Some(to) = to {
+                seats[to] = i as u32;
+            }
+        }
+        Colored { overflow: self.overflow, colors }
+    }
+
+    /// Each edge's seat, `item * width + lane`, in edge order, `None` if
+    /// unsolved: `seat`'s, for a caller that goes through the edges in
+    /// their order rather than the items in theirs.
+    pub fn seats(&self, width: usize) -> impl Iterator<Item = Option<usize>> + '_ {
+        let mut next = [0; COLORS];
+        let mut at = self.overflow * width;
+        for (next, c) in next.iter_mut().zip(&self.count) {
+            *next = at;
+            at += c.div_ceil(width) * width;
+        }
+        let mut overflowed = 0;
+        self.of.iter().map(move |&k| match k {
+            UNSOLVED => None,
+            OVERFLOW => {
+                overflowed += 1;
+                Some((overflowed - 1) * width)
+            }
+            k => {
+                next[k as usize] += 1;
+                Some(next[k as usize] - 1)
+            }
+        })
+    }
 }
+
+/// A lane `Coloring::seat` gives no edge.
+pub const EMPTY: u32 = u32::MAX;
 
 /// Items in colors: the overflow's first, then each color's, consecutive.
 /// No two items of a color touch one moving state, so a color's items can

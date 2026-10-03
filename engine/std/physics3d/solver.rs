@@ -1099,7 +1099,7 @@ pub mod lanes {
     fn run<const N: usize>(program: &[Stage<Step>], items: &mut [Item<'_, N>], states: &mut [State], kernels: &Kernels<'_, N>) {
         for stage in program {
             match *stage {
-                Stage::Items(k) => kernels.block(k, items, states),
+                Stage::Items(k) | Stage::All(k) => kernels.block(k, items, states),
                 Stage::Each(k, n) => kernels.each(k, 0..n, states),
             }
         }

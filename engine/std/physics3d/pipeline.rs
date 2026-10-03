@@ -198,7 +198,7 @@ impl Physics3d {
                 &mut items,
                 states,
                 program,
-                |k, block, s| match s {
+                |k, _, block, s| match s {
                     States::Plain(s) => kernels.block(k, block, s),
                     States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
                 },

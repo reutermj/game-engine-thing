@@ -461,7 +461,7 @@ mod tests {
                         &mut items.lock().unwrap(),
                         &mut states,
                         &program,
-                        |k, block, mut s| block.iter().for_each(|&e| relax(&mut s, e, k)),
+                        |k, _, block, mut s| block.iter().for_each(|&e| relax(&mut s, e, k)),
                         |k, r, mut s| r.for_each(|i| s.set(i, s.get(i) * k)),
                     );
                     std::thread::sleep(Duration::from_millis(2));
