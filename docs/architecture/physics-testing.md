@@ -346,8 +346,9 @@ against `engine/std/physics3d/tests/exact.txt`, in two layers
   a seed (`kernel_inputs`: bounces, friction at its limit, overlaps past
   the push, gaps, a body that can't turn), three steps at each of twelve
   tunings, one line a tuning. Nothing of the narrowphase, the gather or
-  the world is in it, so it moves when the arithmetic changes and holds
-  when only the order of the solve does. Two more tests check its inputs
+  the world is in it, so it moves when the arithmetic changes, and when
+  the order the solver takes contacts in does (it solves in the
+  solver's order). Two more tests check its inputs
   exercise what they claim, and that reversing their order changes every
   tuning's result.
 
@@ -373,7 +374,10 @@ writes the file, only in a commit that changes results on purpose, whose
 message says why (runbook 005, "The exact fingerprint"). A change that
 claims to keep results (a refactor, a speed change, a lanes kernel in
 pair order) leaves the file as it was; one that changes the order alone
-(colouring) rewrites the mod's lines and leaves the kernel's. Since every
+(colouring) rewrites the mod's lines and the kernel's too, since the
+kernel solves in the solver's order (measured 2026-10-03, get-emj.90:
+colored, all 12 kernel lines move; physics.md, "Colouring the 3D solve
+(proposed)", proposes kernel lines at a named order). Since every
 physics change rewrites it, the file's diff says nothing about better or
 worse: that is the baseline's job, and why a band and not a pin is the
 baseline (above). After merging physics branches, write it on the merged
@@ -388,10 +392,15 @@ widths 1, 4 and 8 and at `lanes=0` (`solver::one_at_a_time`), at each
 tuning and `int=exact`, and compares every body and contact after every
 step as `Debug` prints them, no pin needed; the kernel's pinned lines,
 solved at the default's four lanes, and the mod's, held as they were
-(physics.md, "The solver in lanes", for what it caught). Colouring (get-emj.90) moves the mod's lines and not the
-kernel's; its equivalence is the coloured solve against `solver::solve`
-over the contacts in the colours' order, as 2D's
+(physics.md, "The solver in lanes", for what it caught). Colouring
+(get-emj.90, built as `order=colored`, not the default) moves both
+layers; its equivalence is the same test run in each order, the
+coloured lanes against `solver::in_order`, one contact at a time over
+the colours' order, as 2D's
 `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`.
+`TUNE=<variant> ./bazel run //engine/std/physics3d:exact` prints a
+variant's lines against the default's (the mod's against the scene with
+the default's `Tuning` named, since a `Tuning` is an entity).
 
 ### Measurements that are themselves tested
 

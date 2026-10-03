@@ -2565,13 +2565,223 @@ first storing the bias, the rest reading it), the sums (contacts), then
 restitution once: 2D's `staged::Step` names neither the refresh nor the
 sums, so it stays 2D's until get-emj.90 decides. The equivalence it
 needs is 2D's: the colored lanes against `one_at_a_time` over the
-contacts in the colors' order.
+contacts in the colors' order. Built since, the default still by level
+([Colouring the 3D solve (proposed)](#colouring-the-3d-solve-proposed)).
 
 [^lanes3d-harness]: 2026-10-03: a binary compiling `solver.rs` by path
     with timers between the lanes' stages, on a generated pile (25 × 25
     columns 16 high, each box on the one below or the floor, a side
     contact every third box), median of nine solves. Deleted before the
     first commit that has the lanes; what it measured is above.
+
+### Colouring the 3D solve (proposed)
+
+**Status: built and measured, not the default** (2026-10-03,
+get-emj.90). The solve runs on `Passes` ([A mod](#a-mod)) in either
+order, `Tuning`'s `order=levels` (the default: the sweep in pair order,
+bit for bit as before) or `order=colored` (Box2D's colors, the sweep over
+the colors' order). Coloring is what threads need (get-emj.75): a pile of
+10 000 boxes has 246 levels and 11 colors. It is a physics change, so
+this section is the data for the decision; nothing below is the default,
+no baseline was written and the fingerprint wasn't re-pinned.
+
+**What was compared.** Order (by level, colored) against what a contact
+carries to the next step (`Carry`): **C**, the mean of the substeps for
+both impulses (3D's default, `carry=mean`); **A**, both from the last
+substep (`carry=last`); **B**, the normal from the last and friction and
+twist their mean (`carry=normal`, 2D's default since get-emj.61, [The
+decision: B colored](#the-decision-b-colored)). 3D's B applies to every
+contact, where 2D's keeps the mean for contacts whose ends don't turn
+(get-emj.97). Six columns: Lm (the default), La, Ln, Cm, Cl, Cn.
+
+**Every bound** (the four suites with `TUNE=order=…,carry=…`, `MATRIX=1`,
+`--include-ignored`, `--nocapture`). Missed bounds of tests not ignored,
+each once (the long suite repeats the default's); the three ignored tests
+(get-emj.65, .71, .72) miss the same bounds under every option:
+
+| | Lm | La | Ln | Cm | Cl | Cn |
+|---|---|---|---|---|---|---|
+| bounds missed | **0** | 7 | 3 | 5 | 14 | 15 |
+| boxes 200-500 turning, the deepest at the end (bound 0.00695) | 0.0055 | 0.0063 | 0.0065 | **0.0078** | **0.0074** | **0.0074** |
+| boxes 10 000 turning: rest (median bound 895), deep while settling (0.172) | 468, 0.158 | **1239**, 0.142 | **1133**, 0.155 | 480, **0.175** | **1382**, **0.191** | **1026**, **0.192** |
+| planks 10 000 turning: rest (bound 490) | 335 | **never** | 395 | **767** | **1443** | **1316** |
+| planks 2000-5000 turning: rest median (bound 470) | 417 | 367 | 393 | **559** | **1499** | **796** |
+| boxes 400 locked: rest (bound 500), energy at the end | ok | ok | ok | ok | **never, 5.4e-4** | **never, 5.4e-4** |
+| mixed 900 turning: rest (bound 570) | ok | ok | ok | ok | ok | **never** |
+| boxes 900 turning: rest (bound 440) | ok | **965** | ok | ok | ok | ok |
+
+Every missed bound but the locked piles' and the depths is a big
+turning pile's rest, each a single run, and settling is chaotic; the
+depths are steady over seeds (below).
+
+**What moved past its band** (`baseline -- --all`, and `--long --all`,
+against the default's file; the rest within their bands):
+
+| | La | Ln | Cm | Cl | Cn |
+|---|---|---|---|---|---|
+| default suite | 7 | 8 | 10 | 10 | 10 |
+| long suite | 1 | 0 | 3 | 3 | 3 |
+
+- **Every option** stands the heavy cube on a light one at 1000 times
+  (`ratio 1000`: stands 0 → 1, top sank 0.998 → 0.110, at rest from 316
+  → 75-282) at the cost of a deeper contact and more jitter (4.6e-5 →
+  0.072 deep, jitter 1.2e-7 → 2e-4 to 0.017): today's default crushes it.
+- **Colored**, the locked pile of 200-500 sinks a tenth as deep while
+  settling (0.033 → 0.0034 median, every seed), with the mean carry
+  only; the 15- and 20-high stacks end with 1.4 to 19 times less energy;
+  `ratio 100` rests later (42 → 81) under C.
+- **Colored with A or B**, the locked piles of 200-1000 never come to
+  rest (median never, energy 5.4e-4): get-emj.97.
+- **By level with A**, planks 10 000 end at 5.5e-7 a body (6.1e-10).
+
+**Over seeds** (`--offset=1,2,3`, the default's run the fourth): the
+depths are the order's, not chance. Turning boxes 200-500, depth at the
+end (median over sizes), Lm 0.0053, 0.0052, 0.0066, 0.0052 and Cm 0.0060,
+0.0057, 0.0077, 0.0058: colored about 10% deeper on every seed, against
+a bound of 0.00695. The piles' rest medians (200-1000) overlap: boxes Lm
+189-199, Cm 174-233; planks Lm 256-288, Cm 218-335.
+
+**The families** (`bench -- <engines> --families`, `compare/family.rs`;
+600 steps, 1000 for stacks): edge-of-stability scenes, each a grid
+judged by the share that stood (the top body within half a box of where
+it began; a card house with no card moved a quarter of its half height)
+and the median step they came to rest from (of the runs that stood):
+
+| family (grid) | Rapier | Box3D | Jolt | Lm | La | Ln | Cm | Cl | Cn |
+|---|---|---|---|---|---|---|---|---|---|
+| stacks 8-40 high | 31/33, 29 | 32/33, 29 | 8/33 | 16, 14 | 16, 11 | 16, 11 | 16, 14 | 17, 11 | 17, 11 |
+| pyramids (2D's, one deep) 10-60 wide, friction 0-0.5 | 47/55, 59 | 47/55, 47 | 20/55 | 36, 47 | 46, 74 | 48, 47 | 45, **596** | 48, 76 | **48, 40** |
+| cabins of planks on edge, 8-40 layers, friction 0.2-0.8 | 36/36, 122 | 36/36, 111 | 12/36 | 24, never | 28, never | 28, 182 | 25, 599 | 24, 254 | 24, 317 |
+| card houses, 3-6 storeys, lean 23-27°, friction 0.6-0.9 | 66/120, 24 | 93/120, 26 | 85/120 | 23, 30 | 21, 30 | 22, 35 | 23, 35 | 20, 37 | 24, 34 |
+
+- **The 2D lessons, in 3D.** A 3D pyramid stands under colored order (45
+  to 48 of 55 against 36 by level with the mean), but with the mean it
+  doesn't come to rest (median 596 of 600 steps): 2D's lag, the mean two
+  substeps behind a breathing pyramid ([Why colors let the pyramid
+  fall](#why-colors-let-the-pyramid-fall)). B is 2D's fix and is 3D's:
+  colored with B the pyramids rest soonest of any option (40), sooner than
+  Rapier and Box3D. Stacks stand one higher colored with A or B (24).
+  But B costs 3D's piles what it didn't cost 2D's (15 bounds colored, 3
+  by level), so in 3D the carry that fixes pyramids isn't the one that
+  keeps piles.
+- **Card houses and tall columns are short of the references whatever
+  the order** (cards 20-24 of 120 against 66-93; cabins never at rest;
+  stacks topple from 24 where Rapier and Box3D stand 40): get-emj.98 and
+  get-emj.99, not this decision's.
+- Jolt fails stacks over 15, pyramids and cabins at its defaults
+  (damping and its own solver), and isn't a bound here.
+
+**The exact fingerprint.** The default's lines are as pinned, mod and
+kernel. Colored (`TUNE=order=colored ./bazel run
+//engine/std/physics3d:exact`), the mod's lines differ from frame 25 (the
+first contacts that color differently) in 96 of 120 frames, against the
+scene run with the default's `Tuning` named (a `Tuning` is an entity, so
+any tuned run moves every body's index from the pinned one); the
+kernel's lines differ at all 12 tunings. That is the kernel's order, not
+its arithmetic: the kernel layer solves `kernel_inputs` in the solver's
+order, and those inputs see their order (reversed, every tuning moves).
+What holds under both orders is the arithmetic, which
+`the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit` checks in
+each order, lanes against `in_order`. physics-testing.md's "Colouring
+moves the mod's lines and not the kernel's" was wrong, and is corrected.
+
+**Speed, one thread** (`step_bench`, `--config=bench`, `taskset -c 0-7`,
+`TUNE=order=levels` and `=colored` alternated on one build, two rounds of
+five runs; the mean of the rounds' medians, µs a step):
+
+| scene | solver, by level | colored | | whole step, by level | colored |
+|---|---|---|---|---|---|
+| boxes 10 000, falling | 18 171 | 18 555 | +2% | 24 742 | 25 493 |
+| boxes 10 000, settled | 19 053 | 18 867 | −1% | 22 839 | 22 907 |
+| planks 1000, settled | 2652 | 2562 | −3% | 3189 | 3079 |
+| spheres 10 000, settled | 17 254 | 17 614 | +2% | 21 242 | 21 825 |
+| boxes 10 000 locked, settled | 18 066 | 17 748 | −2% | 23 641 | 23 321 |
+| stack 20 | 26.5 | 22.5 | −4 µs | 37.5 | 34 |
+
+Level: the rounds moved by up to 8% on their own (colored falling 17 654,
+then 19 455). The same batches, kernels and fill (colored 4690 batches
+for 18 738 contacts, by level 4868 for 19 087); the stack goes in lanes
+colored (2 colors, 6 batches), where by level it falls back to one at a
+time. So colouring buys nothing on one thread.
+
+**Across threads, from the layout** (not run): the colors of one step,
+in batches (`step_bench`'s `groups`, `widest`, `narrowest`, and each
+group's batches logged once), the blocks on a stage's critical path
+`Σ ceil(batches/T)`, and the stage barriers a step (26 stages over
+batches at the default, 5 × (warm start, push, two relax, sums) and
+restitution):
+
+| step | groups | batches | 4 threads | 8 | 16 | barriers a step |
+|---|---|---|---|---|---|---|
+| boxes 10 000 settled, colored: 1243, 1230, 917, 664, 368, 192, 52, 16, 4, 3, 1 | 11 | 4690 | 4.0× | 7.9× | 15.7× | 286 |
+| boxes 10 000 settled, by level (widest 88) | 246 | 4868 | 3.7× | 6.7× | 12.4× | 6396 |
+| boxes 10 000 locked, colored | 11 | 5091 | 4.0× | 7.9× | 15.7× | 286 |
+| spheres 10 000 settled, colored | 11 | 7977 | 4.0× | 8.0× | 15.8× | 286 |
+| planks 1000 settled, colored | 12 | 752 | 3.9× | 7.6× | 14.2× | 312 |
+
+The colors are big where the work is (three quarters of the batches in
+the first four) and the tail tiny, so the blocks split near perfectly;
+by level, 6396 barriers a step at the 0.19 µs one costs on one CCD
+([Parallel solving](#parallel-solving)) are 1.2 ms, against 0.05 ms
+colored. 2D measured 4.9× at 8 threads on the same layout; the prepare
+(grouping, packing, filling: about 1.6 ms of 12 on the dense pile, "The
+solver in lanes") stays serial until stage 3 moves the fill into the
+passes (flows.md, "Physics's adoption").
+
+**Recommendation: by level stays the default until threads; then Cm.**
+
+- **Not now.** On one thread colored is level with by level in speed and
+  misses five bounds the default meets (get-emj.96): one in the default
+  suite (turning boxes about 10% deeper at the end on every seed) and
+  four on big turning piles. Its gains (pyramids stand, a locked pile
+  sinks a tenth as deep while settling, the heavy cube stands) don't
+  pay for a re-baseline that buys no speed.
+- **With threads (get-emj.75), Cm**: colored with the mean carry, 3D's
+  carry as it is. It is the colored option closest to the bounds (5
+  missed, against 14 and 15 for A and B), keeps every locked bound, and
+  stands as many pyramids as any. B is 2D's fix and rests pyramids
+  soonest, but costs 3D's piles ten more bounds, and breathes locked
+  piles as 3D applies it (get-emj.97): B wants 2D's form, the mean where
+  nothing turns, before it is measured again.
+- **What Cm costs**: the five bounds of get-emj.96, and pyramids that
+  stand but don't come to rest within 600 steps (2D's lag). Whoever
+  adopts it decides whether those four tests go ignored under
+  get-emj.96, or get-emj.96 is fixed first; a bound is never loosened.
+
+**Commands that would make Cm the default** (one commit, its message
+saying why, as 2D's get-emj.61):
+
+```text
+# components.rs: #[default] on Order::Colored (codes unchanged: 0 levels, 1 colored)
+# the four tests of get-emj.96: #[ignore = "get-emj.96: ..."], or get-emj.96 fixed first
+./bazel run //engine/std/physics3d/compare:baseline -- --all             # see what moves
+./bazel run //engine/std/physics3d/compare:baseline -- --write
+./bazel run //engine/std/physics3d/compare:baseline -- --long --write
+./bazel run //engine/std/physics3d:exact -- --write                      # mod and kernel lines
+./bazel run //engine/std/physics2d/compare:baseline -- --all             # 2D: nothing moves
+./bazel test //... && ./bazel test //engine/std/physics3d/compare:baseline_long_test
+```
+
+With it, `exact.rs`' kernel layer should solve at `order=levels` named,
+plus one colored line a tuning, so a later change to the coloring moves
+only the colored lines and one to the arithmetic both; the edge families
+become tests with share bounds (get-emj.100), in the same re-baseline.
+
+**The tests that keep this honest**, each planted and seen to fail
+(2026-10-03): Box2D's color-0 rule dropped from the colored grouping
+fails `contacts_are_colored_as_box2d_colors_them` and moves every colored
+number (the exact tool's colored lines, 43 rows of the colored baseline)
+while the default's fingerprint and baseline stay byte-identical; the
+pipeline's `prepare` grouping by level whatever the order fails
+`the_mod_solves_in_the_order_its_world_sets`; the shared states' turn
+rate stored with two components swapped fails
+`the_mod_is_its_fingerprint_with_its_states_shared` alone; B's friction
+from the last substep in the lanes fails the equivalence at
+`carry=normal`; the colored sweep in pair order fails the equivalence
+colored and the coloring's unit test.
+
+The listing of every bound needs `--nocapture` besides `MATRIX=1`: the
+test harness keeps a passing test's output, `CHECK` lines included.
 
 ### The choices, measured
 

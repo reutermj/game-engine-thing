@@ -9,9 +9,9 @@
 //!   write-back).
 //! - **The kernel**: `solver::solve` alone, on bodies and contacts made
 //!   here from a seed (`kernel_inputs`), at each of its tunings. No
-//!   narrowphase, gather or world in it, so it holds still when only the
-//!   order of the solve changes (colouring it, get-emj.90) and moves when
-//!   the arithmetic does.
+//!   narrowphase, gather or world in it, so it moves when the arithmetic
+//!   does, and when the order the solver takes contacts in does: colored
+//!   (`order=colored`, get-emj.90), every kernel line moves.
 //!
 //! 3D has no second implementation to hold the mod to bit for bit, as 2D
 //! has its arrays: a pinned value is the other side. Both scenes avoid

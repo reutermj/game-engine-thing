@@ -638,11 +638,12 @@ scatter_contacts Take<Contacts> -> world
 scatter_bodies   Take<Bodies> -> world
 ```
 
-- **No shape.** 3D's solve is the sweep one contact at a time in pair
-  order (`solver::solve`; in lanes by level since get-emj.52, which is
-  that sweep bit for bit), whose result is that order's, so `solver`
-  runs it whole. Coloring it would move results: a physics change,
-  re-baselined (get-emj.90), then threads (get-emj.75).
+- **No shape** (until get-emj.90, below). 3D's solve is the sweep one
+  contact at a time in pair order (`solver::solve`; in lanes by level
+  since get-emj.52, which is that sweep bit for bit), whose result is
+  that order's, so `solver` runs it whole. Coloring it would move
+  results: a physics change, re-baselined (get-emj.90), then threads
+  (get-emj.75).
 - **No sleeping, sides or events** in 3D, so `scatter_bodies` writes
   bodies alone, and the contacts are taken by `scatter_contacts`.
 - **No `Workers`** to remove: 3D never had them.
@@ -682,6 +683,22 @@ Level: the gathers and write-backs are within 10% of a few hundred µs
 either way, and the 2 to 6% the solve gained is the solver's own time,
 whose code didn't change: the runs were one after the other, not
 alternated, so that is the machine's drift, not the port's.
+
+**On `Passes`** (2026-10-03, get-emj.90). `solver` is now `prepare`,
+`passes` and `finish`, as 2D's, the passes a program on `Passes`
+(physics.md, "A mod"): by level (the default) the same sweep bit for bit
+(both baselines and the fingerprint byte-identical), the levels being
+`Passes`' colors (246 of them on a pile of 10 000, so a stage is 246
+blocks); colored (`Tuning`'s `order=colored`) Box2D's colors, 11 on the
+same pile, a physics change not yet adopted (physics.md, "Colouring the
+3D solve (proposed)"). The states are `solver::lanes::State`, a body's
+velocities, move and turn in 64 bytes, shared as sixteen relaxed atomics
+(`Atom`); the kernels are generic over the view, matched once a call, as
+2D's. Held to its plain path by `exact_test`'s
+`the_mod_is_its_fingerprint_with_its_states_shared`, by level and
+colored. Not split into the stage loop's own `Step`: 3D's stages include
+the refresh under `Inertia::Substep` and the impulse sums, which 2D's
+`staged::Step` doesn't name, so each mod keeps its own.
 
 ## Out of scope
 
