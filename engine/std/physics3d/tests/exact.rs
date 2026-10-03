@@ -296,14 +296,21 @@ pub const KERNEL_TUNINGS: &[&str] = &[
 pub const KERNEL_STEPS: usize = 3;
 
 /// `solver::solve` at `tuning` on `bodies` and `contacts`, `KERNEL_STEPS`
-/// times, as a step hands the next its results.
-pub fn kernel_run(
+/// times, as a step hands the next its results: in the default's lanes.
+pub fn kernel_run(tuning: &str, bodies: &mut [SolverBody], contacts: &mut [Constraint], each: impl FnMut(&[SolverBody], &[Constraint])) {
+    kernel_run_in(tuning, solver::LANES, bodies, contacts, each)
+}
+
+/// `kernel_run`, `lanes` at a time (`solver::Tuning::lanes`; 0 is one at
+/// a time in pair order).
+pub fn kernel_run_in(
     tuning: &str,
+    lanes: usize,
     bodies: &mut [SolverBody],
     contacts: &mut [Constraint],
     mut each: impl FnMut(&[SolverBody], &[Constraint]),
 ) {
-    let how = solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning"));
+    let how = solver::Tuning { lanes, ..solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning")) };
     for _ in 0..KERNEL_STEPS {
         solver::solve(bodies, contacts, DT, &how);
         each(bodies, contacts);

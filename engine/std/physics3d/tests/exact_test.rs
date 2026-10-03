@@ -47,6 +47,34 @@ fn the_kernel_is_its_pinned_fingerprint_bit_for_bit() {
     }
 }
 
+/// The lanes (`solver::lanes`) are the solve one contact at a time in pair
+/// order bit for bit, at every width and under every tuning the kernel is
+/// pinned at, and `int=exact` and `anchors=exact` besides (the default
+/// is `anchors=exact`; the integration is the bodies' stage, which both
+/// share, but a sine is no reason to leave a tuning out of a comparison
+/// on one host): every body and contact after each step, compared as
+/// `Debug` prints them, which tells `-0.0` from `0.0`. The fingerprint
+/// pins the default width; this holds the others, and the scalar
+/// reference, to it.
+#[test]
+fn the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit() {
+    let tunings = exact::KERNEL_TUNINGS.iter().copied().chain(["int=exact", "anchors=exact"]);
+    for tuning in tunings {
+        let run = |lanes: usize| {
+            let (mut bodies, mut contacts) = exact::kernel_inputs();
+            let mut steps = Vec::new();
+            exact::kernel_run_in(tuning, lanes, &mut bodies, &mut contacts, |b, c| steps.push(format!("{b:?}\n{c:?}")));
+            steps
+        };
+        let one = run(0);
+        for lanes in [1, 4, 8] {
+            for (step, (a, b)) in one.iter().zip(run(lanes)).enumerate() {
+                assert!(*a == b, "{tuning:?}, {lanes} lanes: step {step} differs from one at a time");
+            }
+        }
+    }
+}
+
 /// The kernel's inputs couple their contacts through shared bodies, so the
 /// order they are solved in shows in every output: reversed, every tuning's
 /// result differs. Without this, a kernel test could pass an order change

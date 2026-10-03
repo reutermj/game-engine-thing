@@ -1,8 +1,9 @@
 //! What the 2D and 3D physics mods share apart from the dimension
 //! (docs/architecture/physics-sharing.md, "Phase 1"): code both had a copy
 //! of, moved here so a fix lands in both; and from phase 2, what 2D has
-//! and 3D will build on unchanged (`lanes::F`, for 3D's lanes kernel,
-//! get-emj.52). It takes plain values (entities,
+//! and 3D builds on unchanged (`lanes::F`, and `levels`, the order both
+//! lanes kernels can keep the sweep in pair order by, get-emj.52). It
+//! takes plain values (entities,
 //! indices, scalars), never a mod's components, which stay in each mod's
 //! interface: this crate is a dependency of the mods' implementations
 //! only, so changing it reloads the two physics mods and no game.
@@ -12,10 +13,12 @@
 
 mod closing;
 pub mod lanes;
+mod levels;
 mod slots;
 mod soft;
 
 pub use closing::Closing;
+pub use levels::levels;
 pub use slots::Slots;
 
 /// How near two shapes count as in contact, with a negative depth: a

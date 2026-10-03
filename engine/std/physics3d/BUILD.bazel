@@ -23,8 +23,12 @@ engine_mod(
     ],
     twin = True,
     # The implementation's, never the interface's: see
-    # //engine/std/physics_common.
-    deps = ["//engine/std/physics_common"],
+    # //engine/std/physics_common. The ECS's own for the lanes' layout
+    # (engine_ecs::shape's `Coloring::pack`).
+    deps = [
+        "//engine/ecs",
+        "//engine/std/physics_common",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -78,6 +82,7 @@ rust_test(
     crate_root = "tests/core_test.rs",
     deps = [
         ":physics3d_interface",
+        "//engine/ecs",
         "//engine/std/physics_common",
     ],
 )

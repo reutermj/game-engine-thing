@@ -1254,40 +1254,18 @@ mod lanes {
     /// (`b2AddContactToGraph`), which is the generic primitive's
     /// (`Coloring::greedy`), the same call the mod's pipeline makes, so the
     /// arrays and the mod can't color apart. By level (`Wide::Levels`), a
-    /// variant with no generic counterpart: one past the latest level of
-    /// the contacts before it in pair order that share a body it moves,
-    /// which in pair order is the level the body's last contact left, so
-    /// one pass finds them. A pile of 10 000 has about 420 levels of 50
-    /// contacts, its batches 97% full; a 5050 pyramid 590, 94%. Levels
-    /// never overflow; both are packed into batches alike (`Coloring::pack`).
+    /// variant: `physics_common::levels`, which 3D's lanes solve in too. A
+    /// pile of 10 000 has about 420 levels of 50 contacts, its batches 97%
+    /// full; a 5050 pyramid 590, 94%. Both are packed into batches alike
+    /// (`Coloring::pack`).
     fn group(contacts: &[Constraint], moves: &[bool], wide: Wide) -> Coloring {
-        let mut coloring = Coloring::default();
+        let ends = |i: usize| (contacts[i].a, contacts[i].b);
         if let Wide::Colored(_) = wide {
-            coloring.greedy(contacts.len(), |i| (contacts[i].a, contacts[i].b), moves, true, &mut Vec::new());
+            let mut coloring = Coloring::default();
+            coloring.greedy(contacts.len(), ends, moves, true, &mut Vec::new());
             return coloring;
         }
-        // By body, in pair order so far: the next level.
-        let mut next = vec![0u32; moves.len()];
-        for c in contacts {
-            let (a, b) = (c.a as usize, c.b as usize);
-            if !moves[a] && !moves[b] {
-                coloring.of.push(UNSOLVED);
-                continue;
-            }
-            let at = |e: usize| if moves[e] { next[e] } else { 0 };
-            let level = at(a).max(at(b));
-            for e in [a, b] {
-                if moves[e] {
-                    next[e] = level + 1;
-                }
-            }
-            if coloring.count.len() <= level as usize {
-                coloring.count.resize(level as usize + 1, 0);
-            }
-            coloring.count[level as usize] += 1;
-            coloring.of.push(level);
-        }
-        coloring
+        physics_common::levels(contacts.len(), ends, moves)
     }
 
     /// What `solve` solves them in: the overflow's first, then each group's

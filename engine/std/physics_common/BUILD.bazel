@@ -15,6 +15,7 @@ rust_library(
     srcs = [
         "closing.rs",
         "lanes.rs",
+        "levels.rs",
         "lib.rs",
         "slots.rs",
         "soft.rs",
