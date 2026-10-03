@@ -39,8 +39,12 @@ struct Case {
     at: (u32, u32),
 }
 
-/// One run's window, µs a step: the solve and its parts, and the frame.
-fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 5] {
+/// One run's window, µs a step: the solve and its parts, and the frame;
+/// then how the window's last step laid its contacts out in lanes
+/// (physics3d's `stages`): contacts, groups (levels or colors), the
+/// overflow's batches, all batches, and the most and fewest batches a
+/// group has; zeros where it solved them whole.
+fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 11] {
     let dir = std::env::temp_dir().join(format!("physics3d-step-bench-{}-{k}", std::process::id()));
     let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
     e.load_batch(&manifest.mods).expect("loading the pile");
@@ -61,9 +65,11 @@ fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 5] {
     let frame = t.elapsed().as_secs_f64() * 1e6 / window as f64;
     let stages = e.send("physics3d", "stages").unwrap();
     let (gather, solver, write_back) = (field(&stages, "solve_gather"), field(&stages, "solver"), field(&stages, "write_back"));
+    let layout = ["contacts", "groups", "overflow", "batches", "widest", "narrowest"].map(|k| field(&stages, k));
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
-    [gather + solver + write_back, gather, solver, write_back, frame]
+    let [contacts, groups, overflow, batches, widest, narrowest] = layout;
+    [gather + solver + write_back, gather, solver, write_back, frame, contacts, groups, overflow, batches, widest, narrowest]
 }
 
 fn main() {
@@ -79,17 +85,18 @@ fn main() {
         Case { name: "stack 20, steps 301-330", build: "stack 20", locked: false, at: (300, 30) },
     ];
     println!("µs a step, the median of {runs} runs\n");
-    println!("| case | solve | gather | solver | write-back | whole step |");
-    println!("|---|---|---|---|---|---|");
+    println!("| case | solve | gather | solver | write-back | whole step | contacts | groups | overflow | batches | widest | narrowest |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut k = 0;
     for case in cases.iter().filter(|c| only.is_empty() || c.name.contains(only.as_str())) {
-        let all: Vec<[f64; 5]> = (0..runs)
+        let all: Vec<[f64; 11]> = (0..runs)
             .map(|_| {
                 k += 1;
                 run(&manifest, case, k)
             })
             .collect();
         let m = |i: usize| median(all.iter().map(|r| r[i]).collect());
-        println!("| {} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |", case.name, m(0), m(1), m(2), m(3), m(4));
+        let cells: Vec<String> = (0..11).map(|i| format!("{:.0}", m(i))).collect();
+        println!("| {} | {} |", case.name, cells.join(" | "));
     }
 }

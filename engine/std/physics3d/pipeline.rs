@@ -5,18 +5,23 @@
 //! solve            world -> Make<Settings>
 //! gather_bodies    See<Settings>, world -> Make<Bodies>
 //! gather_contacts  See<Bodies>, world -> Make<Contacts>
-//! solver           See<Settings>, Pass<Bodies>, Pass<Contacts>
+//! prepare          See<Settings>, Pass<Bodies>, Pass<Contacts> -> Make<Graph>
+//! passes           See<Bodies>, Pass<Graph>, Passes
+//! finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Contacts>
 //! scatter_contacts Take<Contacts> -> world
 //! scatter_bodies   Take<Bodies> -> world
 //! ```
 //!
-//! The sources copy the moving bodies and the contacts out of the world,
-//! `solver` solves them (`solver::solve`), and the sinks write the results
-//! back. The solve's result is the sweep's one contact at a time in pair
-//! order: in lanes by level since get-emj.52, which is that sweep bit for
-//! bit, so it is one system and no shape. Colors, which a shape can
-//! split, would change 3D's results, a physics change of its own
-//! (get-emj.90, get-emj.75).
+//! The sources copy the moving bodies and the contacts out of the world;
+//! `prepare`, `passes` and `finish` are the solver's (`solver::Staged`), its
+//! passes a program of stages declared as a shape the scheduler runs
+//! (`Passes`), as 2D's; the sinks write the results back. The contacts are
+//! grouped by `Tuning`'s order: by level, the sweep in pair order bit for
+//! bit (the default), or in Box2D's colors, the sweep over the colors'
+//! order, which threads can share (physics.md, "Colouring the 3D solve
+//! (proposed)"). A step the lanes don't take (few contacts, a width but
+//! four, `lanes=0`) is solved whole by `finish`, one contact at a time in
+//! the same order or at its width (`solver::solve`).
 //!
 //! The flows are this mod's alone, not its interface's: what they carry is
 //! the solver's own layout, and a mod that saw them would be rebuilt for
@@ -24,9 +29,10 @@
 
 use std::time::Instant;
 
-use engine_api::{Cx, Dt, Entity, Make, Pass, Query, See, Take, flow};
+use engine_api::{Cx, Dt, Entity, Make, Pass, Passes, Query, Recycle, See, Stage, States, Take, flow};
 
-use crate::solver::{self, Constraint, ContactPoint, SolverBody};
+use crate::solver::lanes::Shared;
+use crate::solver::{self, Constraint, ContactPoint, SolverBody, Staged, Step};
 use crate::{
     AngularVelocity, Body, ContactPair, Gravity, Impulse, Manifold, Physics3d, Position, Quat, Rotation, Slots, Tuning, Vec3, Velocity,
 };
@@ -55,6 +61,28 @@ flow! {
     pub(crate) struct Contacts: "physics3d::flow::Contacts" {
         constraints: Vec<Constraint>,
     }
+}
+
+/// How many contacts the passes solve at once: SSE2's width, `Tuning`'s
+/// default (`Lanes::Four`). Other widths are variants, solved whole.
+const LANES: usize = 4;
+
+flow! {
+    /// The contacts as the passes solve them: grouped, in lanes, the
+    /// bodies as states.
+    pub(crate) struct Graph: "physics3d::flow::Graph" {
+        /// Whether the step is solved in lanes; if not, `finish` solves it
+        /// whole.
+        lanes: bool,
+        staged: Staged<LANES>,
+        program: Vec<Stage<Step>>,
+    }
+}
+
+/// Overwritten whole by the step that uses it, so there is nothing to
+/// empty: recycling it is keeping its allocations.
+impl Recycle for Staged<LANES> {
+    fn recycle(&mut self) {}
 }
 
 /// Moving bodies, read: the walk `scatter_bodies` writes back in, so the
@@ -134,12 +162,80 @@ impl Physics3d {
         self.gathered(start);
     }
 
-    /// The solve, whole (`solver::solve`): in lanes by level, the sweep in
-    /// pair order bit for bit.
-    pub(crate) fn solver(&mut self, _: &mut (), _: &mut Cx, (dt, s): (Dt, See<Settings>), (mut b, mut c): (Pass<Bodies>, Pass<Contacts>)) {
+    /// The contacts grouped and into their lanes, the bodies as states,
+    /// where the step goes in lanes four wide.
+    pub(crate) fn prepare(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        (dt, s): (Dt, See<Settings>),
+        (mut b, mut c): (Pass<Bodies>, Pass<Contacts>),
+        mut g: Make<Graph>,
+    ) {
         let start = Instant::now();
         let how = s.how.expect("made by `solve`");
-        solver::solve(&mut b.bodies, &mut c.constraints, *dt, &how);
+        let Graph { lanes, staged, .. } = &mut *g;
+        *lanes = how.lanes == LANES && staged.prepare(&mut b.bodies, &mut c.constraints, *dt, &how);
+        let [groups, overflow, batches, widest, narrowest] = if *lanes { staged.layout() } else { [0; 5] }.map(|x| x as u64);
+        let f = &mut self.found;
+        (f.groups, f.overflow, f.batches, f.widest, f.narrowest) = (groups, overflow, batches, widest, narrowest);
+        self.solver_time(start);
+    }
+
+    /// The substeps and restitution: every pass a stage over the groups'
+    /// batches or the bodies' states, which the scheduler runs.
+    pub(crate) fn passes(&mut self, _: &mut (), _: &mut Cx, b: See<Bodies>, mut g: Pass<Graph>, passes: Passes) {
+        let start = Instant::now();
+        let Graph { lanes, staged, program } = &mut *g;
+        if *lanes {
+            staged.program(program);
+            let (layout, mut items, states, kernels) = staged.split(&b.bodies);
+            // The kernels are generic over the states' view (`Bodies`), so
+            // each view is matched once a call, not once a body (flows.md,
+            // "On one thread").
+            passes.run(
+                layout,
+                &mut items,
+                states,
+                program,
+                |k, block, s| match s {
+                    States::Plain(s) => kernels.block(k, block, s),
+                    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+                },
+                |k, r, s| match s {
+                    States::Plain(s) => kernels.each(k, r, s),
+                    States::Shared(s) => kernels.each(k, r, &mut Shared(s)),
+                },
+            );
+        }
+        self.solver_time(start);
+    }
+
+    /// The step's impulses and states back into the contacts and bodies;
+    /// or, where nothing went in lanes, the step solved whole.
+    pub(crate) fn finish(
+        &mut self,
+        _: &mut (),
+        _: &mut Cx,
+        (dt, s): (Dt, See<Settings>),
+        g: Take<Graph>,
+        (mut b, mut c): (Pass<Bodies>, Pass<Contacts>),
+    ) {
+        let start = Instant::now();
+        let how = s.how.expect("made by `solve`");
+        let (bodies, contacts) = (&mut b.bodies[..], &mut c.constraints[..]);
+        if g.lanes {
+            g.staged.finish(bodies, contacts);
+        } else if how.lanes == LANES {
+            // `prepare` found the lanes don't pay, and changed nothing.
+            solver::in_order(bodies, contacts, *dt, &how);
+        } else {
+            solver::solve(bodies, contacts, *dt, &how);
+        }
+        self.solver_time(start);
+    }
+
+    fn solver_time(&mut self, start: Instant) {
         let t = crate::nanos(start, Instant::now());
         (self.time.solver, self.time.solve) = (self.time.solver + t, self.time.solve + t);
     }

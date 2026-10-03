@@ -31,7 +31,7 @@ use narrow::{Narrow, Solid};
 use physics_common::{FAT, Slots};
 pub use physics3d::{
     Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, Lanes, MAX_POINTS,
-    Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
+    Manifold, Mat3, Order, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
 };
 
 field_struct! {
@@ -70,6 +70,15 @@ field_struct! {
         matched: u64,
         /// Contacts carried from the last step without the narrowphase.
         recycled: u64,
+        /// How the solve laid the contacts out in lanes (`solver::Staged`):
+        /// groups (levels or colors), the overflow's batches, all batches,
+        /// and the most and fewest batches a group has; zeros where it
+        /// solved them whole.
+        groups: u64,
+        overflow: u64,
+        batches: u64,
+        widest: u64,
+        narrowest: u64,
     }
 }
 
@@ -335,7 +344,8 @@ impl Physics3d {
         t.narrowphase += nanos(paired, narrowed);
         t.merge += nanos(narrowed, end);
         t.contacts += nanos(start, end);
-        self.found = Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched, recycled: reused };
+        self.found =
+            Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched, recycled: reused, ..Found::default() };
     }
 }
 
@@ -355,8 +365,10 @@ impl Mod for Physics3d {
         s.add("solve", Self::solve).phase(STEP).after("physics3d::find_contacts");
         s.add("gather_bodies", Self::gather_bodies).phase(STEP).after("physics3d::solve");
         s.add("gather_contacts", Self::gather_contacts).phase(STEP).after("physics3d::gather_bodies");
-        s.add("solver", Self::solver).phase(STEP).after("physics3d::gather_contacts");
-        s.add("scatter_contacts", Self::scatter_contacts).phase(STEP).after("physics3d::solver");
+        s.add("prepare", Self::prepare).phase(STEP).after("physics3d::gather_contacts");
+        s.add("passes", Self::passes).phase(STEP).after("physics3d::prepare");
+        s.add("finish", Self::finish).phase(STEP).after("physics3d::passes");
+        s.add("scatter_contacts", Self::scatter_contacts).phase(STEP).after("physics3d::finish");
         s.add("scatter_bodies", Self::scatter_bodies).phase(STEP).after("physics3d::scatter_contacts");
     }
 
@@ -392,8 +404,18 @@ impl Mod for Physics3d {
                 );
                 Ok(times
                     + &format!(
-                        " pairs {} contacts {} points {} kept {} matched {} recycled {}",
-                        f.pairs, f.contacts, f.points, f.kept, f.matched, f.recycled
+                        " pairs {} contacts {} points {} kept {} matched {} recycled {} groups {} overflow {} batches {} widest {} narrowest {}",
+                        f.pairs,
+                        f.contacts,
+                        f.points,
+                        f.kept,
+                        f.matched,
+                        f.recycled,
+                        f.groups,
+                        f.overflow,
+                        f.batches,
+                        f.widest,
+                        f.narrowest
                     ))
             }
             "reset_timings" => {

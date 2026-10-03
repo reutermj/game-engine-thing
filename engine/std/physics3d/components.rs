@@ -348,6 +348,10 @@ pub enum Carry {
     Mean,
     /// The last substep's impulses (Box2D's, Box3D's, Rapier's).
     Last,
+    /// The normal impulses as the last substep left them, friction and
+    /// twist their mean: 2D's default since get-emj.61 ("B", physics.md,
+    /// "The decision: B colored"), measured in 3D for get-emj.90.
+    Normal,
 }
 
 /// What restitution bounces a contact back from: 2D's `solver::Closing`,
@@ -381,6 +385,20 @@ pub enum Lanes {
     /// One contact at a time in pair order, as before lanes: the reference
     /// the lanes are held to.
     Off,
+}
+
+/// The order the solver takes contacts in (physics.md, "Colouring the 3D
+/// solve (proposed)"). Each is the same bits in lanes and one at a time;
+/// the two orders are two computations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    /// The sweep in pair order, its contacts grouped by level
+    /// (`physics_common::levels`).
+    #[default]
+    Levels,
+    /// Box2D's graph colors (`Coloring::greedy`): the overflow, then each
+    /// color's contacts in pair order. Colors are what threads can share.
+    Colored,
 }
 
 impl Lanes {
@@ -441,6 +459,7 @@ component! {
         pub carry: u8,
         pub closing: u8,
         pub lanes: u8,
+        pub order: u8,
     }
 }
 
@@ -462,6 +481,7 @@ impl Default for Tuning {
             carry: Carry::default() as u8,
             closing: Closing::default() as u8,
             lanes: Lanes::default() as u8,
+            order: Order::default() as u8,
         }
     }
 }
@@ -497,7 +517,11 @@ impl Tuning {
     }
 
     pub fn carry(&self) -> Carry {
-        code(&[Carry::Mean, Carry::Last], self.carry)
+        code(&[Carry::Mean, Carry::Last, Carry::Normal], self.carry)
+    }
+
+    pub fn order(&self) -> Order {
+        code(&[Order::Levels, Order::Colored], self.order)
     }
 
     pub fn lanes(&self) -> Lanes {
@@ -539,6 +563,7 @@ impl Tuning {
                 ("recycle", _) => t.recycle = num()?,
                 ("carry", "last") => t.carry = Carry::Last as u8,
                 ("carry", "mean") => t.carry = Carry::Mean as u8,
+                ("carry", "normal") => t.carry = Carry::Normal as u8,
                 ("closing", "stepped") => t.closing = Closing::Stepped as u8,
                 ("closing", "before") => t.closing = Closing::Before as u8,
                 ("closing", "half") => t.closing = Closing::Half as u8,
@@ -547,6 +572,8 @@ impl Tuning {
                 ("lanes", "8") => t.lanes = Lanes::Eight as u8,
                 ("lanes", "1") => t.lanes = Lanes::One as u8,
                 ("lanes", "0") => t.lanes = Lanes::Off as u8,
+                ("order", "levels") => t.order = Order::Levels as u8,
+                ("order", "colored") => t.order = Order::Colored as u8,
                 _ => return Err(format!("{kv}: unknown")),
             }
         }
@@ -598,6 +625,9 @@ mod tests {
         assert_eq!(Tuning::parse("").unwrap(), Tuning::default());
         let widths = ["", "lanes=8", "lanes=1", "lanes=0"].map(|t| Tuning::parse(t).unwrap().lanes().width());
         assert_eq!(widths, [4, 8, 1, 0]);
+        let orders = ["", "order=levels", "order=colored"].map(|t| Tuning::parse(t).unwrap().order());
+        assert_eq!(orders, [Order::Levels, Order::Levels, Order::Colored]);
+        assert_eq!(Tuning::parse("carry=normal").unwrap().carry(), Carry::Normal);
         assert!(Tuning::parse("warm=hot").is_err() && Tuning::parse("sub").is_err());
         let odd = Tuning { warm: 9, box_box: 9, ..Tuning::default() };
         assert_eq!((odd.warm(), odd.box_box()), (Warm::Ids, BoxBox::SatCached));

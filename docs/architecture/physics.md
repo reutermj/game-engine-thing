@@ -2309,14 +2309,18 @@ crate `physics3d`), and the mod (`lib.rs`, `narrow.rs`, `gjk.rs`,
 and the solve, in the phase `physics3d::step`, after `simulate` and
 before `late` at the simulation's rate, as `physics2d::step` is. Since
 get-znt.35 the solve is a pipeline of [flows](flows.md), as 2D's is
-([The step](#the-step)), six systems in place of one:[^one-solve-3d]
+([The step](#the-step)); since get-emj.90 (2026-10-03) its solver is
+three systems, its passes on `Passes`, as 2D's:[^one-solve-3d]
 
 ```text
 solve            world -> Make<Settings>                 the step's Tuning and Gravity
 gather_bodies    See<Settings>, world -> Make<Bodies>    the moving bodies, dense
 gather_contacts  See<Bodies>, world -> Make<Contacts>    the contacts, in pair order
-solver           See<Settings>, Pass<Bodies>,            solver::solve, whole
-                 Pass<Contacts>
+prepare          See<Settings>, Pass<Bodies>,            grouped, packed, into lanes (solver::Staged)
+                 Pass<Contacts> -> Make<Graph>
+passes           See<Bodies>, Pass<Graph>, Passes        the program of stages
+finish           See<Settings>, Take<Graph>,             impulses and states back; or the step whole
+                 Pass<Bodies>, Pass<Contacts>
 scatter_contacts Take<Contacts> -> world                 impulses
 scatter_bodies   Take<Bodies> -> world                   velocities, positions, rotations
 ```
@@ -2324,13 +2328,21 @@ scatter_bodies   Take<Bodies> -> world                   velocities, positions, 
 - **`solve` comes first**, as in 2D, so a pre-solve hook ordered
   `.before("physics3d::solve")` runs before anything is gathered (3D has
   no hooks yet; the name keeps the rule one rule).
-- **`solver`'s result is the solve one contact at a time in pair order**,
-  and it is no shape: its result depends on that order, so a colored
-  `Passes` run would be a physics change, with a re-baseline (get-emj.90,
-  get-emj.75). Bit for bit the one system it replaced: every baseline
-  value printed as it was, and the reload replay's every frame, every
-  float, the same. Since get-emj.52 it runs in lanes by level, which is
-  that order to the bit ([The solver in lanes](#the-solver-in-lanes)).
+- **The order is `Tuning`'s** (`order=levels|colored`): by level, the
+  default, the solve is the sweep one contact at a time in pair order
+  bit for bit, as it was ([The solver in lanes](#the-solver-in-lanes));
+  colored, the sweep over Box2D's colors' order, a physics change not
+  yet the default ([Colouring the 3D solve
+  (proposed)](#colouring-the-3d-solve-proposed)). Either way `prepare`
+  groups the contacts (`physics_common::levels` or `Coloring::greedy`),
+  packs them (`Coloring::pack`) and fills the batches; `passes` runs the
+  program, each stage a block of one group's batches or a range of the
+  bodies' states (gravity with the turn cap, warm start, push, move, the
+  refresh under `Inertia::Substep`, relax, the sums, restitution); and
+  `finish` writes the impulses and states back. A step the lanes don't
+  take (batches under half full, a width but four, `lanes=0`) is solved
+  whole by `finish`, in the same order. The default printed every
+  baseline value as before, and the fingerprint held, mod and kernel.
 - **The sources read, the sinks write**, as 2D's: the gathers' queries are
   read-only, with no apply node, and the scatters walk the same tables in
   the same order (asserted); `scatter_bodies` is last, so its apply node
@@ -4671,7 +4683,10 @@ frame 508.
     built afresh), called `solver::solve`, and wrote the impulses and the
     bodies back. The pipeline is that system's code, split where its
     stages were. It never had `Workers`: 3D's solve, broadphase and
-    narrowphase were on one thread before and after.
+    narrowphase were on one thread before and after. From get-znt.35 to
+    get-emj.90 (2026-10-03) the solver was one system of the pipeline,
+    `solver`, which ran `solver::solve` whole: no shape fitted a result
+    that was pair order's.
 
 [^dead-test]: *(History, 2026-09-24.)* Before sleeping was storage, the
     solve looked each contact's ends up to skip resting ones, and did so

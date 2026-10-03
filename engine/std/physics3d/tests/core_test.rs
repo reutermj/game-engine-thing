@@ -11,4 +11,4 @@ mod narrow;
 #[path = "../solver.rs"]
 mod solver;
 
-pub use physics3d::{Anchors, BoxBox, Carry, Closing, Inertia, Integrate, MAX_POINTS, Mat3, Quat, Reduce, Shape, Tuning, Vec3};
+pub use physics3d::{Anchors, BoxBox, Carry, Closing, Inertia, Integrate, MAX_POINTS, Mat3, Order, Quat, Reduce, Shape, Tuning, Vec3};

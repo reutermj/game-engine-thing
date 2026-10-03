@@ -101,14 +101,30 @@ fn hash<T: Component + Clone + Debug>(e: &Engine) -> u64 {
     h.0
 }
 
-/// The mod's lines, one a frame, and what it saw.
-pub fn the_mod() -> (Vec<String>, Seen) {
+/// How the mod's scene is run besides the pinned way: a `Tuning` written
+/// into its world first (`pile3d tune`), and the passes handed their
+/// states shared (`World::set_shapes_shared`), as threads will.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Run {
+    pub tune: &'static str,
+    pub shared: bool,
+}
+
+/// The mod's lines, one a frame, and what it saw: as pinned at
+/// `Run::default()`.
+pub fn the_mod(run: Run) -> (Vec<String>, Seen) {
+    static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let manifest = engine_control::read_manifest(&std::env::var("PILE3D").expect("PILE3D")).unwrap();
     let base = std::env::var("TEST_TMPDIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join(format!("physics3d-exact-{}", std::process::id()));
+    let k = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = base.join(format!("physics3d-exact-{}-{k}", std::process::id()));
     let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
     engine.load_batch(&manifest.mods).expect("loading pile3d");
     let send = |to: &str, m: &str| engine.send(to, m).unwrap_or_else(|err| panic!("{to} {m:?}: {err}"));
+    if !run.tune.is_empty() {
+        send("pile3d", &format!("tune {}", run.tune));
+    }
+    engine.world().set_shapes_shared(run.shared);
     let (mut lines, mut seen, mut frame) = (Vec::new(), Seen::default(), 0);
     let mut locked = None;
     for step in SCENE {
@@ -330,14 +346,15 @@ fn run_at(
     }
 }
 
-/// The kernel's lines, one a tuning: every output of every step, hashed.
-pub fn the_kernel() -> Vec<String> {
+/// The kernel's lines, one a tuning: every output of every step, hashed;
+/// each tuning with `variant` after it (pinned at "").
+pub fn the_kernel(variant: &str) -> Vec<String> {
     KERNEL_TUNINGS
         .iter()
         .map(|tuning| {
             let (mut bodies, mut contacts) = kernel_inputs();
             let (mut hb, mut hc) = (Fnv::new(), Fnv::new());
-            kernel_run(tuning, &mut bodies, &mut contacts, |b, c| {
+            kernel_run(&format!("{tuning},{variant}"), &mut bodies, &mut contacts, |b, c| {
                 b.iter().for_each(|b| hb.add(b));
                 c.iter().for_each(|c| hc.add(c));
             });
