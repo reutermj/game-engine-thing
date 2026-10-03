@@ -981,94 +981,10 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
 /// sweep in pair order. See physics.md, "The solver's speed".
 mod lanes {
     use super::*;
-    use std::ops::{Add, Mul, Neg, Range, Sub};
+    use physics_common::lanes::F;
+    use std::ops::Range;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-
-    /// `N` lanes of `f32`: each operation a loop over the lanes, which LLVM
-    /// makes one SIMD instruction a register (SSE2 on x86-64's baseline).
-    #[derive(Clone, Copy, Debug)]
-    pub struct F<const N: usize>(pub [f32; N]);
-
-    impl<const N: usize> F<N> {
-        pub const ZERO: F<N> = F([0.0; N]);
-
-        #[inline(always)]
-        pub fn splat(x: f32) -> F<N> {
-            F([x; N])
-        }
-
-        #[inline(always)]
-        fn zip(self, o: F<N>, f: impl Fn(f32, f32) -> f32) -> F<N> {
-            let mut r = self.0;
-            for l in 0..N {
-                r[l] = f(self.0[l], o.0[l]);
-            }
-            F(r)
-        }
-
-        /// x86's `maxps`, which SSE2 has one instruction for: where neither
-        /// is NaN, `f32::max`, so the lanes are the scalar solve to the bit.
-        #[inline(always)]
-        pub fn max(self, o: F<N>) -> F<N> {
-            self.zip(o, |a, b| if a > b { a } else { b })
-        }
-
-        /// `f32::clamp`, as it is written.
-        #[inline(always)]
-        pub fn clamp(self, lo: F<N>, hi: F<N>) -> F<N> {
-            let low = self.zip(lo, |x, lo| if x < lo { lo } else { x });
-            low.zip(hi, |x, hi| if x > hi { hi } else { x })
-        }
-
-        /// `a` where `self` is positive, else `b`.
-        #[inline(always)]
-        pub fn positive_then(self, a: F<N>, b: F<N>) -> F<N> {
-            let mut r = b.0;
-            for l in 0..N {
-                if self.0[l] > 0.0 {
-                    r[l] = a.0[l];
-                }
-            }
-            F(r)
-        }
-    }
-
-    impl<const N: usize> Add for F<N> {
-        type Output = F<N>;
-        #[inline(always)]
-        fn add(self, o: F<N>) -> F<N> {
-            self.zip(o, |a, b| a + b)
-        }
-    }
-
-    impl<const N: usize> Sub for F<N> {
-        type Output = F<N>;
-        #[inline(always)]
-        fn sub(self, o: F<N>) -> F<N> {
-            self.zip(o, |a, b| a - b)
-        }
-    }
-
-    impl<const N: usize> Mul for F<N> {
-        type Output = F<N>;
-        #[inline(always)]
-        fn mul(self, o: F<N>) -> F<N> {
-            self.zip(o, |a, b| a * b)
-        }
-    }
-
-    impl<const N: usize> Neg for F<N> {
-        type Output = F<N>;
-        #[inline(always)]
-        fn neg(self) -> F<N> {
-            let mut r = self.0;
-            for x in r.iter_mut() {
-                *x = -*x;
-            }
-            F(r)
-        }
-    }
 
     /// A body as the passes read and write it, Box2D's `b2BodyState`: what
     /// a pass reads of a body in one 32-byte line, its masses kept by each

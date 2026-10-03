@@ -14,6 +14,7 @@ rust_library(
     name = "physics_common",
     srcs = [
         "closing.rs",
+        "lanes.rs",
         "lib.rs",
         "slots.rs",
         "soft.rs",
