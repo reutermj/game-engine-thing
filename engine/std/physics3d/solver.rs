@@ -47,19 +47,17 @@ pub struct Tuning {
     pub anchors: Anchors,
     pub carry: Carry,
     pub closing: Closing,
-    /// Contacts solved this many at a time (`lanes`), 1, 4 or 8, by level
-    /// of the sweep in pair order, so bit for bit `0`: one at a time in
-    /// pair order (`one_at_a_time`), the reference the lanes are held to.
+    /// Contacts solved this many at a time (`lanes`; `Lanes::width`), 1,
+    /// 4 or 8, by level of the sweep in pair order, so bit for bit 0: one
+    /// at a time in pair order (`one_at_a_time`), the reference the lanes
+    /// are held to.
     pub lanes: usize,
 }
-
-/// The lanes' default width: four, SSE2's register, as 2D's.
-pub const LANES: usize = 4;
 
 impl Tuning {
     pub fn of(t: &crate::Tuning) -> Tuning {
         Tuning {
-            lanes: LANES,
+            lanes: t.lanes().width(),
             substeps: t.substeps as usize,
             relax: t.relax as usize,
             stiffness: t.stiffness,

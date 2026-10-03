@@ -8,7 +8,9 @@
 //!
 //!     taskset -c 0-7 ./bazel run --config=bench //engine/std/physics3d:step_bench
 //!
-//! `RUNS` (5), `ONLY=<case>`. `stages` is the breakdown of one run by
+//! `RUNS` (5), `ONLY=<case>`, `TUNE=<variant>` (pile3d's `tune`, so
+//! `TUNE=lanes=0` times the solve one contact at a time on the same
+//! build). `stages` is the breakdown of one run by
 //! stage over a pile's whole life.
 
 use std::path::PathBuf;
@@ -42,6 +44,9 @@ fn run(manifest: &engine_control::Manifest, case: &Case, k: usize) -> [f64; 5] {
     let dir = std::env::temp_dir().join(format!("physics3d-step-bench-{}-{k}", std::process::id()));
     let e = Engine::new(manifest.bootstrap.clone(), PathBuf::from(&dir));
     e.load_batch(&manifest.mods).expect("loading the pile");
+    if let Ok(t) = std::env::var("TUNE") {
+        e.send("pile3d", &format!("tune {t}")).unwrap();
+    }
     if case.locked {
         e.send("pile3d", "lock").unwrap();
     }

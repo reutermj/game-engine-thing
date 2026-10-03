@@ -296,23 +296,32 @@ pub const KERNEL_TUNINGS: &[&str] = &[
 pub const KERNEL_STEPS: usize = 3;
 
 /// `solver::solve` at `tuning` on `bodies` and `contacts`, `KERNEL_STEPS`
-/// times, as a step hands the next its results: in the default's lanes.
+/// times, as a step hands the next its results.
 pub fn kernel_run(tuning: &str, bodies: &mut [SolverBody], contacts: &mut [Constraint], each: impl FnMut(&[SolverBody], &[Constraint])) {
-    kernel_run_in(tuning, solver::LANES, bodies, contacts, each)
+    run_at(&solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning")), bodies, contacts, each)
 }
 
-/// `kernel_run`, `lanes` at a time (`solver::Tuning::lanes`; 0 is one at
-/// a time in pair order).
+/// `kernel_run`, `lanes` at a time whatever `tuning` says
+/// (`solver::Tuning::lanes`; 0 is one at a time in pair order).
 pub fn kernel_run_in(
     tuning: &str,
     lanes: usize,
     bodies: &mut [SolverBody],
     contacts: &mut [Constraint],
-    mut each: impl FnMut(&[SolverBody], &[Constraint]),
+    each: impl FnMut(&[SolverBody], &[Constraint]),
 ) {
     let how = solver::Tuning { lanes, ..solver::Tuning::of(&Tuning::parse(tuning).expect("a tuning")) };
+    run_at(&how, bodies, contacts, each)
+}
+
+fn run_at(
+    how: &solver::Tuning,
+    bodies: &mut [SolverBody],
+    contacts: &mut [Constraint],
+    mut each: impl FnMut(&[SolverBody], &[Constraint]),
+) {
     for _ in 0..KERNEL_STEPS {
-        solver::solve(bodies, contacts, DT, &how);
+        solver::solve(bodies, contacts, DT, how);
         each(bodies, contacts);
         for b in bodies.iter_mut() {
             b.q = b.rotation();

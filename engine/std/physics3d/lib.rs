@@ -30,7 +30,7 @@ use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner,
 use narrow::{Narrow, Solid};
 use physics_common::{FAT, Slots};
 pub use physics3d::{
-    Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, MAX_POINTS,
+    Anchors, AngularVelocity, Body, BoxBox, Carry, Closing, Collider, ContactPair, Gravity, Impulse, Inertia, Integrate, Lanes, MAX_POINTS,
     Manifold, Mat3, Position, Quat, Reduce, Rotation, Shape, Static, Tuning, Vec3, Velocity, Warm,
 };
 

@@ -367,6 +367,34 @@ pub enum Closing {
     Met,
 }
 
+/// How many contacts the solver solves at once (physics.md, "The solver
+/// in lanes"). By level of the sweep in pair order, so each is the
+/// others to the bit: the choice is speed alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lanes {
+    /// Four lanes: SSE2's register, as 2D's.
+    #[default]
+    Four,
+    Eight,
+    /// One lane, by level: the lanes' layout and order, and no lanes.
+    One,
+    /// One contact at a time in pair order, as before lanes: the reference
+    /// the lanes are held to.
+    Off,
+}
+
+impl Lanes {
+    /// The solver's width for it, 0 for `Off`.
+    pub fn width(self) -> usize {
+        match self {
+            Lanes::Four => 4,
+            Lanes::Eight => 8,
+            Lanes::One => 1,
+            Lanes::Off => 0,
+        }
+    }
+}
+
 /// Substeps a step, and relaxing passes a substep.
 pub const SUBSTEPS: u32 = 5;
 pub const RELAX_ITERATIONS: u32 = 2;
@@ -412,6 +440,7 @@ component! {
         pub recycle: f32,
         pub carry: u8,
         pub closing: u8,
+        pub lanes: u8,
     }
 }
 
@@ -432,6 +461,7 @@ impl Default for Tuning {
             recycle: RECYCLE,
             carry: Carry::default() as u8,
             closing: Closing::default() as u8,
+            lanes: Lanes::default() as u8,
         }
     }
 }
@@ -468,6 +498,10 @@ impl Tuning {
 
     pub fn carry(&self) -> Carry {
         code(&[Carry::Mean, Carry::Last], self.carry)
+    }
+
+    pub fn lanes(&self) -> Lanes {
+        code(&[Lanes::Four, Lanes::Eight, Lanes::One, Lanes::Off], self.lanes)
     }
 
     pub fn closing(&self) -> Closing {
@@ -509,6 +543,10 @@ impl Tuning {
                 ("closing", "before") => t.closing = Closing::Before as u8,
                 ("closing", "half") => t.closing = Closing::Half as u8,
                 ("closing", "met") => t.closing = Closing::Met as u8,
+                ("lanes", "4") => t.lanes = Lanes::Four as u8,
+                ("lanes", "8") => t.lanes = Lanes::Eight as u8,
+                ("lanes", "1") => t.lanes = Lanes::One as u8,
+                ("lanes", "0") => t.lanes = Lanes::Off as u8,
                 _ => return Err(format!("{kv}: unknown")),
             }
         }
@@ -558,6 +596,8 @@ mod tests {
             (4, Warm::Cold, BoxBox::GjkEpa, Integrate::Exact, Anchors::Linear, Carry::Last, 0.0)
         );
         assert_eq!(Tuning::parse("").unwrap(), Tuning::default());
+        let widths = ["", "lanes=8", "lanes=1", "lanes=0"].map(|t| Tuning::parse(t).unwrap().lanes().width());
+        assert_eq!(widths, [4, 8, 1, 0]);
         assert!(Tuning::parse("warm=hot").is_err() && Tuning::parse("sub").is_err());
         let odd = Tuning { warm: 9, box_box: 9, ..Tuning::default() };
         assert_eq!((odd.warm(), odd.box_box()), (Warm::Ids, BoxBox::SatCached));
