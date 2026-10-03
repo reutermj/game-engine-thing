@@ -484,6 +484,30 @@ fn row(
     c: &mut Constraint,
     points: &mut [PointRow; MAX_POINTS],
     share: f32,
+    soft: (Softness, Softness),
+    closing: (Closing, f32),
+) -> Row {
+    let mut speeds = [0.0; MAX_POINTS];
+    let r = row_of(bodies, c, (points, &mut speeds), share, soft, closing);
+    for (cp, speed) in c.points[..r.count].iter_mut().zip(speeds) {
+        (cp.speed, cp.jn) = (speed, 0.0);
+    }
+    (c.jt, c.twist) = (Vec3::ZERO, 0.0);
+    r
+}
+
+/// `row` with the contact only read: each point's closing speed into
+/// `speeds`, where `row` writes it to the contact. The staged solve's fill
+/// makes rows from contacts it may only read; copying each to give `row`
+/// made the fill 2209-2460 µs a step on one thread, against 2080-2197
+/// (step_bench, 10 000 boxes falling, 2026-10-03), and the solve slower
+/// than before the fill was a stage.
+#[inline(always)]
+fn row_of(
+    bodies: &[SolverBody],
+    c: &Constraint,
+    (points, speeds): (&mut [PointRow; MAX_POINTS], &mut [f32; MAX_POINTS]),
+    share: f32,
     (moving, fixed): (Softness, Softness),
     (how, dt): (Closing, f32),
 ) -> Row {
@@ -495,19 +519,18 @@ fn row(
     let m = a.inv_mass + b.inv_mass;
     let count = c.count.min(MAX_POINTS);
     let mut centroid = Vec3::ZERO;
-    for (cp, p) in c.points[..count].iter_mut().zip(points.iter_mut()) {
+    for ((cp, p), s) in c.points[..count].iter().zip(points.iter_mut()).zip(speeds.iter_mut()) {
         let (ra, rb) = (cp.ra, cp.ra + c.offset);
         let (rna, rnb) = (ra.cross(n), rb.cross(n));
         let (ia, ib) = (a.inv_i.apply(rna), b.inv_i.apply(rnb));
         let k = m + ia.dot(rna) + ib.dot(rnb);
         let speed = -(b.v - a.v).dot(n) - b.w.dot(rnb) + a.w.dot(rna);
-        cp.speed = closing(how, speed, -(b.gravity - a.gravity).dot(n), -cp.depth, dt);
+        *s = closing(how, speed, -(b.gravity - a.gravity).dot(n), -cp.depth, dt);
         // The last step's impulse was over the whole step: a substep's
         // share of it is where each substep starts.
         let jn = cp.jn * share;
         let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
         *p = PointRow { ra, rb, rna, rnb, ia, ib, base: -cp.depth - n.dot(c.offset), mass, jn, lever: 0.0 };
-        cp.jn = 0.0;
         centroid += ra;
     }
     let ca = centroid * (1.0 / count.max(1) as f32);
@@ -528,7 +551,7 @@ fn row(
     let tmass = if det > 0.0 { [k22 / det, -k12 / det, k11 / det] } else { [0.0; 3] };
     let (na, nb) = (a.inv_i.apply(n), b.inv_i.apply(n));
     let kt = na.dot(n) + nb.dot(n);
-    let r = Row {
+    Row {
         a: ai,
         b: bi,
         n,
@@ -544,9 +567,7 @@ fn row(
         nb,
         twist_mass: if kt > 0.0 { 1.0 / kt } else { 0.0 },
         twist: c.twist * share,
-    };
-    (c.jt, c.twist) = (Vec3::ZERO, 0.0);
-    r
+    }
 }
 
 /// The row's angular terms again, from the bodies' inverse inertias now
@@ -1564,17 +1585,15 @@ pub mod lanes {
         }
 
         /// Contact `c`'s row made, as `prepare` made it before the fill
-        /// was a stage, into lane `l` of its batch and points. `row` zeroes
-        /// what it reads of the contact for the sums to come, so it's
-        /// given a copy: the contact is `finish`'s, which writes what
-        /// `row` would have, the closing speeds included.
+        /// was a stage, into lane `l` of its batch and points. The contact
+        /// is only read (`row_of`): `finish` writes what `row` would have
+        /// to it, the closing speeds included.
         #[inline(always)]
         fn enter(&self, it: &mut Item<'_, N>, l: usize, c: &Constraint) {
             let Begun { share, soft, .. } = self.begun;
-            let mut c = *c;
-            let mut ps = [PointRow::default(); MAX_POINTS];
-            let r = row(self.bodies, &mut c, &mut ps, share, soft, (self.how.closing, self.dt));
-            put(it.o, l, &r, &c, self.bodies);
+            let (mut ps, mut speeds) = ([PointRow::default(); MAX_POINTS], [0.0; MAX_POINTS]);
+            let r = row_of(self.bodies, c, (&mut ps, &mut speeds), share, soft, (self.how.closing, self.dt));
+            put(it.o, l, &r, c, self.bodies);
             let exact = !it.anchors.is_empty();
             for (k, p) in ps[..r.count].iter().enumerate() {
                 let q = &mut it.pts[k];
@@ -1583,7 +1602,7 @@ pub mod lanes {
                 q.ia.set(l, p.ia);
                 q.ib.set(l, p.ib);
                 (q.base.0[l], q.arm.0[l], q.mass.0[l], q.jn.0[l]) = (p.base, (p.rb - p.ra).dot(r.n), p.mass, p.jn);
-                (q.lever.0[l], q.speed.0[l]) = (p.lever, c.points[k].speed);
+                (q.lever.0[l], q.speed.0[l]) = (p.lever, speeds[k]);
                 (q.on[l], q.solid[l]) = (true, p.mass != 0.0);
                 if exact {
                     it.anchors[k][0].set(l, p.ra);
