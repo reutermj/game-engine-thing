@@ -16,10 +16,10 @@
 //! `prepare`, `passes` and `finish` are the solver's (`solver::Staged`), its
 //! passes a program of stages declared as a shape the scheduler runs
 //! (`Passes`), as 2D's; the sinks write the results back. The contacts are
-//! grouped by `Tuning`'s order: by level, the sweep in pair order bit for
-//! bit (the default), or in Box2D's colors, the sweep over the colors'
-//! order, which threads can share (physics.md, "Colouring the 3D solve
-//! (proposed)"). A step the lanes don't take (few contacts, a width but
+//! grouped by `Tuning`'s order: in Box2D's colors (the default since
+//! get-emj.90), the sweep over the colors' order, which threads can
+//! share, or by level, the sweep in pair order bit for bit (physics.md,
+//! "Colouring the 3D solve"). A step the lanes don't take (few contacts, a width but
 //! four, `lanes=0`) is solved whole by `finish`, one contact at a time in
 //! the same order or at its width (`solver::solve`).
 //!

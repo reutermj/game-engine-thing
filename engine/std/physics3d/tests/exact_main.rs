@@ -10,7 +10,7 @@
 //! it was. `TUNE=<variant>` (`physics3d::Tuning::parse`) compares a
 //! variant's lines with the pinned ones, and never writes:
 //!
-//!     TUNE=order=colored ./bazel run //engine/std/physics3d:exact
+//!     TUNE=order=levels ./bazel run //engine/std/physics3d:exact
 
 #![allow(dead_code)]
 
@@ -30,13 +30,13 @@ fn main() {
     // A variant's lines against the default's, to see where it moves
     // them: every kernel tuning with it, against the pinned lines; and the
     // mod's scene tuned so, against the scene with the default's `Tuning`
-    // named (`order=levels`), since a `Tuning` in the world is an entity,
+    // named (`lanes=4`, the default width), since a `Tuning` in the world is an entity,
     // which moves every body's index from the pinned run's.
     let tune: &'static str = std::env::var("TUNE").unwrap_or_default().leak();
     assert!(!(write && !tune.is_empty()), "the fingerprint is the default's: unset TUNE to write it");
     let (the_mod, _) = exact::the_mod(exact::Run { tune, shared: false });
     let kernel = exact::the_kernel(tune);
-    let named = (!tune.is_empty()).then(|| exact::the_mod(exact::Run { tune: "order=levels", shared: false }).0);
+    let named = (!tune.is_empty()).then(|| exact::the_mod(exact::Run { tune: "lanes=4", shared: false }).0);
     let mod_against: Vec<&str> = match &named {
         Some(lines) => lines.iter().map(String::as_str).collect(),
         None => exact::pinned("mod"),

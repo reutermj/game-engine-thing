@@ -30,9 +30,9 @@
 //! time in pair order (`one_at_a_time`) bit for bit, under every `Tuning`;
 //! a step whose levels would leave the batches under half full runs that
 //! loop instead. Physics.md, "The solver in lanes". Grouped by Box2D's
-//! colors instead (`Order::Colored`), the result is that loop over the
-//! colors' order (`in_order`), another computation: physics.md,
-//! "Colouring the 3D solve (proposed)". The lanes' solve is a program of
+//! colors instead (`Order::Colored`, the default since get-emj.90), the
+//! result is that loop over the colors' order (`in_order`), another
+//! computation: physics.md, "Colouring the 3D solve". The lanes' solve is a program of
 //! stages (`lanes::Staged`), which the mod runs on `Passes` and `solve`
 //! runs here.
 

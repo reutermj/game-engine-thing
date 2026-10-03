@@ -686,12 +686,14 @@ alternated, so that is the machine's drift, not the port's.
 
 **On `Passes`** (2026-10-03, get-emj.90). `solver` is now `prepare`,
 `passes` and `finish`, as 2D's, the passes a program on `Passes`
-(physics.md, "A mod"): by level (the default) the same sweep bit for bit
-(both baselines and the fingerprint byte-identical), the levels being
-`Passes`' colors (246 of them on a pile of 10 000, so a stage is 246
-blocks); colored (`Tuning`'s `order=colored`) Box2D's colors, 11 on the
-same pile, a physics change not yet adopted (physics.md, "Colouring the
-3D solve (proposed)"). The states are `solver::lanes::State`, a body's
+(physics.md, "A mod"): colored (`Tuning`'s `order=colored`, the default
+since the same day, decided ahead of threads so the default suite
+validates it) Box2D's colors, 11 on a pile of 10 000, a physics change,
+re-baselined (physics.md, "Colouring the 3D solve"); by level
+(`order=levels`) the sweep as before bit for bit (ported with both
+baselines and the fingerprint byte-identical), the levels being
+`Passes`' colors (246 of them on the same pile, so a stage is 246
+blocks). The states are `solver::lanes::State`, a body's
 velocities, move and turn in 64 bytes, shared as sixteen relaxed atomics
 (`Atom`); the kernels are generic over the view, matched once a call, as
 2D's. Held to its plain path by `exact_test`'s

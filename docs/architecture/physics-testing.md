@@ -55,7 +55,11 @@ the fourth.
 How bounds are set is in [physics.md, "Quality as a test"](physics.md#quality-as-a-test),
 and how to re-measure the references in runbook 005. The rule there is
 kept: a bound we no longer meet is a finding (a bead and an ignored test),
-never a looser bound.
+never a looser bound. In 3D's quality tests a missed bound is ignored
+alone, not its whole test (2026-10-03, get-emj.90): `quality_test.rs`'
+`KNOWN` names it by family, pile and measure, the test it came from
+holds every other bound, and a `known_miss_` test of its own, ignored
+under the bead with the value in its reason, holds it.
 
 **Every test is checked by planting the break it claims to catch**
 (CLAUDE.md, "green has to be earned"): friction halved, the old warm start
@@ -376,8 +380,11 @@ claims to keep results (a refactor, a speed change, a lanes kernel in
 pair order) leaves the file as it was; one that changes the order alone
 (colouring) rewrites the mod's lines and the kernel's too, since the
 kernel solves in the solver's order (measured 2026-10-03, get-emj.90:
-colored, all 12 kernel lines move; physics.md, "Colouring the 3D solve
-(proposed)", proposes kernel lines at a named order). Since every
+colored, all 12 kernel lines moved). So since colored became the default
+(the same day) the kernel layer names its order: twelve lines by level
+(`kernel <tuning>`, the lines pinned before, unchanged to the bit) and
+twelve colored (`kernel colored/<tuning>`). A change to the arithmetic
+moves both halves; one to the coloring, the colored half alone. Since every
 physics change rewrites it, the file's diff says nothing about better or
 worse: that is the baseline's job, and why a band and not a pin is the
 baseline (above). After merging physics branches, write it on the merged
@@ -393,8 +400,8 @@ tuning and `int=exact`, and compares every body and contact after every
 step as `Debug` prints them, no pin needed; the kernel's pinned lines,
 solved at the default's four lanes, and the mod's, held as they were
 (physics.md, "The solver in lanes", for what it caught). Colouring
-(get-emj.90, built as `order=colored`, not the default) moves both
-layers; its equivalence is the same test run in each order, the
+(get-emj.90, `order=colored`, the default since 2026-10-03) moved both
+layers, and was re-pinned; its equivalence is the same test run in each order, the
 coloured lanes against `solver::in_order`, one contact at a time over
 the colours' order, as 2D's
 `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`.

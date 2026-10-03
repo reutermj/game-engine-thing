@@ -9,7 +9,7 @@
 //! the same grid, says which way a change moved it.
 //!
 //! Measured by `bench -- <backends> --families[=names]` for physics.md's
-//! "Colouring the 3D solve (proposed)" (get-emj.90); no test bounds them
+//! "Colouring the 3D solve" (get-emj.90); no test bounds them
 //! yet.
 
 use crate::behave::Behaviour;

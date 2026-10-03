@@ -346,22 +346,27 @@ fn run_at(
     }
 }
 
-/// The kernel's lines, one a tuning: every output of every step, hashed;
-/// each tuning with `variant` after it (pinned at "").
+/// The kernel's lines, one a tuning in each order: every output of every
+/// step, hashed; each tuning with `variant` after it (pinned at ""). The
+/// order is named, not the default's, since the kernel solves in the
+/// solver's order: by level first (`kernel <tuning>`, its lines as pinned
+/// before colouring), then colored (`kernel colored/<tuning>`). A change
+/// to the arithmetic moves both; one to the coloring, the colored alone.
 pub fn the_kernel(variant: &str) -> Vec<String> {
-    KERNEL_TUNINGS
-        .iter()
-        .map(|tuning| {
+    let mut lines = Vec::new();
+    for (order, prefix) in [("levels", ""), ("colored", "colored/")] {
+        for tuning in KERNEL_TUNINGS {
             let (mut bodies, mut contacts) = kernel_inputs();
             let (mut hb, mut hc) = (Fnv::new(), Fnv::new());
-            kernel_run(&format!("{tuning},{variant}"), &mut bodies, &mut contacts, |b, c| {
+            kernel_run(&format!("{tuning},order={order},{variant}"), &mut bodies, &mut contacts, |b, c| {
                 b.iter().for_each(|b| hb.add(b));
                 c.iter().for_each(|c| hc.add(c));
             });
             let name = if tuning.is_empty() { "default" } else { tuning };
-            format!("kernel {name} bodies={:016x} contacts={:016x}", hb.0, hc.0)
-        })
-        .collect()
+            lines.push(format!("kernel {prefix}{name} bodies={:016x} contacts={:016x}", hb.0, hc.0));
+        }
+    }
+    lines
 }
 
 /// The pinned lines whose first word is `layer`.

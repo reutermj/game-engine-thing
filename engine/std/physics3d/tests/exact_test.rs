@@ -58,15 +58,15 @@ fn the_mod_is_its_fingerprint_with_its_states_shared() {
     }
 }
 
-/// The mod solves in the order its world's `Tuning` names: by level it is
-/// the default, colored it is not. Each against a run with a `Tuning` in
-/// its world, an entity, which moves every body's index from the pinned
-/// run's.
+/// The mod solves in the order its world's `Tuning` names: colored it is
+/// the default (since get-emj.90), by level it is not. Each against a run
+/// with a `Tuning` in its world, an entity, which moves every body's index
+/// from the pinned run's.
 #[test]
 fn the_mod_solves_in_the_order_its_world_sets() {
     let run = |tune| exact::the_mod(exact::Run { tune, shared: false }).0;
     let (default, levels, colored) = (run("lanes=4"), run("order=levels"), run("order=colored"));
-    assert_eq!(default, levels, "by level, named, isn't the default");
+    assert_eq!(default, colored, "colored, named, isn't the default");
     let moved = levels.iter().zip(&colored).filter(|(a, b)| a != b).count();
     assert!(moved > levels.len() / 2, "colored, only {moved} of {} frames differ from by level", levels.len());
 }

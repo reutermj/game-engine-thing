@@ -388,16 +388,19 @@ pub enum Lanes {
 }
 
 /// The order the solver takes contacts in (physics.md, "Colouring the 3D
-/// solve (proposed)"). Each is the same bits in lanes and one at a time;
-/// the two orders are two computations.
+/// solve"). Each is the same bits in lanes and one at a time; the two
+/// orders are two computations. Colored is the default since 2026-10-03
+/// (get-emj.90), ahead of threads, so every change validates it first.
+/// The codes are as before (0 levels, 1 colored); a `Tuning` migrated
+/// from a build without the field takes `Tuning::default`'s, colored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Order {
     /// The sweep in pair order, its contacts grouped by level
-    /// (`physics_common::levels`).
-    #[default]
+    /// (`physics_common::levels`): the default until get-emj.90.
     Levels,
     /// Box2D's graph colors (`Coloring::greedy`): the overflow, then each
     /// color's contacts in pair order. Colors are what threads can share.
+    #[default]
     Colored,
 }
 
@@ -626,7 +629,7 @@ mod tests {
         let widths = ["", "lanes=8", "lanes=1", "lanes=0"].map(|t| Tuning::parse(t).unwrap().lanes().width());
         assert_eq!(widths, [4, 8, 1, 0]);
         let orders = ["", "order=levels", "order=colored"].map(|t| Tuning::parse(t).unwrap().order());
-        assert_eq!(orders, [Order::Levels, Order::Levels, Order::Colored]);
+        assert_eq!(orders, [Order::Colored, Order::Levels, Order::Colored]);
         assert_eq!(Tuning::parse("carry=normal").unwrap().carry(), Carry::Normal);
         assert!(Tuning::parse("warm=hot").is_err() && Tuning::parse("sub").is_err());
         let odd = Tuning { warm: 9, box_box: 9, ..Tuning::default() };

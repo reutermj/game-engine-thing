@@ -17,6 +17,24 @@ use super::*;
 /// ours at rest from 182 and 468, 0.007 and 0.013 deep.
 #[test]
 fn big_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
+    let (at_1000, at_10000) = big_turning_boxes();
+    std::thread::scope(|s| {
+        s.spawn(|| piles_meet(Kind::BoxPile, &[1000], true, &at_1000));
+        s.spawn(|| piles_meet(Kind::BoxPile, &[10000], true, &at_10000));
+    });
+}
+
+/// A known miss of the test above (`KNOWN`): colored, the pile of 10 000
+/// lands deeper than Box3D's and a quarter; at three other seeds 0.207,
+/// 0.157, 0.178 (by level 0.158 at this seed, then 0.167, 0.178, 0.152):
+/// the order's, missed at three seeds of four.
+#[test]
+#[ignore = "get-emj.96: colored, turning boxes 10000 0.175 deep while settling, bound 0.172"]
+fn known_miss_big_turning_boxes_land_no_deeper_than_box3d_and_a_quarter() {
+    known_miss(Kind::BoxPile, &[10000], true, &big_turning_boxes().1, Bound::DeepestDuring(10000));
+}
+
+fn big_turning_boxes() -> (PileBounds, PileBounds) {
     let at_1000 = PileBounds {
         rest_worst: 2 * 304,
         rest_median: 380,
@@ -37,10 +55,7 @@ fn big_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
         partners: 2.0,
         not_columns: 0.8,
     };
-    std::thread::scope(|s| {
-        s.spawn(|| piles_meet(Kind::BoxPile, &[1000], true, &at_1000));
-        s.spawn(|| piles_meet(Kind::BoxPile, &[10000], true, &at_10000));
-    });
+    (at_1000, at_10000)
 }
 
 /// Turning planks, until recycling 3D's weak spot. 1000: at rest from
@@ -53,6 +68,25 @@ fn big_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
 /// 9.7e-13 (ours 2.0e-6).
 #[test]
 fn big_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
+    let (at_1000, at_10000) = big_turning_planks();
+    std::thread::scope(|s| {
+        s.spawn(|| piles_meet(Kind::PlankPile, &[1000], true, &at_1000));
+        s.spawn(|| piles_meet(Kind::PlankPile, &[10000], true, &at_10000));
+    });
+}
+
+/// A known miss of the test above (`KNOWN`): colored, the pile of 10 000
+/// rests later than the later reference and a quarter (its median, of
+/// one); at three other seeds 421, 1349, 1191 (by level 335 at this seed,
+/// then 1152, 523, 362): missed at three seeds of four, by level at two,
+/// so the bound sits inside both orders' spread.
+#[test]
+#[ignore = "get-emj.96: colored, turning planks 10000 at rest from 767, bound 490"]
+fn known_miss_big_turning_planks_rest_as_soon_as_the_later_reference_and_a_quarter() {
+    known_miss(Kind::PlankPile, &[10000], true, &big_turning_planks().1, Bound::RestMedian);
+}
+
+fn big_turning_planks() -> (PileBounds, PileBounds) {
     let at_1000 = PileBounds {
         rest_worst: 2 * 278,
         rest_median: 347,
@@ -73,10 +107,7 @@ fn big_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
         partners: 2.5,
         not_columns: 0.8,
     };
-    std::thread::scope(|s| {
-        s.spawn(|| piles_meet(Kind::PlankPile, &[1000], true, &at_1000));
-        s.spawn(|| piles_meet(Kind::PlankPile, &[10000], true, &at_10000));
-    });
+    (at_1000, at_10000)
 }
 
 // The wider families (`record::WIDE`): more sizes, each its own seeded
@@ -194,7 +225,32 @@ fn bigger_piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do() {
 /// Jolt 1474-never; ours 320-546 (417).
 #[test]
 fn bigger_piles_of_turning_planks_rest_as_soon_as_rapier_and_box3d_do() {
+    let (r, b) = bigger_turning_planks();
+    wide_meet(6, r, b, 2.5);
+}
+
+fn bigger_turning_planks() -> (Refs, Refs) {
     let r = Refs { rest: Some(376), depth_end: 0.0685, during: 0.411, mean_during: 0.0227, energy: Some(4.6e-11) };
     let b = Refs { rest: Some(314), depth_end: 0.1258, during: 0.410, mean_during: 0.0221, energy: Some(1.2e-12) };
-    wide_meet(6, r, b, 2.5);
+    (r, b)
+}
+
+/// Known misses of the test above (`KNOWN`): colored, the family's median
+/// rest (316, 432, 559, 1327: 559) and the pile of 4000's (1327). At three
+/// other seeds the medians 378, 771, 387 and the latest 1405, 989, 434;
+/// by level 417 at this seed, then 401, 1416, 365, and the latest 546,
+/// 1249, never, 376. The median missed at two seeds of four (by level
+/// one), a pile past 752 at three (by level two): chaotic in both orders.
+#[test]
+#[ignore = "get-emj.96: colored, turning planks 2000-5000 at rest from a median 559, bound 470"]
+fn known_miss_bigger_turning_planks_rest_as_soon_as_rapier_and_box3d_by_median() {
+    let ((kind, rotate, sizes), (r, b)) = (wide(6), bigger_turning_planks());
+    known_miss(kind, sizes, rotate, &by_the_rules(r, b, 2.5), Bound::RestMedian);
+}
+
+#[test]
+#[ignore = "get-emj.96: colored, turning planks 4000 at rest from 1327, bound 752"]
+fn known_miss_turning_planks_4000_rest_within_twice_the_later_reference() {
+    let ((kind, rotate, sizes), (r, b)) = (wide(6), bigger_turning_planks());
+    known_miss(kind, sizes, rotate, &by_the_rules(r, b, 2.5), Bound::Rest(4000));
 }

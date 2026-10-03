@@ -2328,12 +2328,11 @@ scatter_bodies   Take<Bodies> -> world                   velocities, positions, 
 - **`solve` comes first**, as in 2D, so a pre-solve hook ordered
   `.before("physics3d::solve")` runs before anything is gathered (3D has
   no hooks yet; the name keeps the rule one rule).
-- **The order is `Tuning`'s** (`order=levels|colored`): by level, the
-  default, the solve is the sweep one contact at a time in pair order
-  bit for bit, as it was ([The solver in lanes](#the-solver-in-lanes));
-  colored, the sweep over Box2D's colors' order, a physics change not
-  yet the default ([Colouring the 3D solve
-  (proposed)](#colouring-the-3d-solve-proposed)). Either way `prepare`
+- **The order is `Tuning`'s** (`order=colored|levels`): colored, the
+  default since 2026-10-03, the sweep over Box2D's colors' order ([Colouring
+  the 3D solve](#colouring-the-3d-solve)); by level, the sweep one contact
+  at a time in pair order bit for bit, as it was until then ([The solver
+  in lanes](#the-solver-in-lanes)). Either way `prepare`
   groups the contacts (`physics_common::levels` or `Coloring::greedy`),
   packs them (`Coloring::pack`) and fills the batches; `passes` runs the
   program, each stage a block of one group's batches or a range of the
@@ -2341,8 +2340,9 @@ scatter_bodies   Take<Bodies> -> world                   velocities, positions, 
   refresh under `Inertia::Substep`, relax, the sums, restitution); and
   `finish` writes the impulses and states back. A step the lanes don't
   take (batches under half full, a width but four, `lanes=0`) is solved
-  whole by `finish`, in the same order. The default printed every
-  baseline value as before, and the fingerprint held, mod and kernel.
+  whole by `finish`, in the same order. By level, it printed every
+  baseline value as before the port, and the fingerprint held, mod and
+  kernel.
 - **The sources read, the sinks write**, as 2D's: the gathers' queries are
   read-only, with no apply node, and the scatters walk the same tables in
   the same order (asserted); `scatter_bodies` is last, so its apply node
@@ -2565,8 +2565,8 @@ first storing the bias, the rest reading it), the sums (contacts), then
 restitution once: 2D's `staged::Step` names neither the refresh nor the
 sums, so it stays 2D's until get-emj.90 decides. The equivalence it
 needs is 2D's: the colored lanes against `one_at_a_time` over the
-contacts in the colors' order. Built since, the default still by level
-([Colouring the 3D solve (proposed)](#colouring-the-3d-solve-proposed)).
+contacts in the colors' order. Built since, and colored the default
+([Colouring the 3D solve](#colouring-the-3d-solve)).
 
 [^lanes3d-harness]: 2026-10-03: a binary compiling `solver.rs` by path
     with timers between the lanes' stages, on a generated pile (25 × 25
@@ -2574,16 +2574,18 @@ contacts in the colors' order. Built since, the default still by level
     contact every third box), median of nine solves. Deleted before the
     first commit that has the lanes; what it measured is above.
 
-### Colouring the 3D solve (proposed)
+### Colouring the 3D solve
 
-**Status: built and measured, not the default** (2026-10-03,
-get-emj.90). The solve runs on `Passes` ([A mod](#a-mod)) in either
-order, `Tuning`'s `order=levels` (the default: the sweep in pair order,
-bit for bit as before) or `order=colored` (Box2D's colors, the sweep over
-the colors' order). Coloring is what threads need (get-emj.75): a pile of
-10 000 boxes has 246 levels and 11 colors. It is a physics change, so
-this section is the data for the decision; nothing below is the default,
-no baseline was written and the fingerprint wasn't re-pinned.
+**Status: decided, colored the default** (2026-10-03, get-emj.90; [The
+decision](#the-decision-cm-now)). The solve runs on `Passes` ([A
+mod](#a-mod)) in either order, `Tuning`'s `order=colored` (Box2D's
+colors, the sweep over the colors' order; the default since the
+decision) or `order=levels` (the sweep in pair order, bit for bit the
+solve before it, and the default until then). Coloring is what threads
+need (get-emj.75): a pile of 10 000 boxes has 246 levels and 11 colors.
+It is a physics change: the measurements below were made with by level
+the default, and are what the decision was taken on. "The default" in
+them is by level with the mean carry (Lm).
 
 **What was compared.** Order (by level, colored) against what a contact
 carries to the next step (`Carry`): **C**, the mean of the substeps for
@@ -2728,44 +2730,74 @@ colored. 2D measured 4.9× at 8 threads on the same layout; the prepare
 solver in lanes") stays serial until stage 3 moves the fill into the
 passes (flows.md, "Physics's adoption").
 
-**Recommendation: by level stays the default until threads; then Cm.**
+#### The decision: Cm, now
 
-- **Not now.** On one thread colored is level with by level in speed and
-  misses five bounds the default meets (get-emj.96): one in the default
-  suite (turning boxes about 10% deeper at the end on every seed) and
-  four on big turning piles. Its gains (pyramids stand, a locked pile
-  sinks a tenth as deep while settling, the heavy cube stands) don't
-  pay for a re-baseline that buys no speed.
-- **With threads (get-emj.75), Cm**: colored with the mean carry, 3D's
-  carry as it is. It is the colored option closest to the bounds (5
-  missed, against 14 and 15 for A and B), keeps every locked bound, and
-  stands as many pyramids as any. B is 2D's fix and rests pyramids
-  soonest, but costs 3D's piles ten more bounds, and breathes locked
-  piles as 3D applies it (get-emj.97): B wants 2D's form, the mean where
-  nothing turns, before it is measured again.
-- **What Cm costs**: the five bounds of get-emj.96, and pyramids that
-  stand but don't come to rest within 600 steps (2D's lag). Whoever
-  adopts it decides whether those four tests go ignored under
-  get-emj.96, or get-emj.96 is fixed first; a bound is never loosened.
+**Decided by the user** (2026-10-03, get-emj.90): **colored with the
+mean carry (Cm) is the default now**, ahead of threads, so that colored
+is what the default suite, the baselines and the fingerprint validate on
+every change before threading depends on it (get-emj.75). `order=levels`
+stays selectable (`pile3d tune order=levels`, `TUNE=order=levels`).
 
-**Commands that would make Cm the default** (one commit, its message
-saying why, as 2D's get-emj.61):
+What the data offered, and the reason it was set aside: on one thread
+colored is level in speed with by level and misses five bounds the
+default met, so it buys nothing until threads; but a default that only
+threads would exercise would be validated only once they land. Cm is the
+colored option closest to the bounds (5 missed, against 14 and 15 for
+A and B), keeps every locked bound, and stands as many pyramids as any.
+B (2D's fix) rests pyramids soonest but costs 3D's piles ten more
+bounds and breathes locked piles as 3D applies it (get-emj.97). What Cm
+costs: the five bounds below, and pyramids that stand but don't come to
+rest within 600 steps (2D's lag).
 
-```text
-# components.rs: #[default] on Order::Colored (codes unchanged: 0 levels, 1 colored)
-# the four tests of get-emj.96: #[ignore = "get-emj.96: ..."], or get-emj.96 fixed first
-./bazel run //engine/std/physics3d/compare:baseline -- --all             # see what moves
-./bazel run //engine/std/physics3d/compare:baseline -- --write
-./bazel run //engine/std/physics3d/compare:baseline -- --long --write
-./bazel run //engine/std/physics3d:exact -- --write                      # mod and kernel lines
-./bazel run //engine/std/physics2d/compare:baseline -- --all             # 2D: nothing moves
-./bazel test //... && ./bazel test //engine/std/physics3d/compare:baseline_long_test
-```
+**The known misses** (get-emj.96). Each is its own test, ignored under
+the bead with the value in its reason, and the test it came from holds
+every other bound (`quality_test.rs`' `KNOWN` and `known_miss`: a bound is
+named by its family and its pile, so no other pile's or measure's bound
+in the test is left out; planted, a known miss named at the wrong pile
+fails the test it came from, and a tighter bound on another pile of the
+same test fails it too). The single runs were run again at three other
+seeds (`bench`, each size + 1 to 3, as the baseline's `--offset`), by
+level and colored, before any was marked:
 
-With it, `exact.rs`' kernel layer should solve at `order=levels` named,
-plus one colored line a tuning, so a later change to the coloring moves
-only the colored lines and one to the arithmetic both; the edge families
-become tests with share bounds (get-emj.100), in the same re-baseline.
+| bound (test) | colored, this seed | colored, 3 other seeds | missed | by level, 4 seeds | missed |
+|---|---|---|---|---|---|
+| turning boxes 400, deep at the end ≤ 0.00695 (`piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do`) | 0.0078 | the deepest of 200-500: 0.0072, 0.0082, 0.0066 | 3 of 4 | 0.0055, 0.0066, 0.0097, 0.0067 | 1 |
+| turning boxes 10 000, deep while settling ≤ 0.172 (`big_piles_of_turning_boxes_…`) | 0.175 | 0.207, 0.157, 0.178 | 3 of 4 | 0.158, 0.167, 0.178, 0.152 | 1 |
+| turning planks 10 000, at rest ≤ 490 (`big_piles_of_turning_planks_…`, the median of one) | 767 | 421, 1349, 1191 | 3 of 4 | 335, 1152, 523, 362 | 2 |
+| turning planks 2000-5000, median rest ≤ 470 (`bigger_piles_of_turning_planks_…`) | 559 | 378, 771, 387 | 2 of 4 | 417, 401, 1416, 365 | 1 |
+| turning planks 4000, at rest ≤ 752 (the same test; any size past 752 at the other seeds) | 1327 | 1405, 989, none | 3 of 4 | none, 1249, never, none | 2 |
+
+- **None cleared**: each misses at the default's own seed, which the
+  test runs, and at one or two of three others.
+- **The two depths are the order's**: colored misses at three seeds of
+  four, by level at one.
+- **The big plank piles' rest is chaotic in both orders**: by level misses
+  the same bounds at one or two seeds of four. Colored misses them more
+  often, but the bounds sit inside both orders' spread; get-emj.96 has
+  both.
+- **Not marked, and close**: turning boxes 10 000's rest (bound 895, of
+  one) is 480 at the default's seed, and 1180, 1155, 1157 at the others
+  (by level 468, never, 1495, 1298): it holds here, and would miss at
+  most seeds in either order.
+
+**What moved, at the new default** (the baselines written in the same
+commit): in the default suite, the locked pile of 200-500 sinks a tenth
+as deep while settling (0.033 → 0.0034) with a tenth the overlap
+(0.0047 → 0.00055); the 15-high stack ends with a tenth the energy
+(4.4e-8 → 4.5e-9); the heavy cube 1000 times its support's mass stands
+(sank 0.998 → 0.110, at rest 316 → 282) on a deeper, livelier contact
+(4.6e-5 → 0.072 deep, jitter 1.2e-7 → 0.017); one 100 times rests later
+(42 → 81) and jitters more (0.0010 → 0.0078). In the long suite, the
+locked piles of 200-1000 the same (0.033 → 0.0051, 0.0053 → 0.0012), and
+turning boxes 10 000 end with more energy (9.9e-9 → 1.6e-7 a body). The
+fingerprint's mod lines from frame 25 (96 of 120); its kernel lines are
+now the twelve by level as pinned before, named (`kernel <tuning>`,
+unchanged to the bit), and twelve colored (`kernel colored/<tuning>`), so
+a change to the coloring moves the colored lines alone and one to the
+arithmetic both. 2D's baseline `--all` is byte-identical.
+
+The edge families stay a measurement until get-emj.100 makes them
+tests.
 
 **The tests that keep this honest**, each planted and seen to fail
 (2026-10-03): Box2D's color-0 rule dropped from the colored grouping
