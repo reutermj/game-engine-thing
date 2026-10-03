@@ -17,6 +17,8 @@ mod narrow;
 #[path = "../solver.rs"]
 mod solver;
 
+use solver::{Constraint, SolverBody};
+
 pub use physics3d::{Anchors, BoxBox, Carry, Closing, Inertia, Integrate, MAX_POINTS, Mat3, Quat, Reduce, Shape, Tuning, Vec3};
 
 const UPDATE: &str = "a change meant to move results rewrites it: ./bazel run //engine/std/physics3d:exact -- --write";
@@ -49,30 +51,53 @@ fn the_kernel_is_its_pinned_fingerprint_bit_for_bit() {
 
 /// The lanes (`solver::lanes`) are the solve one contact at a time in pair
 /// order bit for bit, at every width and under every tuning the kernel is
-/// pinned at, and `int=exact` and `anchors=exact` besides (the default
-/// is `anchors=exact`; the integration is the bodies' stage, which both
+/// pinned at, and `int=exact` besides (the bodies' stage, which both
 /// share, but a sine is no reason to leave a tuning out of a comparison
 /// on one host): every body and contact after each step, compared as
-/// `Debug` prints them, which tells `-0.0` from `0.0`. The fingerprint
-/// pins the default width; this holds the others, and the scalar
-/// reference, to it.
+/// `Debug` prints them, which tells `-0.0` from `0.0`. On the kernel's
+/// inputs, and on them with what they lack (`odd_inputs`). The
+/// fingerprint pins the default width; this holds the others, and the
+/// scalar reference, to it.
 #[test]
 fn the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit() {
-    let tunings = exact::KERNEL_TUNINGS.iter().copied().chain(["int=exact", "anchors=exact"]);
+    let tunings = exact::KERNEL_TUNINGS.iter().copied().chain(["int=exact"]);
     for tuning in tunings {
-        let run = |lanes: usize| {
-            let (mut bodies, mut contacts) = exact::kernel_inputs();
-            let mut steps = Vec::new();
-            exact::kernel_run_in(tuning, lanes, &mut bodies, &mut contacts, |b, c| steps.push(format!("{b:?}\n{c:?}")));
-            steps
-        };
-        let one = run(0);
-        for lanes in [1, 4, 8] {
-            for (step, (a, b)) in one.iter().zip(run(lanes)).enumerate() {
-                assert!(*a == b, "{tuning:?}, {lanes} lanes: step {step} differs from one at a time");
+        for (inputs, make) in [("kernel", exact::kernel_inputs as fn() -> _), ("odd", odd_inputs)] {
+            let run = |lanes: usize| {
+                let (mut bodies, mut contacts) = make();
+                let mut steps = Vec::new();
+                exact::kernel_run_in(tuning, lanes, &mut bodies, &mut contacts, |b, c| steps.push(format!("{b:?}\n{c:?}")));
+                steps
+            };
+            let one = run(0);
+            for lanes in [1, 4, 8] {
+                for (step, (a, b)) in one.iter().zip(run(lanes)).enumerate() {
+                    assert!(*a == b, "{tuning:?}, {inputs} inputs, {lanes} lanes: step {step} differs from one at a time");
+                }
             }
         }
     }
+}
+
+/// The kernel's inputs with what they lack, for the lanes' equivalence
+/// (the pinned inputs stay as they are): a body that moves but takes no
+/// impulse, as a kinematic one would (3D's gather makes none, but the
+/// solver takes it), so a body nothing pushes is read moving; a contact
+/// between it and the statics, neither end of which moves; and one
+/// between the body that can't turn and the statics, carrying warm
+/// friction and twist, which it has a tangent mass for and no twist mass.
+fn odd_inputs() -> (Vec<SolverBody>, Vec<Constraint>) {
+    let (mut bodies, mut contacts) = exact::kernel_inputs();
+    let (still, kinematic) = (exact::KERNEL_BODIES as u32, 7);
+    let b = &mut bodies[kinematic as usize];
+    (b.inv_mass, b.inv_inertia, b.gravity) = (0.0, Vec3::ZERO, Vec3::ZERO);
+    let three = *contacts.iter().find(|c| c.count == 3).expect("a contact of three points");
+    let warm = Constraint { jt: three.normal.perp() * 0.5, twist: 0.3, ..three };
+    contacts.push(Constraint { a: 3, b: still, ..warm });
+    contacts.push(Constraint { a: kinematic, b: still, ..warm });
+    // In pair order, as the gather hands them over.
+    contacts.sort_by_key(|c| (c.a, c.b));
+    (bodies, contacts)
 }
 
 /// The kernel's inputs couple their contacts through shared bodies, so the
