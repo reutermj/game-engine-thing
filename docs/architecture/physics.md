@@ -228,9 +228,9 @@ gather_bodies    See<Settings>, world -> Make<Bodies>        the awake bodies, d
 gather_turning   See<Bodies>, world -> Make<Turning>         the turning ones' angular state
 gather_contacts  See<Bodies>, world -> Make<Contacts>        the contacts, in pair order
 prepare          See<Settings>, See<Bodies>, See<Turning>,   bodies as states; contacts colored
-                 Pass<Contacts> -> Make<Graph>               (Coloring::greedy), in lanes
-passes           See<Settings>, See<Turning>, Pass<Graph>,   the substeps and restitution
-                 Passes
+                 Pass<Contacts> -> Make<Graph>               (Coloring::greedy), seated in lanes
+passes           See<Settings>, See<Turning>, See<Bodies>,   the batches filled, the substeps
+                 See<Contacts>, Pass<Graph>, Passes          and restitution
 finish           See<Settings>, Take<Graph> -> Pass<Bodies>, impulses and states back
                  Pass<Turning>, Pass<Contacts>
 scatter_contacts See<Settings>, Pass<Contacts> -> world      impulses, Touching, Contact, links
@@ -243,11 +243,13 @@ scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, velocities, positio
   before anything is gathered, as it did when the solve was one system.
 - **`passes` declares its parallel work** as a shape (`Passes`: every
   pass a stage over the colors' batches or the bodies' states, a kernel a
-  block of batches), which the scheduler runs; until it runs shapes
-  across threads (get-znt.34) the solve is on one thread, whatever the
-  host has. The kernels are `solver.rs`'s (`lanes::staged`), the colored
-  solve taken apart where the systems take it apart, bit for bit the
-  arrays' `solve` (the mod's tests hold the two together).
+  block of batches), which the scheduler runs across its threads
+  (get-znt.34). Its first stage fills the batches, every batch at once,
+  from the contacts `prepare` seated in their lanes (get-znt.40, [The
+  fill as the passes' first stage](#the-fill-as-the-passes-first-stage)).
+  The kernels are `solver.rs`'s (`lanes::staged`), the colored solve
+  taken apart where the systems take it apart, bit for bit the arrays'
+  `solve` (the mod's tests hold the two together).
 - **A step where nothing turns** is solved one contact at a time in pair
   order, which no shape can split (its result depends on the order), and
   so whole, by `finish` (`solver::solve_with`), as it always was.
@@ -2316,9 +2318,10 @@ three systems, its passes on `Passes`, as 2D's:[^one-solve-3d]
 solve            world -> Make<Settings>                 the step's Tuning and Gravity
 gather_bodies    See<Settings>, world -> Make<Bodies>    the moving bodies, dense
 gather_contacts  See<Bodies>, world -> Make<Contacts>    the contacts, in pair order
-prepare          See<Settings>, Pass<Bodies>,            grouped, packed, into lanes (solver::Staged)
-                 Pass<Contacts> -> Make<Graph>
-passes           See<Bodies>, Pass<Graph>, Passes        the program of stages
+prepare          See<Settings>, Pass<Bodies>,            grouped, seated in lanes (solver::Staged)
+                 See<Contacts> -> Make<Graph>
+passes           See<Bodies>, See<Contacts>,             the program of stages, the fill first
+                 Pass<Graph>, Passes
 finish           See<Settings>, Take<Graph>,             impulses and states back; or the step whole
                  Pass<Bodies>, Pass<Contacts>
 scatter_contacts Take<Contacts> -> world                 impulses
@@ -2333,12 +2336,15 @@ scatter_bodies   Take<Bodies> -> world                   velocities, positions, 
   the 3D solve](#colouring-the-3d-solve)); by level, the sweep one contact
   at a time in pair order bit for bit, as it was until then ([The solver
   in lanes](#the-solver-in-lanes)). Either way `prepare`
-  groups the contacts (`physics_common::levels` or `Coloring::greedy`),
-  packs them (`Coloring::pack`) and fills the batches; `passes` runs the
-  program, each stage a block of one group's batches or a range of the
-  bodies' states (gravity with the turn cap, warm start, push, move, the
-  refresh under `Inertia::Substep`, relax, the sums, restitution); and
-  `finish` writes the impulses and states back. A step the lanes don't
+  groups the contacts (`physics_common::levels` or `Coloring::greedy`)
+  and seats them in their lanes (`Coloring::seat`); `passes` runs the
+  program, its first stage filling the batches, every batch at once,
+  from the contacts their lanes seat (get-znt.40, [The fill as the
+  passes' first stage](#the-fill-as-the-passes-first-stage)), each stage
+  after it a block of one group's batches or a range of the bodies'
+  states (gravity with the turn cap, warm start, push, move, the refresh
+  under `Inertia::Substep`, relax, the sums, restitution); and `finish`
+  writes the impulses and states back. A step the lanes don't
   take (batches under half full, a width but four, `lanes=0`) is solved
   whole by `finish`, in the same order. By level, it printed every
   baseline value as before the port, and the fingerprint held, mod and
@@ -2730,8 +2736,8 @@ by level, 6396 barriers a step at the 0.19 µs one costs on one CCD
 ([Parallel solving](#parallel-solving)) are 1.2 ms, against 0.05 ms
 colored. 2D measured 4.9× at 8 threads on the same layout; the prepare
 (grouping, packing, filling: about 1.6 ms of 12 on the dense pile, "The
-solver in lanes") stays serial until stage 3 moves the fill into the
-passes (flows.md, "Physics's adoption").
+solver in lanes") stayed serial until get-znt.40 moved the fill into the
+passes ([The fill as the passes' first stage](#the-fill-as-the-passes-first-stage)).
 
 #### The decision: Cm, now
 
@@ -4765,6 +4771,92 @@ left of them is gathering and copying for one consumer, which
 [Parallelism](#parallelism) found moves data between cores more than it
 saves. The frame: 1393 → 1349 µs (ECS), 1674 → 1273 (arrays). Threads
 spawned for each run instead: 2034 / 2013 at 8.
+
+### The fill as the passes' first stage
+
+**Built** (2026-10-03, get-znt.40). Both mods fill their batches in the
+program's first stage, `Stage::All(Step::Fill)`, across the scheduler's
+threads, where `prepare` had filled them on one; it was the largest part
+of the step that didn't scale (threads.md, "Measured", before: `prepare`
+568 µs of 2D's settled 2190 at 8 threads, 2360 of 3D's 5938).
+
+**The map of `prepare`** (timers put in a copy, since removed; µs a step,
+step_bench, one thread unless said):
+
+| part | 2D pile 10 000 settled | 2D pyramid 5050 | 3D boxes 10 000 settled |
+|---|---|---|---|
+| shareable, states (`begin`) | 8, 16 | 4, 7 | 16-21 (moving, shareable), 18 (states) |
+| world inverse inertias | – | – | 111 |
+| coloring (`Coloring::greedy`) | 60 | 39-40 | 87-96 |
+| packing (`pack`) | 25 | 17 | 22 |
+| emptying the batches | 58-61 (92 at 8 threads) | 38 | 63-96 |
+| counting points, their and the anchors' room | – | – | 171-194 |
+| filling (`enter`, the rows) | 327-336 | 248-250 | 1775-1786 |
+| clearing the points | 25 | 16 | – |
+| **all** | **532** (571 at 8) | **375** | **2266-2346** |
+
+- **Into the passes**: emptying and filling the batches (and in 3D
+  their points and anchors), about 395 µs in 2D's settled pile and 2030
+  in 3D's boxes: three quarters of `prepare` and more, per item once the
+  layout is known.
+- **What stays serial, and why**: the coloring, greedy in pair order
+  (Box2D's rule): the colors, and so the result, are that order's, and a
+  parallel coloring would be another computation, re-baselined; seating
+  (`Coloring::seat`, a scatter of each contact to its lane, the size of
+  `pack`'s); the states and in 3D the world inverse inertias, which are
+  the bodies' (a stage writes items or states, and the inertias are
+  neither; formed per contact end in the fill instead they would be 3.7
+  times the work on one thread); the contacts no batch solves (both ends
+  still, few); and `finish`, the write-back, which has no shape yet
+  (get-znt.45). Left: 2D's `prepare` about 120 µs, 3D's 270-310.
+
+**The shape**: `Stage::All`, every item in one stage, colors and overflow
+alike, for a kernel that writes its items alone and only reads the
+states; and a block's first index, so the kernel finds what its items
+hold (flows.md, "The fill is a stage, `All`, given the index"). Across
+threads its blocks are the colors' blocks together, handed out by each
+worker's share of every color (`all_order`), so a worker fills what it
+then solves: 3% off the passes at 8 threads against item order.
+
+**The kernels**, written once over the states' view as the passes are:
+
+- **By batch** (`fill`): each batch emptied and filled from the contacts
+  its lanes seat (`Coloring::seat`, `pack`'s places the other way round).
+- **On one thread** the block is every batch, which the kernel fills
+  contact by contact in pair order (`fill_all`), each into its seat
+  (`Coloring::seats`): batch by batch the reads jump between the colors'
+  contacts, 530 µs against 390 on the settled pile (the history 2026-09-27
+  measured too, 1223 against 887). It empties every batch in a sweep
+  first: emptying each as its first lane went in, while in cache, made
+  the solve 104 to 192 µs slower.
+- **What the fill read, `finish` writes** afterwards: 2D's `clear` of the
+  points and each contact's closing speed, 3D's closing speeds (`row_of`,
+  `row` with the contact only read: copying each contact for `row` made
+  3D's fill 2209-2460 µs against 2080-2197).
+- **2D's lane records** (where a lane's results go) are written by the
+  fill as relaxed atomics (`LaneCell`), beside the batches, so a stage's
+  items stay the bare batches. Measured against: the records in the batch
+  (`finish` 155 µs against 112, a line more a batch) and items of a batch
+  and its lanes as references (the one-thread solve 1.4-1.8% slower than
+  the base, against 0.7% now).
+
+**Bit for bit**, at `ENGINE_THREADS` 1, 2, 4 and 8: both mods' baselines,
+default and long, every value printed byte-identical to the ed0b68d
+tree's; the 3D fingerprint as pinned; the exact and equivalence tests
+(`quality_test`'s `the_mod_across_threads_is_the_arrays_bit_for_bit`
+among them) and pong's and the platformer's replays.
+
+**What it bought**, step_bench, `--config=bench`, the ed0b68d tree and
+this one alternated over two rounds (threads.md, "Measured", has the
+tables): at 8 threads 2D's settled pile solves in 1818 µs against
+2150-2240 (step 2554-2562 against 2897-3031), the pyramid in 1124-1131
+against 1339-1345; 3D's 10 000 boxes settled in 4246-4284 against
+6655-7375 (step 6987-7001 against 9437-10 126), falling 5762-5908 against
+7400-7426, planks 736-742 against 974-976. On one thread 2D is level
+but for the settled pile, +0.7% of the solve over five alternated rounds
+(+0.25% of the step); 3D's boxes +0.8% settled and, pooled over every
+alternated run, +1.4 to 1.7% falling, inside that case's spread of 6%
+from run to run.
 
 ## Open questions
 

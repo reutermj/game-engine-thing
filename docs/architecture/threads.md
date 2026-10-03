@@ -2,7 +2,8 @@
 
 **Status: built** (2026-10-03; get-znt.29, the design; get-znt.20, the
 pool; get-znt.34, shapes run across it; get-znt.39, the one-thread
-guard). The running engine has threads: a resident mod, `threads`
+guard; get-znt.40, the solves' batches filled across it). The running
+engine has threads: a resident mod, `threads`
 (`engine/std/threads`), keeps a rayon pool on one CCD and installs it as
 the world's executor, and `Passes::run` hands a program's stages out
 across it as a task graph (`engine_ecs::dispatch`), the dispatch spike's
@@ -45,8 +46,12 @@ solves are: [physics.md](physics.md#solving-across-threads).
   to 2.4 times as fast (passes 4.8 and 5.2), the falling pile 1.3; 3D's
   10 000 boxes settled 2.3 to 2.5 (passes 4.4 to 5.5), falling 1.9,
   planks 2.1.
-  `prepare`, still on one thread (get-znt.40), is now 26% of 2D's settled
-  solve and 40% of 3D's.
+- **The fill in the passes** (get-znt.40): the batches filled in the
+  program's first stage, `prepare` left with the coloring and seating
+  (2D's 568 µs → 122 at 8 threads, 3D's 2360 → about 275). At 8 threads
+  2D's settled solve 1818 µs against 2150-2240, 3D's settled boxes
+  4246-4284 against 6655-7375; on one thread within 1% but 3D's falling
+  boxes, +1.4 to 1.7% pooled ("Measured").
 
 ## Where the pool lives
 
@@ -173,8 +178,9 @@ untouched and the spin ends the moment the next dispatch starts.
 
 The dispatch spike measured what cold costs (+79% on the passes after 16
 ms idle). Within a step the gaps between dispatches are short but not
-nothing: 2D's `prepare` runs on one thread for about 470 µs between the
-narrowphase's dispatch and the passes', 3D's for about 2 ms. Measured on
+nothing: 2D's `prepare` ran on one thread for about 470 µs between the
+narrowphase's dispatch and the passes', 3D's for about 2 ms (since
+get-znt.40 filled the batches in the passes, about 120 and 290). Measured on
 step_bench at 8 threads, the workers pinned, µs a step, the passes and
 the whole step (2D: the median of 5 runs; 3D: of 3):
 
@@ -219,8 +225,12 @@ count of other stages, as one run of the executor:
 
 `Passes::run` turns a program into a plan: an `Items` stage is a stage a
 color (the overflow one block, its items sharing states; a color's items
-in blocks of at least 4, at most four a thread, Box2D's sizes), an `Each`
-stage a stage of ranges of at least 32 states. Each block's items sit
+in blocks of at least 4, at most four a thread, Box2D's sizes), an `All`
+stage one stage of every color's blocks together, handed out worker by
+worker, each its share of every color (`all_order`, so a worker fills the
+batches it then solves: 3% off the passes at 8 threads against item
+order), an `Each` stage a stage of ranges of at least 32 states. Each
+block's items sit
 behind a lock only its taker takes (`try_lock`), which is how a kernel
 gets `&mut` items in safe Rust, and which fails loudly if the protocol
 ever handed a block out twice. The states are shared as `T::Shared` for
@@ -405,6 +415,53 @@ pyramid's passes 455-459 → 536-543 µs pinned (+18%), the step 1774-1778
 OS can't move it. On a machine running other work, `ENGINE_PIN=0` (or a
 `Placement` avoiding the busy cores) is the escape.
 
+### The fill in the passes (get-znt.40)
+
+The same benches (`--config=bench`, the median of 5 runs in 2D and 3 in
+3D), the ed0b68d tree and the get-znt.40 one alternated, two rounds each
+(their range; 2026-10-03; load averages 1 to 7, but 17 at the start of
+2D's first round). What moved, and why the rest didn't: physics.md, "The
+fill as the passes' first stage".
+
+**2D**, µs a step: the solver (`prepare`, `passes`, `finish`), and the
+whole step.
+
+| case | before, 1 | after, 1 | before, 8 | after, 8 |
+|---|---|---|---|---|
+| pile 10 000 turning, settled | 4399-4478 / 6775-6932 | 4419-4435 / 6774-6797 | 1436-1491 (559-582, 769-799, 108-111) / 2897-3031 | 1118-1121 (122-123, 816-820, 177-180) / 2554-2562 |
+| pyramid 5050 turning | 2828-2835 / 4359-4397 | 2850-2860 / 4395-4405 | 947-951 (410-423, 464-470, 65-66) / 1794-1820 | 728-729 (75-76, 512, 141) / 1594-1597 |
+| pile 10 000 turning, falling | 345-346 / 1076-1095 | 342-344 / 1105-1122 | 191-193 / 812-813 | 182-183 / 814-816 |
+| pile 10 000 not turning, settled | 2494-2496 / 3348-3356 | 2491-2496 / 3352-3363 | 2509-2510 / 3239-3242 | 2504-2512 / 3250-3253 |
+
+**3D**, µs a step: the solver (`prepare`, `passes`, `finish`), and the
+whole step.
+
+| case | before, 1 | after, 1 | before, 8 | after, 8 |
+|---|---|---|---|---|
+| boxes 10 000 settled | 17 756-17 994 / 21 329-21 683 | 17 900-18 138 / 21 443-21 693 | 6059-6792 (2362-2372, 3559-4290, 130-131) / 9437-10 126 | 3647-3661 (272-276, 3222-3231, 157-159) / 6987-7001 |
+| boxes 10 000 falling | 16 882-17 362 / 23 051-23 640 | 17 701-17 826 / 24 164-24 307 | 6788-6832 / 12 859-12 928 | 5154-5279 / 11 270-11 420 |
+| planks 1000 settled | 2550-2557 / 3067-3073 | 2563-2596 / 3071-3108 | 906-909 / 1405-1408 | 664-668 / 1161-1166 |
+| stack 20 | 21-22 / 32-33 | 22 / 33 | 51 / 63 | 50-51 / 62-63 |
+
+- **At 8 threads the turning solvers take a fifth to two fifths less**:
+  2D's settled pile 22-25%, the pyramid 23%; 3D's settled boxes 40-46%,
+  falling 22-25%, planks 26-27%. The serial `prepare` is 122 µs in 2D's
+  settled pile and about 275 in 3D's boxes; the passes grew by the fill,
+  20-50 µs in 2D and 370-520 in 3D's falling boxes (settled, the base's
+  own passes ranged 3559 to 4290). Against one thread the solver is now
+  4.0 times as fast at 8 in 2D's settled pile (3.1 before), and 4.9 in
+  3D's settled boxes (2.6-3.0).
+- **`finish` grew at 8 threads** (2D's settled 108 → 178 µs, the pyramid
+  65 → 141, 3D's boxes 131 → 158): the contacts, points and lanes it
+  writes and reads were last touched by the fill and the passes on other
+  cores. It is the largest serial part left (get-znt.45).
+- **One thread.** 2D level within the rounds' noise but for its settled
+  pile, +0.7% of the solve over five more alternated rounds (4483 µs
+  against 4450, the step +0.25%); 3D's settled boxes +0.8%, its falling
+  boxes +1.4 to 1.7% pooled over every alternated run (17 702-17 779 µs
+  mean against 17 408-17 531), a case whose base itself ranged 16 882 to
+  17 944.
+
 ## What waits
 
 - **System parallelism (get-znt.5).** `Plan` already takes several chains,
@@ -420,14 +477,14 @@ OS can't move it. On a machine running other work, `ENGINE_PIN=0` (or a
   block (block `k` of the next stage after block `k` of this one, for
   row-local work), the same publish-on-completion with a count a block,
   inside the same dispatch.
-- **Filling the batches in the first stage (get-znt.40).** `prepare` fills
-  them on one thread: in 2D the whole gap to the old hand-tuned solve
-  across threads; measured in the engine, 568 µs of the settled pile's
-  2190 µs solve at 8 threads (26%), and 2360 of 3D's 5938 (40%).
-  A first stage over items is an `Each` over the item count, or a stage
-  kind given the place map; the plan doesn't change, the kernels do.
 - **Block sizes by work (get-znt.41)**: the plan's blocks are Box2D's
   sizes; a stage's blocks could be cut by points, or more of them.
+- **A write-back across threads (get-znt.45).** With the fill a stage
+  ("Measured"), each mod's `finish` is the largest serial part left of a
+  turning solve at 8 threads.
+
+(History, 2026-10-03: filling the batches in the first stage waited here
+too, until get-znt.40 built it, "Measured".)
 
 ## Testing, and the mutants
 
@@ -436,8 +493,9 @@ The tiers (CLAUDE.md), each test where the bug it's for shows first:
 - **Unit:** `engine_ecs`'s `dispatch.rs` (every block once, each stage
   after the one it waits for, a panic raised on the caller and the rest
   stopped, on threads at once, late and one by one, 1 to 8); `flow_test`
-  (`Passes` on test executors against one thread, `serial`, a kernel's
-  panic); `//engine/std/threads:pool_test` (every task once and `run`
+  (`Passes` on test executors against one thread, its items filled by an
+  `All` stage from their seats, `serial`, a kernel's panic);
+  `//engine/std/threads:pool_test` (every task once and `run`
   returning after the last, `Passes` on the real pool at 1, 2, 4 and 8
   warm and cold, workers pinned where the placement says, a second pool
   made from a pinned thread placed as the first, the threads ended on
@@ -471,6 +529,26 @@ The third can't be written in safe Rust: rayon's scope borrows the tasks
 until they return, which is the guarantee. The guard's own race, which the
 mutant re-opens, needs particular impulses to show and wasn't seen; the
 test holds the guard, not the race.
+
+**The fill as a stage** (get-znt.40, 2026-10-03), its mutants the same
+way, each run against `flow_test`, `pool_test` and both physics mods'
+tests:
+
+| mutant | fails |
+|---|---|
+| an `All` stage skips its first block | `flow_test`; `physics2d_test`, 2D's `quality_test` and `behaviour_test`; `exact_test`, `physics3d_test`, 3D's `reload_test`, `quality_test` and `smoke_test` |
+| an `All` stage fills its first block twice | `flow_test` alone: both mods' fills write their batches whole, so a batch filled twice is the batch filled once, which no physics test can see, and needn't |
+| the stage after the fill not waiting for it (`plan.chain()` after it) | every physics test above but `flow_test`, at first: its fill was over before a thread reached the next stage. Once its blocks took 20 µs, 10 runs in 10 |
+| 2D's fill of a block skipping each batch's last lane | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 2D's fill of every batch (one thread) skipping the same | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 2D's fill reading the first step's seats, not this step's | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 2D's fill of every batch keeping no record of each batch's last lane (`LaneCell`) | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 3D's fill of a block skipping each batch's last lane | `exact_test`, `physics3d_test`, `quality_test`, `smoke_test` |
+| 3D's fill of every batch (one thread) skipping the same | `exact_test` (the kernel's fingerprint), `smoke_test` |
+| 3D's fill reading the first step's seats | `exact_test`, `physics3d_test`, `reload_test`, `quality_test`, `behaviour_test`, `smoke_test` |
+
+`pool_test` failed none: it runs no `All` stage. The 2D rows were run
+again once the lanes became `LaneCell`s, with the same results.
 
 **Long checks run:** the reload fuzzer (runbook 003; the loader's reload
 sequence is unchanged, and its mods declare no shapes, so it checks that
