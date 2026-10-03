@@ -970,17 +970,19 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
 /// lanes, and scattered back.
 ///
 /// The groups are Box2D's graph colors (`constraint_graph.c`,
-/// `Wide::Colored`), or the levels of the pair-order sweep (`group`): a
-/// contact one level past the latest contact before it that shares a body
-/// with it, which is level scheduling, as sparse triangular solves are run
-/// in parallel (Anderson and Saad, 1989). Either way no two contacts in a
-/// group share a body that moves, so solving the groups in turn, with
-/// `pass_points`' arithmetic operation for operation, is the sweep one
+/// `Wide::Colored`, by `engine_ecs::shape`'s `Coloring`), or the levels
+/// of the pair-order sweep (`group`): a contact one level past the latest
+/// contact before it that shares a body with it, which is level
+/// scheduling, as sparse triangular solves are run in parallel (Anderson
+/// and Saad, 1989). Either way no two contacts in a group share a body
+/// that moves, so solving the groups in turn, with `pass_points`'
+/// arithmetic operation for operation, is the sweep one
 /// contact at a time over the groups' order (`order`) bit for bit, whatever
 /// the width; for the levels, that order changes no body's, so it is the
 /// sweep in pair order. See physics.md, "The solver's speed".
 mod lanes {
     use super::*;
+    use engine_ecs::shape::{Colored, Coloring, OVERFLOW, UNSOLVED};
     use physics_common::lanes::F;
     use std::ops::Range;
     use std::sync::Mutex;
@@ -1236,72 +1238,56 @@ mod lanes {
     }
 
     const NONE: u32 = u32::MAX;
-    /// Colors a body's contacts can take: a body in a pile touches up to
-    /// about 8; past 64, a contact is solved alone (Box2D's overflow).
-    const COLORS: usize = 64;
-    const OVERFLOW: u32 = u32::MAX - 1;
-    /// Solved not at all: neither end moves.
-    const UNSOLVED: u32 = u32::MAX;
     /// How a pass finds a point's bias (`pass`'s `SEP`): from its separation,
     /// storing it too, or as the last pass stored it.
     const COMPUTE: u8 = 0;
     const STORE: u8 = 1;
     const LOAD: u8 = 2;
 
-    /// Each contact's group, in which no two share a body that moves, and
-    /// how many groups: a body that doesn't move (a static, a kinematic, the
-    /// one standing for sleeping bodies) can be in any number of a group's
-    /// contacts, since none of them changes it.
+    /// Each contact's group, in which no two share a body that moves: a
+    /// body that doesn't move (a static, a kinematic, the one standing for
+    /// sleeping bodies) can be in any number of a group's contacts, since
+    /// none of them changes it.
     ///
-    /// By level (`Wide::Levels`): one past the latest level of the contacts
-    /// before it in pair order that share a body it moves, which in pair
-    /// order is the level the body's last contact left, so one pass finds
-    /// them. A pile of 10 000 has about 420 levels of 50 contacts, its
-    /// batches 97% full; a 5050 pyramid 590, 94%. Colored
-    /// (`Wide::Colored`): greedily in pair order, the lowest color no body it
-    /// moves is in already, and not color 0 for a contact with an end that
-    /// doesn't move (Box2D v3's `b2AddContactToGraph`).
-    fn group(contacts: &[Constraint], moves: &[bool], wide: Wide) -> (Vec<u32>, usize) {
-        // By body, in pair order so far: the next level, or the colors taken.
-        let mut used = vec![0u64; moves.len()];
-        let mut groups = 0;
-        let g = contacts
-            .iter()
-            .map(|c| {
-                let (a, b) = (c.a as usize, c.b as usize);
-                if !moves[a] && !moves[b] {
-                    return UNSOLVED;
+    /// Colored (`Wide::Colored`): Box2D v3's greedy coloring in pair order,
+    /// not color 0 for a contact with an end that doesn't move
+    /// (`b2AddContactToGraph`), which is the generic primitive's
+    /// (`Coloring::greedy`), the same call the mod's pipeline makes, so the
+    /// arrays and the mod can't color apart. By level (`Wide::Levels`), a
+    /// variant with no generic counterpart: one past the latest level of
+    /// the contacts before it in pair order that share a body it moves,
+    /// which in pair order is the level the body's last contact left, so
+    /// one pass finds them. A pile of 10 000 has about 420 levels of 50
+    /// contacts, its batches 97% full; a 5050 pyramid 590, 94%. Levels
+    /// never overflow; both are packed into batches alike (`Coloring::pack`).
+    fn group(contacts: &[Constraint], moves: &[bool], wide: Wide) -> Coloring {
+        let mut coloring = Coloring::default();
+        if let Wide::Colored(_) = wide {
+            coloring.greedy(contacts.len(), |i| (contacts[i].a, contacts[i].b), moves, true, &mut Vec::new());
+            return coloring;
+        }
+        // By body, in pair order so far: the next level.
+        let mut next = vec![0u32; moves.len()];
+        for c in contacts {
+            let (a, b) = (c.a as usize, c.b as usize);
+            if !moves[a] && !moves[b] {
+                coloring.of.push(UNSOLVED);
+                continue;
+            }
+            let at = |e: usize| if moves[e] { next[e] } else { 0 };
+            let level = at(a).max(at(b));
+            for e in [a, b] {
+                if moves[e] {
+                    next[e] = level + 1;
                 }
-                let at = |e: usize| if moves[e] { used[e] } else { 0 };
-                let k = if let Wide::Colored(_) = wide {
-                    let mut free = !(at(a) | at(b));
-                    if !moves[a] || !moves[b] {
-                        free &= !1;
-                    }
-                    let k = free.trailing_zeros();
-                    if k as usize >= COLORS {
-                        return OVERFLOW;
-                    }
-                    for e in [a, b] {
-                        if moves[e] {
-                            used[e] |= 1u64 << k;
-                        }
-                    }
-                    k
-                } else {
-                    let level = at(a).max(at(b));
-                    for e in [a, b] {
-                        if moves[e] {
-                            used[e] = level + 1;
-                        }
-                    }
-                    level as u32
-                };
-                groups = groups.max(k as usize + 1);
-                k
-            })
-            .collect();
-        (g, groups)
+            }
+            if coloring.count.len() <= level as usize {
+                coloring.count.resize(level as usize + 1, 0);
+            }
+            coloring.count[level as usize] += 1;
+            coloring.of.push(level);
+        }
+        coloring
     }
 
     /// What `solve` solves them in: the overflow's first, then each group's
@@ -1314,7 +1300,8 @@ mod lanes {
             inertia[sp.body as usize] = sp.inv_inertia;
         }
         let moves: Vec<bool> = bodies.iter().zip(inertia.iter()).map(|(b, i)| b.inv_mass > 0.0 || *i > 0.0).collect();
-        let (groups, n_groups) = group(contacts, &moves, wide);
+        let coloring = group(contacts, &moves, wide);
+        let n_groups = coloring.count.len();
         let rank = |k: u32| match k {
             OVERFLOW => 0,
             UNSOLVED => n_groups + 1,
@@ -1322,21 +1309,15 @@ mod lanes {
         };
         let mut at: Vec<usize> = (0..contacts.len()).collect();
         // Stable, so pair order within each.
-        at.sort_by_key(|&i| rank(groups[i]));
+        at.sort_by_key(|&i| rank(coloring.of[i]));
         at
     }
 
-    /// What both ways of solving start from: the bodies as states, and
-    /// each contact's group, and how many batches each group takes.
+    /// What every way of solving starts from: the bodies as states, and the
+    /// step's constants.
     struct Head {
         s: Vec<State>,
         inertia: Vec<f32>,
-        groups: Vec<u32>,
-        n_groups: usize,
-        count: Vec<usize>,
-        first: Vec<usize>,
-        overflow: usize,
-        batches: usize,
         nowhere: u32,
         h: f32,
         inv_h: f32,
@@ -1348,28 +1329,13 @@ mod lanes {
     impl Head {
         fn empty() -> Head {
             let soft = Softness { rate: 0.0, mass: 0.0, impulse: 0.0 };
-            Head {
-                s: Vec::new(),
-                inertia: Vec::new(),
-                groups: Vec::new(),
-                n_groups: 0,
-                count: Vec::new(),
-                first: Vec::new(),
-                overflow: 0,
-                batches: 0,
-                nowhere: 0,
-                h: 0.0,
-                inv_h: 0.0,
-                share: 0.0,
-                warm: 0.0,
-                soft: (soft, soft),
-            }
+            Head { s: Vec::new(), inertia: Vec::new(), nowhere: 0, h: 0.0, inv_h: 0.0, share: 0.0, warm: 0.0, soft: (soft, soft) }
         }
 
         /// The step's constants, and the bodies as states into `s` and
         /// `inertia`, keeping their allocations; whether each body moves
-        /// into `moves`. Everything but the grouping, which `head` adds and
-        /// the staged solve takes from the generic coloring (`staged`).
+        /// into `moves`, which the contacts are grouped by (`head`, or the
+        /// staged solve's caller).
         #[inline(always)]
         fn start(&mut self, params: &Params, (bodies, spinning): (&[SolverBody], &[Spinning]), dt: f32, moves: &mut Vec<bool>) {
             let substeps = params.substeps;
@@ -1399,44 +1365,24 @@ mod lanes {
         }
     }
 
+    /// The step's start, and its contacts grouped and laid out in batches:
+    /// the overflow's first, one contact each (as Box2D solves its overflow
+    /// first), then each group's, in pair order; and each contact's batch
+    /// and lane, `None` for one left unsolved.
     #[inline(always)]
-    fn head<const N: usize>(params: &Params, (bodies, spinning): (&[SolverBody], &[Spinning]), contacts: &[Constraint], dt: f32) -> Head {
+    #[allow(clippy::type_complexity)]
+    fn head<const N: usize>(
+        params: &Params,
+        (bodies, spinning): (&[SolverBody], &[Spinning]),
+        contacts: &[Constraint],
+        dt: f32,
+    ) -> (Head, Colored, Vec<Option<(u32, u32)>>) {
         let mut hd = Head::empty();
         let mut moves = Vec::new();
         hd.start(params, (bodies, spinning), dt, &mut moves);
-        let (groups, n_groups) = group(contacts, &moves, params.wide);
-        // Batches: the overflow's first, one contact each (as Box2D solves
-        // its overflow first), then each group's, in pair order.
-        let mut count = vec![0usize; n_groups];
-        let mut overflow = 0;
-        for k in groups.iter() {
-            match *k {
-                UNSOLVED => (),
-                OVERFLOW => overflow += 1,
-                k => count[k as usize] += 1,
-            }
-        }
-        let mut first = vec![0usize; n_groups];
-        let mut batches = overflow;
-        for k in 0..n_groups {
-            first[k] = batches;
-            batches += count[k].div_ceil(N);
-        }
-        Head { groups, n_groups, count, first, overflow, batches, ..hd }
-    }
-
-    /// Where the contact grouped `k` goes, the next in its group: its batch
-    /// and lane.
-    #[inline(always)]
-    fn place<const N: usize>(k: u32, hd: &Head, (filled, overflowed): (&mut [usize], &mut usize)) -> (usize, usize) {
-        if k == OVERFLOW {
-            *overflowed += 1;
-            (*overflowed - 1, 0)
-        } else {
-            let j = filled[k as usize];
-            filled[k as usize] += 1;
-            (hd.first[k as usize] + j / N, j % N)
-        }
+        let mut place = Vec::new();
+        let layout = group(contacts, &moves, params.wide).pack(N, &mut place);
+        (hd, layout, place)
     }
 
     /// A contact as the substeps start it: its points (or its row's), where
@@ -1633,17 +1579,13 @@ mod lanes {
         points: &mut [Points],
         dt: f32,
     ) -> Solve<N> {
-        let hd = head::<N>(params, (bodies, spinning), contacts, dt);
-        let (mut filled, mut overflowed) = (vec![0usize; hd.n_groups], 0);
-        let mut out: Vec<Batch<N>> = vec![Batch::empty(hd.nowhere); hd.batches];
-        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; hd.batches];
+        let (hd, layout, place) = head::<N>(params, (bodies, spinning), contacts, dt);
+        let mut out: Vec<Batch<N>> = vec![Batch::empty(hd.nowhere); layout.items()];
+        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; layout.items()];
 
         let mut kept: Vec<(usize, [(f32, f32); 2])> = Vec::new();
         let mut solved: Vec<usize> = Vec::new();
-        let place = |i: usize| match hd.groups[i] {
-            UNSOLVED => None,
-            k => Some(place::<N>(k, &hd, (&mut filled, &mut overflowed))),
-        };
+        let place = |i: usize| place[i].map(|(batch, l)| (batch as usize, l as usize));
         enter(params, &hd, bodies, (contacts, points), dt, place, (&mut out, &mut lanes), (&mut solved, &mut kept));
         clear(points, solved, &kept);
         let Head { mut s, h, inv_h, share, .. } = hd;
@@ -1765,9 +1707,8 @@ mod lanes {
         dt: f32,
         gang: &dyn Gang,
     ) {
-        let hd = head::<N>(params, (bodies, spinning), contacts, dt);
-        let (mut filled, mut overflowed) = (vec![0usize; hd.n_groups], 0);
-        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; hd.batches];
+        let (hd, layout, place) = head::<N>(params, (bodies, spinning), contacts, dt);
+        let mut lanes: Vec<[Lane; N]> = vec![[Lane::NONE; N]; layout.items()];
         // `setup`'s loop, but for starting the contacts that are solved,
         // which is the first stage's: what's left is where each goes, and
         // which contact each point is, for writing them back.
@@ -1778,8 +1719,7 @@ mod lanes {
             if c.points > 0 {
                 owner[c.points as usize - 1] = i as u32;
             }
-            let k = hd.groups[i];
-            if k == UNSOLVED {
+            let Some((batch, l)) = place[i] else {
                 let (jn, jt) = (c.jn, c.jt);
                 (c.jn, c.jt) = (0.0, 0.0);
                 let (pts, at, n_points, speed) = start(params, c, (jn, jt), bodies, &hd, points, dt);
@@ -1789,15 +1729,14 @@ mod lanes {
                 }
                 unsolved(params, c, (&pts, at, n_points), &mut kept);
                 continue;
-            }
-            let (batch, l) = place::<N>(k, &hd, (&mut filled, &mut overflowed));
-            lanes[batch][l].contact = i as u32;
-            slot[i] = (batch as u32, l as u32);
+            };
+            lanes[batch as usize][l as usize].contact = i as u32;
+            slot[i] = (batch, l);
         }
         let gravity: Vec<Vec2> = bodies.iter().map(|b| b.gravity).collect();
         let mut angle = vec![0.0f32; spinning.len()];
         let shared = (&*bodies, &*spinning, &*contacts, &*points);
-        let (atoms, outs) = run_across::<N>(params, shared, (&hd, &gravity, dt), (&mut lanes, &mut angle), gang);
+        let (atoms, outs) = run_across::<N>(params, shared, (&hd, &layout, &gravity, dt), (&mut lanes, &mut angle), gang);
 
         // What `clear` and `finish` write, split between the threads by
         // what they write: each task its own run of contacts, points, bodies
@@ -2002,7 +1941,7 @@ mod lanes {
     fn run_across<const N: usize>(
         params: &Params,
         (bodies, spinning, contacts, points): (&[SolverBody], &[Spinning], &[Constraint], &[Points]),
-        (hd, gravity, dt): (&Head, &[Vec2], f32),
+        (hd, layout, gravity, dt): (&Head, &Colored, &[Vec2], f32),
         (lanes, angle): (&mut [[Lane; N]], &mut [f32]),
         gang: &dyn Gang,
     ) -> (Vec<Atom>, Vec<Vec<Batch<N>>>) {
@@ -2026,8 +1965,8 @@ mod lanes {
         let mut rest: &mut [[Lane; N]] = lanes;
         // The overflow is one block: its batches share bodies, and are
         // solved in order, as Box2D solves its overflow on one thread.
-        let overflowed = if hd.overflow > 0 {
-            let (head, tail) = rest.split_at_mut(hd.overflow);
+        let overflowed = if layout.overflow > 0 {
+            let (head, tail) = rest.split_at_mut(layout.overflow);
             rest = tail;
             blocks.push(batches(head));
             Some(blocks.len() - 1..blocks.len())
@@ -2035,8 +1974,8 @@ mod lanes {
             None
         };
         let mut colors = Vec::new();
-        for k in 0..hd.n_groups {
-            let (mut group, tail) = rest.split_at_mut(hd.count[k].div_ceil(N));
+        for &n in layout.colors.iter() {
+            let (mut group, tail) = rest.split_at_mut(n);
             rest = tail;
             let from = blocks.len();
             for r in blocks_of(group.len(), 4, threads) {
@@ -2347,8 +2286,8 @@ mod lanes {
     /// adoption"): `begin` and `fill` are `setup`, the passes are `run`'s
     /// stages for a generic primitive to run (`Passes`), `finish` is
     /// `finish`. Its coloring is the caller's, by the generic primitive
-    /// (`Coloring::greedy`, which is `group`'s), so this file needs nothing
-    /// of the engine's. Bit for bit `solve`: the mod's tests hold it to the
+    /// (`Coloring::greedy`, the call `group` makes), packed by the caller
+    /// too (`Coloring::pack`). Bit for bit `solve`: the mod's tests hold it to the
     /// arrays, which solve by `solve`.
     #[allow(dead_code)] // Only the mod runs it; the benches compile this file too.
     pub mod staged {

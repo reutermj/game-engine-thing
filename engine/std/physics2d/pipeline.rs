@@ -295,8 +295,8 @@ impl Physics {
         if *lanes {
             let moves = staged.begin(&params, (&b.bodies, &t.spinning), *dt);
             // Box2D's rule (`b2AddContactToGraph`): an edge with an end that
-            // doesn't move stays out of color 0. `group`'s, contact for
-            // contact, so the colors are the arrays' (`lanes::solve`).
+            // doesn't move stays out of color 0. The call the arrays'
+            // `lanes::group` makes, so the colors are theirs (`lanes::solve`).
             let Colors { coloring, layout, place, masks } = colors;
             coloring.greedy(constraints.len(), |i| (constraints[i].a, constraints[i].b), moves, true, masks);
             *layout = coloring.pack(LANES, place);
