@@ -88,5 +88,6 @@ a reload. A panicking mod is disabled until it's reloaded.
 - [docs/runbooks/](docs/runbooks/): recurring maintenance procedures
 - [docs/retrospectives/](docs/retrospectives/): what building on the engine
   showed: pong and the platformer, then physics
+- [docs/reviews/](docs/reviews/): dated design and consistency reviews
 - [CLAUDE.md](CLAUDE.md): conventions for working in the repo (for agents,
   and humans too)
