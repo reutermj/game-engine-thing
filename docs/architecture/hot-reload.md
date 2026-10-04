@@ -357,7 +357,7 @@ sequence depends on:
   are linked dynamically through an `$ORIGIN`-relative RUNPATH, which stops
   resolving once the library is copied to the staging directory (see
   [lore](../lore/rust-shared-libraries-link-the-cxx-runtime-dynamically.md)).
-- `-Clink-arg=-Wl,-z,now`, which is what makes step 2 above reject a build
+- `-Clink-arg=-Wl,-z,now`, which is what makes step 3 above reject a build
   with unresolved symbols. The `llvm` toolchain already passes it; it is
   pinned so the loader doesn't depend on a default (see
   [lore](../lore/mods-are-linked-bind-now.md)).

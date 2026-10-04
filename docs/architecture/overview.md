@@ -16,8 +16,9 @@ possible:
 3. **The scheduler mod** decides when each of a frame's systems runs, from
    the plan the loader keeps. `//engine/std/sequential` is the default; see
    [scheduling.md](scheduling.md#who-schedules).
-4. **Every other mod** does real work in its systems. Today that is `counter`
-   and `hello`; eventually windowing, rendering, input and the game.
+4. **Every other mod** does real work in its systems. Today that is the demo
+   mods, `physics2d` and `physics3d`, and the games (pong and the
+   platformer); eventually windowing, rendering and input too.
 
 ### Who runs the loop
 

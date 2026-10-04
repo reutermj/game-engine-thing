@@ -2256,7 +2256,7 @@ on branch `physics3d-rotation`, a mod since `physics3d-land`).
 angular velocity and inertia, contacts of up to four points, the soft
 step with angular terms. It is a mod as `//engine/std/physics2d` is, and
 hot-reloads under a running pile ([A mod](#a-mod)). Still left out: layers,
-sensors, kinematic bodies, sleeping, events, parallelism, rolling
+sensors, kinematic bodies, sleeping, events, rolling
 resistance, gyroscopic terms. The comparison runs every engine locked (as
 before) or turning (`--rotate`).
 

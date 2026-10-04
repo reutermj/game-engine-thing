@@ -38,7 +38,8 @@ monolithic design doc.
   another within a frame as stages of a pipeline: how Bevy, Flecs, Unity
   and dataflow systems pass values, the mechanism built on the ECS's own
   graph, physics's solve ported onto it bit for bit with a generic colored
-  primitive, hierarchy propagation as a second user (spike results)
+  primitive, hierarchy propagation as a second user (spike results;
+  designed and built as [flows.md](flows.md))
 - [flows.md](flows.md) — flows designed: `Make`, `See`, `Pass` and
   `Take` and their rules, edges in the graph, the world's store and its
   recycling bins across reloads, the plan check and its errors, fixed-rate
@@ -65,7 +66,7 @@ monolithic design doc.
   side by side: a parity table from the code, what each piece is
   (dimension-independent, the same algorithm over other math, or its own),
   how Rapier, Box2D and Box3D, Jolt and Avian share 2D and 3D, and a shared
-  implementation crate in phases (proposed)
+  implementation crate in phases (accepted; phases 1 and 2 built)
 - [physics-testing.md](physics-testing.md) — how physics is kept from
   regressing: equivalence, physical law, the reference floor, and a
   baseline of our own accepted results
