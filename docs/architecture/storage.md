@@ -1,11 +1,15 @@
 # Storage and concurrent structural change
 
-**Status: built, on one thread.** The `engine/ecs` crate is the engine's
-world, run by the sequential scheduler. The parallel executor exists in
-`engine_ecs::harness`, for tests and the benchmark; running it in the
-loader is system parallelism (step 2, get-znt.5). It replaced one sparse
-set per component, and structural changes and events applied at phase
-boundaries (see [scheduling.md](scheduling.md)).[^landing]
+**Status: built.** The `engine/ecs` crate is the engine's world. Systems
+run one at a time, in plan order, on the default scheduler (`sequential`);
+a parallel executor over whole systems exists in `engine_ecs::harness`,
+for tests and the benchmark, and running one in the loader is system
+parallelism (step 2, get-znt.5). Within a system, data parallelism is
+built: `par_for_each*` hand a query's pages to the world's executor (the
+resident `threads` mod's pool) through a `ParMap`, and `Passes` runs a
+program of stages there (see [threads.md](threads.md)). The crate replaced one
+sparse set per component, and structural changes and events applied at
+phase boundaries (see [scheduling.md](scheduling.md)).[^landing]
 
 ## Goals
 
@@ -70,8 +74,10 @@ its final table; insert then remove of one component leaves it removed.
 
 Decided 2026-09-23, replacing a first design of separate typed parameters
 (`Inserts<T, Target>`) that restated the query's bound as a second
-declaration.[^inserts] Free-form `cx.commands()` is left to exclusive
-systems, and to code outside a frame (hooks, message handlers).
+declaration.[^inserts] A free-form change is left to code outside a
+frame: hooks and message handlers, through `cx.world()` (a `WorldMut`,
+`between.rs`; [below](#the-world-between-frames)). Exclusive systems,
+which would allow one inside a frame, aren't built.[^commands]
 
 ### What a change is visible to
 
@@ -121,34 +127,40 @@ engine_api::component! {
 ### The systems
 
 ```rust
+engine_api::mod_state! {
+    #[derive(Default)]
+    struct Hazards {}
+}
+
 impl Hazards {
     /// Sets walkers standing in lava on fire.
     fn ignite(
-        &mut self, cx: &mut Cx,
-        lava: Query<&Lava>,
-        walkers: Query<(&Position, &Health), Without<Burning>, Adds<Burning>>,
+        &mut self, _: &mut (), _: &mut Cx,
+        mut lava: Query<&Lava>,
+        mut walkers: Query<(&Position, &Health), Without<Burning>, Adds<Burning>>,
     ) {
-        let pools: Vec<Rect> = lava.iter().map(|(_, l)| l.area).collect();
-        for (row, (pos, _)) in walkers.iter() {
+        let mut pools: Vec<Rect> = Vec::new();
+        lava.for_each(|_, l| pools.push(l.area));
+        walkers.for_each(|row, (pos, _)| {
             if pools.iter().any(|area| area.contains(pos)) {
                 row.insert(Burning { dps: 5.0, left: 3.0 });
             }
-        }
+        });
     }
 
     /// Burns them down, and puts them out when the fire runs out.
     fn burn(
-        &mut self, cx: &mut Cx,
-        clock: Single<&Clock>,
-        fires: Query<(&mut Health, &mut Burning), (), Removes<Burning>>,
+        &mut self, _: &mut (), _: &mut Cx,
+        dt: Dt,
+        mut fires: Query<(&mut Health, &mut Burning), (), Removes<Burning>>,
     ) {
-        for (row, (health, fire)) in fires.iter_mut() {
-            health.hp -= fire.dps * clock.dt;
-            fire.left -= clock.dt;
+        fires.for_each(|row, (mut health, mut fire)| {
+            health.hp -= fire.dps * *dt;
+            fire.left -= *dt;
             if fire.left <= 0.0 {
                 row.remove::<Burning>();
             }
-        }
+        });
     }
 }
 
@@ -164,16 +176,23 @@ impl Mod for Hazards {
 
 In the mod's code:
 
+- **A system is a method** taking the mod's state, its transient part
+  (`()` here), its `Cx`, then its parameters. A query is walked with
+  `for_each(|row, items| ..)`, not a `for` loop (why: "New sharp edges",
+  under [Spike results](#spike-results)); a `&mut T` term comes as a
+  `Mut<T>`, which records the write for change detection. `Dt` is the
+  seconds this run covers.
 - **Changes go through the row**, inside the query loop. The row writes to
   the system's own log, not the world, so it needs no lock, and the query
-  is iterated without `cx`, which stays free for logging and spawning.
+  is iterated without `cx`, which stays free for logging.
 - **The query's type says what its rows can change.** `row.insert(Health {
   .. })` on a walkers row is refused: `Health` isn't in its `Adds`. A
-  change no query declares needs an exclusive system.
+  change no query declares can't be made in a frame; between frames,
+  `cx.world()` makes any.
 - **The declaration is the signature.** `ignite` reads `Lava`, `Position`
-  and `Health`, and adds `Burning` to walkers; `burn` reads `Clock`, writes
-  `Health` and `Burning`, and removes `Burning`. `systems()` only places
-  them: phase, `after`, `before`.
+  and `Health`, and adds `Burning` to walkers; `burn` writes `Health` and
+  `Burning`, and removes `Burning`. `systems()` only places them: phase,
+  `after`, `before`.
 
 ### The frame
 
@@ -209,11 +228,17 @@ and why the choice is the component's.
 
 ### Iterating
 
-`walkers.iter()` walks every page of every table matching `(Position,
+`walkers.for_each` walks every page of every table matching `(Position,
 Health)`, skipping entities in `Burning`'s sparse set. Each page hands the
 mod plain `&[Position]` and `&[Health]` slices, in its own code, instead of a
-host call per entity. Data parallelism (step 3) adds a page-level form that
-hands whole pages to workers.
+host call per entity. A query of table components with no sparse filters
+(so not `walkers`) can also be walked a page at a time, `for_each_page`
+handing over the slices themselves, and split across the world's
+executor, which is data parallelism (step 3, get-znt.6):
+`par_for_each_page` and `par_for_each` cut the walk's pages into chunks of
+about equal rows, whole pages each, a task a chunk, and join the chunks'
+logs in walk order, so the changes are the ones a single walk would have
+made.
 
 [^inserts]: *(History, 2026-09-23.)* The first design declared structural
     changes as separate parameters, `Inserts<T>`, `Removes<T>`,
@@ -252,7 +277,7 @@ Hooks and message handlers use `cx.world()`, a direct view of the whole
 world (spawn, insert, remove, despawn, get, for_each) that exists only
 between frames, where the loader holds everything; in a frame, and so in a
 service called from a system, it's refused. Exclusive systems, which would
-get the same view inside a frame, are deferred.
+get the same view inside a frame, aren't built.
 
 ## Landing
 
@@ -287,7 +312,10 @@ sequential at `WORK=0`). Two bugs only real mods could show:
 - A **page** is the unit of borrowing: a task claims the pages it reads and
   writes, not whole components. An insert that appends to a table's last
   page conflicts only with whoever uses that page. Pages are also the unit
-  of data parallelism (step 3), so `par_for_each` hands out pages.
+  of data parallelism (step 3): `par_for_each` and `par_for_each_page`
+  hand each task a run of whole pages, the runs cut to about equal rows.
+  A page holds `PAGE_ROWS` (256) rows, or `SPATIAL_PAGE_ROWS` (16) in a
+  spatial table: the size is per table, chosen when it's made.
 - **Sparse-set storage** remains for components that come and go often
   (tags, short-lived state), where moving an entity between tables on every
   add and remove would cost more than it saves. A component chooses its
@@ -319,8 +347,17 @@ depends on interleavings needs model checking and luck.
 - **The unsafe core is type erasure.** The loader stores components it
   knows only as layouts and drop code from a mod's build, so a column of
   erased values, the page memory behind it, and turning a column into
-  `&[T]` / `&mut [T]` once a component's layout is checked, are unsafe. That
-  one module is all of it; every view above it is safe.
+  `&[T]` / `&mut [T]` once a component's layout is checked, are unsafe.
+  That is `erased.rs`, with `schema.rs` (migrating values as bytes), the
+  drop and default glue `component!` generates (`component.rs`) and
+  `world.rs`'s calls into them when it installs a layout. Beside them is
+  glue of the same kind, which reads a key through a raw pointer as the
+  build that declared it compiled it: `spatial.rs`'s bounds glue
+  (`__bounds`, `Extents::refs`) and `ordered.rs`'s key glue (`__key`).
+  The rest of the crate's `unsafe` is traits whose contract is the image
+  rule ([ecs.md](ecs.md#components): `Component`, `FieldType`, `Crossing`,
+  and `events.rs`'s `Event`): implementing one is a promise, not unsafe
+  code. Every view above all this is safe.
 - **Mods iterate pages directly**, as `&mut [T]`, in their own code (over the
   Rust ABI, which the one-compiler rule already allows), instead of calling
   `extern "C"` per entity. That also removes the biggest cost get-8in expects
@@ -334,10 +371,11 @@ trivially correct model, compared after every step:
 
 - **`world`**: spawns, inserts, removes and despawns through `Structural`
   (dead entities included, which every operation must ignore), keys and
-  heap values written in place, the re-sorts of an ordered table, and
-  migrations between two layouts of a component, back and forth, against a
-  map from entity to values. It checks every row's location, and an
-  ordered table's key order, as it goes.
+  heap values written in place, the re-sorts of ordered and spatial
+  tables they cause, and migrations between two layouts of a component,
+  back and forth, against a map from entity to values. It checks every
+  row's location, an ordered table's key order, and a spatial table's
+  order invariants, as it goes.
 - **`columns`**: `ErasedColumn`'s own operations, against vectors: moves
   between pages, drops, `drop_front`, `gather` into pages of any size,
   migrations by `schema::migrate`, ticks, and a `gather` given a wrong
@@ -396,13 +434,21 @@ Neither panic happens in the engine today (`Resort` builds a valid order;
 the migration glue doesn't unwind), but both are safe functions or
 documented contracts that a caller could meet.
 
-**Not covered:** the loader's `dlopen` paths and `engine/api` (Miri can't
-load a shared library, and the ECS is the only crate here with unsafe code
-of its own); the parallel executors beyond the scaled `spatial_test` and
-`page_test` cases (safe code, but Miri's race detector would see a wrong
-`Sync`); and the drop and default glue under unwinding, which can't
-happen: an `extern "C"` function that panics aborts, and `__drop` catches
-the panic first.
+**Not covered:**
+
+- **The engine's unsafe code outside `engine_ecs`:** the loader's
+  `dlopen` paths and poison mode (`poison.rs`), and `engine/api`'s FFI
+  (the load-time tables, raw `ModContext` pointers, the `Host` calls).
+  Miri can't load a shared library, so the loader's tiers, the reload
+  fuzzer and AddressSanitizer test them instead
+  ([hot-reload.md](hot-reload.md#how-reload-is-tested)). (The comparison
+  harnesses' FFI to the C and C++ engines is bench code, outside this.)
+- **The parallel executors** beyond the scaled `spatial_test` and
+  `page_test` cases (safe code, but Miri's race detector would see a
+  wrong `Sync`).
+- **The drop and default glue under unwinding**, which can't happen: an
+  `extern "C"` function that panics aborts, and `__drop` catches the
+  panic first.[^only-crate]
 
 Still planned: **the equivalence test** for the scheduler, pong and the
 platformer replayed under the parallel and sequential schedulers, frame by
@@ -417,7 +463,7 @@ a boxed closure per insert, a hash lookup of the set per change at the
 apply, and a walk of the whole set at every apply that took it, purging
 dead entries. `//engine/ecs:change_bench` measures each part.
 
-What the spike does, all of it safe Rust:
+What it does, all of it safe Rust:
 
 - **A system's sparse changes are logged as runs**: `Change::Sparse`
   holds a typed `Vec<(Entity, Option<T>)>` of one component's inserts
@@ -494,14 +540,21 @@ beyond the equivalence tests.
 
 ## Other open questions
 
-- **Page size**, and whether it's per table.
+- **Page size.** It is per table, chosen when the table is made:
+  `PAGE_ROWS` (256), or `SPATIAL_PAGE_ROWS` (16) for a spatial table.
+  What's open is the sizes, and whether a spatial table's should follow
+  its dimensions: 3D's broadphase measured 16% faster at 32 rows
+  ([spatial-storage.md, "In 3D"](spatial-storage.md#in-3d)).[^page-size]
 - **Spawned entity ids** under parallel execution: ids reserved by
   concurrent systems depend on timing unless reservations are given out
   per system in plan order.
 - **Service calls** from systems: the provider's footprint joins the
   caller's. Probably declared by the provider per service (see get-znt.5).
-- **Layout migration** after a reload becomes a task over the affected
-  tables, instead of happening on first access.
+- **Layout migration** after a reload happens when the load commits,
+  between frames, on the loader's thread, over every value of the
+  component (`World::install`; [ecs.md](ecs.md#layout-changes)). Whether
+  it should become a task over the affected tables, run beside other
+  work, is open.[^migration]
 - **Dense working sets** kept by storage for a system: proposed, and
   mostly not recommended, in [working-sets.md](working-sets.md).
 - **Contiguous columns**, each table column one block with pages as its
@@ -642,10 +695,40 @@ optimizations for later (get-znt.11), none of which changes the design:
 - table moves (`apply(ignite)`, 4,000 rows in 0.23 ms) clone the table's
   component list and look up guards in a `HashMap` per row.
 
-**Not done yet:** events as publish nodes (the same mechanism as apply
-nodes); exclusive systems and mod state conflicts.
+**Not done in the spike:** events as publish nodes (the same mechanism as
+apply nodes); exclusive systems and mod state conflicts. Since landing,
+a system's events are published by its apply node (an apply footprint's
+`events`, `graph.rs`), and two systems of one mod are ordered as
+conflicting, since both borrow its state; exclusive systems aren't
+built.
 
 [^landing]: *(History, 2026-09-23.)* Designed here as a draft, prototyped
     as `spike/ecs` (see [Spike results](#spike-results)), then landed as
     `engine/ecs`. The spike was removed once every test of it had moved
     over.
+
+[^commands]: *(History, 2026-10-04.)* This said free-form `cx.commands()`
+    was left to exclusive systems and to code outside a frame. `Cx::commands`
+    was removed when the ECS landed (5507a6f, 2026-09-23), `cx.world()`
+    taking its place between frames, and exclusive systems were never
+    built. "Walkthrough: walkers that catch fire" was also written against a draft API
+    (`Single<&Clock>`, `Query::iter`, systems without the transient
+    argument) and was rewritten against the real one the same day.
+
+[^only-crate]: *(History, 2026-10-04.)* This said Miri skips `engine/api`
+    because "the ECS is the only crate here with unsafe code of its own",
+    and "Where the unsafe is" called `erased.rs` "that one module". Both
+    were wrong: `engine/api` and the loader have unsafe code of their own,
+    and `engine_ecs`'s reaches past `erased.rs` (`schema.rs`, the
+    component glue, and the spatial and ordered key glue).
+
+[^page-size]: *(History, 2026-10-04.)* Listed here as "page size, and
+    whether it's per table" from the draft. It is per table: `world.rs`
+    picks it when it makes a table, by whether the table is spatial.
+
+[^migration]: *(History, 2026-10-04.)* This said migration happened "on
+    first access". Values migrate when a newer build's layout is
+    installed, which `load_batch` does for every component the batch's
+    builds declare as their load commits (`engine/loader/engine.rs`); a
+    component a build only reaches through `cx.world()` is installed on
+    that first use (ecs.md, "Layout changes").
