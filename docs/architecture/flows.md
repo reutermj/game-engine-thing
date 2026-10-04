@@ -45,9 +45,10 @@ restating them.
 - **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
   are parameters, and the kernels a system hands them are the only code
   that may run across threads. Stage 1 fixed their results on the
-  system's own thread; since stage 3 `Passes`, and `ParMap`'s
-  `for_each_mut`, reproduce them across the scheduler's threads, at any
-  count.
+  system's own thread; since stage 3 they reproduce them across the
+  scheduler's threads, at any count (`Passes` with stage 3, `ParMap` and
+  `Reduce` since get-znt.45 and get-znt.31). A system has no other way
+  to fan out.
 
 ## What a flow is, and isn't
 
@@ -336,11 +337,14 @@ nothing else: no footprint, no apply node.
 
 - **`ParMap`**: `map_into(items, min, out, f)` sets `out` to `f(i, item)`
   of each item, in the items' order, keeping `out`'s allocation;
-  `for_each_mut(items, min, f)` calls `f(i, &mut item)`, across threads
-  in blocks since get-znt.45 ([threads.md](threads.md#parmap-and-reduce)).
+  `for_each_mut(items, min, f)` calls `f(i, &mut item)`; both across
+  threads in blocks ([threads.md](threads.md#parmap-and-reduce)).
   `min` is the fewest items a task is worth. An item may be a part of
   the caller's making, runs of several arrays cut alike, so that one map
-  writes them all (physics's write-back, below).
+  writes them all (physics's write-back, below), or a chunk of work with
+  the list it fills (physics2d's broadphase and narrowphase). A query's
+  parallel walks take one (`Query::par_for_each(&map, make, f)` and its
+  page walks): the map is the walk's threads.
 - **`Reduce`**: `reduce(items, chunk, map, fold)` maps fixed chunks of
   `chunk` items and folds the results left to right, in the items' order.
   The chunks are the input's, not the threads', so a float sum is the
@@ -430,7 +434,10 @@ runs them is the scheduler's. That is the line get-znt.28 draws:
   is on a worker's stack once the node ends (get-znt.29's rule for hot
   reload);
 - **the system holds no pool.** Its parameters give it no way to start a
-  thread, and `Workers` goes once its users have moved (get-znt.31).
+  thread. (History: `Workers`, a parameter that declared nothing and
+  reached the executor, ran physics2d's broadphase, narrowphase and
+  gathers until get-znt.31 moved them onto `ParMap` and deleted it,
+  2026-10-03.)
 
 *Considered and not proposed:* a shape as a node of its own, the kernel
 registered when the system is declared and called by the scheduler after
@@ -448,8 +455,8 @@ Each shape's result is the same on any number of threads, by
 construction, and stage 1 fixes what that result is:
 
 - `ParMap` calls `f` once an item; its output is in the items' order.
-- `Reduce` folds `map(chunk)` results left to right in chunk order. Stage
-  3 may map chunks in any order but must fold in this one.
+- `Reduce` folds `map(chunk)` results left to right in chunk order. Across
+  threads it maps chunks in any order and folds in this one.
 - `Passes` runs stages in program order, and within an `Items` stage the
   overflow's block first and then each color's. The kernel must treat a
   block's items independently: how a color is cut into blocks is the
@@ -547,9 +554,9 @@ That is the result stage 3 must reproduce, and does: since stage 3
 (2026-10-03, [threads.md](threads.md)) `Passes` runs across the world's
 executor where it has more than one thread, and this path where it
 doesn't, or where the system says `serial` (get-znt.39); so does
-`ParMap::for_each_mut` since physics's write-back uses it (get-znt.45).
-`map_into` and `Reduce` stay on one thread until they have users
-(threads.md, "ParMap and Reduce").
+`ParMap::for_each_mut` since physics's write-back uses it (get-znt.45),
+and `map_into` and `Reduce` since get-znt.31 (threads.md, "ParMap and
+Reduce").
 
 `API_VERSION` goes up: `ParamDecl` gains `Flow` and `Shape`, the world a
 flow store, and `Declarations` the flows a build uses.
@@ -581,8 +588,8 @@ Each tier proves what the others can't (CLAUDE.md):
 - **Stage 3** adds what only threads can show: `Passes` bit for bit at 1
   to 8 threads, at once, late and one by one, on test executors
   (`flow_test`) and on the real pool (`//engine/std/threads:pool_test`),
-  and `ParMap::for_each_mut`'s every item once at its index the same
-  ways; the mods held to one thread across it (threads.md,
+  and `ParMap`'s and `Reduce`'s every item (or chunk) once, in order,
+  the same ways; the mods held to one thread across it (threads.md,
   "Determinism").
 
 ## Physics's adoption (stage 2)
@@ -663,7 +670,7 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
   "Measured"). With no shape run across threads the solve takes its
   one-thread time (5327 against 1415 settled), and the step loses what
   the solve gained. The broadphase and
-  narrowphase still split across `Workers` (get-znt.31). (History:
+  narrowphase split on the host's threads then, a `ParMap` since get-znt.31. (History:
   `solver_bench`'s `THREADS` and the comparison's `rot/threads=<n>` timed
   `solve_across` on arrays until stage 3 removed it, 2026-10-03.)
 - **The batch fill stayed in `prepare`**, then: moving it into the
@@ -701,7 +708,9 @@ scatter_bodies   Take<Bodies> -> world
   (get-emj.75).
 - **No sleeping, sides or events** in 3D, so `scatter_bodies` writes
   bodies alone, and the contacts are taken by `scatter_contacts`.
-- **No `Workers`** to remove: 3D never had them.
+- **Nothing to move onto shapes** (get-znt.31): 3D never split its step. Its
+  `Live` broadphase found afresh is split across the world's threads
+  since then, as 2D's was.
 
 **Bit for bit.** Every value of both baselines printed as it was (100
 default, 94 long, `baseline -- --all`, diffed whole), and the reload

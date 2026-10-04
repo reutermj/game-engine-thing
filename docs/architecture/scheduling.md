@@ -261,11 +261,10 @@ The four steps, of which this document is the first:
    `try_lock`, so a scheduler bug is a failed frame, never a data race.
 3. **Data parallelism.** `par_for_each` over a query's chunks, with a
    restricted task context. Prototyped (2026-09-24) and measured on the
-   physics step: `Workers`, a parameter that declares nothing and reaches
-   the executor the host installed in the world; `Query::par_for_each`
-   and its page walks, whose chunks' changes join in walk order; a task
-   context of just its chunk, so no spawns or events from tasks yet. What
-   it showed, and who owns the threads:
+   physics step: `Query::par_for_each` and its page walks, whose chunks'
+   changes join in walk order, across the executor the host installed in
+   the world; a task context of just its chunk, so no spawns or events
+   from tasks yet. What it showed, and who owns the threads:
    [physics.md](physics.md#parallelism). The physics solver's passes are
    split this way too, a stage at a time within one run
    ([physics.md](physics.md#solving-across-threads)): tasks of a run may
@@ -274,8 +273,10 @@ The four steps, of which this document is the first:
    Since get-znt.28 a system declares its parallel work as a shape
    ([flows.md](flows.md#parallel-shapes)) and the scheduler runs it; the
    host's pool and the shapes' dispatch across it are built
-   ([threads.md](threads.md), 2026-10-03), and `Workers` reaches the same
-   pool until get-znt.31 retires it.
+   ([threads.md](threads.md), 2026-10-03), and a query's walks take the
+   system's `ParMap` for their threads. (History: they took `Workers`, a
+   parameter that declared nothing, until get-znt.31 deleted it,
+   2026-10-03.)
 4. **Pipeline parallelism.** The next frame's simulation during this
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.

@@ -108,7 +108,7 @@ in six.
 | sleeping: the tables, what wakes an island, falling asleep, `load` | `lib.rs` (`wake_by_games`, `move_woken`, `wake_on_statics`, `fall_asleep`, `resolve`, the queries) | ~300 | (a), written against 2D's components |
 | layers, sensors, overlaps and `Trigger`; the contacts' write-back (impulses, pressing, sleep links, `Contact`, `Touching`) | `lib.rs` (`collides`, `senses`, `awake`, the overlap merge, `wrote`) | ~260 | (a), but for `Touching`'s four sides |
 | the contact merge with the world, serial and across workers | `lib.rs` | 86 | (a) |
-| `Slots`, mod state, timings, messages, systems, the `Contacts` relation and its pairs, the `Gang` for `Workers` | `lib.rs` | ~200 | (a), a pattern both repeat |
+| `Slots`, mod state, timings, messages, systems, the `Contacts` relation and its pairs, the broadphase and narrowphase chunks (`chunks`) | `lib.rs` | ~200 | (a), a pattern both repeat |
 | gathering bodies and colliders, writing bodies back, `meet`, `item` | `lib.rs` | ~275 | (b) |
 | settings: `Params`, `Closing` (with its formula), `Carry`, `Wide`, the constants | `solver.rs` | 113 | (a) |
 | entry points (`solve_with`, `solve_across`) | `solver.rs` | 59 | (a) |

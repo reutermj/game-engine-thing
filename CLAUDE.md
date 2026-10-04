@@ -103,15 +103,18 @@ changing the ABI, the reload sequence or the Bazel rules.
     check the loader's `schedule.rs` runs. Both physics mods' solves are
     pipelines of flows (each one's `pipeline.rs`). See
     [docs/architecture/flows.md](docs/architecture/flows.md).
-  - `shape.rs` — parallel shapes, the form a system's parallel work takes
-    once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a
-    program of stages over items in colors, its kernels handed the states
-    plain on one thread and shared on several, `States`), parameters the
-    scheduler runs across threads (`Passes` and `ParMap::for_each_mut` do;
-    `Reduce` and `ParMap::map_into` stay on one until they have users).
-    Both physics solves' passes are `Passes` programs, and their
-    write-backs a `ParMap` over parts (each one's `pipeline.rs`).
-  - `dispatch.rs` — the task graph `Passes` runs across the world's
+  - `shape.rs` — parallel shapes, the only way a system's work fans out:
+    `ParMap`, `Reduce` and `Passes` (a program of stages over items in
+    colors, its kernels handed the states plain on one thread and shared
+    on several, `States`), parameters the scheduler runs across the
+    world's threads on `dispatch`. Both physics solves' passes are
+    `Passes` programs, their write-backs a `ParMap` over parts (each
+    one's `pipeline.rs`), and physics2d's gathers, broadphase and
+    narrowphase a `ParMap` (`Query::par_for_each` takes one).
+  - `par.rs` — the `Executor` trait the host's pool implements, `Scoped`,
+    and the crate-private `Split` the ECS's own work inside a node (a
+    `Live`'s broadphase, `near_pairs`, a re-sort's re-bounding) runs on.
+  - `dispatch.rs` — the task graph every shape runs on across the world's
     executor: stages of blocks claimed from each thread's share, published
     by whoever completes the stage before, no main thread, a kernel's
     panic raised on the caller. Safe Rust. See
@@ -158,7 +161,8 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/std/` — the mods the engine ships, which `engine_game` uses by
   default: `realtime` (the frame loop in real time) and `lockstep` (frames
   only when sent `step N`), both resident bootstraps; `clock` (the `Clock`
-  both publish); `sequential`, the default scheduler; `threads`, resident,
+  both publish); `sequential`, the default scheduler (`time on` times each node, what
+  the step_benches break a step down by); `threads`, resident,
   the scheduler's thread pool (rayon pinned to one CCD with
   core_affinity, installed as the world's executor and loaded first; its
   library `:pool` for benches and tests;

@@ -648,14 +648,16 @@ are get-emj.30's answer.
 
 **What's built.** In `engine_ecs`:
 
-- **`Executor`**, a trait for running tasks on threads, and **`Workers`**, a
-  system parameter that declares nothing (as `Dt` doesn't) and hands out
-  the executor installed in the world with `World::set_executor`, between
-  frames, by whoever owns the threads. Without one, everything runs on the
-  system's thread. `Scoped` is an executor that spawns its threads per run.
-- **`Query::par_for_each`, `par_for_each_page`, `par_for_each_ordered_page`**:
+- **`Executor`**, a trait for running tasks on threads, installed in the
+  world with `World::set_executor`, between frames, by whoever owns the
+  threads; a system reaches it only through a declared shape, `ParMap`
+  here ([flows.md](flows.md#parallel-shapes)). Without one, everything
+  runs on the system's thread. `Scoped` is an executor that spawns its
+  threads per run.[^workers]
+- **`Query::par_for_each`, `par_for_each_page`, `par_for_each_ordered_page`**,
+  each taking the system's `ParMap`:
   the walk cut into chunks of about equal rows, a few per thread, each a
-  task holding runs of whole pages of every term (so the split costs the
+  block of the map holding runs of whole pages of every term (so the split costs the
   calling thread a cut per run, not per page). `make` is called on the
   calling thread for each chunk, with the rows it covers, to make what its
   task fills (see [lore](../lore/memory-a-task-allocates-is-its-threads.md)).
@@ -664,7 +666,7 @@ are get-emj.30's answer.
   (tested: `page_test`). The ordered walk takes at most one ordered table:
   two are merged by key, in runs within pages, and a page can't be two
   tasks'.
-- **`near_pairs_with`**: the active sweep in ranges of pages, the passive
+- **`near_pairs`**, across the sides' world's threads: the active sweep in ranges of pages, the passive
   side in ranges of its runs, each task's pairs already split by range of
   lesser entity index, then each range sorted by a task and turned into
   entities into its piece of the output (tested against one thread and
@@ -673,7 +675,7 @@ are get-emj.30's answer.
   executor and the table has about 2000 rows or more; moving rows, splits
   and merges stay on one thread (tested: `spatial_test`).
 
-In the physics mod, each stage takes the parallel path when its `Workers`
+In the physics mod, each stage takes the parallel path when its `ParMap`
 has more than one thread and nothing sleeps (waking looks sleeping bodies
 up as pairs are found); `physics2d_test` runs a 600-body pile, sensing and
 touching, on four threads against one. `:tax -- parallel` measures both
@@ -1316,7 +1318,7 @@ colors (7).
   so it's the scheduler's workers (get-znt.5) with a data-parallel job
   (step 3 of [scheduling](scheduling.md#toward-parallelism)): run this
   closure on N workers, with a barrier they share. `engine_ecs::Executor`
-  and `Workers` ([Parallelism](#parallelism)) are that job's shape without
+  and `Workers` (then; [Parallelism](#parallelism)) were that job's shape without
   the barrier: the solve needs every worker at once, where they run tasks
   in any order. Those workers need to
   be placed on one CCD (the numbers above are pinned; unpinned they're
@@ -4655,8 +4657,8 @@ mod's rayon pool, kept, pinned to one CCD and warm, is every game's
 executor. What follows is what the solver measured before it, and why
 the pool is shaped as it is.
 
-The threads are the host's: `Workers` reaches whatever executor the world
-has. In the engine that was nothing then: `engine_ecs` has only `Scoped`,
+The threads are the host's: `Workers` (then) reached whatever executor
+the world had. In the engine that was nothing then: `engine_ecs` has only `Scoped`,
 threads spawned for each run, because keeping threads that run a borrowed
 closure takes unsafe code whose soundness depends on concurrency
 ([Parallelism](#parallelism)); the benchmarks use `tests/pool.rs`'s kept
@@ -5340,3 +5342,11 @@ frame 508.
     blocks no start, as Box2D does; either can leave a stage waiting on a
     block nobody takes, and the second hung the determinism test
     ([lore](../lore/a-stage-loop-without-a-main-thread-must-let-any-thread-take-any-block.md)).
+
+[^workers]: *(History, 2026-10-03, get-znt.31.)* `Workers`, a system parameter that
+    declared nothing (as `Dt` doesn't) and handed out the world's
+    executor, was deleted once its users had moved onto `ParMap`
+    (physics2d's gathers, broadphase and narrowphase) and the ECS's own
+    crate-private split (`near_pairs`, a `Live`'s broadphase, the
+    re-sort's re-bounding). A system had used it to fan out without
+    declaring it, which get-znt.28 ruled out.

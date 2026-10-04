@@ -854,7 +854,7 @@ ms against 31.5-32.3, most of it the solver; Rapier's 13.4 and Box3D's
   Box2D and Rapier show 0 there because their narrowphase does the same
   test on every fat pair (Box2D's `b2Collide`), and ours needs exact pairs
   for its cheaper narrowphase. The walk and the tests split by range would
-  go across threads as `near_pairs_with` does; not done.
+  go across threads as `near_pairs` does; not done.
 - **Falling pays a little.** In `:tax` at 10 000 falling (three
   alternated runs of each, both piles) the broadphase is 128-134 µs against
   120-126 before, and the frame the same (870-889 against 871-883). It

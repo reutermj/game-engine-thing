@@ -2,7 +2,8 @@
 
 **Status: built** (2026-10-03; get-znt.29, the design; get-znt.20, the
 pool; get-znt.34, shapes run across it; get-znt.39, the one-thread
-guard; get-znt.40, the solves' batches filled across it). The running
+guard; get-znt.40, the solves' batches filled across it; get-znt.31,
+every split on a shape or the ECS's own). The running
 engine has threads: a resident mod, `threads`
 (`engine/std/threads`), keeps a rayon pool on one CCD and installs it as
 the world's executor, and `Passes::run` hands a program's stages out
@@ -35,9 +36,11 @@ solves are: [physics.md](physics.md#solving-across-threads).
 - **Warm for a millisecond:** after a dispatch a worker spins that long
   for the next before rayon parks it: at none, the settled pile's passes
   took 1.8 times as long at 8 threads, at 5 ms 3% less than at 1.
-- **`Passes` runs across threads; `ParMap` and `Reduce` don't** (no system
-  uses them yet). `Workers` reaches the same pool until get-znt.31
-  retires it.
+- **Every shape runs across threads**, on one dispatch: `Passes` a stage a
+  color or pass, `ParMap` and `Reduce` one stage of blocks. A system has
+  no other way to fan out (get-znt.31 removed the last); the ECS's own
+  work inside a node (`near_pairs`, a `Live`'s broadphase, the re-sort's
+  re-bounding) splits on the same dispatch, crate-private (`Split`).
 - **Bit for bit** at 1, 2, 4 and 8 threads: both baselines, short and
   long, byte-identical to before; the 3D fingerprint; pong's and the
   platformer's replays.
@@ -259,7 +262,8 @@ sends such a step to its sweep (`in_order`), on one thread.
 A kernel's panic is caught on the thread it happened on, ends the other
 workers' waits, and is raised again on the calling thread when the
 dispatch returns, where the system's mod catches it as it would any.
-`Workers::run` does the same for its tasks. It never unwinds through the
+Every split is a dispatch, so the same holds for all of them. It never
+unwinds through the
 executor: the pool's code is another library's, with another copy of std,
 and std's `catch_unwind` aborts the process on a panic from another copy
 (read in std's source, `panic_unwind/src/gcc.rs`: an exception whose
@@ -278,23 +282,32 @@ each a run of several arrays (physics.md, "The write-back across
 threads"). An empty map's dispatch costs about 3 µs at 8 threads (an
 extra one in physics2d's `finish`, the settled pile: 31 µs against 28).
 
-`map_into` and `Reduce` stay on the system's thread. No system declares
-either yet: the broadphase's and narrowphase's splits, their natural
-users, still go through `Workers` until get-znt.31 moves them, so there
-are no sizes to measure them at. Across threads `map_into` needs room for
-its results before the run (`R: Default`) or a vector a block, and
-`Reduce` its fixed chunks mapped in a stage and folded in order after.
+**`map_into` and `Reduce` run across threads** (get-znt.31,
+2026-10-03), each a plan of one stage on the same dispatch. `map_into`
+cuts the items into blocks as `for_each_mut` does, each block's results
+into a list of its own made on the system's thread with room for them
+(memory a worker allocates is its thread's:
+[lore](../lore/memory-a-task-allocates-is-its-threads.md)), moved into
+`out` in block order after; `Reduce` maps its fixed chunks in blocks of
+consecutive chunks, at most four a thread, and folds the results on the
+system's thread in chunk order. Neither has a user yet: physics2d's
+broadphase and narrowphase, the splits they were meant for, fill lists
+the system makes before the run, each chunk an item of `for_each_mut`
+with its own lists, which keeps their allocations on the system's thread
+and their chunking what it was.
 
-### `Workers`, until get-znt.31
+### The ECS's own splits
 
-The same pool: `Workers::run(tasks, f)` is `Executor::run`, whose tasks the
-pool hands out as `Scoped` did, each thread its own first and then from a
-counter, so rayon only starts the workers. In the running engine that puts
-physics2d's broadphase, narrowphase and merge, and the spatial re-sort's
-re-bounding, on threads too, all of it bit for bit by the chunking that was
-already tested against one thread. There is one pool for everything, as
-parallel-relations.md's "(d) The host pool" asked: two would oversubscribe
-the cores.
+Work the ECS does inside a declared node splits across the same pool
+through `Split` (`par.rs`, crate-private): `near_pairs` (and so a
+`Live`'s broadphase when it finds its pairs afresh), a query's parallel
+walks (which take the system's `ParMap`), and the spatial re-sort's
+re-bounding at an apply node. Each is one stage of blocks, an item a
+block, each thread taking its own share first, on the same dispatch
+(get-znt.31; until then each a run of the executor, tasks from a shared
+counter). They declare nothing: the scheduler seeing them is get-znt.5.
+There is one pool for everything, as parallel-relations.md's "(d) The
+host pool" asked: two would oversubscribe the cores.
 
 ## Hot reload
 
@@ -332,10 +345,11 @@ values in any order. Proved here by:
 
 - **Unit:** `Passes` on threads that come at once, late and one by one, at
   1 to 8, against one thread (`flow_test`); on the real pool at 1, 2, 4
-  and 8, warm and cold (`pool_test`); `ParMap::for_each_mut` the same
-  ways, every item once at its own index, the calling thread among its
-  takers; the dispatch's every block once and each stage after its
-  predecessor (`dispatch.rs`'s tests).
+  and 8, warm and cold (`pool_test`); `ParMap::for_each_mut` and
+  `map_into` and `Reduce` the same ways, every item (or chunk) once at
+  its own index, results in order and a fold in chunk order, the calling
+  thread among the takers; the dispatch's every block once and each stage
+  after its predecessor (`dispatch.rs`'s tests).
 - **The mods:** `quality_test`'s
   `the_mod_across_threads_is_the_arrays_bit_for_bit` (2D's mod on the pool
   at 1 to 16 threads and one by one, against the arrays' one-thread solve);
@@ -364,7 +378,8 @@ each (both rounds below, or their range), the median of 5 runs (3D: 3),
 each a fresh engine stepped to the window and timed over 30 steps. The
 new runs without `taskset`: the pool pins itself. The old runs as it was
 documented, under `taskset -c 0-7`, its `THREADS=8` a kept pool of its own
-for `Workers` alone (its passes on one thread). Other agents' builds
+for the broadphase's and narrowphase's splits alone (its passes on one
+thread). Other agents' builds
 shared the machine (load averages 2 to 7 between runs); every number
 below repeated within 6% across rounds but 3D's settled boxes at 8
 threads, whose passes read 2822 and 3509.
@@ -382,13 +397,13 @@ threads, whose passes read 2822 and 3509.
   within 1% (the plain path, unchanged), but for the pile not turning, 3%
   slower (2737 against 2659-2709 µs of solve; not chased).
 - **Eight threads more than halve a turning step**, where the old
-  engine's 8 gained only what `Workers` gave (10 to 12%): the passes run
+  engine's 8 gained only what those splits gave (10 to 12%): the passes run
   4.8 to 5.3 times as fast as one thread's, the spike's 5.5 (its affine
   passes 651 µs settled, 426 on the pyramid; here 789 and 455, the step's
   own cache traffic around them). The rest is serial: `prepare` (568 µs
   settled, unchanged from one thread), the gathers and write-backs.
 - **Nothing turning gains nothing**: that step is solved one contact at a
-  time in pair order, and its `Workers` splits were already the old
+  time in pair order, and its splits were already the old
   engine's (3230 against 3142-3188, the new pool's dispatch a little
   dearer than the bench's old one for these small splits).
 
@@ -419,6 +434,116 @@ settled). Where the OS put it wasn't sampled; another CCD is the likely
 reading. Pinned by the pool (`pin_caller`), the step is level with
 `taskset` (2899-2927 against 2901-2913 settled, 1787-1797 against
 1797-1805 on the pyramid).
+
+### Every split on a shape (get-znt.31)
+
+`step_bench`, 2D and 3D, `--config=bench`, the df23813 tree and this one
+(their step_benches and `sequential` alike, the breakdown below added to
+both) alternated over two rounds, the pool pinning itself, nothing else
+building (load averages 2.8 to 9.5, falling, other agents' Bazel servers
+idle). µs a step, both rounds; 2D the median of 5 runs, 3D of 3.
+
+| case | old, 1 | new, 1 | old, 8 | new, 8 |
+|---|---|---|---|---|
+| 2D pile 10 000 turning, settled | 6786-6853 | 6831-6841 | 2428-2462 | 2370-2385 |
+| 2D pyramid 5050 turning | 4383-4421 | 4379-4397 | 1486-1487 | 1446-1462 |
+| 2D pile 10 000 turning, falling | 1081-1116 | 1107-1113 | 801-804 | 789-798 |
+| 2D pile 10 000 not turning, settled | 3364-3367 | 3362-3377 | 3254-3271 | 3233-3257 |
+| 3D boxes 10 000, settled | 21 421-21 599 | 21 519-21 948 | 6827-7731 | 6833-6837 |
+| 3D boxes 10 000, falling | 23 728 | 23 199-24 309 | 11 285-11 401 | 9382-9448 |
+| 3D planks 1000, settled | 3045-3072 | 3059-3074 | 1152-1165 | 1156 |
+
+- **2D at 8 threads, 1 to 3% faster**, from the narrowphase (settled
+  275-282 µs → 250-260, the pyramid 240-241 → 216-230) and the merge
+  (33-36 → 30): the same chunks, each thread now taking its own share
+  first (dispatch-spike.md) where `Executor::run` handed tasks out from a
+  shared counter. The pile not turning, get-znt.44's case, gains 0.5%:
+  the small dispatches cost no more than before.
+- **3D's falling boxes, 17% faster at 8**: `Live`'s broadphase, found
+  afresh while the pile falls, now splits across the threads as 2D's did
+  (1164-1166 µs → 355-358), and the passes after it take 3740-3819
+  against 4880-4919, the workers kept warm by the broadphase's dispatch
+  where 4.6 ms of serial `find_contacts` had let them park (inferred from
+  "Warmth", not measured apart). Settled, the pairs are kept, and nothing
+  moves.
+- **Bit for bit**, by the chunking kept: at `ENGINE_THREADS` 1, 2, 4 and
+  8 both baselines, default and long (`baseline -- --all`, `-- --long
+  --all`), byte-identical to df23813's (232, 229, 104 and 98 lines); the
+  3D fingerprint as pinned; the exact and equivalence tests and pong's
+  and the platformer's replays pass at each count.
+- **One thread is level** within the runs' spread (2D's falling pile
+  1081-1116 against 1107-1113, 3D's boxes 21 421-21 599 against
+  21 519-21 948).
+- **Unexplained, kept as measured:** 2D's `gather_contacts` 291-297 µs →
+  267-270 on the settled pile at both counts, and `scatter_bodies`
+  139-146 → 153-155 on one thread; neither's code changed.
+
+### The whole step, stage by stage
+
+The same runs, the new tree: each stage µs a step at 1 / 8 threads (its
+share of the step at 8), the mean of the two rounds' medians, from the
+mod's own timers (`stages`) inside `find_contacts` and the scheduler's
+(`sequential`'s `time on`) for each node, apply nodes included. A
+median of each stage, so the stages needn't add to the step exactly.
+
+**2D**
+
+| stage | pile settled | pyramid | pile falling | pile not turning | |
+|---|---|---|---|---|---|
+| gravity (`integrate_velocities`) | 27 / 23 (1%) | 14 / 16 (1%) | 25 / 21 (3%) | 24 / 23 (1%) | split (`ParMap` walk), no gain |
+| colliders gathered | 87 / 92 (4%) | 39 / 49 (3%) | 85 / 86 (11%) | 55 / 64 (2%) | split (`ParMap` walks), no gain |
+| broadphase: `Live` kept pairs | 185 / 182 (8%) | 75 / 77 (5%) | 155 / 106 (13%) | 114 / 114 (4%) | serial (afresh: split) |
+| broadphase: pairs to slots | 68 / 19 (1%) | 39 / 11 (1%) | 3 / 3 (0%) | 44 / 17 (1%) | scales: `ParMap` |
+| narrowphase | 942 / 255 (11%) | 824 / 223 (15%) | 39 / 18 (2%) | 208 / 131 (4%) | scales: `ParMap` |
+| merge with the world | 133 / 30 (1%) | 83 / 22 (2%) | 9 / 11 (1%) | 62 / 28 (1%) | scales: a `ParMap` walk |
+| rest of `find_contacts` (overlaps, waking) | 13 / 11 (0%) | 6 / 8 (1%) | 7 / 8 (1%) | 6 / 8 (0%) | serial |
+| apply(find_contacts): contacts spawned, despawned | 47 / 46 (2%) | 0 / 0 (0%) | 43 / 43 (5%) | 0 / 0 (0%) | serial |
+| gather_bodies | 54 / 51 (2%) | 24 / 26 (2%) | 47 / 50 (6%) | 46 / 50 (2%) | serial |
+| gather_turning | 95 / 92 (4%) | 36 / 37 (3%) | 71 / 69 (9%) | 1 / 1 (0%) | serial |
+| gather_contacts | 267 / 270 (11%) | 190 / 194 (13%) | 12 / 12 (2%) | 82 / 84 (3%) | serial |
+| prepare (coloring, seating) | 121 / 122 (5%) | 73 / 77 (5%) | 36 / 42 (5%) | 0 / 0 (0%) | serial |
+| passes (fill and solve) | 4200 / 818 (34%) | 2702 / 507 (35%) | 297 / 126 (16%) | 0 / 0 (0%) | scales: `Passes` |
+| finish (write-back; not turning: the whole solve) | 134 / 29 (1%) | 80 / 22 (1%) | 15 / 10 (1%) | 2509 / 2523 (78%) | scales: `ParMap` (not turning: serial) |
+| scatter_contacts | 156 / 155 (7%) | 90 / 93 (6%) | 12 / 12 (1%) | 83 / 83 (3%) | serial |
+| scatter_bodies | 154 / 138 (6%) | 53 / 57 (4%) | 86 / 99 (12%) | 48 / 51 (2%) | serial |
+| apply(scatter_bodies): the re-sort | 146 / 33 (1%) | 50 / 23 (2%) | 153 / 66 (8%) | 81 / 60 (2%) | re-bounding split, moves serial |
+| everything else (other nodes, outside them) | 11 / 11 (0%) | 9 / 11 (1%) | 12 / 12 (2%) | 5 / 6 (0%) | serial |
+| **whole step** | 6836 / 2377 (100%) | 4388 / 1454 (100%) | 1110 / 793 (100%) | 3370 / 3245 (100%) |  |
+
+**3D**
+
+| stage | boxes settled | boxes falling | planks settled | |
+|---|---|---|---|---|
+| gravity (`integrate_velocities`) | 53 / 43 (1%) | 53 / 46 (0%) | 3 / 3 (0%) | serial |
+| colliders gathered | 381 / 353 (5%) | 376 / 353 (4%) | 42 / 42 (4%) | serial |
+| broadphase (`Live`) | 320 / 300 (4%) | 1175 / 357 (4%) | 40 / 37 (3%) | kept: serial; afresh: split |
+| narrowphase | 1796 / 1773 (26%) | 2859 / 2894 (31%) | 307 / 299 (26%) | serial |
+| merge with the world | 166 / 163 (2%) | 194 / 195 (2%) | 18 / 18 (2%) | serial |
+| rest of `find_contacts` | 7 / 17 (0%) | 10 / 24 (0%) | 3 / 4 (0%) | serial |
+| apply(find_contacts): contacts spawned, despawned | 19 / 20 (0%) | 729 / 729 (8%) | 0 / 0 (0%) | serial |
+| gather_bodies | 108 / 105 (2%) | 131 / 123 (1%) | 7 / 8 (1%) | serial |
+| gather_contacts | 301 / 311 (5%) | 295 / 303 (3%) | 46 / 55 (5%) | serial |
+| prepare (coloring, seating) | 270 / 271 (4%) | 285 / 280 (3%) | 32 / 33 (3%) | serial |
+| passes (fill and solve) | 17690 / 3164 (46%) | 16950 / 3780 (40%) | 2502 / 611 (53%) | scales: `Passes` |
+| finish (write-back) | 133 / 29 (0%) | 127 / 31 (0%) | 21 / 7 (1%) | scales: `ParMap` |
+| scatter_contacts | 59 / 54 (1%) | 55 / 50 (1%) | 11 / 7 (1%) | serial |
+| scatter_bodies | 186 / 147 (2%) | 191 / 156 (2%) | 10 / 10 (1%) | serial |
+| apply(scatter_bodies): the re-sort | 243 / 72 (1%) | 272 / 97 (1%) | 20 / 20 (2%) | re-bounding split, moves serial |
+| **whole step** | 21734 / 6835 (100%) | 23754 / 9415 (100%) | 3066 / 1156 (100%) |  |
+
+- **2D's serial stages over 5% at 8 threads**: the contacts gathered for
+  the solve (11-13% turning), `Live`'s kept pairs (5-13%), writing the
+  contacts and the bodies back (6-7% and 4-12%), `prepare` (5%); while
+  falling also the bodies' and their turning's gathers (6% and 9%), the
+  contacts spawned at `find_contacts`' apply node (5%), and the re-sort's
+  moves (8%). The colliders' gathers and gravity split but don't gain:
+  memory-bound walks whose chunks are joined by a copy on the system's
+  thread.
+- **3D's narrowphase is a quarter to a third of its step**, on one thread
+  (3D never split it); its colliders' and contacts' gathers are 4-5%, its
+  contacts spawned while falling 8%.
+- **The pile not turning is its solve** (78%), one contact at a time in
+  pair order, which no shape splits without moving results.
 
 **A busy core.** One process spinning on CPU 3, one of the pool's: the
 pyramid's passes 455-459 → 536-543 µs pinned (+18%), the step 1774-1778

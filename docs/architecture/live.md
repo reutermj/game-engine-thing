@@ -80,7 +80,8 @@ fn find_contacts(_: &mut Cx, /* the queries it reads data through */ mut near: L
 ```
 
 That is the 2D physics mod's relation (`engine/std/physics2d/lib.rs`), which
-finds its pairs across workers: `near.pairs_with(&workers)`.
+finds its pairs afresh across the world's threads when it does, as
+`near_pairs` does (get-znt.31; `pairs_with(&workers)` until then).
 
 **The names.** The two halves are named apart on purpose. `Proximity` is
 the *kind* of relation, and it is spatial: pairs of rows of one spatial
@@ -503,7 +504,7 @@ the natural way to consume the result.
 ### 7. Across threads
 
 The walk over changed pages and the candidate tests both split by range,
-as `near_pairs_with` already splits the fresh search. Not done, and part
+as `near_pairs` already splits the fresh search. Not done, and part
 of parallelism's open work (get-znt.5).
 
 ## What's left
