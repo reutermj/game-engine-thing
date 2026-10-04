@@ -12,7 +12,9 @@ game: each is linked only into a comparison bench
 (`//engine/std/physics2d/compare` for 2D, `//engine/std/physics3d/compare`
 for 3D), so our own solvers can be measured against established ones on
 identical scenes. Flecs, EnTT, Bevy, Unity Physics and Timely Dataflow,
-last, were read for the ECS's design, and aren't built at all.
+last, were read for the ECS's design, and aren't built at all. wgpu,
+winit, tiny-skia, pollster and bytemuck, at the end, are linked only by
+the presentation spike's manual targets (`//spikes/presentation`).
 
 Where the notices live: every library's license text is in its fetched
 source (Bazel's external repository for it), or committed or fetched
@@ -637,6 +639,63 @@ one would have to ship those files with it.
 - **Linked with it:** `libc` 0.2.190 and `num_cpus` 1.17.0 (Sean
   McArthur), MIT or Apache-2.0; their MIT texts are kept beside the
   others in `engine/std/threads/licenses/`.
+
+## wgpu
+
+- **Project:** wgpu, "Cross-platform, safe, pure-rust graphics API":
+  `wgpu`, `wgpu-core`, `wgpu-hal` and `wgpu-types` 30.0.1, and the shader
+  translator `naga` 30.0.1. <https://wgpu.rs>,
+  <https://github.com/gfx-rs/wgpu>
+- **Authors:** "gfx-rs developers" (`Cargo.toml`).
+- **License:** MIT or Apache-2.0 (`Cargo.toml`: "MIT OR Apache-2.0";
+  `LICENSE.MIT`, `LICENSE.APACHE`).
+- **What for:** the GPU presenter of the presentation spike
+  (`//spikes/presentation`, get-3hd.1;
+  [presentation-spike.md](architecture/presentation-spike.md)), Vulkan
+  only (`vulkan`, `wgsl`, `std`, `parking_lot`; no GLES, DX12, Metal or
+  WebGPU), and the stack presentation.md (D10) proposes.
+- **Linked with it:** `ash` 0.38.0 (Maik Klein, Benjamin Saunders, Marijn
+  Suijten and others; MIT or Apache-2.0), which loads `libvulkan.so.1`
+  with `dlopen`; `gpu-allocator` 0.28.0 (Traverse Research; MIT or
+  Apache-2.0); `parking_lot` 0.12.5 (Amanieu d'Antras; MIT or
+  Apache-2.0); and their own dependencies, as `Cargo.lock` lists them.
+- **Notice:** the spike's targets are manual and never leave this
+  machine, so they don't carry the license texts in their runfiles as
+  the `threads` mod does; the presenter that lands (M1, get-3hd.3) must.
+
+## winit
+
+- **Project:** winit, "Cross-platform window creation library": `winit`
+  0.30.13, X11 only (`x11`, `rwh_06`). <https://github.com/rust-windowing/winit>
+- **Authors:** "The winit contributors", Pierre Krieger (`Cargo.toml`).
+- **License:** Apache-2.0 (`Cargo.toml`, `LICENSE`).
+- **What for:** the spike's platform mod's window and event loop, pumped
+  once a frame (`pump_app_events`) rather than run
+  ([presentation-spike.md](architecture/presentation-spike.md), "The
+  loop").
+- **Linked with it:** `x11-dl` 2.21.0 (daggerbot, Erle Pereira, AltF02 and
+  others; MIT), `x11rb` 0.13.2 (Uli Schlachter, Eduardo Sánchez Muñoz,
+  notgull; MIT or Apache-2.0) and `xkbcommon-dl` 0.4.2 (Francesca
+  Frangipane; MIT), which load libX11, libxcb and libxkbcommon with
+  `dlopen`.
+
+## tiny-skia
+
+- **Project:** tiny-skia 0.12.0, "A tiny Skia subset ported to Rust".
+  <https://github.com/linebender/tiny-skia>
+- **Author:** Yevhenii Reizner (`Cargo.toml`); `LICENSE` reads "Copyright
+  (c) 2011 Google Inc. All rights reserved. Copyright (c) 2020 Yevhenii
+  Reizner All rights reserved."
+- **License:** BSD-3-Clause.
+- **What for:** the spike's measure of the deterministic pixel presenter
+  (D3), `//spikes/presentation:skia_bench`, with `std` and `simd` (no PNG).
+
+## pollster and bytemuck
+
+- **pollster** 0.4.0 (Joshua Barretto; MIT or Apache-2.0), to block on
+  wgpu's adapter and device futures; **bytemuck** 1.25.2 with
+  `bytemuck_derive` 1.12.1 (Lokathor; Zlib, Apache-2.0 or MIT), to upload
+  the spike's draw items as bytes. Both in `//spikes/presentation` only.
 
 [^spike-code]: (2026-10-04) physics2d's experiment binaries
     `:parallel_solver` (`tests/parallel_solver.rs`), `:solver_layout` and

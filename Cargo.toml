@@ -11,4 +11,6 @@ members = [
     "engine/std/physics3d/compare",
     # The scheduler's thread pool: rayon and core_affinity.
     "engine/std/threads",
+    # SPIKE (get-3hd.1): wgpu, winit and tiny-skia, for the presentation spike.
+    "spikes/presentation",
 ]

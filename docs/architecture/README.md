@@ -29,6 +29,11 @@ monolithic design doc.
   playtesting as mods: games describe and presenters draw (window, CPU
   pixels, text, data), input as actions, one agent interface, rendering
   pipelined with the next frame (sketch)
+- [presentation-spike.md](presentation-spike.md) — wgpu, winit and
+  tiny-skia under Bazel, a window pumped by the bootstrap through a
+  resident platform mod, what of wgpu can cross mods (and the crash when
+  it does), the extract full against incremental, draw throughput plain
+  against instanced, and the hand-off's cost, measured (spike results)
 - [parallel-relations.md](parallel-relations.md) — systems whose
   relation rows write the entities they name, across threads in colors:
   who wants it, what other engines keep in and out of the ECS, colors as
