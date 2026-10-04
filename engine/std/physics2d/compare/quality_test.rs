@@ -40,6 +40,7 @@ mod bounces;
 mod ecs;
 #[allow(dead_code)]
 mod family;
+mod meets;
 #[path = "../narrow.rs"]
 mod narrow;
 #[allow(dead_code)]

@@ -38,7 +38,7 @@ pub struct Quality {
 /// Signed distance between two shapes, negative when they overlap: turned
 /// ones by their faces' separating axes (`physics2d::separation`), the rest
 /// axis-aligned as before rotation.
-fn gap(a: &Dyn, b: &Dyn) -> f32 {
+pub fn gap(a: &Dyn, b: &Dyn) -> f32 {
     if a.angle != 0.0 || b.angle != 0.0 {
         let placed = |d: &Dyn| {
             let shape = if d.circle { Shape::Circle(d.hx) } else { Shape::Box(Vec2::new(d.hx, d.hy)) };
@@ -80,7 +80,7 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
 pub fn measure(scene: &Scene, bodies: &[Dyn], turning: bool) -> Quality {
     let turned = bodies.iter().filter(|b| b.angle.abs() > 1e-6).count();
     assert!(turning || turned == 0, "{turned} bodies turned: rotation is not locked");
-    let statics: Vec<Dyn> = scene.build().iter().filter(|s| !s.dynamic).map(as_dyn).collect();
+    let statics: Vec<Dyn> = scene.build().iter().filter(|s| !s.dynamic && !s.kinematic).map(as_dyn).collect();
     // A grid of cells as wide as the widest body (a unit in every settling
     // scene), so a pair within `TOUCH` is in neighboring cells.
     let size = bodies.iter().map(|b| 2.0 * b.hx.hypot(b.hy) + TOUCH).fold(1.0, f32::max);

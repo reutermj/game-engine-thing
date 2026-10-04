@@ -17,6 +17,9 @@ pub const DT: f32 = 1.0 / 60.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spec {
     pub dynamic: bool,
+    /// Not dynamic, and moved at its velocity whatever it meets: pong's
+    /// paddles. Placed among the statics, before the dynamic bodies.
+    pub kinematic: bool,
     pub circle: bool,
     pub x: f32,
     pub y: f32,
@@ -39,6 +42,7 @@ pub struct Spec {
 /// What a field a scene doesn't set is: at rest, unturned, mass 1.
 pub const SPEC: Spec = Spec {
     dynamic: true,
+    kinematic: false,
     circle: false,
     x: 0.0,
     y: 0.0,
@@ -143,6 +147,74 @@ pub enum Scene {
     /// floor or another body at a chosen speed, restitution, gravity,
     /// angle, friction, step and substeps (`Hit`).
     Hit(Hit),
+    /// One meeting of the meet families (`meets.rs`): pong's ball fast
+    /// into pong's paddle, static or kinematic (`Meet`).
+    Meet(Meet),
+}
+
+/// What a `Scene::Meet` fires, and at what: pong's ball (radius 0.25, no
+/// gravity, restitution 1, no friction) at `speed`, `deg` off the face's
+/// normal, into a box pong's paddle's size (1 by 4.5) whose face is at x =
+/// 0 when they meet. The box is static where `paddle` and `slide` are 0;
+/// otherwise kinematic, coming toward the ball at `paddle` along the normal
+/// and sliding along its face at `slide` (pong's paddles move along their
+/// face at 16). They meet `3 + phase` steps in, at the face's middle:
+/// `phase` is where in a step that is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Meet {
+    pub speed: f32,
+    pub deg: f32,
+    pub paddle: f32,
+    pub slide: f32,
+    pub phase: f32,
+}
+
+/// Pong's paddle's half extents, and its ball's radius.
+pub const PADDLE: (f32, f32) = (0.5, 2.25);
+pub const BALL: f32 = 0.25;
+
+impl Meet {
+    /// When they meet, from the start.
+    pub fn at(&self) -> f32 {
+        (3.0 + self.phase) * DT
+    }
+
+    pub fn kinematic(&self) -> bool {
+        self.paddle != 0.0 || self.slide != 0.0
+    }
+
+    /// The paddle's centre after `t` seconds.
+    pub fn paddle_at(&self, t: f32) -> (f32, f32) {
+        let at = self.at();
+        (PADDLE.0 + self.paddle * (at - t), self.slide * (t - at))
+    }
+
+    fn build(&self) -> Vec<Spec> {
+        let (x, y) = self.paddle_at(0.0);
+        let (hx, hy) = PADDLE;
+        let paddle = Spec { dynamic: false, kinematic: self.kinematic(), x, y, hx, hy, vx: -self.paddle, vy: self.slide, ..SPEC };
+        let (c, s) = (self.deg.to_radians().cos(), self.deg.to_radians().sin());
+        let (vx, vy) = (self.speed * c, self.speed * s);
+        let at = self.at();
+        let ball = Spec {
+            circle: true,
+            x: -BALL - vx * at,
+            y: -vy * at,
+            hx: BALL,
+            hy: BALL,
+            vx,
+            vy,
+            friction: 0.0,
+            restitution: 1.0,
+            gravity_scale: 0.0,
+            ..SPEC
+        };
+        vec![Spec { friction: 0.0, ..paddle }, ball]
+    }
+
+    fn text(&self) -> String {
+        format!("meet {} {} {} {} {}", self.speed, self.deg, self.paddle, self.slide, self.phase)
+    }
 }
 
 /// What a `Scene::Hit` throws, and at what.
@@ -341,6 +413,7 @@ impl Scene {
             "ladder" => Some(Scene::Ladder { deg: num(1)?, mu: num(2)? }),
             "dominoes" => Some(Scene::Dominoes { n: num(1)? as u32, spacing: num(2).unwrap_or(1.0), mu: num(3).unwrap_or(0.6) }),
             "hit" => Some(Scene::Hit(Hit::parse(&words[1..])?)),
+            "meet" => Some(Scene::Meet(Meet { speed: num(1)?, deg: num(2)?, paddle: num(3)?, slide: num(4)?, phase: num(5)? })),
             _ => None,
         }
     }
@@ -382,6 +455,7 @@ impl Scene {
             Scene::Dominoes { n, spacing, mu } => format!("dominoes {n} {spacing} {mu}"),
             Scene::PyramidAt { base, mu } => format!("pyramid {base} {mu}"),
             Scene::Hit(h) => h.text(),
+            Scene::Meet(m) => m.text(),
         }
     }
 
@@ -541,6 +615,7 @@ impl Scene {
                 ]
             }
             Scene::Hit(h) => h.build(),
+            Scene::Meet(m) => m.build(),
             Scene::Dominoes { n, spacing, mu } => {
                 let mut v = vec![Spec { friction: mu, ..wall(0.0, 1.0, 100.0, 1.0) }];
                 let x0 = -0.5 * n as f32 * spacing;
@@ -593,7 +668,7 @@ impl Scene {
             }
             Scene::Pyramid { base } | Scene::PyramidAt { base, .. } => y > 0.0 || x.abs() > base as f32 + 10.0,
             Scene::Stack { .. } => y > 0.0 || x.abs() > 10.0,
-            Scene::Ramp { .. } | Scene::Bullet { .. } => false,
+            Scene::Ramp { .. } | Scene::Bullet { .. } | Scene::Meet(_) => false,
             Scene::Bounce { .. } | Scene::Ratio { .. } | Scene::Overlap { .. } | Scene::Ladder { .. } => y > 0.0 || x.abs() > 10.0,
             Scene::BigOnSmall | Scene::Cards { .. } | Scene::Dominoes { .. } => y > 0.0 || x.abs() > 40.0,
             Scene::Hit(h) => h.target.floor() && (y > 0.0 || x.abs() > 50.0),

@@ -16,6 +16,7 @@ use crate::baseline::{Band, Better, Entry};
 use crate::behave::{self, Behaviour};
 use crate::bounces;
 use crate::family;
+use crate::meets;
 use crate::runs;
 use crate::scene::Scene;
 use crate::settle::Settling;
@@ -113,6 +114,9 @@ const STEPS_TO: Band = Band::Steps(10.0, 0.0);
 const ANALYTIC: Band = Band::Rel(0.002, 0.0);
 /// Counts and flags.
 const COUNT: Band = Band::Exact;
+/// A meet family's depths (`meets.rs`): two bodies, nothing chaotic, but
+/// near nothing once caught, so within a fifth of the slop of it.
+const MEET_DEPTH: Band = Band::Rel(0.03, 0.002);
 /// An edge family's count of runs that did what they should: a
 /// reassociated sum flipped one of four dominoes' spacings and one of 135
 /// card houses. One run, or 2% of a long grid.
@@ -411,12 +415,15 @@ pub fn behaviour(long: bool) -> Vec<Entry> {
     let bullets = if long { Vec::new() } else { bullets() };
     let families = family::families(long);
     let bouncing = bounces::families(long);
+    let meeting = if long { Vec::new() } else { meets::families(false) };
     let mut all = singles.clone();
     all.extend(bullets.iter().flat_map(|(_, _, s)| s.iter().copied()));
     all.extend(families.iter().flat_map(|f| f.scenes.iter().copied()));
     all.extend(bouncing.iter().flat_map(|f| f.scenes.iter().copied()));
     // Each run once, all at once; below they are read from `runs`.
     runs::par(&all, |&s| runs::behaved(s));
+    let met: Vec<Scene> = meeting.iter().flat_map(|f| f.scenes.iter().copied()).collect();
+    runs::par(&met, |&s| runs::met(s));
     let mut v = Vec::new();
     for s in &singles {
         v.extend(behaviour_of(G, s, &runs::behaved(*s)));
@@ -435,6 +442,18 @@ pub fn behaviour(long: bool) -> Vec<Entry> {
         for (name, value) in bounces::stats(f, &runs) {
             let (band, better) = bounce_band(name, runs.len());
             v.push(Entry::new(G, format!("bounces {}", f.name), name.replace(' ', "_"), value, band, better));
+        }
+    }
+    for f in &meeting {
+        let runs: Vec<Behaviour> = f.scenes.iter().map(|&s| runs::met(s)).collect();
+        for (name, value) in meets::stats(f, &runs) {
+            let (band, better) = match name {
+                "deepest" | "median deepest" => (MEET_DEPTH, Better::Lower),
+                "held" => (COUNT, Better::Higher),
+                "least rebound" | "most rebound" => (ANALYTIC, Better::Toward(1.0)),
+                _ => (COUNT, Better::Lower),
+            };
+            v.push(Entry::new(G, format!("meets {}", f.name), name.replace(' ', "_"), value, band, better));
         }
     }
     v

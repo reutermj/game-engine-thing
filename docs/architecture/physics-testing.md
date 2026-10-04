@@ -166,7 +166,8 @@ the floor" or "suspiciously better" gets an explicit yes or no.
 
 - **Where:** four files, next to the scenes:
   `engine/std/physics2d/compare/baseline.txt` (2D, the default suite's
-  scenes: 228 values, 27 of them the bounce families') and
+  scenes: 242 values, 27 of them the bounce families' and 14 the meet
+  families') and
   `baseline_long.txt` (the long suite's: 225),
   `engine/std/physics3d/compare/baseline.txt` (100) and `baseline_long.txt` (94).
   The format and the comparison are the test kit's (`baseline.rs`,
@@ -637,6 +638,44 @@ family, so the median itself moves less (get-emj.67), not a looser rule.
 The other family it moved, the locked piles 81 wide (median 310 against
 275, 260 before), is more piles resting and moving again, get-emj.63's
 own mechanism: a clue there, not noise.
+
+### The meet families
+
+**Built** (2026-10-04, get-lye). The playtest loop found pong's ball half
+a cell inside a paddle, with no contact found yet at its deepest frame
+(presentation-spike.md, "The playtest loop"). So the meeting itself is a
+family (`meets.rs`, `Scene::Meet`): pong's ball (radius 0.25, restitution
+1, no friction) fired into a box pong's paddle's size, kinematic and
+coming at it along the normal (`paddle`, 4 to 24 a second) and sliding
+along its face (pong's paddles move along it at 16), or static (`wall`),
+over the ball's speed (10 to 56.6, pong's fastest diagonal), its angle and
+where in a step they meet. Each run is read every step against the
+paddle's analytic position (a kinematic body goes where its velocity
+takes it, in every engine): how deep the ball got, whether the engine
+held a contact in the step it first sank past a slop (0.01), whether it
+went through, and its rebound. The harness gained kinematic bodies for it
+(`Spec::kinematic`, in every engine), and runs them locked, as pong's
+bodies are. `MEETS=all` in the comparison (`MEET_LONG`, `MEET_RUNS`,
+`MEETS=scenes SCENES=meet ..`); `:behaviour_test` bounds them and the
+baseline records their statistics.
+
+What the short grids found (72 runs on the paddle, 18 on the wall), the
+deepest and the median run's depth:
+
+| | paddle | wall |
+|---|---|---|
+| ours | 0.605, 0.18; no contact held in any of the 36 that sank | 0.47, 0.083; none of 9 |
+| Box2D 3.1.1 | 0.605, 0.18 | 0.0092, 0.005 |
+| Rapier 0.36 | 0.605, 0.18 | 0.0092, 0.005 |
+| Rapier, `ccd_enabled` | 0.19, 0.012 | 0.0092, 0.005 |
+
+On the long grids (2160 and 216 runs) ours and both references at their
+defaults put the ball through the paddle in 51 runs, each closing on it
+at 60.6 a second or more along the normal (whether one does depends on
+where in a step they meet: others close at up to 80.6 and bounce), and
+Rapier with a bullet's sweep sank it 0.62 deep in one. Both references sweep a fast body against statics only, so
+on a kinematic paddle they are no reference: the wall is, where neither
+sinks past the slop.
 
 ### A time budget for the default suite
 

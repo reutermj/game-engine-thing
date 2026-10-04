@@ -18,7 +18,8 @@ unsafe extern "C" {
     fn bx_free(w: *mut World);
     fn bx_add(
         w: *mut World,
-        dynamic: i32,
+        // 0 static, 1 dynamic, 2 kinematic.
+        kind: i32,
         circle: i32,
         x: f32,
         y: f32,
@@ -131,7 +132,13 @@ impl Box2d {
         let h = unsafe {
             bx_add(
                 self.world,
-                s.dynamic as i32,
+                if s.dynamic {
+                    1
+                } else if s.kinematic {
+                    2
+                } else {
+                    0
+                },
                 s.circle as i32,
                 s.x,
                 s.y,
@@ -145,12 +152,14 @@ impl Box2d {
                 s.gravity_scale,
             )
         };
-        if s.dynamic {
+        if s.dynamic || s.kinematic {
             // SAFETY: `h` is the handle just returned.
             unsafe {
                 bx_set_velocity(self.world, h, s.vx, s.vy);
                 bx_set_spin(self.world, h, if self.turning { s.w } else { 0.0 });
             }
+        }
+        if s.dynamic {
             self.dynamic.push_back((h, *s));
             self.alive += 1;
         }

@@ -174,6 +174,22 @@ every option, the 3D ones about five. The families' tests record the
 references' statistics beside their bounds; after bumping a library,
 measure again on exactly the tests' grids.
 
+## The meet families
+
+```sh
+MEETS=all VARIANTS=rapier:ccd ./bazel run //engine/std/physics2d/compare                 # short grids, every engine
+MEETS=paddle MEET_LONG=1 MEET_RUNS=1 ENGINES=arrays ./bazel run //engine/std/physics2d/compare   # a long grid, every run
+MEETS=scenes SCENES="meet 40 0 16 0 0.5,meet 40 30 0 0 0.25" MEET_RUNS=1 ./bazel run //engine/std/physics2d/compare
+```
+
+Pong's ball into a kinematic paddle or a static wall (`meets.rs`;
+physics-testing.md, "The meet families"): each family's deepest and median
+depth, how many runs sank past the slop, held a contact as they did, went
+through, and the rebound. A meet is a scene (`meet <speed> <deg> <paddle>
+<slide> <phase>`), run with rotation locked, as pong's bodies are; the mod
+in the engine is left out, the arrays being it bit for bit
+(`the_mod_is_the_arrays_on_the_meet_scenes`).
+
 ## The baseline
 
 Our own accepted results, per scene and measure, in four files:

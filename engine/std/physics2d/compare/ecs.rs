@@ -275,6 +275,8 @@ fn body(s: &Spec) -> Body {
     let material = |b: Body| Body { friction: s.friction, restitution: s.restitution, ..b };
     if s.dynamic {
         material(Body { inv_mass: 1.0 / s.mass, gravity_scale: s.gravity_scale, ..Body::default() })
+    } else if s.kinematic {
+        material(Body::kinematic())
     } else {
         material(Body::fixed())
     }
@@ -314,7 +316,7 @@ impl Flat {
             specs.iter().map(|s| Vec2::new(s.x, s.y)).collect(),
             specs.iter().map(collider).collect(),
             specs.iter().map(body).collect(),
-            (statics as u32..specs.len() as u32).collect(),
+            (0..specs.len() as u32).filter(|&i| specs[i as usize].dynamic || specs[i as usize].kinematic).collect(),
             Vec2::new(0.0, scene.gravity()),
         );
         arrays.dt = scene.dt();
@@ -400,8 +402,10 @@ impl Sim for Flat {
 
     fn bodies(&self) -> Vec<Dyn> {
         let a = &self.arrays;
+        // The kinematic ones aren't the scene's bodies (as in the mod).
         a.moving
             .iter()
+            .filter(|&&i| a.body[i as usize].kind == DYNAMIC)
             .map(|&i| {
                 let (c, p, v) = (&a.collider[i as usize], a.pos[i as usize], a.vel[i as usize]);
                 let (angle, w) = (a.rot[i as usize].map_or(0.0, |q| q.angle()), a.spin[i as usize].unwrap_or(0.0));

@@ -37,7 +37,9 @@
 //! the edge-of-stability families (`family.rs`), `FAMILY_LONG=1` their
 //! long grids; `BOUNCES=<names>` (`all`) the bounce families' statistics
 //! (`bounces.rs`), `BOUNCE_LONG=1` on their long grids, `BOUNCE_RUNS=1`
-//! with every run's values.
+//! with every run's values; `MEETS=<names>` (`all`) the meet families'
+//! (`meets.rs`: pong's ball into a paddle or a wall), `MEET_LONG=1` and
+//! `MEET_RUNS=1` likewise, `MEETS=scenes` the meets `SCENES` names.
 
 #[allow(dead_code)] // `Arrays::snapshot`, which only `:tax` uses.
 #[path = "../tests/arrays.rs"]
@@ -47,6 +49,7 @@ mod bounces;
 mod box2d;
 mod ecs;
 mod family;
+mod meets;
 #[path = "../narrow.rs"]
 mod narrow;
 mod quality;
@@ -235,6 +238,10 @@ fn main() {
         bounce_families(&names, env("BOUNCE_LONG").is_some(), env("BOUNCE_RUNS").is_some(), &engines);
         return;
     }
+    if let Some(names) = env("MEETS") {
+        meet_families(&names, env("MEET_LONG").is_some(), env("MEET_RUNS").is_some(), &engines);
+        return;
+    }
     if env("BEHAVE").is_some() {
         let scenes = match env("SCENES") {
             Some(s) => s.split(",").map(|t| Scene::parse(t).unwrap_or_else(|| panic!("SCENES: no scene {t:?}"))).collect(),
@@ -363,6 +370,36 @@ fn bounce_families(names: &str, long: bool, runs: bool, engines: &[(String, Make
             }
             let stats: Vec<String> = bounces::stats(&f, &all).iter().map(|(k, v)| format!("{k} {v:.6}")).collect();
             println!("bounces {} ({}, {} runs), {label}: {}", f.name, if long { "long" } else { "short" }, all.len(), stats.join(", "));
+        }
+    }
+}
+
+/// `MEETS`: each engine's statistics on each meet family's grid
+/// (`meets.rs`), and with `runs` every run's values, rotation locked as
+/// pong's is. The mod in the engine is left out: the arrays are it bit for
+/// bit.
+fn meet_families(names: &str, long: bool, runs: bool, engines: &[(String, Make)]) {
+    let mut families = meets::families(long);
+    // `MEETS=scenes SCENES=meet ..,meet ..`: those meets alone, as a family.
+    if names == "scenes" {
+        let scenes = std::env::var("SCENES").expect("MEETS=scenes takes SCENES");
+        let scenes = scenes.split(",").map(|t| Scene::parse(t).unwrap_or_else(|| panic!("SCENES: no scene {t:?}"))).collect();
+        families = vec![family::Family { name: "scenes", scenes }];
+    }
+    for f in families {
+        if names != "all" && !names.split(",").any(|n| n == f.name) {
+            continue;
+        }
+        for (label, make) in engines.iter().filter(|(label, _)| !label.contains("ECS")) {
+            let all: Vec<behave::Behaviour> = f.scenes.iter().map(|s| behave::behave(make(s, false).as_mut(), s, false)).collect();
+            if runs {
+                for (s, r) in f.scenes.iter().zip(&all) {
+                    let values: Vec<String> = r.values.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
+                    println!("run {} {label} | {} | {}", f.name, s.text(), values.join(" "));
+                }
+            }
+            let stats: Vec<String> = meets::stats(&f, &all).iter().map(|(k, v)| format!("{k} {v:.4}")).collect();
+            println!("meets {} ({}, {} runs), {label}: {}", f.name, if long { "long" } else { "short" }, all.len(), stats.join(", "));
         }
     }
 }

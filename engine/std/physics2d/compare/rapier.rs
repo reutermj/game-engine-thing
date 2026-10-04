@@ -59,6 +59,11 @@ impl Rapier {
             .friction_combine_rule(CoefficientCombineRule::Min)
             .restitution_combine_rule(CoefficientCombineRule::Max);
         let at = Vector::new(s.x, s.y);
+        if s.kinematic {
+            let body = RigidBodyBuilder::kinematic_velocity_based().translation(at).rotation(s.angle).linvel(Vector::new(s.vx, s.vy));
+            self.world.insert(body, collider);
+            return;
+        }
         if !s.dynamic {
             self.world.insert(RigidBodyBuilder::fixed().translation(at).rotation(s.angle), collider);
             return;

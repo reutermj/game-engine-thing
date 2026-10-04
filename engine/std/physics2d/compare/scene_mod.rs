@@ -61,6 +61,9 @@ fn dynamic(s: &Spec) -> Dynamic {
 fn spawn(world: &mut WorldMut, s: &Spec) -> Entity {
     let e = if s.dynamic {
         world.spawn(dynamic(s))
+    } else if s.kinematic {
+        let body = Body { friction: s.friction, restitution: s.restitution, ..Body::kinematic() };
+        world.spawn((Position { x: s.x, y: s.y }, Velocity { x: s.vx, y: s.vy }, body, collider(s)))
     } else if s.friction == Body::fixed().friction && s.restitution == Body::fixed().restitution {
         // A collider without a body is static with `Body::fixed()`'s
         // friction and restitution, which is what `scene::wall` gives the

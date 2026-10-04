@@ -102,6 +102,10 @@ fn moved(a: &Dyn, b: &Dyn) -> f64 {
 
 /// `sim` on `scene` from the start, as `steps` says.
 pub fn behave(sim: &mut dyn Sim, scene: &Scene, turning: bool) -> Behaviour {
+    // Read against a box that moves, and the engine's contacts, every step.
+    if let Scene::Meet(m) = scene {
+        return crate::meets::meet(sim, m);
+    }
     let t = run(sim, steps(scene));
     let mut b = Behaviour { label: sim.label(), values: Vec::new() };
     let depths: Vec<f32> = t.iter().map(|bodies| quality::measure(scene, bodies, turning).max_depth).collect();

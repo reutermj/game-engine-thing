@@ -211,7 +211,7 @@ static float greatest( float a, int ma, float b, int mb )
 bx_world* bx_new( float gx, float gy, int sleep, int continuous );
 bx_world* bx_new_threads( float gx, float gy, int sleep, int continuous, int workers );
 void bx_free( bx_world* w );
-int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning,
+int bx_add( bx_world* w, int kind, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning,
 			float angle, float mass, float gravity_scale );
 void bx_set_spin( bx_world* w, int handle, float spin );
 int bx_awake( const bx_world* w, int handle );
@@ -262,11 +262,12 @@ void bx_free( bx_world* w )
 	free( w );
 }
 
-int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning,
+int bx_add( bx_world* w, int kind, int circle, float x, float y, float hx, float hy, float friction, float restitution, int turning,
 			float angle, float mass, float gravity_scale )
 {
 	b2BodyDef bd = b2DefaultBodyDef();
-	bd.type = dynamic ? b2_dynamicBody : b2_staticBody;
+	// 0 static, 1 dynamic, 2 kinematic (the harness's `Spec`).
+	bd.type = kind == 1 ? b2_dynamicBody : kind == 2 ? b2_kinematicBody : b2_staticBody;
 	bd.position = (b2Vec2){ x, y };
 	bd.rotation = b2MakeRot( angle );
 	bd.gravityScale = gravity_scale;
@@ -286,7 +287,7 @@ int bx_add( bx_world* w, int dynamic, int circle, float x, float y, float hx, fl
 		b2Polygon p = b2MakeBox( hx, hy );
 		b2CreatePolygonShape( body, &sd, &p );
 	}
-	if ( dynamic )
+	if ( kind == 1 )
 	{
 		// The scene's mass (1 but where a scene sets one), rather than by
 		// density and area. Locked, inertia 0, not any value: this call sets

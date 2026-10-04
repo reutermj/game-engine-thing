@@ -505,7 +505,7 @@ naming its bead, not a looser bound.
 | target | what |
 |---|---|
 | `//engine/std/physics2d/compare:quality_test`, `:quality_long_test` (manual) | 2D piles, pyramids, stacks, sleeping, the families, the mod bit for bit the arrays and across threads, the baseline |
-| `//engine/std/physics2d/compare:behaviour_test`, `:behaviour_long_test` (manual) | 2D ramps, bounces, mass ratios, overlap recovery, fast bodies, card houses, ladders, dominoes, the families at the edge |
+| `//engine/std/physics2d/compare:behaviour_test`, `:behaviour_long_test` (manual) | 2D ramps, bounces, mass ratios, overlap recovery, fast bodies, a ball meeting a paddle, card houses, ladders, dominoes, the families at the edge |
 | `//engine/std/physics3d/compare:quality_test`, `:quality_long_test` (manual) | 3D piles of cubes and planks, stacks, the families, the baseline |
 | `//engine/std/physics3d/compare:behaviour_test`, `:behaviour_long_test` (manual) | 3D ramps, bounces, mass ratios |
 | `//engine/std/physics3d:exact_test` | the 3D fingerprint, and the lanes and the shared states bit for bit |

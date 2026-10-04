@@ -91,6 +91,14 @@ pub fn asleep_at(scene: Scene, turning: bool, max: u32) -> Option<u32> {
     })
 }
 
+/// `scene`, a meet (`meets.rs`), run by `ours`, rotation locked as pong's
+/// is: the path a ball and paddles that don't turn take
+/// (`narrow::collide_moving`).
+pub fn met(scene: Scene) -> Behaviour {
+    let key = format!("{} locked {:?}", scene.text(), solver());
+    (*BEHAVED.get(key, || behave::behave(&mut ours(&scene, false, ""), &scene, false))).clone()
+}
+
 /// `scene`, a behaviour scene, run by `ours`, bodies turning.
 pub fn behaved(scene: Scene) -> Behaviour {
     let key = format!("{} {:?}", scene.text(), solver());

@@ -234,3 +234,17 @@ behaviour  bounces pairs                     momentum_worst       2.543e-5   rel
 behaviour  bounces series                    rise_worst           0.9977     rel 0.01 or 0.001
 behaviour  bounces series                    decay_worst          1          rel 0.01 or 0.001
 behaviour  bounces series                    decay_median         0.983      rel 0.01 or 0.001
+behaviour  meets paddle                      deepest              0.605      rel 0.03 or 0.002
+behaviour  meets paddle                      median_deepest       0.1845     rel 0.03 or 0.002
+behaviour  meets paddle                      sank_past_slop       36         exact
+behaviour  meets paddle                      held                 36         exact
+behaviour  meets paddle                      through              0          exact
+behaviour  meets paddle                      least_rebound        1          rel 0.002
+behaviour  meets paddle                      most_rebound         1          rel 0.002
+behaviour  meets wall                        deepest              0.4717     rel 0.03 or 0.002
+behaviour  meets wall                        median_deepest       0.08333    rel 0.03 or 0.002
+behaviour  meets wall                        sank_past_slop       9          exact
+behaviour  meets wall                        held                 9          exact
+behaviour  meets wall                        through              0          exact
+behaviour  meets wall                        least_rebound        1          rel 0.002
+behaviour  meets wall                        most_rebound         1          rel 0.002

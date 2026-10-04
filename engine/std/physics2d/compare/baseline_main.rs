@@ -21,6 +21,7 @@ mod bounces;
 #[allow(dead_code)] // The timings and rain, which only the comparison reads.
 mod ecs;
 mod family;
+mod meets;
 #[path = "../narrow.rs"]
 mod narrow;
 #[allow(dead_code)]
