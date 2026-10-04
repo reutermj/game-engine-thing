@@ -1234,6 +1234,9 @@ impl Model {
                 let State::Lockstep { frame } = &self.mods[i].state else { unreachable!() };
                 Ok(format!("frame {frame}"))
             }
+            // Its timer's messages only (`time on|off|reset`, `times`),
+            // which the fuzzer never sends: a node's time isn't a model's.
+            Kind::Sequential => Err(format!("sequential takes `time on|off|reset` and `times`, not {:?}", words.join(" "))),
             _ => Err(format!("{name} doesn't take messages")),
         })
     }
