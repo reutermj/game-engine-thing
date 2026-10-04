@@ -8,7 +8,7 @@
 //! gather_contacts  See<Bodies>, world -> Make<Contacts>
 //! prepare          See<Settings>, See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
 //! passes           See<Settings>, See<Turning>, See<Bodies>, See<Contacts>, Pass<Graph>, Passes
-//! finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
+//! finish           See<Settings>, Take<Graph>, ParMap -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
 //! scatter_contacts See<Settings>, Pass<Contacts> -> world
 //! scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts> -> world
 //! ```
@@ -30,8 +30,8 @@
 use std::time::Instant;
 
 use engine_api::{
-    Adds, Colored, Coloring, Cx, Dt, Entity, EventWriter, Make, Pass, Passes, Query, Recycle, See, Shareable, Stage, States, Take, Without,
-    flow,
+    Adds, Colored, Coloring, Cx, Dt, Entity, EventWriter, Make, ParMap, Pass, Passes, Query, Recycle, See, Shareable, Stage, States, Take,
+    Without, flow,
 };
 use physics2d::{
     Asleep, Body, Collider, Contact, ContactPair, ContactPoints, DYNAMIC, Gravity, Impulse, KINEMATIC, Manifold, Position, Response,
@@ -361,8 +361,9 @@ impl Physics {
         self.solver_time(start, |time, t| time.passes += t);
     }
 
-    /// The step's impulses and states back into the bodies and contacts; or,
-    /// where nothing is in lanes, the step solved whole.
+    /// The step's impulses and states back into the bodies and contacts,
+    /// a map over parts of them the scheduler runs; or, where nothing is in
+    /// lanes, the step solved whole.
     pub(crate) fn finish(
         &mut self,
         _: &mut Sleepers,
@@ -370,13 +371,18 @@ impl Physics {
         (dt, s): (Dt, See<Settings>),
         g: Take<Graph>,
         (mut b, mut t, mut c): (Pass<Bodies>, Pass<Turning>, Pass<Contacts>),
+        map: ParMap,
     ) {
         let start = Instant::now();
         let params = s.params();
         let Contacts { constraints, points, .. } = &mut *c;
         let (bodies, spinning) = (&mut b.bodies[..], &mut t.spinning[..]);
         if g.lanes {
-            g.staged.finish(&params, (bodies, spinning), (constraints, points));
+            // A part a block across threads (`ParMap`'s four a thread), one
+            // part of everything on one.
+            let threads = map.threads();
+            let mut parts = staged::parts(if threads > 1 { 4 * threads } else { 1 }, (bodies, spinning), (constraints, points));
+            map.for_each_mut(&mut parts, 1, |_, part| g.staged.finish(&params, part));
         } else {
             solver::solve_with(&params, (bodies, spinning), constraints, points, *dt);
         }

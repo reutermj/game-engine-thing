@@ -1482,6 +1482,29 @@ mod lanes {
         }
     }
 
+    /// `clear` of a run of the points, the first `at`: each cleared, then
+    /// those of `solved` and `kept` in the run, which are in point order.
+    #[inline(always)]
+    fn clear_run(points: &mut [Points], at: usize, solved: &[usize], kept: &[(usize, [(f32, f32); 2])]) {
+        for p in points.iter_mut() {
+            p.solved = false;
+            for q in p.point.iter_mut() {
+                (q.jn, q.jt) = (0.0, 0.0);
+            }
+        }
+        let run = at..at + points.len();
+        let from = solved.partition_point(|p| *p < run.start);
+        for p in solved[from..].iter().take_while(|p| run.contains(p)) {
+            points[p - at].solved = true;
+        }
+        let from = kept.partition_point(|(p, _)| *p < run.start);
+        for (p, j) in kept[from..].iter().take_while(|(p, _)| run.contains(p)) {
+            for (q, j) in points[p - at].point.iter_mut().zip(j) {
+                (q.jn, q.jt) = *j;
+            }
+        }
+    }
+
     /// Each contact in pair order, as the substeps start it, into the batch
     /// and lane `place` gives it, or left unsolved where it gives none:
     /// `setup`'s loop. Read in the order they're stored, written where
@@ -1523,7 +1546,8 @@ mod lanes {
     /// its lanes seat (`Coloring::seat`, `EMPTY` an empty lane): `enter`,
     /// batch by batch, for the staged solve's first stage, which threads
     /// share by batches. Each batch and its lanes (`lanes[at..]`) are
-    /// written whole, so what they held before is never read. Reads the
+    /// written whole, so what they held before is never read; and each
+    /// contact's seat, into `seat_of`, for the write-back. Reads the
     /// contacts and points as the last step left them, which
     /// `staged::Staged::finish` changes only after.
     #[allow(clippy::too_many_arguments)]
@@ -1534,11 +1558,11 @@ mod lanes {
         bodies: &[SolverBody],
         (contacts, points): (&[Constraint], &[Points]),
         dt: f32,
-        (seats, lanes, at): (&[u32], &[[LaneCell; N]], usize),
+        (seats, lanes, seat_of, at): (&[u32], &[[LaneCell; N]], &[AtomicU32], usize),
         out: &mut [Batch<N>],
     ) {
         let (seats, lanes) = (seats[at * N..].as_chunks::<N>().0, &lanes[at..]);
-        for ((o, seats), cells) in out.iter_mut().zip(seats).zip(lanes) {
+        for (batch, ((o, seats), cells)) in (at..).zip(out.iter_mut().zip(seats).zip(lanes)) {
             *o = Batch::empty(k.nowhere);
             for (l, (&i, cell)) in seats.iter().zip(cells).enumerate() {
                 if i == EMPTY {
@@ -1548,6 +1572,7 @@ mod lanes {
                 let c = &contacts[i as usize];
                 let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, (k, s), points, dt);
                 cell.set(put(o, l, (i as usize, c), bodies, k, (&pts, at, n_points, speed)));
+                seat_of[i as usize].store((batch * N + l) as u32, Ordering::Relaxed);
             }
         }
     }
@@ -1566,7 +1591,7 @@ mod lanes {
         bodies: &[SolverBody],
         (contacts, points): (&[Constraint], &[Points]),
         dt: f32,
-        (coloring, lanes): (&Coloring, &[[LaneCell; N]]),
+        (coloring, lanes, seat_of): (&Coloring, &[[LaneCell; N]], &[AtomicU32]),
         out: &mut [Batch<N>],
     ) {
         out.fill(Batch::empty(k.nowhere));
@@ -1576,6 +1601,7 @@ mod lanes {
             let (pts, at, n_points, speed) = start(params, c, (c.jn, c.jt), bodies, (k, s), points, dt);
             let (batch, l) = (to / N, to % N);
             lanes[batch][l].set(put(&mut out[batch], l, (i, c), bodies, k, (&pts, at, n_points, speed)));
+            seat_of[i].store(to as u32, Ordering::Relaxed);
         }
     }
 
@@ -2022,6 +2048,15 @@ mod lanes {
             /// Each batch's contacts, lane by lane (`Coloring::seat`): what
             /// the fill fills it from.
             seats: Vec<u32>,
+            /// Each contact's seat (`Coloring::seats`), `EMPTY` for one no
+            /// batch solves: what the write-back finds a contact's lane by,
+            /// going through the contacts in their order. Written by the
+            /// fill as it seats each, through the shared reference every
+            /// kernel has, as the lanes are, and by `place` for the rest:
+            /// so every one each step. (Formed in `place` from the
+            /// coloring's seats instead, it was 11-14 µs more of serial
+            /// `prepare` on the settled pile of 10 000, at any thread count.)
+            seat_of: Vec<AtomicU32>,
             /// Each turning body's angle over the step, as bits: the `Move`
             /// stage writes them through the shared reference every kernel
             /// has, whether its states are plain or shared. Once a substep a
@@ -2042,6 +2077,7 @@ mod lanes {
                     items: Vec::new(),
                     lanes: Vec::new(),
                     seats: Vec::new(),
+                    seat_of: Vec::new(),
                     angle: Vec::new(),
                     solved: Vec::new(),
                     kept: Vec::new(),
@@ -2063,6 +2099,7 @@ mod lanes {
             points: &'a [Points],
             seats: &'a [u32],
             lanes: &'a [[LaneCell; N]],
+            seat_of: &'a [AtomicU32],
             coloring: &'a Coloring,
             dt: f32,
         }
@@ -2098,6 +2135,10 @@ mod lanes {
                 dt: f32,
             ) -> Colored {
                 let layout = coloring.seat(N, &mut self.seats);
+                if self.seat_of.len() < contacts.len() {
+                    self.seat_of.resize_with(contacts.len(), AtomicU32::default);
+                }
+                self.seat_of.truncate(contacts.len());
                 // Only new room is written here: the fill writes every batch
                 // whole, so what one held last step is never read, and
                 // emptying them first was a fifth of the fill on one thread.
@@ -2111,6 +2152,7 @@ mod lanes {
                 self.solved.clear();
                 self.kept.clear();
                 for (i, _) in coloring.of.iter().enumerate().filter(|(_, k)| **k == UNSOLVED) {
+                    self.seat_of[i].store(EMPTY, Ordering::Relaxed);
                     let c = &mut contacts[i];
                     let (jn, jt) = (c.jn, c.jt);
                     (c.jn, c.jt) = (0.0, 0.0);
@@ -2121,6 +2163,8 @@ mod lanes {
                     }
                     unsolved(params, c, (&pts, at, n_points), &mut self.kept);
                 }
+                // `finish` finds a part's among them by point (`clear_run`).
+                debug_assert!(self.solved.is_sorted() && self.kept.is_sorted_by_key(|(at, _)| *at), "in their contacts' order");
                 // The states less the step's gravity, which the substeps
                 // give back a share at a time.
                 self.gravity.clear();
@@ -2161,27 +2205,100 @@ mod lanes {
                     points,
                     seats: &self.seats,
                     lanes: &self.lanes,
+                    seat_of: &self.seat_of,
                     coloring,
                     dt,
                 };
                 (&mut self.items, &mut self.hd.s, kernels)
             }
 
-            /// The step's impulses into the contacts and points, and the
-            /// states into the bodies: `finish`; and before it `clear`, here
-            /// and not in `place` since the fill reads the points it clears.
-            /// `finish` marks the points the batches solved at.
-            pub fn finish(
-                &self,
-                params: &Params,
-                (bodies, spinning): (&mut [SolverBody], &mut [Spinning]),
-                (contacts, points): (&mut [Constraint], &mut [Points]),
-            ) {
-                clear(points, self.solved.iter().copied(), &self.kept);
-                let angle = self.angle.iter().map(|a| f32::from_bits(a.load(Ordering::Relaxed)));
-                let batches = self.items.iter().zip(self.lanes.iter().map(|cells| cells.iter().map(LaneCell::get)));
-                finish(params, batches, (bodies, spinning), (&self.hd.s[..], angle), contacts, points);
+            /// The step's impulses into a part's contacts and points, and
+            /// the states into its bodies and turning bodies: `finish`'s
+            /// writes, contact by contact, each finding its lane by its seat
+            /// (`seat_of`); and before them `clear`'s of the part's points,
+            /// here and not in `place` since the fill reads the points it
+            /// clears. Every value a part writes is its lane's or its
+            /// state's, so any cut into parts, on any threads, writes what
+            /// one part of everything does.
+            pub fn finish(&self, params: &Params, part: &mut Part<'_>) {
+                let Part { contacts: (c0, contacts), points: (p0, points), bodies: (b0, bodies), spinning: (s0, spinning) } = part;
+                clear_run(points, *p0, &self.solved, &self.kept);
+                for (i, c) in (*c0..).zip(contacts.iter_mut()) {
+                    let to = self.seat_of[i].load(Ordering::Relaxed);
+                    if to == EMPTY {
+                        continue;
+                    }
+                    let (batch, l) = (to as usize / N, to as usize % N);
+                    let (o, lane) = (&self.items[batch], self.lanes[batch][l].get());
+                    debug_assert_eq!(lane.contact as usize, i, "a contact's seat, its lane");
+                    (c.jn, c.jt) = impulses(o, l, &lane);
+                    c.speed = lane.speed;
+                    if lane.at != NONE {
+                        // Its own points, so in this part's run (`parts`).
+                        let to = &mut points[lane.at as usize - *p0];
+                        to.solved = true;
+                        carried(params.carry, params.substeps, o, l, lane.count as usize, to);
+                    }
+                }
+                let s = &self.hd.s[..];
+                for (i, b) in (*b0..).zip(bodies.iter_mut()) {
+                    let st = s.load(i);
+                    (b.v, b.moved) = (st.v, st.moved);
+                }
+                for (j, sp) in (*s0..).zip(spinning.iter_mut()) {
+                    let st = s.load(sp.body as usize);
+                    (sp.w, sp.turned, sp.angle) = (st.w, st.turned, f32::from_bits(self.angle[j].load(Ordering::Relaxed)));
+                }
             }
+        }
+
+        /// What a task of the write-back writes (`Staged::finish`): a run
+        /// of the contacts, of their points, of the bodies and of the
+        /// turning bodies, each with its first index.
+        pub struct Part<'a> {
+            contacts: (usize, &'a mut [Constraint]),
+            points: (usize, &'a mut [Points]),
+            bodies: (usize, &'a mut [SolverBody]),
+            spinning: (usize, &'a mut [Spinning]),
+        }
+
+        /// The contacts, the bodies and the turning bodies cut alike into
+        /// `n` parts (one at least), each part's points its contacts':
+        /// the points are in their contacts' order (`gather_contacts`
+        /// pushes a contact's as it goes), so a run of contacts has a run
+        /// of points, from its first contact with any.
+        pub fn parts<'a>(
+            n: usize,
+            (bodies, spinning): (&'a mut [SolverBody], &'a mut [Spinning]),
+            (contacts, points): (&'a mut [Constraint], &'a mut [Points]),
+        ) -> Vec<Part<'a>> {
+            let n = n.max(1);
+            let points_from = |at: usize| contacts[at..].iter().find(|c| c.points > 0).map_or(points.len(), |c| c.points as usize - 1);
+            let cut = |k: usize| {
+                let at = contacts.len() * k / n;
+                [at, points_from(at), bodies.len() * k / n, spinning.len() * k / n]
+            };
+            let cuts: Vec<[usize; 4]> = (0..=n).map(cut).collect();
+            assert!(cuts.windows(2).all(|w| w[0][1] <= w[1][1]), "the points in their contacts' order");
+            /// The run `from..to` off the front of `rest`, which starts at
+            /// `from`.
+            fn run<'a, T>(rest: &mut &'a mut [T], from: usize, to: usize) -> (usize, &'a mut [T]) {
+                let (head, tail) = std::mem::take(rest).split_at_mut(to - from);
+                *rest = tail;
+                (from, head)
+            }
+            let (mut cs, mut ps, mut bs, mut ss) = (contacts, points, bodies, spinning);
+            let mut out = Vec::with_capacity(n);
+            for w in cuts.windows(2) {
+                let ([c, p, b, s], [c1, p1, b1, s1]) = (w[0], w[1]);
+                out.push(Part {
+                    contacts: run(&mut cs, c, c1),
+                    points: run(&mut ps, p, p1),
+                    bodies: run(&mut bs, b, b1),
+                    spinning: run(&mut ss, s, s1),
+                });
+            }
+            out
         }
 
         impl<const N: usize> Kernels<'_, N> {
@@ -2197,9 +2314,9 @@ mod lanes {
                     Step::Fill => {
                         let (read, ks) = ((self.contacts, self.points), (self.k, &*s));
                         if at == 0 && items.len() * N == self.seats.len() {
-                            fill_all(&self.params, ks, self.bodies, read, self.dt, (self.coloring, self.lanes), items);
+                            fill_all(&self.params, ks, self.bodies, read, self.dt, (self.coloring, self.lanes, self.seat_of), items);
                         } else {
-                            fill(&self.params, ks, self.bodies, read, self.dt, (self.seats, self.lanes, at), items);
+                            fill(&self.params, ks, self.bodies, read, self.dt, (self.seats, self.lanes, self.seat_of, at), items);
                         }
                     }
                     Step::Warm => items.iter_mut().for_each(|o| warm_start(o, s)),
