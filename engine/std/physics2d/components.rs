@@ -129,12 +129,19 @@ component! {
         /// A contact uses the smaller of its bodies' frictions.
         pub friction: f32,
         pub gravity_scale: f32,
+        /// Swept against moving bodies too, kinematic ones included: a
+        /// contact for every pair it meets within a step, however far it
+        /// moves (`narrow::collide_moving`), where a body that isn't is
+        /// swept against static ones only. Box2D's `b2BodyDef::isBullet`
+        /// and Rapier's `RigidBodyBuilder::ccd_enabled` are the same choice,
+        /// per body, off by default: pong's ball against its paddles.
+        pub bullet: bool,
     }
 }
 
 impl Default for Body {
     fn default() -> Body {
-        Body { kind: DYNAMIC, inv_mass: 1.0, restitution: 0.0, friction: 0.5, gravity_scale: 1.0 }
+        Body { kind: DYNAMIC, inv_mass: 1.0, restitution: 0.0, friction: 0.5, gravity_scale: 1.0, bullet: false }
     }
 }
 

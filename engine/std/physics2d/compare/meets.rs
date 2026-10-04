@@ -35,7 +35,7 @@ pub fn families(long: bool) -> Vec<Family> {
             for &toward in pick(&[8.0, 16.0], &[4.0, 8.0, 16.0, 24.0]) {
                 for &slide in pick(&[0.0, 16.0], &[0.0, 8.0, 16.0]) {
                     for &phase in phases {
-                        paddle.push(Scene::Meet(Meet { speed, deg, paddle: toward, slide, phase }));
+                        paddle.push(Scene::Meet(Meet { speed, deg, paddle: toward, slide, phase, bullet: false }));
                     }
                 }
             }
@@ -45,11 +45,14 @@ pub fn families(long: bool) -> Vec<Family> {
     for &speed in speeds {
         for &deg in pick(&[0.0, 30.0, 60.0], &[0.0, 15.0, 30.0, 45.0, 60.0, 75.0]) {
             for &phase in phases {
-                wall.push(Scene::Meet(Meet { speed, deg, paddle: 0.0, slide: 0.0, phase }));
+                wall.push(Scene::Meet(Meet { speed, deg, paddle: 0.0, slide: 0.0, phase, bullet: false }));
             }
         }
     }
-    vec![Family { name: "paddle", scenes: paddle }, Family { name: "wall", scenes: wall }]
+    // The paddle's grid with the ball a bullet (`Body::bullet`), as a game
+    // that wants it stopped by moving bodies too would make it.
+    let bullet = paddle.iter().map(|s| if let Scene::Meet(m) = *s { Scene::Meet(Meet { bullet: true, ..m }) } else { *s }).collect();
+    vec![Family { name: "paddle", scenes: paddle }, Family { name: "wall", scenes: wall }, Family { name: "bullet", scenes: bullet }]
 }
 
 /// One meeting, stepped `STEPS` and read every step:

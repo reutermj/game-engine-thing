@@ -63,13 +63,13 @@ one would have to ship those files with it.
   - speculative contacts, pairs found and solved a margin before they
     touch (`narrow.rs`, the margin `physics_common::MARGIN`; Box2D's
     `B2_SPECULATIVE_DISTANCE`);
-  - weighed for 2D's swept contacts (get-lye, `narrow::collide_moving`;
-    physics.md, "Narrowphase"), not taken: its continuous collision
-    (`b2SolveContinuous` in v3.1.1's `solver.c`), which moves a fast
-    body back to its time of impact against statics only, and against
-    kinematic and dynamic bodies too where the body is a bullet, and
-    which marks a body fast by its move against half its smallest
-    extent;
+  - which pairs 2D's swept contacts cover (get-lye,
+    `narrow::collide_moving`, `Body::bullet`; physics.md, "Narrowphase"):
+    as its continuous collision (`b2SolveContinuous` in v3.1.1's
+    `solver.c`), a fast body against statics, and a bullet
+    (`b2BodyDef::isBullet`) against kinematic and dynamic bodies too. Its
+    way of resolving them, moving the body back to its time of impact,
+    isn't taken: ours makes a speculative contact there;
   - the soft step, since 2026-09-26 the 2D solver (`solver.rs`): the step
     in substeps, each gravity, warm starting, one pass of soft contacts
     (`b2MakeSoft`'s constants, `physics_common::Softness` since
@@ -265,8 +265,9 @@ one would have to ship those files with it.
   what the step's relative motion closes. Ours finds it by a time of
   impact instead of a grown distance, so a pair that would pass doesn't
   get one. Its automatic CCD sweeps fast bodies against fixed colliders
-  only, and `ccd_enabled` (a bullet) against every body, which the meet
-  families measure (physics-testing.md, "The meet families").
+  only, and `ccd_enabled` (a bullet) against every body, the split
+  `Body::bullet` follows, which the meet families measure
+  (physics-testing.md, "The meet families").
 - **The broadphase that keeps its pairs** (2026-09-27,
   `engine/ecs/live.rs`) takes from 0.36.0's `broad_phase_bvh` that a pair
   can only change if one of its ends changed, so only pairs beside

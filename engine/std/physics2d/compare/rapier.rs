@@ -73,7 +73,7 @@ impl Rapier {
             .rotation(s.angle)
             .linvel(Vector::new(s.vx, s.vy))
             .gravity_scale(s.gravity_scale)
-            .ccd_enabled(self.ccd)
+            .ccd_enabled(self.ccd || s.bullet)
             .can_sleep(self.sleep);
         let body = if self.turning { body.angvel(s.w) } else { body.lock_rotations() };
         // The scene's mass (1 but where a scene sets one) whatever the

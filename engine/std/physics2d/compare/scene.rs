@@ -20,6 +20,9 @@ pub struct Spec {
     /// Not dynamic, and moved at its velocity whatever it meets: pong's
     /// paddles. Placed among the statics, before the dynamic bodies.
     pub kinematic: bool,
+    /// A dynamic body swept against moving bodies too (`Body::bullet`;
+    /// Box2D's `isBullet`, Rapier's `ccd_enabled`).
+    pub bullet: bool,
     pub circle: bool,
     pub x: f32,
     pub y: f32,
@@ -43,6 +46,7 @@ pub struct Spec {
 pub const SPEC: Spec = Spec {
     dynamic: true,
     kinematic: false,
+    bullet: false,
     circle: false,
     x: 0.0,
     y: 0.0,
@@ -159,7 +163,8 @@ pub enum Scene {
 /// otherwise kinematic, coming toward the ball at `paddle` along the normal
 /// and sliding along its face at `slide` (pong's paddles move along their
 /// face at 16). They meet `3 + phase` steps in, at the face's middle:
-/// `phase` is where in a step that is.
+/// `phase` is where in a step that is. `bullet` makes the ball one
+/// (`Spec::bullet`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Meet {
     pub speed: f32,
@@ -167,6 +172,7 @@ pub struct Meet {
     pub paddle: f32,
     pub slide: f32,
     pub phase: f32,
+    pub bullet: bool,
 }
 
 /// Pong's paddle's half extents, and its ball's radius.
@@ -207,13 +213,15 @@ impl Meet {
             friction: 0.0,
             restitution: 1.0,
             gravity_scale: 0.0,
+            bullet: self.bullet,
             ..SPEC
         };
         vec![Spec { friction: 0.0, ..paddle }, ball]
     }
 
     fn text(&self) -> String {
-        format!("meet {} {} {} {} {}", self.speed, self.deg, self.paddle, self.slide, self.phase)
+        let bullet = if self.bullet { " bullet" } else { "" };
+        format!("meet {} {} {} {} {}{bullet}", self.speed, self.deg, self.paddle, self.slide, self.phase)
     }
 }
 
@@ -413,7 +421,14 @@ impl Scene {
             "ladder" => Some(Scene::Ladder { deg: num(1)?, mu: num(2)? }),
             "dominoes" => Some(Scene::Dominoes { n: num(1)? as u32, spacing: num(2).unwrap_or(1.0), mu: num(3).unwrap_or(0.6) }),
             "hit" => Some(Scene::Hit(Hit::parse(&words[1..])?)),
-            "meet" => Some(Scene::Meet(Meet { speed: num(1)?, deg: num(2)?, paddle: num(3)?, slide: num(4)?, phase: num(5)? })),
+            "meet" => Some(Scene::Meet(Meet {
+                speed: num(1)?,
+                deg: num(2)?,
+                paddle: num(3)?,
+                slide: num(4)?,
+                phase: num(5)?,
+                bullet: words.get(6) == Some(&"bullet"),
+            })),
             _ => None,
         }
     }

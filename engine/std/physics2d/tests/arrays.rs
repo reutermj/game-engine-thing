@@ -321,7 +321,11 @@ impl Arrays {
             // As the mod's `meet`: points if either is turned.
             let (pa, pb) = (self.placed(a), self.placed(b));
             let (m, points) = if pa.rot.is_none() && pb.rot.is_none() {
-                let Some(m) = narrow::collide_moving(&pa, &pb, self.vel[b] - self.vel[a], self.dt) else { continue };
+                // As the mod's `swept`: against a static body, or a bullet's.
+                let swept = ba.kind == STATIC || bb.kind == STATIC || ba.bullet || bb.bullet;
+                let rel = self.vel[b] - self.vel[a];
+                let m = if swept { narrow::collide_moving(&pa, &pb, rel, self.dt) } else { narrow::collide(&pa, &pb, rel) };
+                let Some(m) = m else { continue };
                 (m, 0)
             } else {
                 let Some(mut g) = narrow::collide_turned(&pa, &pb) else { continue };

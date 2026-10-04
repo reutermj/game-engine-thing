@@ -251,9 +251,10 @@ impl Arrays {
                 if !meets || ca.sensor || cb.sensor || (ba.kind != DYNAMIC && bb.kind != DYNAMIC) {
                     continue;
                 }
-                let Some(m) = narrow::collide_moving(&this.placed(a), &this.placed(b), this.vel[b] - this.vel[a], this.dt) else {
-                    continue;
-                };
+                let (pa, pb, rel) = (this.placed(a), this.placed(b), this.vel[b] - this.vel[a]);
+                let swept = ba.kind == STATIC || bb.kind == STATIC || ba.bullet || bb.bullet;
+                let m = if swept { narrow::collide_moving(&pa, &pb, rel, this.dt) } else { narrow::collide(&pa, &pb, rel) };
+                let Some(m) = m else { continue };
                 found.push(Cached {
                     a: i,
                     b: j,

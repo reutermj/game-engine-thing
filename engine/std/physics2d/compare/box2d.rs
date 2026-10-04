@@ -18,7 +18,7 @@ unsafe extern "C" {
     fn bx_free(w: *mut World);
     fn bx_add(
         w: *mut World,
-        // 0 static, 1 dynamic, 2 kinematic.
+        // 0 static, 1 dynamic, 2 kinematic, 3 a dynamic bullet.
         kind: i32,
         circle: i32,
         x: f32,
@@ -132,12 +132,11 @@ impl Box2d {
         let h = unsafe {
             bx_add(
                 self.world,
-                if s.dynamic {
-                    1
-                } else if s.kinematic {
-                    2
-                } else {
-                    0
+                match (s.dynamic, s.bullet, s.kinematic) {
+                    (true, true, _) => 3,
+                    (true, false, _) => 1,
+                    (false, _, true) => 2,
+                    _ => 0,
                 },
                 s.circle as i32,
                 s.x,

@@ -53,6 +53,7 @@ fn dynamic(s: &Spec) -> Dynamic {
         restitution: s.restitution,
         inv_mass: 1.0 / s.mass,
         gravity_scale: s.gravity_scale,
+        bullet: s.bullet,
         ..Body::default()
     };
     (Position { x: s.x, y: s.y }, Velocity { x: s.vx, y: s.vy }, body, collider(s))

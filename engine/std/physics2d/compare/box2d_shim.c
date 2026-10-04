@@ -266,8 +266,10 @@ int bx_add( bx_world* w, int kind, int circle, float x, float y, float hx, float
 			float angle, float mass, float gravity_scale )
 {
 	b2BodyDef bd = b2DefaultBodyDef();
-	// 0 static, 1 dynamic, 2 kinematic (the harness's `Spec`).
-	bd.type = kind == 1 ? b2_dynamicBody : kind == 2 ? b2_kinematicBody : b2_staticBody;
+	// 0 static, 1 dynamic, 2 kinematic, 3 a dynamic bullet (the harness's
+	// `Spec`).
+	bd.type = kind == 1 || kind == 3 ? b2_dynamicBody : kind == 2 ? b2_kinematicBody : b2_staticBody;
+	bd.isBullet = kind == 3;
 	bd.position = (b2Vec2){ x, y };
 	bd.rotation = b2MakeRot( angle );
 	bd.gravityScale = gravity_scale;
@@ -287,7 +289,7 @@ int bx_add( bx_world* w, int kind, int circle, float x, float y, float hx, float
 		b2Polygon p = b2MakeBox( hx, hy );
 		b2CreatePolygonShape( body, &sd, &p );
 	}
-	if ( kind == 1 )
+	if ( kind == 1 || kind == 3 )
 	{
 		// The scene's mass (1 but where a scene sets one), rather than by
 		// density and area. Locked, inertia 0, not any value: this call sets

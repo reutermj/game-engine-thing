@@ -160,11 +160,10 @@ across the world's threads ([Solving across
 threads](#solving-across-threads)).[^grid] In 2D, a body moving more than
 half the margin in a step can meet what's further than the margin's
 reach, so the pairs a swept contact may need are added
-(`reach_further`): each such body looks round itself in the spatial
-order, or, once more than one in sixteen bodies does (a falling pile),
-every collider's box grown by its move is swept and pruned. A pile of
-10 000 falling costs 2.30 ms a step where it cost 1.68, at rest the
-same (2026-10-04).
+(`reach_further`), only those the narrowphase sweeps (against a static,
+or a bullet's): each such body looks round itself in the spatial order,
+or, once more than one in sixteen bodies does (a falling pile), every
+collider's box grown by its move is swept and pruned.
 
 ## Narrowphase
 
@@ -199,9 +198,13 @@ same (2026-10-04).
   with the speed (Rapier's soft CCD), so a ball passing a corner isn't
   stopped by it; a box flush across the face it would meet (a body
   running over a floor of tiles, or falling down a wall of them) is left
-  to the seam rule, as before. Box2D and Rapier sweep a fast body against
-  statics only (unless it's a bullet), so on a kinematic paddle they sink
-  as deep as ours did (physics-testing.md, "The meet families").
+  to the seam rule, as before. As Box2D and Rapier sweep, a pair is swept
+  only where one side is static, or a bullet (`Body::bullet`, off by
+  default; Box2D's `isBullet`, Rapier's `ccd_enabled`): pong's ball against
+  its kinematic paddles needs to be one. Swept against everything, piles'
+  landings moved past their baseline bands and two long-suite bounds broke
+  (get-lye's notes); against statics and bullets, none did
+  (physics-testing.md, "The meet families").
 
 Both mods' narrowphases run across the world's threads in chunks of
 pairs.[^narrow]

@@ -501,23 +501,23 @@ fn meet_family(name: &str) -> (Vec<Scene>, Vec<Behaviour>, Stats) {
 /// Pong's ball (radius 0.25, restitution 1) at 20 to 56.6 a second into
 /// pong's paddle coming at it at 8 or 16, sliding along its face or not,
 /// at 0-45° and two phases (72 runs), and into a static wall of its size
-/// (18): stopped at the face in the step it meets it, never found inside,
-/// and returned at the speed it came. The playtest loop found the ball
-/// half a cell into a paddle with no contact yet (get-lye). Ours was 0.605
-/// deep on the paddle (the median run 0.18) and 0.47 on the wall, and of
-/// the runs that sank past `meets::SLOP` (36 and 9) none with a contact
-/// held; since a contact is swept over the step (`narrow::collide_moving`),
-/// 0.0000 and 0.0014, every run held. Box2D and Rapier at their defaults
-/// sweep a fast body against statics only: on the wall the deepest of any
-/// run is 0.0092 in both, and none past the slop; on the kinematic paddle
-/// 0.605 in both (the median 0.18). Rapier with `ccd_enabled`, a bullet's
-/// sweep against every body: 0.19 on the paddle (all 2026-10-04,
-/// `MEETS=all` in the comparison). The bounds: no run past the slop on
-/// either, every run held, and the rebound within 1%.
+/// (18). The playtest loop found the ball half a cell into a paddle with
+/// no contact yet (get-lye): ours was 0.605 deep on the paddle (the median
+/// run 0.18) and 0.47 on the wall, none of the runs that sank past
+/// `meets::SLOP` with a contact held. A contact is now swept over the step
+/// (`narrow::collide_moving`) against a static body, and against moving
+/// ones for a bullet (`Body::bullet`), as Box2D and Rapier sweep: on the
+/// wall ours 0.0014, Box2D and Rapier 0.0092; on the paddle with the ball a
+/// bullet ours 0.0000 and every run held, Box2D and Rapier 0.19 (Box2D's
+/// `isBullet`, Rapier's `ccd_enabled`); with it not, all three 0.605 (the
+/// median 0.18), the paddle being kinematic (all 2026-10-04, `MEETS=all`
+/// in the comparison). The bounds: on the wall and for the bullet no run
+/// past the slop, every run held and the rebound within 1%; for a ball
+/// that isn't a bullet, no deeper than the references.
 #[test]
-fn a_fast_ball_is_stopped_at_a_moving_paddle_or_a_wall_in_the_step_it_meets_it() {
+fn a_fast_ball_is_stopped_at_a_wall_and_a_bullet_at_a_moving_paddle_in_the_step_it_meets_it() {
     let mut broken = Broken::default();
-    for name in ["paddle", "wall"] {
+    for name in ["wall", "bullet"] {
         let (scenes, runs, _) = meet_family(name);
         for (scene, r) in scenes.iter().zip(&runs) {
             broken.most(scene, r, "deepest", meets::SLOP as f64);
@@ -526,6 +526,11 @@ fn a_fast_ball_is_stopped_at_a_moving_paddle_or_a_wall_in_the_step_it_meets_it()
             broken.least(scene, r, "rebound", 0.99);
             broken.most(scene, r, "rebound", 1.01);
         }
+    }
+    let (scenes, runs, _) = meet_family("paddle");
+    for (scene, r) in scenes.iter().zip(&runs) {
+        broken.most(scene, r, "deepest", 0.605 + 1e-3);
+        broken.most(scene, r, "through", 0.0);
     }
     broken.assert();
 }
@@ -538,7 +543,7 @@ fn a_fast_ball_is_stopped_at_a_moving_paddle_or_a_wall_in_the_step_it_meets_it()
 fn the_mod_is_the_arrays_on_the_meet_scenes() {
     let manifest = engine_control::read_manifest(&std::env::var("SCENE_GAME").unwrap()).unwrap();
     let bits = |b: &Dyn| [b.x, b.y, b.vx, b.vy].map(f32::to_bits);
-    for text in ["meet 40 0 16 0 0.5", "meet 56.6 45 16 16 0.25", "meet 40 30 0 0 0.5", "meet 20 0 8 0 0"] {
+    for text in ["meet 40 0 16 0 0.5", "meet 56.6 45 16 16 0.25 bullet", "meet 40 30 0 0 0.5", "meet 20 0 8 0 0 bullet"] {
         let scene = Scene::parse(text).unwrap();
         let (mut m, mut a) = (ecs::Ecs::new(&manifest, &scene, false, false), runs::ours(&scene, false, ""));
         for step in 1..=meets::STEPS {

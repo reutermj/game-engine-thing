@@ -177,6 +177,7 @@ struct Material {
     /// On the broadphase's passive side (static or asleep): pairs of two
     /// passive colliders aren't looked for.
     passive: bool,
+    bullet: bool,
 }
 
 /// Sleeping bodies, as the systems that wake them see them: woken is
@@ -970,7 +971,8 @@ fn any_way(p: &Position, c: &Collider) -> engine_api::Bounds {
 /// step (`narrow::swept`), joined into `near`'s, in its order; `None` if
 /// there are none. Only a pair one of whose bodies moves more than half the
 /// margin (`narrow::far`) can: a pair of two slower is within the margin's
-/// reach already. Shapes that are turned aren't swept, so aren't looked
+/// reach already. Shapes that are turned aren't swept, nor pairs `swept`
+/// leaves out (two moving bodies, neither a bullet), so aren't looked
 /// for. Which pairs are found beyond those that meet changes nothing (the
 /// narrowphase turns them away), so the two ways of finding them, chosen by
 /// cost, give the same step:
@@ -1016,7 +1018,8 @@ fn reach_further(
                 if b.min.x > a.max.x {
                     break;
                 }
-                if (*fa || *fb) && a.min.y <= b.max.y && b.min.y <= a.max.y && apart(ia.v, ib.v) {
+                let wanted = (*fa || *fb) && swept(&ia.body, &ib.body);
+                if wanted && a.min.y <= b.max.y && b.min.y <= a.max.y && apart(ia.v, ib.v) {
                     more.push((ia.entity.min(ib.entity), ia.entity.max(ib.entity)));
                 }
             }
@@ -1028,11 +1031,13 @@ fn reach_further(
             let region = engine_api::Bounds::new([b.min.x - grow, b.min.y - grow], [b.max.x + grow, b.max.y + grow]);
             located.in_region(region, |row, _| {
                 let e = row.entity();
-                let v = match slots.get(e) {
-                    Some(k) => Some(items[k as usize].v),
-                    None => asleep(e).then_some(Vec2::ZERO),
+                // A sleeping one is moving, as `swept` has it.
+                let other = match slots.get(e) {
+                    Some(k) => Some((items[k as usize].v, swept(&it.body, &items[k as usize].body))),
+                    None => asleep(e).then_some((Vec2::ZERO, it.body.bullet)),
                 };
-                if e != it.entity && v.is_some_and(|v| apart(it.v, v)) {
+                let wanted = |(v, swept): (Vec2, bool)| swept && apart(it.v, v);
+                if e != it.entity && other.is_some_and(wanted) {
                     more.push((it.entity.min(e), it.entity.max(e)));
                 }
             });
@@ -1070,6 +1075,16 @@ fn reach_further(
     Some(joined)
 }
 
+/// Whether a pair's contact is swept over the step: against a static
+/// body always, against a moving one (kinematic included) only for a
+/// bullet (`Body::bullet`), as Box2D sweeps a fast body against statics
+/// and a bullet against everything (`b2SolveContinuous`) and Rapier its
+/// fast bodies against fixed colliders and `ccd_enabled` ones against all.
+/// A sleeping body counts as moving: it may wake.
+fn swept(a: &Material, b: &Material) -> bool {
+    a.kind == STATIC || b.kind == STATIC || a.bullet || b.bullet
+}
+
 /// The narrowphase for a pair: its contact as the world keeps it, if
 /// they're within the margin. Shapes that aren't turned meet as they always
 /// did, with no points; a turned one (and so any body that turns, which
@@ -1077,7 +1092,11 @@ fn reach_further(
 #[inline(always)]
 fn meet(a: &Item, b: &Item, points: &mut Vec<ContactPoints>, dt: f32) -> Option<Found> {
     if a.placed.rot.is_none() && b.placed.rot.is_none() {
-        let m = narrow::collide_moving(&a.placed, &b.placed, b.v - a.v, dt)?;
+        let m = if swept(&a.body, &b.body) {
+            narrow::collide_moving(&a.placed, &b.placed, b.v - a.v, dt)?
+        } else {
+            narrow::collide(&a.placed, &b.placed, b.v - a.v)?
+        };
         return Some(contact(a, b, Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, ..Manifold::default() }, 0));
     }
     let m = narrow::collide_turned(&a.placed, &b.placed)?;
@@ -1134,7 +1153,15 @@ fn item(entity: Entity, p: &Position, c: &Collider, body: Body, v: Vec2, moves: 
         entity,
         placed: placed(p, c),
         collider: Layers { layer: c.layer, mask: c.mask, senses: c.senses, sensor: c.sensor },
-        body: Material { kind: body.kind, friction: body.friction, restitution: body.restitution, moves, asleep: false, passive },
+        body: Material {
+            kind: body.kind,
+            friction: body.friction,
+            restitution: body.restitution,
+            moves,
+            asleep: false,
+            passive,
+            bullet: body.bullet,
+        },
         v,
     }
 }

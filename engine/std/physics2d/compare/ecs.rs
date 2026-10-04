@@ -274,7 +274,7 @@ fn collider(s: &Spec) -> Collider {
 fn body(s: &Spec) -> Body {
     let material = |b: Body| Body { friction: s.friction, restitution: s.restitution, ..b };
     if s.dynamic {
-        material(Body { inv_mass: 1.0 / s.mass, gravity_scale: s.gravity_scale, ..Body::default() })
+        material(Body { inv_mass: 1.0 / s.mass, gravity_scale: s.gravity_scale, bullet: s.bullet, ..Body::default() })
     } else if s.kinematic {
         material(Body::kinematic())
     } else {
