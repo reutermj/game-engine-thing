@@ -229,6 +229,10 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
     # Every target this macro declares is part of the mod, so all of them
     # share its testonly-ness.
     testonly = kwargs.pop("testonly", False)
+
+    # A reloadable mod may not start threads; a resident one, never
+    # unmapped, may own them. See //engine:mod_lints.
+    lints = "//engine:mod_lints_threads_allowed" if resident else "//engine:mod_lints"
     dep_labels = [native.package_relative_label(d) for d in mod_deps]
     interface_deps = [dep.same_package_label(dep.name + "_interface") for dep in dep_labels]
 
@@ -239,7 +243,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
             crate_root = interface[0],
             srcs = interface,
             deps = interface_deps + ["//engine/api"],
-            lint_config = "//engine:mod_lints",
+            lint_config = lints,
             testonly = testonly,
             visibility = visibility,
         )
@@ -272,7 +276,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         # already links with -z now; pin it so the loader can rely on it. See
         # docs/lore/mods-are-linked-bind-now.md.
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
-        lint_config = "//engine:mod_lints",
+        lint_config = lints,
         testonly = testonly,
         visibility = ["//visibility:private"],
         **kwargs

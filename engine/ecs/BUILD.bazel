@@ -26,7 +26,7 @@ rust_library(
         "world.rs",
     ],
     crate_name = "engine_ecs",
-    lint_config = "//engine:mod_lints",
+    lint_config = "//engine:mod_lints_threads_allowed",
     crate_root = "lib.rs",
     visibility = ["//visibility:public"],
 )
