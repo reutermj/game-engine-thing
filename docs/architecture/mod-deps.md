@@ -91,8 +91,11 @@ older builds cut off) remains as a fallback for libraries built without
 A batch is atomic. Every changed build is opened and checked first, and if
 any fails, nothing is swapped. Otherwise the old builds are retired
 dependents-first and the new ones loaded dependencies-first, so no mod runs
-between two layouts. Component migration then happens once, on the first
-access by the new builds.
+between two layouts. Component migration happens once, in between: the
+new builds' layouts are installed as the batch commits, after the old
+builds are retired and before the new ones load, and stored values
+migrate then ([hot-reload.md](hot-reload.md#the-reload-sequence), step
+6).[^migration]
 
 `engine_game` also loads a game's mods in dependency order, and includes
 dependencies the game didn't list.
@@ -210,3 +213,9 @@ of the game the engine was started with, which is the only one it knows.
 **Open question:** removing a mod from a game. A game reload loads and
 reloads, but never unloads a running mod the game no longer lists (or one
 loaded live, like `hello`).
+
+[^migration]: *(History, 2026-10-04.)* This said migration happened "on the
+    first access by the new builds". `load_batch` installs every component
+    the batch's builds declare as it commits (`engine/loader/engine.rs`);
+    only a component a build reaches through `cx.world()` alone is
+    installed on first use (ecs.md, "Layout changes").
