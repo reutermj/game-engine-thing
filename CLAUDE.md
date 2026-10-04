@@ -288,6 +288,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   After merging physics branches, regenerate on the merged tree and
   compare against both parents. Never edit a baseline by hand (runbook
   005, [physics-testing.md](docs/architecture/physics-testing.md)).
+  physics3d also has an exact fingerprint (`:exact_test`,
+  `tests/exact.txt`) that holds it bit for bit where the bands can't: a
+  one-ulp change fails it. It follows the same rule, regenerated with
+  `./bazel run //engine/std/physics3d:exact -- --write` only in a commit
+  that changes results on purpose, and checked after merges with the
+  baselines (physics-testing.md, "The exact fingerprint").
 - **Long checks run only when a change touches what they cover.** Checks
   that take more than five minutes (Miri, fuzz campaigns, planted-bug
   checks) are for changes to unsafe code (`erased.rs`, `schema.rs`,
