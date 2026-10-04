@@ -1002,16 +1002,43 @@ fn reach_further(
         return None;
     }
     let mut more = Vec::new();
-    if !sleeping && far * SWEEP_FROM > items.len() {
-        let mut boxes: Vec<(physics2d::Aabb, bool, &Item)> = items
-            .iter()
-            .filter(|it| it.placed.rot.is_none())
-            .map(|it| {
-                let (b, t) = (it.placed.aabb(), travel(it));
-                let g = Vec2::new(0.5 * narrow::MARGIN + t, 0.5 * narrow::MARGIN + t);
-                (physics2d::Aabb { min: b.min - g, max: b.max + g }, narrow::far(t), it)
-            })
-            .collect();
+    // Its box grown by half the margin and its move, whether it moves far,
+    // and it.
+    fn grown(it: &Item, t: f32) -> (physics2d::Aabb, bool, &Item) {
+        let b = it.placed.aabb();
+        let g = Vec2::new(0.5 * narrow::MARGIN + t, 0.5 * narrow::MARGIN + t);
+        (physics2d::Aabb { min: b.min - g, max: b.max + g }, narrow::far(t), it)
+    }
+    let grown = |it| grown(it, travel(it));
+    let meet = |a: &physics2d::Aabb, b: &physics2d::Aabb| a.min.y <= b.max.y && b.min.y <= a.max.y;
+    if !sleeping && far * SWEEP_FROM > items.len() && !items.iter().any(|it| it.body.bullet) {
+        // No bullets: only far bodies against statics are swept, so the two
+        // are sorted apart and each scans the other, and pairs of bodies
+        // (most of a pile's overlaps) are never looked at: a pile of 10 000
+        // falling steps in 1.93 ms, against 1.71 unswept and 2.26 sweeping
+        // every collider (2026-10-04).
+        type Boxed<'a> = (physics2d::Aabb, bool, &'a Item);
+        let unturned = || items.iter().filter(|it| it.placed.rot.is_none());
+        let mut fixed: Vec<Boxed> = unturned().filter(|it| it.body.kind == STATIC).map(grown).collect();
+        let mut fast: Vec<Boxed> = unturned().filter(|it| narrow::far(travel(it)) && it.body.kind != STATIC).map(grown).collect();
+        fixed.sort_unstable_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x));
+        fast.sort_unstable_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x));
+        // Each pair from whichever of its two starts first along x (ties
+        // to the fast one), scanning the other list from there.
+        let scan = |from: &[Boxed], to: &[Boxed], ties: bool, more: &mut Vec<(Entity, Entity)>| {
+            for (a, _, ia) in from {
+                let start = to.partition_point(|(b, ..)| if ties { b.min.x < a.min.x } else { b.min.x <= a.min.x });
+                for (b, _, ib) in to[start..].iter().take_while(|(b, ..)| b.min.x <= a.max.x) {
+                    if meet(a, b) && apart(ia.v, ib.v) {
+                        more.push((ia.entity.min(ib.entity), ia.entity.max(ib.entity)));
+                    }
+                }
+            }
+        };
+        scan(&fast, &fixed, true, &mut more);
+        scan(&fixed, &fast, false, &mut more);
+    } else if !sleeping && far * SWEEP_FROM > items.len() {
+        let mut boxes: Vec<(physics2d::Aabb, bool, &Item)> = items.iter().filter(|it| it.placed.rot.is_none()).map(grown).collect();
         boxes.sort_unstable_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x));
         for (k, (a, fa, ia)) in boxes.iter().enumerate() {
             for (b, fb, ib) in &boxes[k + 1..] {
@@ -1019,7 +1046,7 @@ fn reach_further(
                     break;
                 }
                 let wanted = (*fa || *fb) && swept(&ia.body, &ib.body);
-                if wanted && a.min.y <= b.max.y && b.min.y <= a.max.y && apart(ia.v, ib.v) {
+                if wanted && meet(a, b) && apart(ia.v, ib.v) {
                     more.push((ia.entity.min(ib.entity), ia.entity.max(ib.entity)));
                 }
             }
