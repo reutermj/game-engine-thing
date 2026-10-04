@@ -481,6 +481,33 @@ mod tests {
         }
     }
 
+    /// `ParMap::for_each_mut` on the pool: every item once, each given its
+    /// own index, at 1 to 8 threads, warm and cold.
+    #[test]
+    fn a_map_on_the_pool_calls_every_item_once() {
+        use engine_ecs::harness::{Cx, IntoSystem, Schedule};
+        use engine_ecs::{ParMap, World};
+
+        for threads in [1, 2, 4, 8] {
+            for warm in [Duration::ZERO, WARM] {
+                let w = World::new();
+                let pool = Pool::new(&OneCcd, &Settings { threads: Some(threads), pin: false, pin_caller: false, warm });
+                w.set_executor(Some(Arc::new(pool)));
+                let system = move |_: &mut Cx, map: ParMap| {
+                    assert_eq!(map.threads(), threads);
+                    for _ in 0..5 {
+                        let mut items: Vec<(u64, u32)> = (0..5000).map(|i| (i, 0)).collect();
+                        map.for_each_mut(&mut items, 16, |i, x| *x = (x.0 * 3 + i as u64, x.1 + 1));
+                        let right = items.iter().enumerate().all(|(i, x)| *x == (i as u64 * 4, 1));
+                        assert!(right, "{threads} threads, warm {warm:?}: every item once, at its index");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                };
+                Schedule { systems: vec![system.system(&w, "map")] }.run_sequential(&w);
+            }
+        }
+    }
+
     /// This process's pool threads, by name, with the CPUs each may run
     /// on, once `n` of them have named themselves (a thread takes its name
     /// once it's running).

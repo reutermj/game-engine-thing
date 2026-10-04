@@ -11,10 +11,11 @@
 //!   generic.
 //!
 //! Each gives the same result on any number of threads, and on one. This
-//! module fixes what that result is. `Passes` runs across the world's
-//! executor where it has more than one thread, as a task graph
-//! (`dispatch`; docs/architecture/threads.md); `ParMap` and `Reduce` run on
-//! the system's thread (threads.md, "ParMap and Reduce").
+//! module fixes what that result is. `Passes`, and `ParMap`'s
+//! `for_each_mut`, run across the world's executor where it has more than
+//! one thread, as a task graph (`dispatch`; docs/architecture/threads.md);
+//! `ParMap`'s `map_into` and `Reduce` run on the system's thread
+//! (threads.md, "ParMap and Reduce").
 
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -50,15 +51,38 @@ macro_rules! shape_param {
     };
 }
 
-/// Maps a function over items. The lifetime is the frame's: the scheduler
-/// that runs it across threads will hand its tasks out through it.
-pub struct ParMap<'w>(PhantomData<&'w World>);
-shape_param!(ParMap, Map);
+/// Maps a function over items. The lifetime is the frame's.
+#[derive(Clone)]
+pub struct ParMap<'w> {
+    /// The world's executor, where it has more than one thread.
+    across: Option<Arc<dyn Executor>>,
+    _world: PhantomData<&'w World>,
+}
+
+impl Param for ParMap<'static> {
+    type Item<'w> = ParMap<'w>;
+
+    fn declare(_: &mut Declare<'_>) -> ParamDecl {
+        ParamDecl::Shape(ShapeKind::Map)
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> ParMap<'w> {
+        ParMap { across: cx.world.executor().filter(|e| e.threads() > 1), _world: PhantomData }
+    }
+}
 
 impl ParMap<'_> {
+    /// How many threads `for_each_mut` hands its items out across.
+    pub fn threads(&self) -> usize {
+        self.across.as_ref().map_or(1, |e| e.threads())
+    }
+
     /// Sets `out` to `f(i, item)` of each item, in the items' order,
     /// keeping `out`'s allocation. `min` is the fewest items a task is
-    /// worth, for the scheduler's split.
+    /// worth, for the scheduler's split. On the system's thread: across
+    /// threads it would need room for the results made before the run
+    /// (`R: Default`) or a vector a block, and nothing uses it yet to say
+    /// which (threads.md, "ParMap and Reduce").
     pub fn map_into<T: Sync, R: Send>(&self, items: &[T], min: usize, out: &mut Vec<R>, f: impl Fn(usize, &T) -> R + Sync) {
         let _ = min;
         out.clear();
@@ -66,11 +90,46 @@ impl ParMap<'_> {
     }
 
     /// `f(i, &mut item)` for each item, each item's call independent of the
-    /// others'.
+    /// others': in order on one thread; across the world's threads in
+    /// blocks of at least `min` consecutive items, at most four a thread,
+    /// each block run once, by whichever thread takes it (`dispatch`).
+    /// Every call has returned when this does, and a call's panic is
+    /// raised again here.
+    ///
+    /// An item may be a part of the caller's own making, slices of several
+    /// arrays cut alike (physics's write-back: each part its run of
+    /// contacts, their points and bodies), so that one run writes them all.
     pub fn for_each_mut<T: Send>(&self, items: &mut [T], min: usize, f: impl Fn(usize, &mut T) + Sync) {
-        let _ = min;
-        items.iter_mut().enumerate().for_each(|(i, x)| f(i, x));
+        let count = self.across.as_ref().map_or(1, |e| blocks_of(items.len(), min.max(1), e.threads()));
+        match &self.across {
+            Some(exec) if count > 1 => map_across(&**exec, items, count, &f),
+            _ => items.iter_mut().enumerate().for_each(|(i, x)| f(i, x)),
+        }
     }
+}
+
+/// `ParMap::for_each_mut` across `exec`'s threads: `items` cut into `count`
+/// blocks, one stage of a plan, each block behind a lock only its taker
+/// takes, as `Passes`' blocks are.
+fn map_across<T: Send>(exec: &dyn Executor, items: &mut [T], count: usize, f: &(impl Fn(usize, &mut T) + Sync)) {
+    let n = items.len();
+    let mut blocks = Vec::with_capacity(count);
+    let mut rest = items;
+    for k in 0..count {
+        let r = block_range(n, k, count);
+        let (head, tail) = std::mem::take(&mut rest).split_at_mut(r.len());
+        rest = tail;
+        blocks.push((r.start, Mutex::new(head)));
+    }
+    let mut plan = Plan::default();
+    plan.chain();
+    let mark = plan.marks(count);
+    plan.stage(count, mark);
+    dispatch(exec, &plan, &|_, b| {
+        let (at, items) = &blocks[b];
+        let mut items = items.try_lock().expect("a block's taker alone has it");
+        items.iter_mut().enumerate().for_each(|(i, x)| f(at + i, x));
+    });
 }
 
 /// Folds items in an order fixed by the input.

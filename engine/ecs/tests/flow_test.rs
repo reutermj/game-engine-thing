@@ -524,6 +524,61 @@ fn passes_run_across_the_worlds_threads_unless_serial() {
     s.run_sequential(&w);
 }
 
+/// `ParMap::for_each_mut` across the world's threads: every item once, each
+/// given its own index (so the results are in the items' order), in blocks
+/// the calling thread joins in, on executors whose threads come at once,
+/// late, or one after another, as `Passes`' are tested; and a call's panic
+/// reaches the system.
+#[test]
+fn a_map_runs_across_the_worlds_threads_every_item_once() {
+    let mut executors: Vec<Option<Arc<dyn Executor>>> = vec![None];
+    for n in [1, 2, 3, 4, 8] {
+        executors.push(Some(Arc::new(Scoped(n))));
+        executors.push(Some(Arc::new(Late(n))));
+        executors.push(Some(Arc::new(OneByOne(n))));
+    }
+    for executor in executors {
+        let threads = executor.as_ref().map_or(1, |e| e.threads());
+        let w = World::new();
+        w.set_executor(executor);
+        let s = schedule(vec![
+            (move |_: &mut Cx, map: ParMap| {
+                assert_eq!(map.threads(), threads);
+                let n = 1001;
+                let mut items: Vec<u64> = (0..n).map(|i| i * 7).collect();
+                let calls: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+                let on = Mutex::new(Vec::new());
+                map.for_each_mut(&mut items, 8, |i, x| {
+                    calls[i].fetch_add(1, Ordering::Relaxed);
+                    *x = *x * 3 + i as u64;
+                    on.lock().unwrap().push(std::thread::current().id());
+                    // An item takes a while, so threads that come late find
+                    // blocks taken, and the calling thread's share shows.
+                    let t = std::time::Instant::now();
+                    while t.elapsed() < std::time::Duration::from_micros(2) {
+                        std::hint::spin_loop();
+                    }
+                });
+                assert!(calls.iter().all(|c| c.load(Ordering::Relaxed) == 1), "{threads} threads: every item once");
+                assert!(items.iter().enumerate().all(|(i, x)| *x == i as u64 * 22), "{threads} threads: each item its own index");
+                let me = std::thread::current().id();
+                assert!(on.into_inner().unwrap().contains(&me), "{threads} threads: the calling thread takes blocks");
+                // Fewer items than a block's least are one block, here.
+                let mut few = [0u8; 3];
+                map.for_each_mut(&mut few, 8, |i, x| {
+                    assert_eq!(std::thread::current().id(), me, "one block runs on the calling thread");
+                    *x = i as u8 + 1;
+                });
+                assert_eq!(few, [1, 2, 3]);
+                let text = panic_text(|| map.for_each_mut(&mut items, 8, |i, _| assert!(i != 700, "item 700")));
+                assert_eq!(text, "item 700");
+            })
+            .system(&w, "map"),
+        ]);
+        s.run_sequential(&w);
+    }
+}
+
 /// Threads that start one at a time, each later than the last: a stage's
 /// blocks taken by whoever is there.
 struct Late(usize);
