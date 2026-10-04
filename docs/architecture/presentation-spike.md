@@ -539,6 +539,70 @@ and when both have, the turn's frames run, paced, and the next opens.
   2.87 s. Closing the window mid-turn (turn 640, frame 4 of 6) shut the
   engine down with exit 0.
 
+### The playtest loop: record, replay, probe, flag
+
+After a versus match, one agent reported both its lost points as a
+collision bug, and other reports followed (the ball beyond the walls, past
+the paddle faces, a return that lost most of its speed). Nothing was
+recorded, so none of it could be checked. The windowed games now record
+every session, and a tool replays one headless and flags frames for a
+reviewer agent (`spikes/presentation/REVIEW.md`, playtesting-research.md's
+record and replay).
+
+- **Recording is inputs, not frames.** Physics is deterministic, so a
+  session is its inputs at the frames they took effect, and the rest is
+  checks: the launcher writes what was played (game, commit, dirty tree,
+  turn length) and the bootstrap appends JSONL as it happens: steps,
+  turns (and each submission's wall time), `pong_text` steers, points, a
+  check of the ball, paddles and score after every step or turn, and
+  agents' `lockstep note <text>`. The bootstrap writes the file because
+  it is resident (never unloaded, like the window it owns), but it can't
+  name pong's types, so a game mod (`spike_pong_record`) fills a
+  `spike_record::Watch` at the end of each frame and the bootstrap reads
+  it after. The `Watch` sits on the bootstrap's clock entity, so recording
+  spawns nothing; it's there whether or not a log is written.
+- **The replay is the game, in-process.** `pong_replay` loads the
+  recorded game's mods into an `Engine` as the integration tests do (the
+  same bootstrap and mods, `spike_capture` for the presenter, no display),
+  runs it a frame at a time through the bootstrap's own messages (`step
+  1`; in turns, `turns N` and `turn frame`, which plays one frame as the
+  loop does), and reads the world between frames, since it isn't a mod.
+  5062 and 5666 frames replayed in 0.40 and 0.48 s, probes and flags
+  included.
+- **Measured.** A one-player session (5062 frames, 769 steps, 250 steers,
+  6 points, one paced step) and a versus match (5666 frames, 2076 turns of
+  6 and 1 frames, 3 points, game over) each reproduced every check bit for
+  bit. The one-player session also reproduced on plain `//pong` (the
+  standard lockstep, no recorder, view or window; `--plain`), with every
+  frame's probes byte-identical, so nothing the spike adds changes the
+  game. One steer moved a frame later was caught at the next check (frame
+  1050, the paddle 0.267 off), and one versus action changed at the check
+  ending its turn; both exit 1. Frames rendered twice are the same bytes.
+- **Frames come from the draw list.** `spike_capture` (a `See` after
+  `spike_pong_view::draw`) keeps the last list and replies it as text;
+  the tool rasterises it with tiny-skia, linear colours encoded to sRGB as
+  the window's surface does, into PNGs it encodes itself (no `png` crate;
+  tiny-skia's encoder is behind a feature this build leaves off).
+- **What the detectors found on scripted play** (REVIEW.md says how to
+  read them), reported, not diagnosed:
+  - `hit_no_bounce`, 4 of 121 paddle hits, every one a point: the ball
+    met the paddle's *end* (centre 2.28 to 2.60 off the paddle's centre,
+    past its 2.25 face), physics pushed it vertically, and pong's `rebound`
+    still applied its kick (`vy` to ±40 in one case) and speed-up, so `vx`
+    kept its sign and the ball went in: the agent's turn-1036 point. Three
+    came at 31 to 44 cells/s from a script aiming at the paddle's end; the
+    fourth at 17 cells/s in one-player play.
+  - `deep_penetration`, 80 runs: the ball inside a paddle's box by up to
+    0.51 cells (at 35 to 40 cells/s), and at the deepest frame of every
+    run physics held no contact yet; it is found, and the ball turned, a
+    frame later.
+  - `beyond_wall`, 79 runs. The walls stand a radius outside the court, so
+    the ball's centre turns at y = 0 and 20, not at 0.25 and 19.75 as
+    AGENT.md tells players: most runs are ordinary bounces. In 53 the ball
+    was inside a wall's box too, by up to 0.42 cells (a 40-cell/s ball the
+    paddle's end had just kicked upward).
+  - `speed_loss`: none. The reported 37 to 12.9 return wasn't provoked.
+
 ## What it means for presentation.md
 
 - **D2 (incremental extract).** The premise that cost follows what

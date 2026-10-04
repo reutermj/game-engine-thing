@@ -31,15 +31,32 @@
 //!   in force, who has submitted), which `pong_versus` steers by, and stops
 //!   when the game spawns a `spike_turns::Outcome`.
 //!
+//! - **Recording** (on when the engine starts with `SPIKE_RECORD=<file>`,
+//!   which the launcher sets). Every frame's inputs, the turns, points and a
+//!   check of the ball, paddles and score at the end of each step or turn
+//!   go to a JSONL session log, enough to replay the session exactly
+//!   (`pong_replay.rs`; the format is in REVIEW.md). The game's side is a
+//!   `spike_record::Watch` that `spike_pong_record` fills each frame and
+//!   this reads after it; the `Watch` sits on the clock entity whether or
+//!   not a log is written, so a replay's world is the recorded one. Files
+//!   are written here because this build is resident: it is never
+//!   unloaded, so nothing it holds outlives its code (as with the window).
+//!
 //! Messages: `step [frames] [at fps]` and `frame`, as lockstep;
 //! `pace on|off|<speed>` (a speed of 0.5 is half speed); `pace` reports;
-//! with turns, `turn <left|right> <up|down|stay>`, `turn` (reports) and
-//! `turn length <frames>`.
+//! `note <text>` (a line in the session log); with turns, `turn
+//! <left|right> <up|down|stay>`, `turn` (reports) and `turn length
+//! <frames>`. For the replay tool, which drives this without its loop:
+//! `turns <frames>` (what `SPIKE_TURNS` does at start) and `turn frame`
+//! (one frame of the playing turn, as the loop plays it).
 
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use clock::Clock;
 use engine_api::{Bootstrap, Cx, Entity, Mod, Pumped, Status, export_mod};
+use spike_record::Watch;
 use spike_turns::{SIDES, Turn, TurnInfo};
 
 const DT: f32 = 1.0 / 60.0;
@@ -92,6 +109,107 @@ pub struct Pace {
     /// and when that was.
     shown: Option<(u64, [bool; 2], bool, bool, u32)>,
     redrawn: Option<Instant>,
+    log: SessionLog,
+}
+
+/// The session log, if `SPIKE_RECORD` names one: JSONL, a line per record,
+/// each written whole as it happens (no buffer), so a crash or a kill
+/// keeps everything up to it.
+#[derive(Default)]
+pub struct SessionLog {
+    file: Option<std::fs::File>,
+    opened: Option<Instant>,
+    /// The score last recorded, to record points as it changes.
+    score: [u32; 2],
+}
+
+/// An f32 as JSON: Rust's shortest text that parses back to the same bits,
+/// which is what lets the replay compare exactly. JSON has no NaN.
+fn num(v: f32) -> String {
+    if v.is_finite() { format!("{v}") } else { "null".into() }
+}
+
+fn nums(vs: &[f32]) -> String {
+    format!("[{}]", vs.iter().map(|&v| num(v)).collect::<Vec<_>>().join(","))
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out + "\""
+}
+
+impl SessionLog {
+    fn open(&mut self, cx: &Cx) {
+        let Ok(path) = std::env::var("SPIKE_RECORD") else { return };
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => {
+                self.file = Some(f);
+                self.opened = Some(Instant::now());
+                cx.log(format!("recording the session to {path}"));
+            }
+            Err(e) => cx.log(format!("not recording: opening {path}: {e}")),
+        }
+    }
+
+    /// Writes `{"t":"<kind>",<fields>,"ms":<since open>}`. A failed write
+    /// stops recording rather than the game.
+    fn line(&mut self, cx: &Cx, kind: &str, fields: &str) {
+        let Some(f) = &mut self.file else { return };
+        let ms = self.opened.map_or(0, |t| t.elapsed().as_millis());
+        let sep = if fields.is_empty() { "" } else { "," };
+        if let Err(e) = writeln!(f, "{{\"t\":\"{kind}\"{sep}{fields},\"ms\":{ms}}}") {
+            cx.log(format!("recording stopped: {e}"));
+            self.file = None;
+        }
+    }
+
+    fn check(&mut self, cx: &mut Cx, frame: u64) {
+        if self.file.is_none() {
+            return;
+        }
+        let Some(w) = spike_record::watch(&mut cx.world()) else { return };
+        let fields = format!(
+            "\"frame\":{frame},\"watched\":{},\"ball\":{},\"paddles\":{},\"score\":[{},{}]",
+            w.frame,
+            nums(&w.ball),
+            nums(&w.paddles),
+            w.score[0],
+            w.score[1]
+        );
+        self.line(cx, "check", &fields);
+    }
+
+    /// After frame `frame`: its inputs and any point, from the `Watch`.
+    fn frame(&mut self, cx: &mut Cx, frame: u64) {
+        if self.file.is_none() {
+            return;
+        }
+        let Some(w) = spike_record::watch(&mut cx.world()) else { return };
+        if w.frame != frame {
+            return;
+        }
+        if w.steers > 0 {
+            let fields =
+                format!("\"frame\":{frame},\"to\":\"pong_text\",\"msg\":\"{}\",\"steers\":{}", spike_turns::action(w.steer), w.steers);
+            self.line(cx, "input", &fields);
+        }
+        if w.score != self.score {
+            let by = if w.score[0] > self.score[0] { "left" } else { "right" };
+            self.score = w.score;
+            let fields = format!("\"frame\":{frame},\"by\":\"{by}\",\"score\":[{},{}],\"ball\":{}", w.score[0], w.score[1], nums(&w.ball));
+            self.line(cx, "point", &fields);
+        }
+    }
 }
 
 /// What a pump of the window found.
@@ -113,10 +231,21 @@ fn pump_window(cx: &mut Cx) -> Window {
 }
 
 impl Lockstep {
-    fn run_frame(&mut self, cx: &mut Cx, dt: f32) {
+    fn run_frame(&mut self, pace: &mut Pace, cx: &mut Cx, dt: f32) {
         self.frame += 1;
-        clock::publish(&mut cx.world(), &mut self.clock, Clock { frame: self.frame, dt });
+        {
+            let mut world = cx.world();
+            clock::publish(&mut world, &mut self.clock, Clock { frame: self.frame, dt });
+            // Whether or not a log is written, so a recorded world and its
+            // replay are the same world.
+            if let Some(e) = self.clock
+                && world.get::<Watch>(e).is_none()
+            {
+                world.insert(e, Watch::default());
+            }
+        }
         cx.run_frame_for(dt);
+        pace.log.frame(cx, self.frame);
     }
 
     fn speed(&self) -> f32 {
@@ -127,7 +256,21 @@ impl Lockstep {
         Duration::from_secs_f32(dt / self.speed())
     }
 
-    fn step(&mut self, pace: &mut Pace, cx: &mut Cx, n: u64, dt: f32) -> String {
+    /// `fps` is the step's `at <fps>`, as given, for the log: the replay
+    /// sends it back, so its `dt` is parsed from the same text.
+    fn step(&mut self, pace: &mut Pace, cx: &mut Cx, n: u64, dt: f32, fps: Option<&str>) -> String {
+        let from = self.frame + 1;
+        let reply = self.step_frames(pace, cx, n, dt);
+        if self.frame >= from {
+            let fps = fps.map_or("null".into(), json_str);
+            let fields = format!("\"from\":{from},\"to\":{},\"fps\":{fps},\"dt\":{}", self.frame, num(dt));
+            pace.log.line(cx, "step", &fields);
+            pace.log.check(cx, self.frame);
+        }
+        reply
+    }
+
+    fn step_frames(&mut self, pace: &mut Pace, cx: &mut Cx, n: u64, dt: f32) -> String {
         let window = pump_window(cx);
         if let Window::Closed = window {
             self.quit = true;
@@ -153,7 +296,7 @@ impl Lockstep {
             }
             // Taken as the frame starts, so a slow frame isn't paid twice.
             pace.last_frame = Some(Instant::now());
-            self.run_frame(cx, dt);
+            self.run_frame(pace, cx, dt);
         }
         format!("frame {}", self.frame)
     }
@@ -193,7 +336,7 @@ impl Lockstep {
 
     /// A side's action for the open turn. Replies at once: the turn plays
     /// from the loop, a frame a pass.
-    fn submit(&mut self, cx: &mut Cx, side: &str, action: &str) -> Result<String, String> {
+    fn submit(&mut self, pace: &mut Pace, cx: &mut Cx, side: &str, action: &str) -> Result<String, String> {
         let Some(i) = SIDES.iter().position(|s| *s == side) else {
             return Err(format!("no side {side:?}: left or right"));
         };
@@ -208,11 +351,21 @@ impl Lockstep {
         self.pending[i] = intent;
         self.turn.submitted[i] = true;
         let n = self.turn.turn;
+        pace.log.line(cx, "submit", &format!("\"turn\":{n},\"side\":\"{side}\",\"action\":\"{action}\""));
         if self.turn.submitted.iter().all(|&s| s) {
             self.turn.playing = true;
             self.turn.played = 0;
             self.turn.intents = self.pending;
             self.publish_turn(cx);
+            // What the replay applies: the actions, from the frame after this one.
+            let fields = format!(
+                "\"turn\":{n},\"from\":{},\"frames\":{},\"left\":\"{}\",\"right\":\"{}\"",
+                self.frame + 1,
+                self.turn.frames,
+                spike_turns::action(self.pending[0]),
+                spike_turns::action(self.pending[1])
+            );
+            pace.log.line(cx, "turn", &fields);
             Ok(format!("submitted for turn {n}: both in, playing {} frames", self.turn.frames))
         } else {
             self.publish_turn(cx);
@@ -224,13 +377,17 @@ impl Lockstep {
     /// last one, or the game's end.
     fn play_frame(&mut self, pace: &mut Pace, cx: &mut Cx) {
         pace.last_frame = Some(Instant::now());
-        self.run_frame(cx, DT);
+        self.run_frame(pace, cx, DT);
         self.turn.played += 1;
-        if spike_turns::outcome(&mut cx.world()).is_some() {
+        if let Some(outcome) = spike_turns::outcome(&mut cx.world()) {
             self.over = true;
             self.turn.playing = false;
             cx.log(format!("game over at frame {}", self.frame));
+            let winner = SIDES.get(outcome.winner as usize).copied().unwrap_or("?");
+            pace.log.line(cx, "over", &format!("\"frame\":{},\"turn\":{},\"winner\":\"{winner}\"", self.frame, self.turn.turn));
+            pace.log.check(cx, self.frame);
         } else if self.turn.played >= self.turn.frames {
+            pace.log.check(cx, self.frame);
             let n = self.turn.turn + 1;
             self.turn = TurnInfo { turn: n, frames: self.next_frames, intents: self.turn.intents, ..TurnInfo::default() };
         }
@@ -238,6 +395,16 @@ impl Lockstep {
     }
 
     fn handle(&mut self, pace: &mut Pace, cx: &mut Cx, message: &str) -> Result<String, String> {
+        if let Some(text) = message.trim_start().strip_prefix("note")
+            && (text.is_empty() || text.starts_with(char::is_whitespace))
+        {
+            if pace.log.file.is_none() {
+                return Err("not recording: notes go to the session log (SPIKE_RECORD)".into());
+            }
+            let fields = format!("\"frame\":{},\"text\":{}", self.frame, json_str(text.trim()));
+            pace.log.line(cx, "note", &fields);
+            return Ok(format!("noted at frame {}", self.frame));
+        }
         let mut words = message.split_whitespace();
         match (words.next(), words.next(), words.next(), words.next()) {
             (Some("step"), ..) if self.turns => {
@@ -262,7 +429,7 @@ impl Lockstep {
                 if n > MAX_STEPS {
                     return Err(format!("at most {MAX_STEPS} frames per step"));
                 }
-                Ok(self.step(pace, cx, n, dt))
+                Ok(self.step(pace, cx, n, dt, fps))
             }
             (Some("frame"), None, None, None) => Ok(format!("frame {}", self.frame)),
             (Some("turn"), ..) if !self.turns => Err("turns are off: start the engine with SPIKE_TURNS=<frames>".into()),
@@ -276,7 +443,22 @@ impl Lockstep {
                 }
                 Ok(format!("turns are {n} frames from turn {}", if self.turn.playing { self.turn.turn + 1 } else { self.turn.turn }))
             }
-            (Some("turn"), Some(side), Some(action), None) => self.submit(cx, side, action),
+            (Some("turn"), Some("frame"), None, None) => {
+                if !self.turn.playing {
+                    return Err(self.turn_status());
+                }
+                self.play_frame(pace, cx);
+                Ok(self.turn_status())
+            }
+            (Some("turn"), Some(side), Some(action), None) => self.submit(pace, cx, side, action),
+            (Some("turns"), Some(n), None, None) => {
+                if self.turns {
+                    return Err("turns are already on".into());
+                }
+                let n: u32 = n.parse().ok().filter(|&n| n > 0 && u64::from(n) <= MAX_STEPS).ok_or("a turn is 1 or more frames")?;
+                self.start_turns(cx, n);
+                Ok(format!("turns of {n} frames"))
+            }
             (Some("pace"), arg, None, None) => {
                 match arg {
                     None => {}
@@ -301,7 +483,8 @@ impl Lockstep {
     }
 }
 
-const USAGE: &str = "usage: step [frames] [at fps] | frame | pace [on|off|<speed>] | turn [<left|right> <up|down|stay> | length <frames>]";
+const USAGE: &str =
+    "usage: step [frames] [at fps] | frame | pace [on|off|<speed>] | note <text> | turn [<left|right> <up|down|stay> | length <frames>]";
 
 impl Mod for Lockstep {
     type Transient = Pace;
@@ -326,6 +509,18 @@ impl Bootstrap for Lockstep {
         } else {
             cx.log("lockstep with a spectator window: waiting for `step`");
         }
+        pace.log.open(cx);
+        let turns = if self.turns { self.turn.frames } else { 0 };
+        pace.log.line(cx, "start", &format!("\"turns\":{turns},\"dt\":{}", num(DT)));
+        let status = self.run_loop(pace, cx);
+        pace.log.line(cx, "end", &format!("\"frame\":{}", self.frame));
+        pace.log.check(cx, self.frame);
+        status
+    }
+}
+
+impl Lockstep {
+    fn run_loop(&mut self, pace: &mut Pace, cx: &mut Cx) -> Status {
         let mut window_open = false;
         loop {
             // While a turn plays, wait only until its next frame is due, so

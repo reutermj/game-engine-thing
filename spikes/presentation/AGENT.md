@@ -36,7 +36,12 @@ window managers float it. Its `WM_CLASS` class is `game-engine-thing`
 | stop it | `$M send pong_text stay` | `staying` |
 | advance time | `$M send lockstep step 6` | `frame 606` |
 | pacing | `$M send lockstep pace off` (or `on`, or a speed such as `0.5`) | what it is now |
+| note something for the reviewer | `$M send lockstep note <text>` | `noted at frame 606` |
 | quit | `$M quit` | `quitting` |
+
+The session is recorded (REVIEW.md): if something looks wrong, a `note`
+saying what and where puts it in the log at the current frame, for
+whoever replays the game afterwards.
 
 A frame is 1/60 s. `step N` runs N frames and replies when they are done:
 with pacing on (the default) that takes N/60 s, so the spectator sees them;

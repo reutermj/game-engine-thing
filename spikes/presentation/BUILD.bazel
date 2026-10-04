@@ -131,6 +131,7 @@ engine_mod(
     crate_root = "lockstep_window.rs",
     mod_deps = [
         ":spike_platform",
+        ":spike_record",
         ":spike_turns",
         "//engine/std/clock",
     ],
@@ -147,6 +148,7 @@ engine_game(
     mods = [
         "//pong/ai",
         "//pong/text",
+        ":spike_pong_record",
         ":spike_draw",
         ":spike_pong_view",
         ":spike_present",
@@ -209,6 +211,7 @@ engine_game(
     bootstrap = ":spike_lockstep_window",
     mods = [
         ":spike_pong_versus",
+        ":spike_pong_record",
         ":spike_draw",
         ":spike_pong_view",
         ":spike_present",
@@ -234,6 +237,109 @@ rust_binary(
         "PONG_VERSUS": "1",
     },
     tags = ["manual"],
+)
+
+# ---- The playtest loop: record, replay, probe, flag (REVIEW.md) ----
+
+# What the recorder sees of a game (`Watch`), which the bootstrap reads
+# after every frame and writes to the session log. Resident, like
+# spike_turns, since the bootstrap depends on it.
+engine_mod(
+    name = "spike_record",
+    srcs = ["record.rs"],
+    crate_root = "record.rs",
+    interface = ["record_interface.rs"],
+    resident = True,
+    tags = ["manual"],
+)
+
+# Pong's side of the recorder: fills the `Watch` each frame. In both
+# windowed games and both replay games.
+engine_mod(
+    name = "spike_pong_record",
+    srcs = ["pong_record.rs"],
+    crate_root = "pong_record.rs",
+    mod_deps = [
+        ":spike_record",
+        "//engine/std/clock",
+        "//engine/std/physics2d",
+        "//pong/core",
+    ],
+    mod_name = "pong_record",
+    tags = ["manual"],
+)
+
+# A presenter that hands the last draw list out as text, for the replay
+# tool to rasterise: the replay games load it where the windowed ones load
+# spike_present.
+engine_mod(
+    name = "spike_capture",
+    srcs = ["capture.rs"],
+    crate_root = "capture.rs",
+    mod_deps = [":spike_draw"],
+    tags = ["manual"],
+)
+
+# The windowed games without a window: the same bootstrap and mods, with
+# spike_capture for spike_present, and no display (the replay tool hides
+# it, so spike_platform makes no window).
+[engine_game(
+    name = name,
+    bootstrap = ":spike_lockstep_window",
+    mods = mods + [
+        ":spike_pong_record",
+        ":spike_draw",
+        ":spike_pong_view",
+        ":spike_capture",
+    ],
+    tags = ["manual"],
+) for name, mods in [
+    ("pong_window_replay", [
+        "//pong/ai",
+        "//pong/text",
+    ]),
+    ("pong_versus_replay", [":spike_pong_versus"]),
+]]
+
+# //pong itself (the standard lockstep, pong_ai, pong_text: no recorder,
+# view or presenter), for `pong_replay --plain`: a one-player session that
+# reproduces on it too was played by the same game the spike recorded.
+engine_game(
+    name = "pong_plain_replay",
+    bootstrap = "//engine/std/lockstep",
+    mods = [
+        "//pong/ai",
+        "//pong/text",
+    ],
+    tags = ["manual"],
+)
+
+# Replays a recorded session headless, checks it reproduces, and writes
+# probes, flags and frames (REVIEW.md):
+#   ./bazel run //spikes/presentation:pong_replay -- <session.jsonl> [--frames N..M]
+rust_binary(
+    name = "pong_replay",
+    srcs = ["pong_replay.rs"],
+    data = [
+        ":pong_plain_replay",
+        ":pong_versus_replay",
+        ":pong_window_replay",
+    ],
+    env = {
+        "PONG_PLAIN_REPLAY": "$(rlocationpath :pong_plain_replay)",
+        "PONG_VERSUS_REPLAY": "$(rlocationpath :pong_versus_replay)",
+        "PONG_WINDOW_REPLAY": "$(rlocationpath :pong_window_replay)",
+    },
+    tags = ["manual"],
+    deps = [
+        ":spike_record_interface",
+        "//engine/api",
+        "//engine/control",
+        "//engine/loader",
+        "//engine/std/physics2d:physics2d_interface",
+        "//pong/core:core_interface",
+        "@crates//:tiny-skia",
+    ],
 )
 
 # The extract and the hand-off without a GPU, in lockstep, for the bench.

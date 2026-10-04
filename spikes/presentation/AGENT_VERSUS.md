@@ -59,6 +59,10 @@ never enters the game), and restart if the view mod is reloaded.
 | observe, as a picture | `$M send pong_versus show` | the turn line, then a 40x20 text grid, `#` paddles, `o` ball |
 | submit your action | `$M send lockstep turn SIDE up` (or `down`, `stay`) | `submitted for turn 41, waiting for right` |
 | whose move it is, short | `$M send lockstep turn` | `turn 41 open, 6 frames, waiting for right (frame 240)` |
+| note something for the reviewer | `$M send lockstep note <text>` | `noted at frame 240` |
+
+The game is recorded (REVIEW.md): a `note` saying what looked wrong, with
+the turn, lands in the log at the current frame for whoever replays it.
 
 Submitting **never waits**: it replies at once. If you are the second to
 submit, the reply is `submitted for turn 41: both in, playing 6 frames`,
@@ -76,7 +80,8 @@ and the turn then plays out over the next 0.1 s while you poll.
 Commands a player shouldn't send (they change the game for both; leave
 them to the person): `$M send lockstep turn length N` (frames a turn, from
 the next turn on), `$M send pong_versus first-to N` (or `off`), `$M send
-lockstep pace off|on|<speed>`, `$M quit`.
+lockstep pace off|on|<speed>`, `$M quit`. `lockstep turn frame` and
+`lockstep turns N` are the replay tool's (REVIEW.md), not a player's.
 
 ## What `state` means
 
