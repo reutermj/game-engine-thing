@@ -1,6 +1,8 @@
 # Working sets
 
-**Status: proposed** (2026-10-02, get-8m9). Nothing here is built. This
+**Status: proposed** (2026-10-02, get-8m9). Nothing here is built as
+proposed; phase 2's aim, one `Slots`, was met another way, in
+`physics_common` ([Phase 2](#phase-2-one-entity-index-in-engine_ecs-safe-get-cp4)). This
 doc asks whether the solver's per-step copy of bodies is a workaround for a
 storage feature the ECS lacks: a dense **working set** that storage keeps,
 of chosen entities and columns, with an index by entity that the world
@@ -29,8 +31,10 @@ code:
   - bodies renumbered in entity order: 140 µs off the solver, for about 67
     of renumbering.
 - **The ECS gets one small shared piece** (phase 2): the entity-to-index
-  map, written three times today (`Slots`), as one safe type in
-  `engine_ecs`.
+  map, written three times then (`Slots`), as one safe type in
+  `engine_ecs`. *Done another way:* both physics mods share one `Slots`
+  through `physics_common` (get-emj.85; get-cp4 closed 2026-10-04), and
+  the third copy is `query_bench`'s.
 - **Optional query terms are worth something, but not much** (phase 3):
   9 to 41 µs off the solve's copy beyond page walks, and the collider
   gather's four queries become one. They are a change to the query
@@ -147,7 +151,7 @@ measurements are from the spike, below; "settled" is the settled pile of
 | | option | what it costs or saves | what it would take | verdict |
 |---|---|---|---|---|
 | a | **the copy as built**: the index rebuilt from the walk each step, bodies in walk (spatial) order | the baseline | – | – |
-| b | **one shared index type** in `engine_ecs` for the three `Slots` | nothing, either way | a small safe type | **phase 2** |
+| b | **one shared index type** in `engine_ecs` for the three `Slots` | nothing, either way | a small safe type | **phase 2**; done in `physics_common` instead |
 | c | **an index rebuilt each step by the world**: a parameter that does (a)'s walk and map for the system | (a)'s cost, packaged | an API. The gathered layout (`SolverBody`, `Spinning`) is physics's, so its code stays in the mod: live.md's "where does the derivation's code live" again | no: (b) removes the duplication, and nothing else changes |
 | d | **an index kept by storage, by entity**, slots in arrival order with swap-remove (Box2D, Rapier, Jolt) | index 6 → 0 µs. The gather writes each row to its slot, out of walk order: +7 falling, +52 settled, +11 pyramid. Write-back looks each row up: +15, +10, +7. **Solver in entity order: −142 settled (3%), −98 at 8 threads (9.5%)**, −19 / −46 on the pyramid, 0 falling. Spawn and despawn: within −2 and +6 ns of 180 to 290 (the index's own insert 3 to 5 ns, swap-remove 7 to 9). The re-sort: nothing, by construction | `SparseSet` already has this shape. New: a dense view of a sparse component's packed values with its index, and dead entries purged before it's handed out | **deferred** (phase 4): (e) gets its order for less code |
 | e | **renumbered in entity order each step**, by the mod | the solver's gain as (d). Renumbering cost the spike +57 to +67 µs at 10 000 (a scan of the by-entity vector and a move of each gathered value), +29 on the pyramid | physics alone. A cheaper renumbering (physics.md measured 25 to 29 µs by first touch, 2026-09-24) would keep the falling pile from losing | **phase 1** |
@@ -369,8 +373,11 @@ in 3D, measured there. No ECS change, no unsafe code, no baseline moves.
 **Since (2026-10-02):** the copy may become declared flows
 ([flows-spike.md](flows-spike.md), get-znt.24), whose allocations the ECS
 keeps between frames for every flow (2 to 7% of the frame at 8 threads in
-that spike). So the buffers kept in the mod's `Transient` wait on whether
-physics adopts flows (get-znt.25), rather than being built twice. The
+that spike). So the buffers kept in the mod's `Transient` waited on whether
+physics adopted flows (get-znt.25), rather than being built twice. It
+did: both physics mods' solves are pipelines of flows (get-znt.33,
+get-znt.35; each one's `pipeline.rs`), whose allocations the world's
+recycling bins keep between frames ([flows.md](flows.md)). The
 renumbering in entity order doesn't depend on it: it would move into the
 flow's gather as is.
 
@@ -381,6 +388,13 @@ contract: by entity index, generation checked, `O(1)`. It replaces the
 two physics mods' copies and `query_bench`'s, and serves hierarchy's
 by-level idiom and anything else that maps entities to a list. It's a
 utility, not storage: no footprint, nothing kept.
+
+**Done another way** (get-emj.85, merged 2026-10-02): the two physics
+mods' copies became one, `physics_common::Slots`
+(`engine/std/physics_common/slots.rs`), in the crate the two mods share
+apart from the dimension ([physics-sharing.md](physics-sharing.md)).
+`query_bench`'s copy (`engine/ecs/tests/query_bench.rs`) is a bench's
+and stays, so get-cp4 closed without a type in `engine_ecs`.
 
 ### Phase 3: optional terms (the user's decision; get-9ck)
 

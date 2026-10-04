@@ -1,10 +1,11 @@
 # Live relations
 
-**Status: built for one kind of relation** (2026-09-27, get-emj.36, get-pmk):
+**Status: built for one kind of relation** (2026-09-27, get-emj.36):
 `engine_ecs::Live<R>` (`engine/ecs/live.rs`), where `R` is a
 `Proximity`, the pairs of a spatial key's rows near each other, kept
-current between steps. Any number of relations, each its own kept set.
-Other kinds of relation are open (get-pmk). This doc is the design's home:
+current between steps. Any number of relations, each its own kept set
+(get-pmk's first part, built the same day). Other kinds of relation are
+the rest of get-pmk, which stays open for them. This doc is the design's home:
 the problem it solves, how it looks to the code that uses it, what it
 costs storage, how it's tested, where the ideas come from, and how it
 could grow. The measurements behind each of its choices are in
@@ -72,7 +73,7 @@ impl Proximity for Contacts {
     const MARGIN: f32 = FAT; // optional: the engine's default is 0.02
 }
 
-fn find_contacts(_: &mut Cx, /* the queries it reads data through */ mut near: Live<Contacts>) {
+fn find_contacts(&mut self, _: &mut Sleepers, _: &mut Cx, /* the queries it reads data through */ mut near: Live<Contacts>) {
     for &(a, b) in near.pairs() {
         // ... the narrowphase ...
     }
@@ -80,8 +81,10 @@ fn find_contacts(_: &mut Cx, /* the queries it reads data through */ mut near: L
 ```
 
 That is the 2D physics mod's relation (`engine/std/physics2d/lib.rs`), which
-finds its pairs afresh across the world's threads when it does, as
-`near_pairs` does (get-znt.31; `pairs_with(&workers)` until then).
+finds its pairs afresh across the world's executor when it does, as
+`near_pairs` does ([threads.md](threads.md)). *(History, 2026-10-04: until
+get-znt.31 removed `Workers` (9bbf045, 2026-10-03), the system passed its
+workers in, `pairs_with(&workers)`.)*
 
 **The names.** The two halves are named apart on purpose. `Proximity` is
 the *kind* of relation, and it is spatial: pairs of rows of one spatial
@@ -346,7 +349,7 @@ two-relations test and the default-margin one by the margin test.
   without moving any row. Whether the re-sort after the install re-bounds
   and stamps every page is untested for live relations (get-emj.46).
 - **The kept path runs on one thread.** Only the fresh path splits across
-  workers.
+  the world's executor, as `near_pairs` does.
 - **Miri isn't needed for its own sake:** `live.rs` has no unsafe code.
   `live_test` is in the Miri suite anyway (`//engine/ecs:miri`, sized
   down), for the spatial glue its spawns, despawns and table moves drive.
@@ -387,7 +390,8 @@ through a declared parameter, and answers exactly what recomputing would.
 
 ### 1. More than one kept set per key (done)
 
-**Built 2026-09-27** (get-pmk), as the relation declared by a type:
+**Built 2026-09-27** (get-pmk's first part; the bead stays open for
+other kinds), as the relation declared by a type:
 
 ```rust
 struct Perception;
@@ -517,7 +521,8 @@ of parallelism's open work (get-znt.5).
   from a fresh call's fixed cost; not found.
 - **Sparse filters are refused** (sketch 3), and **no fuzzing yet**
   (Testing, get-emj.45).
-- **Other kinds of relation:** get-pmk.
+- **Other kinds of relation:** get-pmk (open; its first part, several
+  relations a key, is built).
 
 [^kept]: **The old API** (2026-09-27, replaced the same day). The world
     kept one set of pairs per spatial key, taken as `Kept<K>`, and the
