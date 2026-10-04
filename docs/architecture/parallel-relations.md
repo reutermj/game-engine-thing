@@ -157,7 +157,7 @@ when this was written; since 2026-10-03 the pipeline's flows, its passes on
 | each contact's color | `Head::groups`, from `lanes::group`, greedy in pair order, **every step** | a pure function of the contacts: nothing to store, and replays need nothing stored |
 | contacts in batches of four lanes, by color | `Batch<N>`, `Lane` | SIMD layout, a transpose of the contacts |
 | the stages and their barriers | `lanes::run_across` when this was written: stages claimed by `fetch_max`, a count a stage, no main thread. Since 2026-10-03, `Passes`' program, its stages dispatched by `engine_ecs::dispatch` (threads.md, "Dispatch") | a protocol inside one run of the executor, which the ECS had no word for; now a shape it provides |
-| the threads | the host's, through `Workers`, when this was written; since 2026-10-03 the `threads` mod's pool, through `Passes` | a reloadable mod can't own threads (physics.md, [Parallelism](physics.md#parallelism)) |
+| the threads | the host's, through `Workers`, when this was written; since 2026-10-03 the `threads` mod's pool, through `Passes` | a reloadable mod can't own threads (the physics log, [Parallelism](../retrospectives/2026-10-04-physics-log.md#parallelism)) |
 
 So the parallelism was three things the ECS doesn't see:
 
@@ -323,7 +323,7 @@ moves every row at a repack. Both are rejected.
   one-thread solve's order changes and every result moves once. That needs
   the quality suites and baselines rerun, and a decision, as the move to
   colored order had ([The decision: B
-  colored](physics.md#the-decision-b-colored)).
+  colored](../retrospectives/2026-10-04-physics-log.md#the-decision-b-colored)).
 - **Across a reload, snapshot or replay:** the colors are in the world, so
   they are carried. A repack by step count needs the count in the world
   too: physics's step counter, or `repack` read against a world tick.
@@ -473,7 +473,7 @@ for this design the pool is a dependency, not a part:
   solve already copes: any thread takes any block, and a late thread skips
   what's done. A colored walk would inherit that from the solve's protocol.
 - **Placement and warmth** help every primitive alike, and the sticky
-  affinity measured in [Parallelism](physics.md#parallelism) (chunk `k` on
+  affinity measured in [Parallelism](../retrospectives/2026-10-04-physics-log.md#parallelism) (chunk `k` on
   thread `k % n`) would help a relation's walks as it helped the broadphase.
 
 Whether the pool is rayon's or our own, and how it pins, was the user's
@@ -492,7 +492,7 @@ splits").
   which `Live`'s contract forbids.
 - **A color key in the table's order, or a table per color:** rejected by
   the merge's cost (above).
-- **Islands:** rejected before ([Parallel solving](physics.md#parallel-solving)):
+- **Islands:** rejected before ([Parallel solving](../retrospectives/2026-10-04-physics-log.md#parallel-solving)):
   a pile is one island.
 - **Entity-level footprints in the scheduler:** not needed. Nothing runs two
   systems over disjoint rows of one table, and a scheduler that tracked
@@ -573,7 +573,7 @@ something besides physics needs it.
   (879 → 838, 585 → 556); projected 9% with placing split; the serial part
   from about 140 µs to a few. It matters more at 40 000 bodies, where the
   serial coloring and copy were as long as the solve on 16 threads
-  ([Parallel solving](physics.md#parallel-solving)).
+  ([Parallel solving](../retrospectives/2026-10-04-physics-log.md#parallel-solving)).
 - **No unsafe code, no ECS change.**
 - **Not worth it** if the rerun quality suites move a bound the wrong way:
   then colors stay a function of the contacts, and the serial part stays.

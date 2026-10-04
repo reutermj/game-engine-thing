@@ -308,7 +308,7 @@ mapped; why, and what checks it: [threads.md](threads.md#hot-reload),
     and measured on the physics step as `Query::par_for_each` and its page
     walks across the executor the host installed in the world: what it
     showed, and who owned the threads then,
-    [physics.md](physics.md#parallelism). The physics solver's passes were
+    [the physics log](../retrospectives/2026-10-04-physics-log.md#parallelism). The physics solver's passes were
     split the same way, a stage at a time within one run
     ([physics.md](physics.md#solving-across-threads)). Since get-znt.28
     (2026-10-02) parallel work is a declared shape; the walks and the
