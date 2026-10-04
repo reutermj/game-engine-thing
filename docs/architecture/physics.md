@@ -4942,6 +4942,123 @@ faster (it found each seat by walking the coloring).
 `solve_with`, the step nothing turns in, solved one contact at a time in
 pair order, which no shape can split.
 
+### The 3D narrowphase across threads
+
+**Built** (2026-10-03, get-emj.101). physics3d's `find_contacts` had
+run on one thread, its narrowphase a quarter to a third of the step at 8
+threads (threads.md, "The whole step, stage by stage"). Now its
+narrowphase, its gathers and its merge with the world run across the
+scheduler's threads, each a `ParMap`, bit for bit one thread's.
+
+**Where the narrowphase's time went** (timers put in a copy, since
+removed: the loop cut into three passes, each timed whole; step_bench,
+`--config=bench`, one round, the median of 3 runs, on a machine other
+agents were loading at 17 to 41). The passes add up to twice the fused
+loop, so only the shares count:
+
+| part | boxes 10 000 settled | boxes 10 000 falling | planks 1000 settled |
+|---|---|---|---|
+| the loop as it runs (one thread) | 1995 µs | 2978 | 410 |
+| finding each pair's last contact, and recycling it (Box3D's) | 2020 (45%) | 1875 (37%) | 235 (48%) |
+| the pair tests (`narrow::collide`) on pairs not recycled | 1451 (33%), 7121 pairs, 1 touching | 2396 (48%), 10 934 pairs, 2638 touching | 151 (31%), 2899 pairs, none touching |
+| the contacts built (`stored`, `warm`) | 980 (22%) | 758 (15%) | 106 (22%) |
+
+- **Settled, the pair tests are almost all misses**: all but one of the
+  18 738 contacts are recycled, and the 7121 pairs tested are pairs
+  whose grown boxes meet but whose shapes don't.
+- **The colliders' gather** (one thread, settled): the colliders 120 µs,
+  `Slots` 17, and copying the last step's contacts 282, which the
+  narrowphase reads for their axes, manifolds and impulses.
+
+**The shape, as 2D's** (`ParMap::for_each_mut` over chunks of pairs,
+2D's `chunks`, at least 256 pairs a chunk, four a thread, one on one
+thread): each chunk an item with the list it fills, made on the system's
+thread with room for a contact a pair. 64 pairs a chunk measured the same
+on the planks (52-53 µs at 8 threads).
+
+- **Nothing in it depends on order.** A pair reads this step's
+  colliders and its own last contact: the cached axis and its separation,
+  and the manifold recycling carries. Nothing a pair finds is read by
+  another pair this step. Each chunk finds its first pair's last contact
+  by a partition point, which is where a walk from the first pair would
+  have got to, since both lists are in pair order. The counts (`Found`)
+  are integer sums. So any cut finds what one walk does, and the results
+  are kept in chunk order.
+- **The results stay in their chunks' lists** (`Parts`, read through a
+  `Cursor`), not copied into one: a contact is about 200 bytes. The merge
+  reads them in order, as one list.
+- **The last step's contacts** are gathered by `par_for_each_ordered_page`
+  and left in its parts the same way. A `Peekable` of chained and
+  flattened slice iterators over them cost the narrowphase 281-284 µs at
+  8 threads on the settled boxes, against 252-258 through `Cursor`, the
+  same as from one `Vec`.
+- **The moving colliders** by `par_for_each`, joined by a copy onto the
+  first chunk's list (made with room for all), since `items` is read by
+  slot everywhere. Unlike 2D's gathers, which split and didn't gain, this
+  one gains despite the copy: at 8 threads the gather took 150-166 µs
+  where the contacts' split alone left it at 191-197.
+- **The merge** is 2D's parallel merge: each chunk of the world's
+  contacts merges with what was found from its first key on, writing in
+  place, and records its spawns and despawns, which the system makes
+  after in walk order. So the log and the ids spawns take are a single
+  walk's.
+
+**Bit for bit**, at `ENGINE_THREADS` 1, 2, 4 and 8: the 3D baselines,
+default and long (`-- --all`, `-- --long --all`), and the 2D baseline,
+byte-identical to 70a4093's (104, 98 and 232 lines); the fingerprint as
+pinned; `exact_test`, `quality_test`, `physics3d_test` and the 3D reload
+test pass at each count. The fingerprint's scene, 40 bodies, is one chunk at any
+count, so `physics3d_test`'s
+`contacts_found_across_threads_are_one_threads_bit_for_bit` runs 1000
+boxes on one thread and on four, more than four chunks, and compares
+every body, contact and entity. Planted: a chunk dropped fails it, the
+pile test, and `quality_test`'s baseline and three pile tests; a chunk
+run twice puts its results out of order, and the merge's `start - done`
+underflows (overflow checks are on) in it, the pile test and
+`quality_test`; two chunks' results swapped fail it alone; the spawns
+between merge chunks dropped fail it and two other `physics3d_test`
+tests.
+
+**What it bought** (step_bench, `--config=bench`, 70a4093 and this tree
+alternated, two rounds each, the median of 3 runs, 2026-10-03, load
+averages 3 to 16 from other agents' work. The 8-thread figures are a
+second pair of rounds: in the first pair's second round both trees'
+passes doubled, other work on the pool's cores). µs a step:
+
+| case | stage | old, 1 | new, 1 | old, 8 | new, 8 |
+|---|---|---|---|---|---|
+| boxes 10 000 settled | gather / narrowphase / merge | 362-388 / 1781-1812 / 182-195 | 369-388 / 1852-1881 / 157-159 | 347-352 / 1762-1773 / 160-161 | 149-155 / 256-258 / 53-56 |
+| | `find_contacts` | 2637-2716 | 2697-2783 | 2566-2587 | 766-769 |
+| | whole step | 21 631-21 942 | 21 617-22 112 | 6727-6730 | 4586-4619 |
+| boxes 10 000 falling | gather / narrowphase / merge | 364-374 / 2836-2895 / 183-207 | 349-360 / 2878-2919 / 178-186 | 347-350 / 2867-2876 / 181-185 | 149-154 / 545-547 / 65-66 |
+| | `find_contacts` | 4590-4650 | 4588-4606 | 3763-3768 | 1107-1114 |
+| | whole step | 23 417-23 957 | 23 350-23 357 | 8504-8641 | 5519-5541 |
+| planks 1000 settled | gather / narrowphase / merge | 40-43 / 300-308 / 17-18 | 47-48 / 326-333 / 18 | 41-42 / 298 / 18 | 23-26 / 53-55 / 11 |
+| | `find_contacts` | 399-413 | 435-443 | 396-398 | 126 |
+| | whole step | 3023-3104 | 3134-3138 | 1141-1147 | 868-873 |
+
+- **At 8 threads the step is a third faster** with boxes (settled 6.7
+  ms to 4.6, falling 8.6 to 5.5) and a quarter with planks: the
+  narrowphase 6.9 times as fast settled, 5.3 falling, 5.5 on planks;
+  the merge about 3 times; the gather 2.3. The passes after it gain too
+  (settled 3102-3105 µs to 2795-2807, falling 2950-2966 to 2681-2690),
+  their workers kept warm by `find_contacts`' dispatches, as the
+  broadphase's did for the falling pile (threads.md, "Every split on a
+  shape"; inferred, not measured apart).
+- **One thread pays 1-4% on the planks** (`find_contacts` 35 µs slower:
+  the narrowphase 25, the gather 6); with boxes the step is level within
+  the runs' spread. The narrowphase is 2-11% slower on one thread with
+  its loop in a chunk's closure; a closure taking its captures by value,
+  counts in locals, and a direct call skipping `for_each_mut` didn't
+  recover it (planks, three rounds each, within their ±10 µs).
+
+**What stays serial, and why**: `Slots` (17 µs), filled from the
+colliders in order; the statics' gather (a few colliders); the spawns
+and despawns the merge recorded, made in walk order so the log and the
+ids are one walk's; and the contacts spawned at the apply node (8% of
+the falling step at 8 threads now 12%, the largest serial stage left in
+`find_contacts`' reach).
+
 ## Open questions
 
 - **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation

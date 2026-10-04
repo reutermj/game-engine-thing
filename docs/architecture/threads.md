@@ -510,26 +510,28 @@ median of each stage, so the stages needn't add to the step exactly.
 | everything else (other nodes, outside them) | 11 / 11 (0%) | 9 / 11 (1%) | 12 / 12 (2%) | 5 / 6 (0%) | serial |
 | **whole step** | 6836 / 2377 (100%) | 4388 / 1454 (100%) | 1110 / 793 (100%) | 3370 / 3245 (100%) |  |
 
-**3D**
+**3D**, the get-emj.101 tree, measured the same way in its own runs
+(2026-10-03; physics.md, "The 3D narrowphase across threads", has them
+against the tree before):
 
 | stage | boxes settled | boxes falling | planks settled | |
 |---|---|---|---|---|
-| gravity (`integrate_velocities`) | 53 / 43 (1%) | 53 / 46 (0%) | 3 / 3 (0%) | serial |
-| colliders gathered | 381 / 353 (5%) | 376 / 353 (4%) | 42 / 42 (4%) | serial |
-| broadphase (`Live`) | 320 / 300 (4%) | 1175 / 357 (4%) | 40 / 37 (3%) | kept: serial; afresh: split |
-| narrowphase | 1796 / 1773 (26%) | 2859 / 2894 (31%) | 307 / 299 (26%) | serial |
-| merge with the world | 166 / 163 (2%) | 194 / 195 (2%) | 18 / 18 (2%) | serial |
-| rest of `find_contacts` | 7 / 17 (0%) | 10 / 24 (0%) | 3 / 4 (0%) | serial |
-| apply(find_contacts): contacts spawned, despawned | 19 / 20 (0%) | 729 / 729 (8%) | 0 / 0 (0%) | serial |
-| gather_bodies | 108 / 105 (2%) | 131 / 123 (1%) | 7 / 8 (1%) | serial |
-| gather_contacts | 301 / 311 (5%) | 295 / 303 (3%) | 46 / 55 (5%) | serial |
-| prepare (coloring, seating) | 270 / 271 (4%) | 285 / 280 (3%) | 32 / 33 (3%) | serial |
-| passes (fill and solve) | 17690 / 3164 (46%) | 16950 / 3780 (40%) | 2502 / 611 (53%) | scales: `Passes` |
-| finish (write-back) | 133 / 29 (0%) | 127 / 31 (0%) | 21 / 7 (1%) | scales: `ParMap` |
-| scatter_contacts | 59 / 54 (1%) | 55 / 50 (1%) | 11 / 7 (1%) | serial |
-| scatter_bodies | 186 / 147 (2%) | 191 / 156 (2%) | 10 / 10 (1%) | serial |
-| apply(scatter_bodies): the re-sort | 243 / 72 (1%) | 272 / 97 (1%) | 20 / 20 (2%) | re-bounding split, moves serial |
-| **whole step** | 21734 / 6835 (100%) | 23754 / 9415 (100%) | 3066 / 1156 (100%) |  |
+| gravity (`integrate_velocities`) | 50 / 40 (1%) | 46 / 40 (1%) | 3 / 2 (0%) | serial |
+| colliders gathered | 378 / 152 (3%) | 355 / 151 (3%) | 47 / 25 (3%) | scales: `ParMap` walks (statics, `Slots` serial) |
+| broadphase (`Live`) | 311 / 296 (6%) | 1157 / 344 (6%) | 41 / 32 (4%) | kept: serial; afresh: split |
+| narrowphase | 1867 / 257 (6%) | 2899 / 546 (10%) | 330 / 54 (6%) | scales: `ParMap` |
+| merge with the world | 158 / 54 (1%) | 182 / 66 (1%) | 18 / 11 (1%) | scales: a `ParMap` walk |
+| rest of `find_contacts` | 25 / 8 (0%) | 5 / 3 (0%) | 4 / 4 (0%) | serial |
+| apply(find_contacts): contacts spawned, despawned | 18 / 18 (0%) | 704 / 675 (12%) | 0 / 0 (0%) | serial |
+| gather_bodies | 116 / 87 (2%) | 125 / 96 (2%) | 7 / 8 (1%) | serial |
+| gather_contacts | 311 / 300 (7%) | 288 / 300 (5%) | 46 / 51 (6%) | serial |
+| prepare (coloring, seating) | 269 / 271 (6%) | 279 / 290 (5%) | 33 / 31 (4%) | serial |
+| passes (fill and solve) | 17745 / 2801 (61%) | 16699 / 2686 (49%) | 2541 / 605 (69%) | scales: `Passes` |
+| finish (write-back) | 128 / 27 (1%) | 116 / 27 (0%) | 21 / 7 (1%) | scales: `ParMap` |
+| scatter_contacts | 55 / 54 (1%) | 50 / 51 (1%) | 11 / 6 (1%) | serial |
+| scatter_bodies | 172 / 151 (3%) | 163 / 154 (3%) | 10 / 10 (1%) | serial |
+| apply(scatter_bodies): the re-sort | 238 / 70 (2%) | 260 / 95 (2%) | 20 / 20 (2%) | re-bounding split, moves serial |
+| **whole step** | 21865 / 4603 (100%) | 23354 / 5530 (100%) | 3136 / 870 (100%) |  |
 
 - **2D's serial stages over 5% at 8 threads**: the contacts gathered for
   the solve (11-13% turning), `Live`'s kept pairs (5-13%), writing the
@@ -539,9 +541,11 @@ median of each stage, so the stages needn't add to the step exactly.
   moves (8%). The colliders' gathers and gravity split but don't gain:
   memory-bound walks whose chunks are joined by a copy on the system's
   thread.
-- **3D's narrowphase is a quarter to a third of its step**, on one thread
-  (3D never split it); its colliders' and contacts' gathers are 4-5%, its
-  contacts spawned while falling 8%.
+- **3D's serial stages over 5% at 8 threads**, its `find_contacts` split
+  (get-emj.101: its narrowphase had been a quarter to a third of the
+  step, on one thread): the contacts gathered for the solve (5-7%),
+  `prepare` (4-6%), `Live`'s kept pairs (4-6%), and while falling the
+  contacts spawned at `find_contacts`' apply node (12%).
 - **The pile not turning is its solve** (78%), one contact at a time in
   pair order, which no shape splits without moving results.
 
