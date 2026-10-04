@@ -193,8 +193,10 @@ fn one_way(_: &mut Cx, mut contacts: Query<(&ContactOf, &Manifold, &mut Response
    tables of 8) would be worse. That rules out relationship pairs stored
    in archetypes (option 1).
 3. **Compound colliders are data.** Parts on the body are 7× cheaper than
-   collider entities, and fit spatial storage's one extent per key: a
-   body's box is the union of its parts.
+   collider entities, and fit spatial storage's extents (one per key when
+   this was measured; up to two since 2026-09-26, `MAX_EXTENTS`, see
+   [spatial-storage.md](spatial-storage.md#bounds-from-several-components)):
+   a body's box is the union of its parts.
 
 Mod state held entity lists that are now in the world: the platformer's
 level is the entity with its `LevelInfo`, and what it builds is `ChildOf`
@@ -217,10 +219,13 @@ spawn, asks the world.
 - **The walkers' `meet` checks both ends of an overlap**, but in the
   replays the walker is always `a`, so the other orientation is untested.
 
-**Found on the way:** restitution is lost on speculative contacts
-(get-emj.19). The solver slows a landing body to gap/dt the step before
-it touches, and bounces it from that speed, so a ball landing at 10 with
-restitution 1 comes back at 3.
+**Found on the way:** restitution was lost on speculative contacts
+(get-emj.19). The solver slowed a landing body to gap/dt the step before
+it touched, and bounced it from that speed, so a ball landing at 10 with
+restitution 1 came back at 3. Fixed 2026-09-26 (e4cc13c): the soft step's
+restitution pass bounces from the closing speed before the step, as
+Box2D v3's does, pinned by the solver's test
+`a_speculative_contact_bounces_at_the_landing_speed`.
 
 [^table]: 2026-09-24. The spike's recommendation was contacts in a
     physics-owned table (`ContactTable`, one component holding every

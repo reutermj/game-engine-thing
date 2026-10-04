@@ -65,7 +65,8 @@ Three places could own the threads. What each has to satisfy:
    parked or spinning between dispatches is in rayon's code, in whichever
    library made the pool; unmapping that library under it is a crash.
 2. **Mods reach the pool only through the world's executor**
-   (`World::set_executor`, `Arc<dyn Executor>`), a trait object, so no
+   (installed by `WorldMut::install_executor`, an `Arc<dyn Executor>`), a
+   trait object, so no
    mod links the pool or depends on whoever made it. And the world hands
    it to no one: a system runs on it only through a declared shape, and
    `World::executor` is crate-private, so a mod holding the world (a
@@ -83,8 +84,8 @@ Three places could own the threads. What each has to satisfy:
 | the bootstrap | yes: resident | yes | yes | tied to time policy: both bootstraps would carry it, and a game replacing its bootstrap would lose its threads |
 
 **The resident mod** is where hot-reload.md already puts threads ("Resident
-mods are the right home for threads"), and where scheduling.md said the
-parallel scheduler's workers would be. It is its own mod rather than the
+mods are the right home for threads"), and where scheduling.md's step 2
+first put the parallel scheduler's workers. It is its own mod rather than the
 scheduler's, because a scheduler that owned threads would have to be
 resident, and scheduling policy would stop hot-reloading; `sequential`
 keeps reloading like gameplay. When systems run in parallel (get-znt.5),
@@ -94,10 +95,15 @@ before `run_frame` does, so it can stay reloadable too.
 
 What being a mod needs, and has:
 
-- **Load and close.** `load` makes the pool and installs it
-  (`set_executor`, between frames). `close` takes it out of the world if
-  it is still there (`take_executor_if`: a test may have put its own in;
-  `threads_test` holds both), and its transient
+- **Load and close.** `load` makes the pool and installs it through
+  `WorldMut::install_executor`, between frames. `close` takes it out of
+  the world if it is still there (`WorldMut::take_executor_if`: a test
+  may have put its own in; `threads_test` holds both). The mod takes the
+  `Executor` trait from `engine_threads`, since `engine_api` no longer
+  exports it (nor `Scoped`): a reloadable mod has no executor to install
+  or run on, only shapes. As a resident mod it takes
+  `//engine:mod_lints_threads_allowed`, the one lint config that lets
+  code in a mod start threads. Its transient
   part, dropped after, joins the threads while the library is mapped: the
   pool spawns them itself (`spawn_handler`) to keep the handles, since a
   dropped rayon pool's threads leave on their own time.
@@ -256,7 +262,17 @@ what lets the loader swap the mod at the next pump.
 
 **One thread, plain.** Where the world has no executor, or one thread,
 `run` runs the stages in order on the system's thread with the states
-plain (stage 1's path, 8 to 18% faster than shared, dispatch-spike.md).
+plain (stage 1's path). What that saves is quoted here, and only here:
+
+- **The engine's figure**, 2D's `passes` system on `step_bench`, one
+  thread, kernels matched once a call (get-znt.26): shared states cost 6
+  to 7% settled and on the pyramid, and 24% on the falling pile
+  (flows.md, "On one thread", has the table).
+- **The spikes'**, their 2D figures superseded by the engine's: the
+  flows spike, 6 to 14% on the solve against the hand-tuned solve's
+  plain path (flows-spike.md); the dispatch spike, 8 to 10% on 2D's
+  passes and 10 to 18% on 3D's, the only 3D figure (dispatch-spike.md,
+  "2D: the solve against `run_across`").
 
 **The guard, get-znt.39.** `passes.serial(true)` runs that call on one
 thread, plain. physics2d's `prepare` decides it each step

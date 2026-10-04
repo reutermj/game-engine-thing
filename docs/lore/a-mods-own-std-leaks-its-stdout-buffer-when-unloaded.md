@@ -33,5 +33,15 @@ it: keep the builds, and tell LeakSanitizer not to count globals as roots
 (`--test_env=LSAN_OPTIONS=use_globals=0`), which reports every
 allocation only a static holds; the one in a mod's std was this.
 
-Not fixed: whether mods print through the host, or the ECS returns its
-reports instead of printing them, is a design question.
+Resolution: mod code doesn't print. `WorldMut` sends its migration
+reports to the host's log (`with_log`, in `engine/ecs/between.rs`), and
+`//engine:mod_lints` (`engine/BUILD.bazel`) denies clippy's
+`print_stdout` and `print_stderr` in every crate `engine_mod` makes and
+every crate linked into mods, so `./bazel test` fails on a new `println!`
+there. A mod logs through `cx.log`. The leak itself is unchanged: std
+in a mod would still leak its buffer if anything printed.
+
+*(History: 2026-10-04: this entry ended "Not fixed: whether mods print
+through the host, or the ECS returns its reports instead of printing
+them, is a design question" until the review found it stale; the host log
+and the lint landed in a47501a, 2026-09-25.)*

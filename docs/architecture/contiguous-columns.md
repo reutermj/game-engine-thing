@@ -29,7 +29,7 @@ rather than engine code:
   (`:contiguous_spike_test`, `:miri_contiguous_spike_sb` and `_tb`).[^spike-code]
 
 `solver_layout` (the split-impulse solver, `//engine/std/physics2d:solver_layout`)
-gained three in-place rows over contiguous blocks.
+gained three in-place rows over contiguous blocks.[^spike-code]
 
 **The answer, in short:**
 
@@ -241,7 +241,7 @@ the copy.
 **Open question:** whether that's false sharing (eight bodies' velocities
 share a cache line, against two `Atom`s), which isn't measured.
 
-**The split-impulse solver** (`solver_layout`, the 10 000 columns scene it
+**The split-impulse solver** (`solver_layout`[^spike-code], the 10 000 columns scene it
 was built on, µs, the median of three runs of 31): the copy 592. In place
 over contiguous `Velocity` and `Body` blocks:
 
@@ -436,3 +436,6 @@ costs more than the pass. No such relation is in a game yet.
   spawn at 9 ns a row against paged's 33, with full pages.
 
 [^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.
+    `//engine/std/physics2d:solver_layout`, an experiment binary rather
+    than one of this doc's spikes, outlived them: (2026-10-04) deleted by
+    get-emj.112; last built at 4018662.

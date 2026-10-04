@@ -15,10 +15,14 @@ them with little or no state of their own. So in this engine:
 
 - **Components live in the loader's world.** They outlive every build of
   every mod, and every mod sees the same entities.
-- **Systems are mods.** `//engine/std/physics2d` keeps only a contact cache
-  of its own; reloading it changes how bodies move, and nothing else.
+- **Systems are mods.** `//engine/std/physics2d` keeps its contacts in the
+  world too, as entities in a table ordered by pair; reloading it changes
+  how bodies move, and nothing else.
 - **Per-mod state (`Mod`) remains** for data genuinely private to one mod,
-  such as `mods/spawner`'s list of the entities it owns.
+  such as `mods/counter`'s counts, or the world tick physics2d last looked
+  for games' changes at. What a mod owns in the world is found there
+  rather than listed in its state: `mods/spawner`'s bodies are `ChildOf`
+  its box ([relationships.md](relationships.md)).[^examples]
 
 Changing a type is also handled better than with per-mod state. Every
 component carries a field-level schema, so a layout change migrates its
@@ -40,9 +44,10 @@ rule](#one-compiler-per-session) already guarantees for `String` and `Vec`,
 and on them being built from the same `engine/ecs`, which `API_VERSION`
 covers: a change to the crate bumps it.[^c-abi]
 
-**Open question:** whether the world should move into a mod once mods can
-call each other. That would make the ECS itself reloadable, at the cost of
-the world's lifetime depending on one mod.
+**Open question:** whether the world should move into a mod, now that mods
+can call each other ([services](mod-deps.md#calls-between-mods)). That
+would make the ECS itself reloadable, at the cost of the world's lifetime
+depending on one mod.
 
 ## Components
 
@@ -212,6 +217,12 @@ plus an addition. An attribute naming the old field
 **Open question:** conversions a schema can't express, such as splitting a
 field or changing units. They need code from the new build, given the old
 values, and a hook for it would sit beside the version bump.
+
+[^examples]: *(History, 2026-10-04.)* The examples here were physics's
+    contact cache, then its only state, and `mods/spawner`'s list of the
+    entities it owned. Contacts moved into the world as ordered tables,
+    and the spawner's list became `ChildOf` its box
+    ([relationships.md](relationships.md)).
 
 [^c-abi]: *(History, 2026-09-23.)* Mods used to reach the world only
     through `WorldApi`, a table of `extern "C"` functions, so the storage

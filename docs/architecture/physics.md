@@ -1,5555 +1,812 @@
 # Physics
 
-**Status: built** as `//engine/std/physics2d`, after a spike (results
-[below](#spike-results)), and both games run on it
-([The games on it](#the-games-on-it)). What the work showed about the
-design's flaws is in the
-[physics retrospective](../retrospectives/2026-09-23-physics.md).
-The third part of the MVP, after the mod loader and the ECS: 2D rigid-body
-physics as an engine mod, `//engine/std/physics2d`, whose every piece of
-state is in the world.
+**Status: built.** Two physics mods, both ours, with every piece of state
+in the world: `//engine/std/physics2d`, which both games run on, and
+`//engine/std/physics3d`, experimental, with `pile3d` as its scene. This
+doc describes what they do now, by topic. Why each choice was made, and
+what it was measured against, is in the dated record of the work,
+[the physics log](../retrospectives/2026-10-04-physics-log.md) (this
+doc's text until 2026-10-04); the sections below point into it, and
+[Where the old sections went](#where-the-old-sections-went) maps every
+old section name, which code comments still cite, to where it is now.
+
+Elsewhere: what the two mods share and how they differ, row by row, is
+[physics-sharing.md](physics-sharing.md)'s parity table; the tests, the
+baselines and the comparisons with other engines are
+[physics-testing.md](physics-testing.md) and
+[runbook 005](../runbooks/005-compare-physics-with-other-engines.md);
+the threads they run on are [threads.md](threads.md); the flows their
+solves are built from are [flows.md](flows.md). What the work showed
+about the design is in the physics retrospectives
+([2026-09-23](../retrospectives/2026-09-23-physics.md),
+[2026-09-25](../retrospectives/2026-09-25-physics-in-the-ecs.md),
+[2026-09-26](../retrospectives/2026-09-26-physics-against-other-engines.md),
+[2026-09-27](../retrospectives/2026-09-27-still-at-rest.md)).
 
 ## Goals
 
-Decided 2026-09-23:
-
 - **Our own, with its state in components.** Bodies, colliders and
   everything the solver carries from one step to the next live in the
-  world or in the physics mod's state, so reloading the solver swaps code
-  under a running simulation like any other mod. A library such as Rapier
-  keeps its own world beside ours (body sets, broadphase trees, contact
-  caches), which would have to be rebuilt after every reload or pinned in a
-  resident mod: the one part of the game that doesn't hot-reload.
-- **2D only.** Both games are 2D and there is no renderer yet; 3D waits for
-  the renderer spike (get-y5t.8).
-- **Deterministic.** The same inputs replay the same simulation, since both
-  games run on the lockstep bootstrap and their tests replay recorded
-  routes.
-- **Proved by the games.** The platformer's tile collision, gravity and
-  walker contact, and pong's bounces, move onto it, and a stress demo piles
-  up many bodies, as a benchmark and a later test of system and data
-  parallelism.
+  world or in the mod's state, so reloading physics swaps code under a
+  running simulation like any other mod. A library such as Rapier keeps
+  its own world beside ours, which would have to be rebuilt after every
+  reload or pinned in a resident mod.
+- **Deterministic.** The same inputs replay the same simulation, bit for
+  bit, at any frame rate and any thread count, on the same build and
+  machine (fused multiply-add and libm differ across machines, so that
+  isn't promised). Both games run on the lockstep bootstrap and replay
+  recorded routes.
+- **As good as the references, and held to it.** How soon scenes come to
+  rest, how deep they sink, how they bounce and slide are tests bounded by
+  what Box2D and Rapier (2D), and Rapier and Box3D (3D), do on the same
+  scenes ([Quality as a test](#quality-as-a-test)).
+- **2D first.** Both games are 2D. 3D is experimental: a mod like 2D's, on
+  the same storage, without 2D's game-facing features
+  ([Rotation in 3D](#rotation-in-3d)).
 
-Not goals for the MVP: joints, continuous collision detection, arbitrary
-polygons. Rotation, once one, is built: [Rotation](#rotation).
+Not built: joints, continuous collision, arbitrary polygons, a character
+controller ([Open questions](#open-questions)).[^goals]
+
+## The two mods
+
+Each is an `engine_mod` with an interface crate other mods depend on
+(`components.rs`; 3D's also `math.rs`) and an implementation that never
+reaches a game's build: a game depends on `//engine/std/physics2d` in its
+`mod_deps` and loads it. They share no interface. What they share is the
+ECS (spatial keys generic over the dimension, live relations, ordered
+tables) and `//engine/std/physics_common`, a library in both
+implementations (`Slots`, `Softness`, `Closing`, the soft step's and the
+broadphase's constants, `lanes::F` and `levels`), so a change to it
+reloads the two physics mods and no game. What may go in it, and the
+parity table every physics change keeps current, are
+[physics-sharing.md](physics-sharing.md).[^share]
 
 ## Components
 
-Declared in the physics mod's interface, so a game depends on it with
-`mod_deps = ["//engine/std/physics2d"]` and the game target loads it.
+2D's interface (`engine/std/physics2d/components.rs`), whose doc comments
+are the reference:
 
-```rust
-component! {
-    /// Where a body is: its collider's center. Units are the game's.
-    pub struct Position: "physics2d::Position" { pub x: f32, pub y: f32 }
-}
-
-component! {
-    /// Units per second. Set by the game at will (a jump, a serve); the
-    /// solver changes it on contact.
-    pub struct Velocity: "physics2d::Velocity" { pub x: f32, pub y: f32 }
-}
-
-component! {
-    /// How a body moves. `kind` is `DYNAMIC` (moved by velocity, gravity
-    /// and contacts), `KINEMATIC` (moved by velocity only: pushes, is never
-    /// pushed) or `STATIC` (never moves; tiles, walls).
-    pub struct Body: "physics2d::Body" {
-        pub kind: u8,
-        /// 0 means infinite (a dynamic body that can't be pushed).
-        pub inv_mass: f32,
-        /// 0 is no bounce, 1 a perfect one.
-        pub restitution: f32,
-        pub friction: f32,
-        pub gravity_scale: f32,
-    }
-}
-
-component! {
-    /// The body's shape, centered on its `Position`: a box (`BOX`, half
-    /// extents `hx`, `hy`) or a circle (`CIRCLE`, radius `hx`).
-    pub struct Collider: "physics2d::Collider" {
-        pub shape: u8,
-        pub hx: f32,
-        pub hy: f32,
-        /// What this collider is (one bit), and what it collides with.
-        pub layer: u32,
-        pub mask: u32,
-        /// Reports overlaps as `Trigger` events and doesn't push: coins,
-        /// spikes, the goal, pong's goal lines.
-        pub sensor: bool,
-        /// Layers it notices overlapping it, colliding or not: each such
-        /// overlap is an `Overlap` (a walker senses the player).
-        pub senses: u32,
-    }
-}
-
-component! {
-    /// Which way a body faces, as the cosine and sine of its angle: its
-    /// collider turned about its position. None is axis-aligned. Part of
-    /// the body's box in storage, with the collider.
-    pub struct Rotation: "physics2d::Rotation" { pub c: f32, pub s: f32 }
-}
-
-component! {
-    /// Radians a second. A dynamic body with a `Rotation` and a `Spin`
-    /// turns, with its shape's inertia at its mass; without a `Spin` it
-    /// keeps its rotation (the rotation lock).
-    pub struct Spin: "physics2d::Spin" { pub w: f32 }
-}
-
-component! {
-    /// The world's gravity, on one entity. None means none: pong has no
-    /// entity with it.
-    pub struct Gravity: "physics2d::Gravity" { pub x: f32, pub y: f32 }
-}
-
-component! {
-    /// How the step solves, on one entity; none is `Tuning::DEFAULT`, 5
-    /// substeps. More substeps are stiffer contacts, for a game that stacks
-    /// tall (six stand a 20-high turning stack at rest from step 60, not
-    /// 580), at about a fifth more solver each ([Still at rest](#still-at-rest)).
-    pub struct Tuning: "physics2d::Tuning" { pub substeps: u32 }
-}
-
-component! {
-    /// Which sides of a body touched something solid on the last step:
-    /// the answer to "can the player jump". Kept up to date on bodies that
-    /// have it; a game adds it where it wants to ask.
-    pub struct Touching: "physics2d::Touching" {
-        pub below: bool, pub above: bool, pub left: bool, pub right: bool,
-    }
-}
-
-event! {
-    /// Two solid colliders began touching this step. `nx, ny` points from
-    /// `a` to `b`; `speed` is how fast they met along it, for game rules
-    /// (pong's spin, a stomp).
-    pub struct Contact: "physics2d::Contact" {
-        pub a: Entity, pub b: Entity, pub nx: f32, pub ny: f32, pub speed: f32,
-    }
-}
-
-event! {
-    /// A sensor began overlapping a collider its mask includes.
-    pub struct Trigger: "physics2d::Trigger" { pub sensor: Entity, pub other: Entity }
-}
-```
-
-Contacts and overlaps are entities, kept by physics
-([relationships.md](relationships.md)):
-
-```rust
-component! {
-    /// Two solid colliders touching or about to, `a < b`: an entity from
-    /// the step physics finds them until the step it doesn't. An ordered
-    /// key, so contacts are stored in pair order.
-    pub struct ContactPair: "physics2d::ContactPair", order = key { pub a: Entity, pub b: Entity }
-}
-// With it on each contact: `Manifold` (normal from a to b, depth, pressed
-// now and the step before, how many points), `Response` (friction,
-// restitution, disabled: what the solver does with it this step), `Impulse`
-// (for warm starting) and `ContactPoints` (up to two points, each with its
-// arms, separation, feature id and last impulses: used when an end turns).
-
-component! {
-    /// Two colliders overlapping where one is a sensor or senses the
-    /// other: an entity while it lasts, in pair order too.
-    pub struct Overlap: "physics2d::Overlap", order = key { pub a: Entity, pub b: Entity }
-}
-```
+| component | what |
+|---|---|
+| `Position` | the collider's centre: a spatial key, bounded by `(Collider, Rotation)` |
+| `Velocity`, `Body` | units a second; kind (`DYNAMIC`, `KINEMATIC`, `STATIC`), inverse mass, restitution, friction, gravity scale |
+| `Collider` | a box (half extents) or a circle (`shape` a `u8`: the schema has no enums), layer and mask, `sensor`, `senses` |
+| `Rotation`, `Spin` | the cosine and sine of the angle; radians a second. A dynamic body turns only with both ([Rotation](#rotation)) |
+| `Gravity`, `Sleep`, `Tuning` | the world's settings, each on one entity, none meaning the default: gravity (none, no gravity), sleeping's thresholds, the substeps |
+| `ContactPair`, with `Manifold`, `Response`, `Impulse`, `ContactPoints` | a contact, an entity while it lasts, in an ordered table by pair; what a pre-solve hook may change (`Response`); the warm start; the points where an end turns |
+| `Overlap` | a sensor's or a sensed pair, an entity while it lasts, by pair |
+| `Asleep`, `Slept`, `Still`, `Resting` | sleeping, kept in the world ([Sleeping](#sleeping)) |
+| `Touching` | which sides touched something solid last step: "can the player jump" |
+| `Contact`, `Trigger` (events) | two colliders began pressing, with the speed they met at; a sensor began overlapping |
 
 `ContactPair::seen_from(me)` and `Overlap::other(me)` give the other end
-(and the sign for the normal) from either side, the part every system
-reading a pair would otherwise get wrong once.
+from either side. `Spatial`, the spatial query, is in the interface too
+([Spatial queries](#spatial-queries)). A body's position is physics's:
+games keep only game state.
 
-Shapes are a `u8` and half extents rather than an enum because a
-component's fields must be `FieldType`, and the schema has no enums;
-migration still works field by field.
-
-`physics2d::Position` replaces `transform::Position` and the games' own
-coordinates (`Player::x`, `Ball::x`): a body's position is the physics
-mod's, and game components keep only game state (coins, deaths, score).
+3D's interface (`engine/std/physics3d/components.rs`) has `Position` (the
+spatial key), `Velocity`, `Rotation` (a unit quaternion),
+`AngularVelocity`, `Body` (inverse mass and inertia about its own axes),
+`Collider` (a sphere or a box), `Static`, the contacts (`ContactPair`,
+`Manifold`, `Impulse`), and the settings `Gravity` and `Tuning`.
 
 ## The step
 
-Physics steps at a fixed 60 Hz, whatever the frame rate: its phase and
-`simulate` are fixed-rate ([scheduling.md](scheduling.md#fixed-rates)), so
-a frame runs them once per 1/60 s its time accumulates, and each system
-reads the step with a `Dt` parameter. The same inputs give the same
-simulation at any frame rate, on the same machine.[^onestep]
+Physics steps at a fixed 60 Hz (`phase::SIMULATE_HZ`) whatever the frame
+rate: its phase, `physics2d::step` (3D: `physics3d::step`), is after
+`simulate` and before `late` at `simulate`'s fixed rate
+([scheduling.md](scheduling.md#fixed-rates)), and each system reads the
+step's length as a `Dt`. A game sets velocities in `update` or
+`simulate` and reacts to contacts in `late`.
 
-The step is a pipeline of the physics mod's systems in its own phase,
-`physics2d::step`, after `simulate` and before `late`, so a game sets
-velocities (input, AI, rules) in `update` or `simulate` and reacts to
-contacts in `late`:
+The step is a chain of the mod's systems, each after the one before:
 
-1. **`integrate_velocities`**: gravity into every dynamic body's velocity.
-2. **`find_contacts`**: the [broadphase](#broadphase) finds candidate
-   pairs, then a narrowphase per pair (box–box, box–circle,
-   circle–circle): a normal and a depth; and, where either is turned, up
-   to two contact points ([Rotation](#rotation)).
-   Pairs filtered by layer and mask; overlaps of sensors (and sensed
-   layers) become `Overlap`s, a sensor's new ones a `Trigger` too, and go
-   no further. The rest bring the world's contacts in line: this step's
-   pairs and the stored contacts are both in pair order, so it's one pass,
-   updating contacts that persist in place (their impulses carried), and
-   despawning and spawning the rest.
-3. **The solve**, from `solve` on (below): a soft step, as Box2D v3's: five substeps of sequential
-   impulses over the contacts, each a pass of soft contacts that push
-   penetration out through the velocity, then positions, then two rigid
-   passes that take the push's speed back out; warm-started from the
-   last step's impulses, with Coulomb friction and restitution (once,
-   after the substeps) above a small speed threshold
-   ([Settling](#settling)). It also moves the bodies (positions change
-   within the substeps, so only the solver knows where they end), stores each contact's impulses and whether it's pressed, updates
-   `Touching`, and sends `Contact` for pairs that weren't pressing last
-   step. Contacts whose `Response` is disabled aren't solved. Writing
-   positions makes its apply node re-sort
-   them ([Broadphase](#broadphase)), so every system after the step
-   finds bodies where they are. It writes only the positions that
-   changed, bit for bit, so a pile at rest costs the re-sort nothing
-   ([What the ECS costs](#what-the-ecs-costs)).
+1. **`integrate_velocities`**: gravity into every awake dynamic body's
+   velocity (and, in 2D, the wakes games caused: [Sleeping](#sleeping)).
+2. **`find_contacts`**: the [broadphase](#broadphase), the
+   [narrowphase](#narrowphase) on each pair, then the world's contacts
+   brought in line in one pass (both lists are in pair order): contacts
+   that persist updated in place, their impulses kept, the rest spawned
+   and despawned. In 2D pairs are filtered by layer and mask, and
+   overlaps of sensors and sensed layers become `Overlap`s (a sensor's
+   new ones a `Trigger`) and go no further.
+3. **The solve**: a pipeline of systems handing [flows](flows.md) along,
+   `solve`, the gathers, `prepare`, `passes`, `finish` and the scatters:
+   2D's nine over five flows, 3D's eight over four. The diagram of
+   which system makes, sees, passes and takes which flow is in each mod's
+   `pipeline.rs` header, its one home. The gathers copy the moving bodies
+   and the contacts into the solver's dense layout, the [soft
+   step](#the-soft-step) runs on that copy, and the scatters write
+   velocities, positions, rotations, impulses, `Touching`, `Contact`
+   events and sleeping back, a position or rotation only where it
+   changed, bit for bit, so a pile at rest costs storage nothing.
+   Writing positions re-sorts them at the scatter's apply node, so every
+   system after the step finds bodies where they are.
 
-Each system is a plain system over queries, so the pipeline is the ECS
-doing what it's for. The systems pass contacts along as entities, which
-also carry them to the next step for warm starting and for "began
-touching", and a reload of physics leaves them in place like any other
-entities.
-
-**The solve is a pipeline of its own**, nine systems handing
-[flows](flows.md) along (`pipeline.rs`), since the solver works on a dense
-copy of the world (gathered, solved many passes over, written back) and
-flows make each of those stages a system the ECS can see:
-
-```text
-solve            world -> Make<Settings>                     the step's Tuning, Gravity, Sleep
-gather_bodies    See<Settings>, world -> Make<Bodies>        the awake bodies, dense
-gather_turning   See<Bodies>, world -> Make<Turning>         the turning ones' angular state
-gather_contacts  See<Bodies>, world -> Make<Contacts>        the contacts, in pair order
-prepare          See<Settings>, See<Bodies>, See<Turning>,   bodies as states; contacts colored
-                 Pass<Contacts> -> Make<Graph>               (Coloring::greedy), seated in lanes
-passes           See<Settings>, See<Turning>, See<Bodies>,   the batches filled, the substeps
-                 See<Contacts>, Pass<Graph>, Passes          and restitution
-finish           See<Settings>, Take<Graph> -> Pass<Bodies>, impulses and states back
-                 Pass<Turning>, Pass<Contacts>
-scatter_contacts See<Settings>, Pass<Contacts> -> world      impulses, Touching, Contact, links
-scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, velocities, positions, rotations;
-                 Take<Contacts> -> world                     then sleeping
-```
-
-- **`solve` comes first**, though it only reads the step's settings, so
-  that a pre-solve hook ordered `.before("physics2d::solve")` (below) runs
-  before anything is gathered, as it did when the solve was one system.
-- **`passes` declares its parallel work** as a shape (`Passes`: every
-  pass a stage over the colors' batches or the bodies' states, a kernel a
-  block of batches), which the scheduler runs across its threads
-  (get-znt.34). Its first stage fills the batches, every batch at once,
-  from the contacts `prepare` seated in their lanes (get-znt.40, [The
-  fill as the passes' first stage](#the-fill-as-the-passes-first-stage)).
-  The kernels are `solver.rs`'s (`lanes::staged`), the colored solve
-  taken apart where the systems take it apart, bit for bit the arrays'
-  `solve` (the mod's tests hold the two together).
-- **A step where nothing turns** is solved one contact at a time in pair
-  order, which no shape can split (its result depends on the order), and
-  so whole, by `finish` (`solver::solve_with`), as it always was.
-- **The flows are the mod's own**, not its interface's: they carry the
+- **`solve` comes first**, though it only reads the step's settings, so a
+  **pre-solve hook** ordered `.after("physics2d::find_contacts")
+  .before("physics2d::solve")` sees this step's contacts and overlaps and
+  may change a contact's `Response` (disable it: a one-way platform; its
+  restitution: a bounce pad) before anything is gathered. The
+  platformer's walkers meet the player this way. What physics found is as
+  of when it found it, so a system reading it belongs after the system
+  that found it.
+- **The flows are each mod's own**, not its interface's: they carry the
   solver's layout, and a mod that saw them would be rebuilt with every
-  change to it. A debug view would get a flow of plain values in the
-  interface.
-- **The sources read, the sinks write**: the gathers' queries are
-  read-only, so they have no apply node, and the scatters walk the same
-  tables in the same order as the gathers did (asserted). The sinks are
-  last so that `scatter_bodies` ends at a tick after every write of the
-  step's, which sleeping counts from.
-
-What it cost and what it changed is in [flows.md](flows.md#physicss-adoption-stage-2).[^one-solve]
-
-**Pre-solve hooks** are systems a game orders between the two:
-`.phase("physics2d::step").after("physics2d::find_contacts").before("physics2d::solve")`.
-One sees this step's contacts and overlaps, found from where everything
-is now, and may change a contact's `Response` (disable it: a one-way
-platform; its restitution: a bounce pad). The platformer's walkers meet
-the player this way. What physics found is as of when it found it, so a
-system reading it belongs after the system that found it: read a step
-later, an overlap from before the player respawned killed it a second
-time.
-
-**Determinism.** A fixed step, contacts stored and solved in entity pair
-order (so results don't depend on when each began, or on table order,
-which parallel spawning would make timing-dependent), no iteration over hash maps, and no
-`f32` math that varies by thread. The same build on the same machine
-replays exactly; across machines is not promised (fused multiply-add and
-libm differ).
+  change to it. What adopting flows cost and changed:
+  [flows.md](flows.md#physicss-adoption-stage-2).
+- **Contacts are entities**, which carries them to the next step for warm
+  starting and "began pressing", and a reload of physics leaves them in
+  place like any other entity.
+- **Determinism**: a fixed step, contacts stored and solved in an order
+  fixed by the contacts (pair order, or the colors found in it), no
+  iteration over hash maps, and the same result at any thread count
+  ([Solving across threads](#solving-across-threads)).[^onestep]
 
 ## Broadphase
 
-`Position` is a spatial key, with `Collider` and `Rotation` as its
-extents ([Rotation](#rotation)), so the ECS
-keeps every table of positions in spatial order
-([spatial-storage.md](spatial-storage.md)). The broadphase is
-`near_pairs` over a query of positions and colliders: pairs whose boxes,
-grown by the speculative margin, meet, found page by page. There is no
-index to rebuild, and static bodies' pages never change.[^grid] Since
-2026-09-27 it is found through `Live<Contacts>`, the live relation the
-mod declares (`Contacts: Proximity`, on `Position`), which the world keeps
-between steps: the same pairs, found from what moved, with fat boxes
-`FAT` (0.02) past each box (live.md; spatial-storage.md, "Keeping
-pairs").
+`Position` is a spatial key with `Collider` and `Rotation` as its
+extents, so the ECS keeps every table of positions in Z-order with each
+page's box ([spatial-storage.md](spatial-storage.md)), and a turned box is
+bounded as turned. The broadphase is `Live<Contacts>`, the live relation
+each mod declares (`Contacts: Proximity`, on `Position`): pairs whose
+boxes, grown by the speculative margin, meet, kept between steps over fat
+boxes `FAT` (0.02) past each box and found again only for rows that left
+theirs ([live.md](live.md); spatial-storage.md, "Keeping pairs"). There is
+no index to build: a static body's pages never change. 2D's sides are
+the awake bodies that can move, against statics and sleeping bodies;
+3D's, moving bodies against `Static`. Found afresh, the pairs are found
+across the world's threads ([Solving across
+threads](#solving-across-threads)).[^grid]
 
-## Spatial queries
+## Narrowphase
 
-A spatial query is a `Query` whose entities are found by where their
-colliders are: a region query over positions and colliders
-(`Query::in_region`), then an exact test of each shape. It takes the same
-`Data`, `Filter` and `Changes`, hands the same rows and items to the same
-closures, and declares the same footprint, plus reads of `Position` and
-`Collider`; so its `Data` can't write those two.
+- **2D**: where neither shape is turned, the axis-aligned tests (box–box,
+  box–circle, circle–circle): a normal and a depth, no points. Two boxes
+  flush on one axis take the face the box slides along, from the pair's
+  relative velocity, so a body running over a row of tiles doesn't snag
+  on their seams. Where either is turned, Box2D's separating axis and
+  clipping (`narrow::collide_turned`): up to two points, each with its
+  arms, separation and a feature id (the edges it came from).
+- **3D** (`narrow.rs`): sphere against sphere or box, one point; box
+  against box, Box3D's separating-axis test over the 15 axes with the
+  last step's axis tried first (both cheaper and hysteresis: a resting
+  box's faces don't flicker), the incident face clipped, reduced to four
+  points by Box3D's area rule, `u32` feature ids. GJK and EPA are a
+  variant (`gjk.rs`). A box pair that has moved less than 0.03
+  (`Tuning::recycle`) since its manifold was found keeps it, its anchors
+  carried and its separation updated (Box3D's contact recycling), which
+  stills chattering planks and halves the narrowphase on a pile.
+- **Speculative contacts**: pairs within `MARGIN` (0.05) are contacts
+  before they touch, and the solver lets a gap close in a substep and no
+  more, so a body stops at the surface instead of after sinking in.
 
-```rust
-use physics2d::{Circle, Ray, Spatial};
+Both mods' narrowphases run across the world's threads in chunks of
+pairs.[^narrow]
 
-// The walkers' ledge check: is there ground just ahead, below?
-fn walk(.., mut walkers: Query<(&Position, &mut Velocity), With<Walker>>,
-            mut ground: Spatial<(), With<Tile>>) {
-    walkers.for_each(|_, (p, mut v)| {
-        let ahead = Vec2::new(p.x + v.x.signum() * 0.55, p.y + 0.6);
-        if !ground.any_at(ahead) {
-            v.x = -v.x;
-        }
-    });
-}
+## Contact points and warm starting
 
-// An explosion: everything with health in the radius is hurt; the dead go.
-fn explode(.., mut blasts: EventReader<Blast>, mut hit: Spatial<&mut Health, (), Despawns>) {
-    for b in blasts.read() {
-        hit.overlapping(Circle::new(b.at, b.radius), |row, health| {
-            health.hp -= b.damage;
-            if health.hp <= 0.0 {
-                row.despawn();
-            }
-        });
-    }
-}
+A turning contact's points are kept on it: in 2D a `ContactPoints`
+component on every contact, written only where there are points, so a
+world where nothing turns pays a turned-or-not test a pair and little
+else; in 3D up to four points inline in `Manifold`. Each step's points
+are matched to the last step's by feature id, as Box2D and parry do, and
+start from their impulses: without warm starting nothing comes to rest
+and a big pyramid falls apart. Matching by nearest point is a variant in
+both.[^points]
 
-// Line of sight: the first solid thing along the ray.
-fn look(.., mut blockers: Spatial<&Collider>) {
-    let first = blockers.cast(Ray::new(eye, dir, 20.0), |hit, row, collider| {
-        (!collider.sensor).then_some((row.entity(), hit.t))
-    });
-}
-```
+## The solver
 
-- **`overlapping(shape, f)`** is `for_each` limited to what overlaps a box
-  or circle; **`any_at(point)`** and **`overlapping_point`** are the
-  common case of a point. **`cast(ray, f)`** visits hits nearest first,
-  passing the hit (distance along the ray, normal); returning `Some`
-  stops it, as `single` stops after one.
-- **The filter does what layers would.** `Spatial<(), With<Tile>>` sees
-  only tiles; layers and masks stay for what collides, which is the
-  solver's business.
-- **Changes go through rows**, as `Changes` declares, landing at the
-  system's apply node.
-- **Shapes are where the last writer left them.** Positions are re-sorted
-  at the apply node of whatever wrote them, so a system sees every move
-  made before it in the plan, including a game's respawn, and none made
-  after: the visibility rule for every other change (storage.md).
+### The soft step
 
-`Spatial` lives in physics's interface, not in `engine_ecs`: the ECS knows
-boxes, not shapes. The query code therefore compiles into each caller, so
-changing it is an interface change (a game reload), while the solver stays
-an implementation change.
+Box2D v3's soft step, as Rapier and Box3D also run it. A step is five
+substeps (2D's `Tuning::substeps`; 3D's `Tuning`); each applies a
+substep's share of gravity, warm-starts, runs one soft pass that pushes
+penetration out through the velocity (at most `MAX_PUSH`, 3 a second),
+moves the bodies and updates each point's separation from how far its
+bodies moved and turned, then two rigid relaxing passes that take the
+push's speed back out, with Coulomb friction in the relaxing passes only
+(Rapier's rule). Contacts are springs of `Softness` (Box2D's
+`b2MakeSoft`, damping ratio 10) as stiff as a share of the substep rate:
 
-### Parameters made of parameters
+- **2D**: a quarter (75 Hz) between moving bodies, a half against a
+  static one. A soft contact sinks by its load over mass times ω², so
+  stiffness is depth, and the stiffest that holds is a quarter of the
+  substep rate: depth is bought with substeps. Five substeps and two
+  relaxing passes rest piles as soon as Box2D and Rapier do and sink
+  them a quarter as deep.
+- **3D**: a fifth (60 Hz) between moving bodies and a quarter against a
+  static one (Box3D's cap): a cube on four points rocks at 1.22 times its
+  contacts' rate, and at 2D's stiffness a column of turning boxes never
+  rests.
 
-A `Spatial` is two parameters: a query, and a query of positions and
-colliders. `ParamDecl::Group` is a parameter made of others, whose
-footprint is their union and whose conflicts are checked among its
-members and against the system's other parameters; any crate can build a
-parameter from existing ones this way, and `Spatial` was the first.
+A game that stacks tall sets more substeps (`physics2d::Tuning`: a
+20-high turning stack rests from step 30 at six, against 240 at five, for
+about a fifth more solver; measured 2026-09-28). Friction mixes as the smaller of the two in
+2D and `sqrt(a b)` in 3D, restitution as the larger in both: the mixing
+rule is undecided (get-emj.81).[^soft]
 
-## Walkthroughs
+### Restitution
 
-### The platformer's player
+Applied once after the substeps, to points that pushed, from each
+point's closing speed as the step began, before the step's gravity
+(`Closing::Before`, the default in both), as Box2D, Box3D and Rapier take
+it; nothing closing slower than `BOUNCE_THRESHOLD` (1) bounces. A
+lossless ball rebounds to its drop and never above it. 2D passes over a
+contact's points four times (`BOUNCE_ITERATIONS`), 3D once. Judged on
+families of bounces over a grid of what decides them (physics-testing.md,
+"Families of a law").[^bounce]
 
-```rust
-// Spawned by the rules, once there's a level:
-spawner.spawn((
-    Player { coins: 0, deaths: 0, won: false },
-    Position { x: info.spawn_x, y: info.spawn_y },
-    Velocity::default(),
-    Body { kind: DYNAMIC, inv_mass: 1.0, friction: 0.0, gravity_scale: 1.0, ..default() },
-    Collider { shape: BOX, hx: 0.4, hy: 0.475, layer: PLAYER, mask: TILES | WALKERS | PICKUPS, ..default() },
-    Touching::default(),
-));
+### Order and lanes
 
-// `play`, in simulate: run and jump are velocity.
-fn play(.., mut players: Query<(&Input, &Touching, &mut Velocity), With<Player>>) {
-    players.for_each(|_, (input, touching, mut v)| {
-        v.x = input.dir * RUN_SPEED;
-        if input.jump && touching.below {
-            v.y = -JUMP_SPEED;
-        }
-    });
-}
+Contacts whose ends turn are solved four at a time: Box2D's wide layout
+(batches of four contacts field by field, bodies gathered into lanes and
+scattered back, inverse masses kept by each contact) on
+`physics_common::lanes::F`, plain arrays LLVM vectorizes to SSE2, no
+intrinsics and no unsafe. No two contacts in a batch may share a body
+that moves, so contacts are grouped:
 
-// `pick_up`, in late: coins, spikes and the goal are sensors.
-fn pick_up(.., mut triggers: EventReader<Trigger>, mut coins: Query<&Coin, (), Despawns>, ..) { .. }
-```
+- **By Box2D's graph colors**, the default in both mods
+  (`engine_ecs::shape`'s `Coloring::greedy`, a contact with a static end
+  never in color 0; `Coloring::pack` lays the colors out in batches): a
+  pile or pyramid takes six or seven colors a step in 2D and eleven or
+  twelve in 3D, which threads can share. Solving the colors in
+  turn is the loop one contact at a time over the colors' order, bit for
+  bit, which is the test the lanes and the threads are held to.
+- **By level of the sweep in pair order** (`physics_common::levels`), a
+  variant in both (2D `Wide::Levels`, 3D `order=levels`): the sweep in
+  pair order bit for bit, but hundreds of levels a step, too many
+  barriers to share.
 
-The level's tiles become static bodies with box colliders (one per cell,
-as now), and neither the rules nor the walkers rebuild a tile map every
-frame. A walker is a dynamic body; `walkers` turns it at a wall from
-`Touching`, and at a ledge with the spatial query in
-[Spatial queries](#spatial-queries). It collides with tiles only and
-senses the player, so meeting it is an `Overlap`; `walkers::meet`, a
-pre-solve hook, reads each one and tells a stomp (the player falling,
-feet in its top half) from a touch.
+Each lane is the scalar code, operation for operation (Rust neither
+reassociates nor contracts `f32`). Where the lanes can't be the loop, the
+loop runs: a world where nothing turns keeps 2D's loop one contact at a
+time in pair order, which the games' replays hold to the bit; 3D solves
+a step one contact at a time (`in_order`) where its batches would be
+under half full, or a body that doesn't move carries a `-0.0`, an
+infinity or a NaN.[^lanes]
 
-### Pong's ball
+### What a turning point carries
 
-The ball is a dynamic circle with restitution 1, friction 0 and gravity
-scale 0; the paddles are kinematic boxes moved by velocity from their
-intent; the top and bottom walls are static boxes; each goal line is a
-sensor. `play` shrinks to: on a `Contact` between the ball and a paddle,
-add spin and speed; on a `Trigger` from a goal line, score and serve.
+A point starts the next step from what the last one left it:
 
-### The stress demo
+- **2D**: its normal impulse from the last substep and its tangent
+  averaged over the substeps (`Carry::Normal`); contacts whose ends don't
+  turn carry the mean. The mean alone lags a breathing pyramid by two
+  substeps and let colored pyramids fall; the last substep for both
+  dropped card houses. This option meets every bound in every contact
+  order and stands as many card houses as Box2D.
+- **3D**: the mean of both (`Carry::Mean`); the last substep, and 2D's
+  rule, are variants, which cost 3D's piles bounds they didn't cost 2D's
+  (get-emj.97).[^carry]
 
-A walled box that a few hundred circles and boxes are dropped into:
-`pile`, a test scene in `engine/std/physics2d/tests`, which the settling,
-determinism and reload tests run and `:bench` times. The engine's demo
-(`mods/spawner` and `mods/reporter`, in `//game`) is the same idea at a
-couple of dozen bodies. It's also the scene system parallelism and
-`par_for_each` will be measured on.
+### Solving across threads
 
-## What the ECS costs
+Both mods run across the world's executor, the resident `threads` mod's
+pool, through the shapes their systems declare
+([flows.md](flows.md#parallel-shapes)); the pool, its placement on one
+CCD, its warmth and what it measures are [threads.md](threads.md). What
+runs across it:
 
-**Verdict (2026-09-24): not a design blocker** for single-threaded 2D
-rigid bodies up to 10 000. Against the same step on plain arrays, checked
-to be the same computation bit for bit, the ECS is within 5% settled, even
-at rest, and 1.28× falling; what's left has known causes that need no
-change of design (below), on a real pile as on the columns first measured
-(see below). The open risks: parallelism, measured on this machine
-(the solver's colored solve is 6 to 9 times today's on one CCD, and
-since built about 4.5 at 8 threads in the step, [Solving across
-threads](#solving-across-threads),
-[Parallel solving](#parallel-solving); the rest of the step, split as
-built, gets slower in the ECS where it gets faster on arrays, for reasons
-mostly unbuilt, [Parallelism](#parallelism)); contact churn (the contacts'
-re-sort, below); scenes unlike a pile (mixed sizes, bodies carrying many
-game components); and tuned engines (the
-baseline is our own array code, not Box2D; since measured: level on one
-thread, [Against other engines](#against-other-engines)). Further
-optimization waits for
-a game that needs it.
+| stage | 2D | 3D |
+|---|---|---|
+| gravity | a `ParMap` walk | one thread |
+| broadphase | `Live`'s, found afresh across threads (the ECS's own split) | the same |
+| colliders' gathers, narrowphase, merge | `ParMap` (while nothing sleeps: waking looks bodies up one at a time) | `ParMap` (the statics' gather on one thread) |
+| the solve's gathers and scatters | `ParMap` page walks, each chunk its own part of the output | one thread |
+| the fill and the passes | a `Passes` program, the fill its first stage | the same |
+| `finish`, the write-back | a `ParMap` over parts, four a thread | the same |
 
-The 10 000 "pile" in the table below is easier than a pile: dropped 331 a
-row, an odd number, each column alternates circles and boxes, and without
-rotation a circle on a box stays put, so it settles as 331 columns that
-never touch, one contact a body. A real pile of 10 000 (a box 401 wide, 332
-a row) has about 14 750 contacts, and the solver takes 1303 µs on it where
-it takes 713 on the columns ([Parallel solving](#parallel-solving), timed
-alone; in the step, below, 1428 and 760). The same comparison on the real
-pile is [after the table's causes](#the-real-pile).
+What stays on one thread, and why: the coloring (greedy in pair order,
+which is what makes the colors, and the result, the contacts'), seating
+each contact in its lane, the bodies' states, `Slots`, the spawns and
+despawns a merge records (made in walk order, so ids don't depend on
+timing), sleeping's bookkeeping, and a step nothing turns in, solved in
+pair order, which no shape can split. 2D keeps a step's passes on one
+thread (`Passes::serial`) where a still body carries a `-0.0`, which
+batches of one color would each write back and turn into `0.0`
+(`staged::shareable`).
 
-2026-09-24. `./bazel run --config=bench //engine/std/physics2d:tax` runs a pile in
-the engine to the frame to measure, copies its whole state (bodies, and
-contacts with their impulses) into plain arrays, and runs the same steps
-both ways: the mod in the world, and the same step on arrays, with the same
-narrowphase and solver, contacts in the same order, bodies as indices. It
-asserts they end bit for bit the same (they do), so what differs is the
-cost of the world, not different work.
-
-µs per step, `-c opt`, one thread, ECS / arrays, the median of three runs
-(pages as blocks of the order and sleeping as storage both merged).
-Settled is 400 steps after the drop, when every body still creeps 1e-4 to
-1e-2 a step; at rest is 4000, when the pile has stopped bit for bit (1000
-bodies by about step 2800, 10 000 by 3000):
-
-| | 1000 settled | 1000 at rest | 10 000 falling | 10 000 settled | 10 000 at rest |
-|---|---|---|---|---|---|
-| frame | 133 / 123 | 126 / 123 | 721 / 564 | 1338 / 1283 | 1263 / 1266 |
-| gravity | 2 / 1 | 2 / 1 | 20 / 10 | 20 / 10 | 21 / 10 |
-| gathering colliders | 4 / – | 4 / – | 51 / – | 49 / – | 49 / – |
-| broadphase | 15 / 25 | 15 / 26 | 121 / 204 | 161 / 285 | 160 / 285 |
-| narrowphase | 9 / 18 | 9 / 18 | 34 / 58 | 100 / 183 | 97 / 180 |
-| merging contacts | 3 / 1 | 3 / 1 | 15 / 3 | 34 / 11 | 34 / 12 |
-| solve: gathering | 7 / 3 | 7 / 3 | 49 / 21 | 67 / 30 | 67 / 30 |
-| solver | 74 / 73 | 73 / 72 | 256 / 252 | 763 / 744 | 750 / 731 |
-| writing back | 6 / 2 | 6 / 2 | 48 / 15 | 65 / 20 | 62 / 19 |
-| outside the systems (the spatial re-sort) | 13 / – | 7 / – | 126 / – | 78 / – | 25 / – |
-
-The 10 000 settled frame was 2909 µs against the same arrays' 1269; it's
-1338, 4% over them, where it was 129%, and at rest the two are the same.
-Falling, where bodies change pages every step, it's 28% over (721 against
-564), where it was 62% before pages were made blocks of the order.[^tax]
-The broadphase is about 10 µs slower than before the two-sided
-`near_pairs` that sleeping uses, measured in one session: 150 at 10 000
-settled and 115 falling, against 161 and 121. About 4 of it is the walls
-on the passive side; the rest isn't found (on the dense layout of
-`spatial_bench`, a query's own `near_pairs`, the two are the same, 348
-against 351 µs).[^merged]
-What took it there:
-
-- **The spatial storage, reworked** (upkeep and broadphase:
-  [spatial-storage.md](spatial-storage.md#upkeep-reworked)). The re-sort
-  is proportional to what changed, about 7 ns a row written (78 µs while
-  the 10 000 creep, 24 at rest), and `solve` writes a position only when
-  it changes bit for bit. `near_pairs` walks page lanes
-  ([Against sweep and prune](spatial-storage.md#against-sweep-and-prune)),
-  and pages split at blocks of the order, which halved the rows falling
-  bodies move and made `near_pairs` about half the arrays' sweep and
-  prune, which keeps its x order between steps
-  ([Pages as blocks](spatial-storage.md#pages-as-blocks-of-the-order)).
-- **Walking queries.** A query with only table terms and no sparse filter
-  matches every row of every page, so `for_each` takes each term's slice
-  once a page and indexes it, with no per-row dispatch on the kind of term,
-  and the per-row steps are forced inline (lore: [a query's row cost its
-  dispatch](../lore/a-query-row-cost-its-dispatch-not-its-data.md)). A
-  walk with no sparse filters also skips the filter check (`Query::passes`).
-  A row of three terms went from 5.4 ns to 2.1 on a spatial table and 1.0
-  on 256-row pages, where a `Vec` of the values copies at 0.4 to 1.4
-  (`./bazel run --config=bench //engine/ecs:query_bench`).
-- **Page walks** (`for_each_page`, `for_each_ordered_page`) hand a system
-  each page's columns whole: `&[T]`, or a `ColumnMut<T>` that stamps a
-  row's tick on `set` or the whole page's on `write_all`. Merging and
-  writing back contacts write every contact they walk, so they stamp by
-  page: the merge went
-  from 54 µs to 34 at 10 000 against `for_each_ordered` and `Mut`. Where
-  rows are only read, a page walk is no faster than `for_each`, which
-  physics uses there.
-- **Colliders are gathered by four queries**, one for each of with or
-  without a `Body` and a `Velocity`, instead of one and then a second walk
-  filling in velocities by entity: queries have no optional terms. The
-  gathered item holds only what a pair is tested with, not whole
-  `Collider`s and `Body`s (44 µs against 64 writing them out).
-- **No test per contact for sleeping.** A resting contact is in a table
-  the merge and the solve don't match ([Sleeping](#sleeping)), and the
-  narrowphase's tests for resting pairs are split off when nothing sleeps:
-  always false then, they cost about 7 µs of 110 at 10 000.[^dead-test]
-
-**Tried, and slower:**
-
-- **Solving in place**, the solver reading and writing `Velocity` in the
-  world's columns (as cells, since two ends of a contact can share a page)
-  through a vector of references by body, generic over where bodies are
-  kept and bit for bit the same: the solver went from 801 to 882 µs, and
-  building the references cost more than copying the values (42 µs
-  against 27). The solver touches each body a dozen times per contact per
-  iteration, so an indirection per touch costs more than one copy in and
-  one out, and positions have to be written after anyway. Pages are
-  separate allocations, so there's no flat index into the world's memory
-  to solve over.
-  Taken apart one cause at a time, the same solve bit for bit at 10 000
-  settled (`./bazel run --config=bench //engine/std/physics2d:solver_layout`), from
-  791 µs on the copy:
-  - *Layout* isn't it. SoA over the same flat index is 780, and the holes
-    of spatial pages (9.5 rows in 16) cost nothing: flat arrays indexed
-    `page * 16 + row` are 788.
-  - *Pages* are. Every field in 16-row pages is 909 µs and in 256-row
-    pages 887, and 836 to 884 even with each body looked up once per
-    contact rather than once per touch.
-  - *Derived data* is. An inverse mass worked out from `Body` on every
-    touch is 930. In the world's own `Velocity` and `Body` pages it's
-    1209, and 870 at best, with inverse masses carried in the constraints
-    as Box2D does.
-  - *The copy itself* is 14 µs gathering and 4.5 writing velocities back,
-    in a walk that writes positions anyway.
-
-  The loop is about 85 instructions per contact per iteration (9 loads and
-  4 stores of body fields, 2 dependent divides), so whatever a lookup adds
-  shows up in the time nearly in full. So the copy is a transpose into the
-  solver's layout, not a patch over a storage flaw. It would take storage
-  that is one allocation per column, plus an inverse-mass column, to solve
-  in place as fast as on the copy, and that would still save only the
-  18 µs of copying.
-- **Renumbering bodies in contact order.** On the copy, bodies in entity
-  order (the order that contacts, sorted by pair, reach them) are 750 µs
-  against 791 in the walk's spatial order. That is the ECS's gap over the
-  arrays in the solver row above, since the arrays index bodies by entity.
-  Renumbering them in the gather cost as much as it saved: 25 to 29 µs
-  more gathering, tried both by sorting the slots and by first touch.
-- **Mapping entities to rows by their locations**, instead of a vector by
-  entity index built from the walk (`Slots`): 7.1 ns a pair against 1.2,
-  the map's building included. A location is two dependent loads into
-  segments of atomics, and then a lookup by page.
-- **Testing each pair where the merge reaches it**, so a persisting
-  contact takes its geometry straight from the narrowphase with no list in
-  between: narrowphase and merge together went from 133 to 149 µs.
-- **Stamping bodies by page** in writing back: 34 to 32 µs, not worth
-  marking static bodies' rows written, and it would defeat writing only
-  the positions that change.
-
-**What's left**, of the 10 000 falling frame's 157 µs over the arrays
-(55 settled), before what the broadphase and narrowphase save (whether
-storage should own the solver's copy: [working-sets.md](working-sets.md)):
-
-1. **Copying in and out, 150 µs** (117 over the arrays falling). Colliders out for detection (which
-   makes the narrowphase faster than the arrays', whose bodies are spread
-   over four arrays: gathering and narrowphase together are 150 µs against
-   183), bodies and contacts into the solver's arrays and back, and the
-   entity-to-body map, built twice a step. Arrays skip it because a body's
-   index is where it's stored; rows in the world can't be that, since
-   spatial order moves them. A walk over bodies still costs about twice a
-   `Vec`'s: about 15 ns a page, on spatial pages of 12 rows on average.
-2. **The re-sort**, 126 µs falling (re-bounding every body about 72,
-   moving rows 20), 78 while bodies creep, 25 at rest.
-3. **The merge**, contacts updated in the world rather than a list
-   replaced, 24 µs over the arrays; and, falling, spawning 331 contacts
-   and sending 331 `Contact` events a step, about 35 µs applying them,
-   each a boxed closure in the system's log.
-
-The broadphase is now 56 to 59% of the arrays'. The
-solver and the narrowphase cost the same either way, since they're the
-same code over the same arrays. The scheduler and frame cost about 7 µs.
-Bodies carrying many game components aren't measured.
-
-### The real pile
-
-The table above is of the columns (see the verdict). `:tax` now runs the
-real pile beside them, one body more a row (41 and 401 wide), with half
-again the contacts, which churn as it creeps. µs per step, ECS / arrays,
-medians of three runs:
-
-| | 1000 settled | 10 000 falling | 10 000 settled | 10 000 at rest |
-|---|---|---|---|---|
-| contacts | 1468 | 10 262 | 14 769 | 14 842 |
-| frame | 212 / 219 | 811 / 668 | 2873 / 2882 | 2396 / 2871 |
-| broadphase | 24 / 54 | 130 / 297 | 405 / 1052 | 396 / 1064 |
-| narrowphase | 15 / 25 | 31 / 42 | 253 / 291 | 238 / 283 |
-| merging contacts | 5 / 2 | 16 / 4 | 50 / 37 | 50 / 35 |
-| solver | 128 / 130 | 283 / 278 | 1428 / 1416 | 1422 / 1401 |
-| outside the systems | 18 | 184 | 476 | 36 |
-
-The verdict holds, and more so: on the real pile the ECS's frame is the
-arrays' settled and 17% under them at rest, since the arrays' sweep and
-prune suffers most from a pile (its x order is a row of 400 bodies deep).
-What's new is outside the systems: 476 µs settled, of which about 360 is
-**re-sorting the contacts** (an ordered table,
-[relationships.md](relationships.md#ordered-tables)), which rearranges the
-whole table, every column, whenever a contact begins or ends, and a
-creeping pile begins and ends some every step. At rest nothing does, and
-it's 36. Keeping ordered tables in order by splicing in what changed,
-rather than rebuilding them, is the fix; it's also what limits the step
-across threads (next).
-
-## Parallelism
-
-**Status: measured, not on by default** (2026-09-24, get-emj.30): every
-stage but the solver can run split across threads, through the ECS, bit
-for bit the same as on one thread; on this machine, at 10 000 bodies, it
-makes the ECS's step slower, and the same split on arrays faster. What
-serializes each stage is below; most of it is unbuilt rather than the
-design, but the largest part is how the step moves its data between cores,
-which is the same on arrays. The solver's own parallelism is
-[Parallel solving](#parallel-solving), measured on arrays; together they
-are get-emj.30's answer.
-
-**What's built.** In `engine_ecs`:
-
-- **`Executor`**, a trait for running tasks on threads, installed in the
-  world with `World::set_executor`, between frames, by whoever owns the
-  threads; a system reaches it only through a declared shape, `ParMap`
-  here ([flows.md](flows.md#parallel-shapes)). Without one, everything
-  runs on the system's thread. `Scoped` is an executor that spawns its
-  threads per run.[^workers]
-- **`Query::par_for_each`, `par_for_each_page`, `par_for_each_ordered_page`**,
-  each taking the system's `ParMap`:
-  the walk cut into chunks of about equal rows, a few per thread, each a
-  block of the map holding runs of whole pages of every term (so the split costs the
-  calling thread a cut per run, not per page). `make` is called on the
-  calling thread for each chunk, with the rows it covers, to make what its
-  task fills (see [lore](../lore/memory-a-task-allocates-is-its-threads.md)).
-  Rows' changes go into a log per chunk, joined in chunk order: the log
-  one thread would have written, so despawns free ids in the same order
-  (tested: `page_test`). The ordered walk takes at most one ordered table:
-  two are merged by key, in runs within pages, and a page can't be two
-  tasks'.
-- **`near_pairs`**, across the sides' world's threads: the active sweep in ranges of pages, the passive
-  side in ranges of its runs, each task's pairs already split by range of
-  lesser entity index, then each range sorted by a task and turned into
-  entities into its piece of the output (tested against one thread and
-  brute force: `spatial_test`).
-- **The spatial re-sort re-bounds pages in parallel** when the world has an
-  executor and the table has about 2000 rows or more; moving rows, splits
-  and merges stay on one thread (tested: `spatial_test`).
-
-In the physics mod, each stage takes the parallel path when its `ParMap`
-has more than one thread and nothing sleeps (waking looks sleeping bodies
-up as pairs are found); `physics2d_test` runs a 600-body pile, sensing and
-touching, on four threads against one. `:tax -- parallel` measures both
-sides at 1 to 16 threads, and checks every run against one thread's, bit
-for bit: positions, velocities, and every contact with its entity and
-impulses. The arrays run the same parallel algorithm (the same chunks,
-the same range-split sort) with the same executor.
-
-**The numbers.** Ryzen 9 7950X (16 cores on two dies of 8, 32 threads),
-a pool of threads kept between runs (`tests/pool.rs`),
-µs per step, ECS / arrays, medians of three runs, every run
-checked. A run that shared the machine with more than a core of anyone
-else's work was taken again (another agent was benchmarking on it).
-"Split, one thread" runs the parallel code with every task on the calling
-thread: what the split costs by itself. 10 000 bodies, 401 wide, settled:
-
-| stage | 1 | split, one thread | 2 | 4 | 8 | 12 | 16 |
-|---|---|---|---|---|---|---|---|
-| frame | 2918 / 2889 | 3040 / 2930 | 3554 / 2678 | 3255 / 2286 | 3143 / 2034 | 3208 / 1963 | 3271 / 1963 |
-| gravity | 23 / 10 | 28 / 9 | 69 / 9 | 45 / 8 | 37 / 8 | 37 / 8 | 40 / 10 |
-| gathering colliders | 53 / – | 86 / – | 165 / – | 134 / – | 122 / – | 130 / – | 138 / – |
-| broadphase | 407 / 1060 | 430 / 1110 | 405 / 819 | 312 / 533 | 281 / 331 | 328 / 300 | 347 / 289 |
-| narrowphase | 256 / 296 | 258 / 288 | 254 / 271 | 157 / 179 | 121 / 125 | 107 / 111 | 101 / 103 |
-| merging contacts | 50 / 37 | 53 / 36 | 75 / 34 | 53 / 25 | 48 / 21 | 52 / 19 | 52 / 21 |
-| solve: gathering | 84 / 37 | 119 / 49 | 221 / 108 | 170 / 104 | 160 / 105 | 174 / 106 | 184 / 115 |
-| solver (one thread) | 1465 / 1410 | 1472 / 1404 | 1428 / 1391 | 1421 / 1391 | 1433 / 1389 | 1437 / 1385 | 1434 / 1383 |
-| writing back | 98 / 38 | 111 / 36 | 153 / 49 | 117 / 44 | 96 / 44 | 98 / 39 | 101 / 41 |
-| outside the systems | 483 / – | 483 / – | 793 / – | 857 / – | 862 / – | 871 / – | 875 / – |
-
-Spreads were within 10% but at 2 threads and in the broadphase at 4 (up
-to 15%). Everything but the solver: the ECS 1453 µs at one thread and
-1840 at 16 (0.8×), the arrays 1479 and 570 (2.6×). The other scenes,
-frames only: 400 wide (columns) settled 1353 / 1294 at one thread, best
-1459 / 1083 at 8; 401 falling 822 / 672, best 999 / 524 at 4; 400
-falling 732 / 569, best 887 / 463 at 8. The best stage speedups the ECS
-reached anywhere: narrowphase 2.5×, broadphase 1.5× (1.9× below),
-the re-sort's re-bounding 1.4× (columns settled, where nothing else
-re-sorts); gravity, gathering, the merge and writing back never above
-1.0× (the merge 1.2× and writing back 1.4× with affinity, below).
-
-**What serializes each stage:**
-
-- **Gravity** (20 µs, a pass writing every body's velocity in place) is
-  too small to split: handing out a run costs 0.5 µs at 2 threads to 5 at
-  16 (the pool, empty tasks), the split 4 to 5 µs more, and the pages then
-  have to come back to the core that runs the next stage. The arrays gain
-  1.1 to 1.7×. Not a design limit; not worth building either, at this size.
-- **Gathering colliders, the solver's gathering, writing back** are
-  transposes between the world and arrays for one consumer. Split, each
-  chunk's results are joined on the calling thread (a copy), and the data
-  crosses cores twice. The arrays' gathering loses the same way (0.3 to
-  0.5×): it's the stage's shape, not the ECS. With the solver on one
-  thread, they belong on its thread; with a parallel solver, each of its
-  threads should gather its own bodies, so the data never crosses.
-- **The broadphase**: serial parts are listing the active pages (and each
-  row's generation), sorting pages by x, and joining the ranges' pairs;
-  the sweep itself splits well. It peaks at 1.5× at 8 threads and falls
-  after, as pages and ranges per task shrink. The arrays split a sweep 2.6
-  times slower to begin with, so gain more. Unbuilt: keeping the page list
-  and generations between steps (they change only as pages do).
-- **The narrowphase** is a function of the pair: the same code on both
-  sides, 2.5 and 2.9× at 16. What's left is the join of found contacts.
-- **The merge** updates contacts in place, page by page; the spawns and
-  despawns it would have made are recorded per chunk and made on the
-  calling thread in walk order, so contacts get the ids one thread gives
-  them (spawns reserve ids as they're made: a spawn from a task would take
-  the id its timing gave it). Split, it's never faster, and its cost
-  shows up after: see the re-sort.
-- **Outside the systems**, the re-sorts. The spatial one re-bounds pages
-  in parallel, but moves, splits and merges on one thread, since a row
-  moving touches two pages and the order. The contacts' re-sort is one
-  thread's whole-table rebuild (see above), and it got 1.8 times slower
-  (483 to 857 µs) when the merge before it wrote the contacts' pages from
-  other cores; splitting its column gathers made it slower still
-  ([lore](../lore/moving-a-stage-to-other-cores-moves-its-data.md)). This
-  is the biggest single loss, and it's unbuilt, not inherent: an ordered
-  table that splices rather than rebuilds would cost little on any thread.
-
-**The pool here wasn't pinned**, where [Parallel solving](#parallel-solving)
-pinned its threads to one CCD and found the scheduler's own placement 2.5
-times slower, and idle cores clocked down
-([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md)): some of
-the loss below may be that, on both sides alike; the arrays' gains are
-then an underestimate too. Not measured pinned.
-
-**Where the data lives is most of it.** At 10 000 bodies the step's data
-fits in the last core's cache; a split stage pulls its share to other
-cores, and the next stage on the calling thread pulls it back. Keeping
-chunk `k` on thread `k % n` every step (`STICKY`, with workers spinning
-through the solver: `SPIN_US=2000`), one run: the real pile's ECS
-broadphase 418 to 224 µs at 8 threads (1.9×), the narrowphase 2.3×, writing
-back 1.4×, the frame 2966 to 2995; the arrays' frame 2959 to 1886. An
-executor with affinity helps what parallelizes, not the copies.
-
-**Systems at once lose physics nothing.** Physics's three systems are a
-chain of data dependencies (gravity writes the velocities finding contacts
-reads, which writes the contacts the solver reads, whose writes the re-sort
-applies), so running one mod's systems at once would give it nothing even
-without the rule against it; its step can only overlap other mods' systems
-that touch none of its tables. Splitting its systems further would make
-more apply nodes on the same chain.
-
-**Whose threads.** The executor is the host's: a resident scheduler's
-(get-znt.5), installed in the world between frames. A task runs only inside
-the system that made it, borrowing its stack, and returns before it does,
-so at a safe point no mod code is on any thread. A reloadable mod can't
-own the threads: a thread it spawns keeps its build mapped
-([lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)), and a
-pool's idle loop would be its code. Measured in `physics2d_test`: host threads
-that ran physics's tasks, kept or spawned per run, leave nothing mapped
-after a reload; a thread-local with a destructor touched in a task keeps
-the build mapped, from any thread, the main one included
-([lore](../lore/a-thread-local-a-mod-touches-keeps-its-build-mapped.md)).
-
-**Kept threads, not threads per system call.** Threads spawned for each run
-(`std::thread::scope`, `Scoped`) cost 23 µs a run at 2 threads to 182 at
-16, against the pool's 0.5 to 5; at 16 the real pile's frame is 5640 /
-4011 against 3243 / 1927. A step makes about a dozen runs. The pool keeps
-threads, so handing them a closure that borrows the caller's stack needs
-unsafe code whose soundness depends on concurrency (the run doesn't return
-until no worker is in it), which `engine_ecs` doesn't allow itself
-([storage.md](storage.md#where-the-unsafe-is-and-isnt)); it's in
-`tests/pool.rs` for the benchmarks. The resident scheduler owning a crate's
-pool (rayon's, audited) or this one is get-znt.5's decision. One pool must
-serve both systems at once and tasks within a system, or they
-oversubscribe the cores: a system on a worker making tasks needs work
-stealing, which this pool doesn't do.
-
-**Not built, and what each would take:**
-
-- a spawn from a task: ids reserved when the chunks are joined, in chunk
-  order, so they don't depend on timing (storage.md's open question on
-  spawned ids);
-- events from a task: a writer per chunk, sent in chunk order;
-- an ordered table that splices what changed instead of rebuilding;
-- an executor with affinity (chunks to the threads that had them) and
-  work stealing, owned by the scheduler;
-- the colored solver of [Parallel solving](#parallel-solving): built
-  (2026-09-29) for the turning default, [Solving across
-  threads](#solving-across-threads), its batches filled and written back
-  by its own threads; the gather from the world into the solver's arrays
-  is still the system's, on one thread.
+**Bit for bit at any thread count**: a stage's blocks share no moving
+body, the bodies are shared as relaxed atomics (no unsafe code), and
+everything in order is collected per chunk and joined in chunk order.
+Held by `quality_test`'s `the_mod_across_threads_is_the_arrays_bit_for_bit`,
+`physics2d_test`'s piles on four threads against one (positions,
+contacts, events, ticks and, falling asleep, islands),
+`reloading_physics_under_the_pool_is_reloading_it_on_one_thread`, and
+`physics3d_test`'s
+`contacts_found_across_threads_are_one_threads_bit_for_bit`; both
+baselines and the 3D fingerprint were byte-identical at `ENGINE_THREADS`
+1, 2, 4 and 8 when each split landed. What threads buy, stage by stage,
+is threads.md's "Measured".[^threads]
 
 ## Sleeping
 
-**Status: on by default, at `Sleep::DEFAULT` (slower than 0.05 a second
-for 0.5 s), which a `Sleep` entity changes and `Sleep::OFF` (no speed)
-turns off; sleeping is storage, and a wake is seen by the world's change
-detection, and all it keeps is in the world** (2026-09-24, `sleep.rs`,
-get-emj.27; its gaps closed, and on by default, 2026-09-25; kept in the
-world, 2026-09-26, get-emj.40).[^sleep-default] An island, dynamic bodies joined
-by pressed contacts, whose bodies have all been slower than `Sleep::speed`
-for `Sleep::time` falls asleep: its velocities are zeroed and each body
-gets `Asleep { island }`, which moves it to a table of its own (with
-`Slept`, physics's record of it: "Where it's kept", below), and each
-contact neither end of which moves, one of them asleep, gets `Resting`
-the same way. The step's queries exclude both (`Without<Asleep>`,
-`Without<Resting>`), so a sleeping body is skipped by the table it's in,
-not looked up: gravity, gathering, the merge, the solver and writing back
-never see it, and change detection leaves its rows alone. A resting
-contact is kept as it was, impulses and all, the warm start for when its
-ends wake. Falling asleep and waking are structural changes, at the apply
-node of the system that decided them, and happen only as islands do.
+2D only. On by default at `Sleep::DEFAULT` (slower than 0.05 a second for
+0.5 s); a `Sleep` entity changes it and `Sleep::OFF` turns it off. An
+island, dynamic bodies joined by pressed contacts, whose bodies have all
+been slower than `Sleep::speed` for `Sleep::time` falls asleep: its
+velocities are zeroed, each body gets `Asleep { island }` (and `Slept`,
+physics's own record), and each contact neither end of which moves, one
+of them asleep, gets `Resting`. Both move rows to tables of their own,
+which the step's queries exclude, so a sleeping body is skipped by the
+table it's in, not looked up, and change detection leaves its rows
+alone. A resting contact keeps its impulses, the warm start for when its
+ends wake. A pile of 10 000 asleep cost a frame about 25 µs when measured
+(2026-09-26): a look at each sleeping table's ticks for what games
+changed.
 
-It changes the simulation (a body stops when a threshold says so, not
-when the solver does), which is why the pile, the benchmarks' scene,
-turns it off unless asked, and why `:tax` measures it apart, the ECS
-alone, with no arrays to agree with (`:tax -- sleeping` runs only its
-tables: this one, and the real piles before they're asleep, sleeping on
-and off, under "Where it's kept" below). From ten steps after the whole pile is asleep,
-against the same pile awake at the same step (speed 0.05, 0.5 s), µs per
-step, medians of three runs, on the columns (40 and 400 wide) and on real
-piles (41 and 401; see [the scenes](#the-scenes)):
+**What's kept, all in the world**: `Asleep` (who's asleep now, which a
+game may write), `Slept` (who physics last had asleep: the baseline a
+game's changes are found against, with a count in the mod's state of how
+many it has given), `Still { since }` (sparse, on awake dynamic bodies
+slower than the threshold: the step they went slower), and `Resting`. A
+reload carries the rest in the mod's state, so it doesn't show: the
+games' replays, reloaded every frame, are bit for bit the runs without
+reloads.
 
-| | 1000, 40 | 1000, 41 | 10 000, 400 | 10 000, 401 |
-|---|---|---|---|---|
-| asleep by step | 630 | 470 | 550 | 810 |
-| frame | 11 / 146 | 11 / 241 | 24 / 1498 | 26 / 3125 |
-| gravity (and waking) | 1 / 2 | 1 / 2 | 6 / 22 | 6 / 34 |
-| broadphase | 0 / 16 | 0 / 26 | 3 / 173 | 3 / 467 |
-| solver | 0 / 81 | 0 / 146 | 0 / 841 | 0 / 1589 |
-| outside the systems | 9 / 14 | 9 / 23 | 12 / 94 | 12 / 329 |
-| deepest overlap | 0.007 / 0.007 | 0.012 / 0.010 | 0.006 / 0.006 | 0.008 / 0.007 |
+**What wakes an island** (the whole island), and where it's seen:
 
-(Measured with another agent's fuzzing on the same machine, load about
-23: the awake numbers are half again what they were alone; the asleep
-ones, and what they're compared with below, were taken interleaved.) The
-rest of the stages are 0 or 1 µs asleep. What's left asleep is the look
-for what games changed (a look at each sleeping page's ticks and each
-table's), and the frame's fixed cost outside the systems. Counting
-instead, as this did before 2026-09-25, cost the same frame, 25 and 26 µs
-at 10 000, with 8 µs in the look for changes against 6 now: the count of
-sleeping bodies was a walk of their pages too.[^sleep-counts] With
-physics's record of who's asleep in the world (`Slept`, 2026-09-26), the
-asleep frame at 10 000 is 26 µs against the copy's 23, measured together
-(see "Where it's kept", below): a look at `Slept`'s tables, and its column.
-
-**The broadphase** is `near_pairs(active, passive, grow)`
-([spatial-storage.md](spatial-storage.md#two-sides)): awake colliders that
-can move on one side, statics and sleeping bodies on the other. Pairs of
-two passive rows aren't looked for, and a passive page no active page is
-near isn't looked at: 200 bodies falling onto 10 000 asleep pair in 18 µs,
-where all of them awake take 650 (`spatial_bench`). A sleeping collider
-the broadphase pairs with an awake one is gathered then, by lookup. Statics
-went passive too: static against static never made anything (neither
-arrives nor pushes), and static against sleeping would be a resting pair
-found again every step. With nothing asleep that costs the broadphase
-about 4 µs at 10 000 (the walls tested from their side), part of the 10
-µs it is over the one-sided broadphase ([What the ECS
-costs](#what-the-ecs-costs)).
-
-**What wakes an island** (the whole island, as it fell asleep), and where
-it's seen:
-
-- in `integrate_velocities`, what a game changed since `find_contacts`
-  last looked (a game's systems, a pre-solve hook between
-  `find_contacts` and the solve, a message):
-  - a body's `Velocity`, `Position`, `Collider` or `Body` written: pages
-    written since (`for_each_written`). The bodies the last solve put to
-    sleep were written by it, after that look; theirs count only if
-    they're newer than the solve;
-  - a body a game woke (removing its `Asleep`) or made something else
-    (removing its body): its `Slept` stays, so there are more `Slept`
-    than sleeping bodies (two lengths), and a walk of them finds which,
-    each with the island it wakes;
-  - a body a game despawned: fewer `Slept` than physics has given and
-    not taken off (a count in its state), and a walk of the resting
-    contacts finds the ends gone, whose other ends' islands wake. A
-    spawn reusing the index is another entity, so it's no end of theirs;
-  - `Sleep` despawned, or `physics2d` sent `wake`: everything.
-- in `find_contacts`:
-  - a static written or spawned (a spawn writes its values) into or out
-    from under sleeping bodies, found by `for_each_written` and a region
-    query; a static despawned from under them, or no longer a static
-    (`left_since` on the statics' tables, then every resting contact's
-    ends checked), whose resting contacts are despawned;
-  - a static made to move (a body, a shelf given a velocity): the pair is
-    found again, not resting, while its `Resting` contact is there;
-  - a contact one of its bodies pressed on ending: what it rested on was
-    despawned or moved away.
-- after the solve, in `solve`: a moving awake body pressing on one of its
-  bodies (a still one waits to fall asleep in its own island; still means
-  still for `Sleep::time`, so a body just woken counts as moving), or a
+- in `integrate_velocities`, what a game changed since the last look: a
+  sleeping body's velocity, position, collider, body, rotation or spin
+  written; a body woken (its `Asleep` removed) or unmade; a sleeping body
+  despawned (fewer `Slept` than given); `Sleep` despawned or `wake` sent;
+- in `find_contacts`: a static spawned, written, moved or despawned into
+  or out from under sleeping bodies; a pressed contact ending;
+- after the solve: a moving awake body pressing on a sleeping one, or a
   kinematic body moving into one.
 
-One of these is a count, of `Slept`, which only physics gives: a game
-putting a body to sleep as another is despawned doesn't make up for the
-one gone, since the new one has `Asleep` and not yet `Slept`. The rest
-aren't counts, so nothing is fooled by one thing gone and another come in
-the same step (a static despawned and another spawned).
-
-**A wake takes effect in the step that saw it**, if it's seen before the
-solve: the bodies leave their sleeping tables at the apply node of the
-system that woke them, their resting contacts with them, so the solve has
-them movable, their contacts solved from where they were, warm starts and
-all, and gravity given them as it was to awake bodies (`fall_woken`): a
-pile whose floor goes falls in that step as the same pile awake does.
-One seen after the solve (a moving body pressing) takes effect from the
-next, as it must.
-
-**A game can put bodies to sleep** by giving them `Asleep` (inserting it,
-spawning a body with it, or making a body of an entity that has it), in
-an island it numbers. Physics finds them as sleeping bodies without
-`Slept`, and takes them as they are (giving each one), before it wakes
-anything that step: an island woken there has rows that aren't asleep to
-physics either, and taking them for new was a bug the count had (a game
-waking one body by removing its `Asleep` put its island back to
-sleep).[^sleep-counts] Physics numbers its islands after the greatest it
-has seen, so a game's numbers don't collide with ones already made, but
-may with later ones.
-
-**A reload doesn't show, and nothing is handed over.** All sleeping
-keeps is in the world ("Where it's kept", below) or in the mod's
-state, which a reload carries as it is: the ticks it looks from (after
-`find_contacts`, and after the solve, so the new build doesn't take the
-old one's writes for a game's), the step count `Still::since` is in, the
-last island made, and how many `Slept` it has given. `Sleepers`, the
-transient part, is only a system's list of what it woke, empty between
-systems, and `enough`'s cached answer (the steps `Sleep::time` takes). A
-build whose state starts empty (the first, or one reset) counts the
-`Slept` in the world and its greatest island, and starts its step count
-from the latest `Still::since`; no test makes a reset state, since no
-build of physics has another state layout. The games' reload replays (//engine/tests:replay.rs) hold physics
-to this: a run reloaded every frame is the run without reloads, bit for
-bit; `a_reload_between_a_games_change_and_the_next_step_does_not_show`
-holds it to what a game changes between frames (a message), reloaded
-before the next step; and
-`a_reload_keeps_how_long_awake_bodies_have_been_still` to a pile due to
-fall asleep.[^sleep-reload][^sleep-adopt]
-
-**Where it's kept** (2026-09-26, get-emj.40): in the world, as
-components, the way the other engines keep it on each body (Box2D's
-`sleepTime` on `b2Body`, Rapier's `time_since_can_sleep` on each body's
-activation). Besides `Asleep` and `Resting`, a step carries two things:
-
-- *How long each awake body has been still*: `Still { since }`, the step
-  it went slower than `Sleep::speed`, on awake dynamic bodies that are
-  slower, put on as one slows and taken off as it goes faster or falls
-  asleep (and all of them when sleeping is turned off, so turned on
-  again it starts from moving). Awake islands aren't kept (they're found
-  afresh each step), so there's no island to keep it on. Sparse, since a
-  settling pile's bodies cross the threshold all the time (at 10 000 in
-  a real pile, about 400 a step while it falls and 1000 while it
-  settles), and dense each crossing would move a row between tables; a
-  step and not seconds, so it's written only as a body crosses. An
-  island falls asleep when its body still for the least time has been
-  for as many steps as `Sleep::time` took counted in seconds
-  (`Sleepers::enough`: the same step as before, where `time / dt` can be
-  one early).
-- *Who physics has asleep*: `Slept { island }`, dense, put on beside
-  `Asleep` and taken off as physics wakes the body, with a count in the
-  state of how many physics has given. `Asleep` is who's asleep now,
-  which a game writes; `Slept` is who physics last had asleep, the
-  baseline a game's changes are found against (see "What wakes an
-  island", above): a body a game woke keeps its `Slept`, and its island
-  wakes; one a game put to sleep has `Asleep` and not `Slept`, and is
-  taken as the game's. Both are found by the tables a query matches
-  (`Asleep` without `Slept`, and more `Slept` than `Asleep`), so at rest
-  each is a look per table.
-
-The record of who physics has asleep had three shapes, each with `Still`
-as above. µs a step at 10 000 in a real pile (401 wide), sleeping on,
-against main (a copy of both in the mod), medians of nine runs
-interleaved, 60 steps from the step given (`:tax -- sleeping`):
-
-| the asleep record | falling (from 1) | settling (from 60) | falling asleep (from 120) | asleep, ten steps after all of it |
-|---|---|---|---|---|
-| main: a copy of both, handed over | 980 | 1786 | 1836 | 23 |
-| B1: a copy in the mod, handed over | 992 (+1.2%) | 1822 (+2.0%) | 1920 (+4.6%) | 23 |
-| B2: `Slept` in the world | 977 (-0.3%) | 1811 (+1.4%) | 1935 (+5.4%) | 26 |
-| B3: none, change detection alone | not built: see below | | | |
-
-B2 as it's kept, against main, medians of 13 runs interleaved (the
-spread between runs of one build is about 1%; sleeping off, the two are
-within it):
-
-| 10 000, 401 wide | main | now | of it, the `sleeping` stage (main / now) |
-|---|---|---|---|
-| falling (from step 1) | 993 | 980 (-1.3%) | 104 / 99 |
-| settling (from step 60) | 1810 | 1812 (+0.1%) | 132 / 146 |
-| falling asleep (from step 120) | 1862 | 1943 (+4.4%) | 143 / 196 |
-| asleep, ten steps after all of it | 23 | 26 | 0 / 0 |
-| 1000, 41 wide, settling | 182 | 184 (+1.1%) | 14 / 16 |
-| 1000, 41 wide, falling asleep | 180 | 184 (+2.2%) | 14 / 19 |
-
-The cost is where bodies fall asleep: each island that does takes
-`Slept` and gives up its `Still`s, and the stage walks the `Still` set
-to find how long each body has been; a pile falling asleep does that for
-most of its bodies within a second, and then costs 3 µs a step more
-while it sleeps.
-
-B1 keeps a handoff at every reload, which is what the move was to be rid
-of. B2 has none, and costs `Slept`'s insert and remove beside `Asleep`'s
-(a dense column, so no extra move) and 3 µs asleep: a look at its tables,
-and its column in the sleeping tables. B3 would find a game's changes from
-ticks alone, as main did for most of them, and doesn't work, for two
-reasons the world can't be asked about:
-
-- *Which rows arrived.* A table keeps the tick a row last arrived in it,
-  not which row. A body asleep before it's a body, then made one (its
-  `Body` inserted), and a sleeping body a game wrote (its `Body` or
-  velocity), are both a sleeping row written since the last step whose
-  `Asleep` isn't, and one must be taken as the other: the first woken, or
-  the second left asleep.
-- *The island of a body a game woke.* Removing `Asleep` takes its island
-  with it. The body's resting contacts name its neighbors, whose islands
-  are its own, which covers physics's islands (they're joined by pressed
-  contacts, all resting once asleep), but not a game's, whose bodies need
-  not touch: the rest of such an island stays asleep.
-
-Emulated in B2 (a game's sleeping body taken only if its `Asleep` was
-written since the solve, and a woken body's island found only through its
-resting contacts), every test passes but two, one for each:
-`a_body_put_to_sleep_by_a_game_as_another_is_despawned`, at the body made
-one while asleep, and `a_games_island_wakes_as_one`, whose pair apart
-stays half asleep. B3 wasn't built further, so it has no measurement; its
-looks at rest are main's, which puts it near B1 and 23 µs asleep.
-
-A per-row arrival tick in the ECS would answer the first, at a tick
-written on every move between tables; the second needs the island kept
-somewhere, which is a record. So B2 it is.
-
-**`Touching`** on a sleeping body is as it fell asleep: its query excludes
-sleeping bodies, so it isn't reset. A side touched by something that
-arrives while it sleeps (a still body settling against it) isn't marked.
-
-**The ECS it needed** ([change detection](spatial-storage.md#change-detection)):
-a spawned value and an inserted one are written, so a walk for what's
-written sees what arrived; a table keeps the ticks a row last arrived in
-it and last left it, which `arrived_since` and `left_since` read with a
-look per table; and `Query::written(e)` is one row's tick. Nothing in
-`engine_ecs` knows about sleeping.
-
-What it doesn't do:
-
-- **An island touching a woken one wakes a step later.** Islands form
-  separately where a still body falls asleep against one already asleep
-  (the real pile of 1000 sleeps as three), and one woken doesn't wake the
-  others at once: a woken body counts as moving, so it wakes what it
-  presses on after the solve. For that step the contact between them is
-  solved against an immovable body, warm started with the weight on
-  it.[^touching]
-- **A body moving into a sleeping one wakes it after the solve**: for one
-  step the sleeper is immovable, as a static would be. Box2D wakes both
-  when a contact begins touching, in its collide phase; the same in
-  `find_contacts` (a found contact that touches, with an awake end moving
-  faster than `Sleep::speed`) is the likely next step.
-- **A body a game puts to sleep while it presses on something wakes in
-  that step**: its pressed contact isn't found again (a sleeping body
-  isn't paired with a static or another sleeping body), and a pressed
-  contact ending wakes its ends; only physics marks a contact `Resting`.
-  So what a game keeps asleep is what it puts to sleep touching nothing
-  (in the air, or before it's a body), as the tests do;
-  `a_body_woken_starts_its_time_still_afresh` shows one on the floor
-  woken so. Marking the game's pressed contacts resting as it's taken
-  would fix it.
-- **No body can opt out, and a free body slower than `Sleep::speed`
-  stops**: a body drifting at 0.04 a second with nothing touching it
-  falls asleep in half a second, and stays where it stopped. Box2D has
-  the same threshold (a hundredth of a metre a second) and a per-body
-  `allowSleep`; neither game has such a body, and the whole world's is
-  `Sleep::OFF`.
-- **A game that writes a body's velocity every frame wakes it every time
-  it falls asleep**: the platformer's `play` sets the player's `v.x` each
-  frame, so the player standing still sleeps one step in 32. Harmless (a
-  structural move there and back), and the player responds to input in
-  the same frame either way; writing only a changed value would keep it
-  asleep.
-
-Its tests (`physics2d_test`, `pile::`), on the columns (200 bodies in 40
-wide) and on a real pile (1000 in 41): falling asleep into tables of
-their own, every contact resting, the scene checked to be what it says
-(contacts a body); staying put with nothing moved or written; no deeper
-asleep than awake at the same step; waking where a body lands, a
-kinematic body pushes, a static moves in or is spawned there, or the
-floor goes (despawned, swapped for another static in the same step,
-lowered, or made a body), with the bottom row falling in that step as the
-awake pile's does and no contact left on the floor; a game's velocity or
-shape change, in the step after an island fell asleep, and from a
-pre-solve hook (`pile_hook`); a body despawned from under others, from a
-hook too, and in the step a game puts another to sleep; a game removing
-`Asleep` and putting it back; bodies spawned asleep, or asleep before
-they're bodies, kept so, and falling in the step a game wakes them;
-bodies on a shelf that starts moving rising with it in the step it's
-found moving; `Touching` kept; a reload keeping it all asleep; turning it
-off; shelves keeping one contact per pair; and a replay with sleeping on,
-through six kinds of wake, the same bit for bit twice and at 30 frames a
-second. The ECS's side is in `page_test`
-(`rows_arriving_are_written_and_rows_leaving_are_seen_to_have_left`). Of
-the 27 mutations made to what 2026-09-25 changed, all are caught, three
-of them only after a test was added or sharpened: a game giving `Asleep`
-to a body the solve doesn't write (a body at rest arrives with its
-velocity written by the last solve, which hid it); the bottom row's speed
-compared with the awake pile's (a looser bound held without gravity); and
-a kick in the step after an island fell asleep (the order of adopting and
-waking, which the 1000 pile had caught only by when it happened to fall
-asleep). The list is in that commit. Of the first version's 24, three survived and weren't re-run: two
-only slower (statics on the active side, resting pairs sent to the
-narrowphase), and one whose setup the tests don't make (a body woken in
-the step taken as still when marking resting contacts).[^prototype]
-
-Moving the bookkeeping into the world (2026-09-26, get-emj.40) added
-`core_test`'s `sleeping::` (how many steps is enough, and islands) and,
-in `physics2d_test`, a body's time still starting afresh when it goes
-faster, falls asleep or is put to sleep by a game (asleep exactly 30
-steps after it's still at 60 a second), physics numbering its islands
-after a game's, a game's island apart waking as one, a despawn in the
-step after a game put a body to sleep and in the step after the last
-island fell asleep, no contact left with an end gone, a game's wake
-taking effect before the solve, and turning sleeping off forgetting
-`Still` and `Slept`. Of 37 mutations to the new bookkeeping, 23 are
-caught (12 of them only by those tests). Of the 14 left, six change
-only what a step costs (a walk that finds nothing, a count too high, a
-resolve later in the same system) or heal in the next step (the `wake`
-message, or the gate, leaving a `Slept` behind); one, what the
-`sleeping` message reports between a game's change and the next step
-(it counts `Asleep` with `Slept`); three are covered by
-another path in every scene the tests make (the merge waking the ends of
-a pressed contact that ended; the other order of a kinematic link; a
-game's body dropping `Still` as it's taken, which gravity makes moving
-anyway as it wakes); and four need a setup no test makes: a state reset
-(`load`'s count from the world, since no build of physics has another
-state layout), a game putting a body to sleep from a system after the
-solve (a message writes at the solve's tick), a contact found between
-an old sleeper and a collider that doesn't move, and the known gap above
-of a body woken in the step taken as still when marking resting
-contacts. The mutations are in the commit's message.
-
-### The scenes
-
-The pile drops rows of bodies that alternate circles and boxes. At 40 or
-400 wide a row holds an odd count, so each column alternates too, and
-without rotation a circle on a box stays put: the pile stands in columns
-that don't touch, a contact a body. At 41 or 401 a column is all circles
-or all boxes, which fall into a real pile, but only once it's tall
-enough: 200 or 300 bodies at 41 still stand in columns (1.0 contacts a
-body), 500 have 1.1, 1000 have 1.5 (2026-09-25, after 600 steps; see [lore](../lore/a-pile-41-wide-stands-in-columns-until-it-is-tall.md)). The
-sleeping tests use 1000 for the real pile, and check the count.
-
-## Parallel solving
-
-**Status: measured, then built** (2026-09-24, get-emj.30; built
-2026-09-29 for the turning default, on its colors and lanes: [Solving
-across threads](#solving-across-threads)). What follows is the prototype
-on arrays, before rotation and lanes. The solver was
-one thread, sequential impulses over contacts in pair order. How far it
-parallelizes was measured on arrays, outside the mod:
-`./bazel run --config=bench //engine/std/physics2d:parallel_solver` takes the solver's
-input from piles run in the engine (and a scene of separate stacks built
-there), and solves it three ways, each checked bit for bit:
-
-- **Colored**, Box2D v3's graph coloring: contacts colored so no two in a
-  color share a body that moves (statics don't count), taking the lowest
-  color free in pair order. Colors are solved in turn, each one's contacts
-  spread over the threads, with a barrier between them. It solves contacts
-  in another order than pair order, so it's a different computation from
-  today's, but one fixed by the contacts alone: the same colors, the same
-  order within each, the same arithmetic on any thread count. It is bit
-  for bit the same on 1 to 32 threads in every scene, and over 4000 whole
-  steps of a pile on 1 and 16 threads.
-- **Wide**: the same, with each color in batches of 8 contacts laid out
-  field by field, solved with AVX2, as Box2D does. The same operations
-  (no FMA), so it's the colored solve bit for bit.
-- **Islands**: groups of bodies joined by contacts, one thread each. They
-  share no moving body, so this is today's computation exactly, and
-  checked to be.
-
-**Verdict: coloring works; islands don't; the ECS needs nothing new for
-it; what's missing is threads.** On one CCD the colored solve of a real
-10 000 pile is 6.1× today's solver on 8 threads, and 8.9× wide on 16 (8
-cores and their SMT siblings); a 40 000 pile, 8.6× and 14×. It stops at one
-CCD, and it needs workers that stay placed and busy, which is the
-scheduler's to provide (get-znt.5).
-
-µs per solve, `-c opt`, the median of three runs of 41 solves each, pinned
-to fill one CCD first (so 12 and 16 threads are one CCD with SMT; 32 is
-both); speedup against `solver::solve` on one thread:
-
-| threads | real pile 10 000 (14 725 contacts) | real pile 40 000 (68 561) | columns 10 000 (10 000) | stacks 10 × 1000 (10 000) | real pile 1000 (1470) |
-|---|---|---|---|---|---|
-| serial | 1303 | 7018 | 713 | 1309 | 126 |
-| colored, 1 | 1015 (1.28×) | 5167 (1.36×) | 769 (0.93×) | 554 (2.4×) | 98 (1.29×) |
-| colored, 2 | 548 (2.4×) | 2574 (2.7×) | 391 (1.8×) | 284 (4.6×) | 67 (1.9×) |
-| colored, 4 | 324 (4.0×) | 1478 (4.7×) | 204 (3.5×) | 150 (8.7×) | 55 (2.3×) |
-| colored, 8 | 213 (6.1×) | 857 (8.2×) | 114 (6.3×) | 86 (15×) | 51 (2.5×) |
-| colored, 16 | 212 (6.2×) | 815 (8.6×) | 114 (6.3×) | 81 (16×) | 59 (2.1×) |
-| colored, 32 | 371 (3.5×) | 1043 (6.7×) | 132 (5.4×) | 155 (8.5×) | 106 (1.2×) |
-| wide, 1 | 932 (1.40×) | 4775 (1.47×) | 789 (0.90×) | 446 (2.9×) | 92 (1.37×) |
-| wide, 8 | 188 (6.9×) | 745 (9.4×) | 117 (6.1×) | 71 (18×) | 46 (2.7×) |
-| wide, 16 | 146 (8.9×) | 493 (14×) | 85 (8.4×) | 47 (28×) | 45 (2.8×) |
-| islands, 8 | 1415 (0.92×) | 8108 (0.87×) | 1041 (0.68×) | 272 (4.8×) | 141 (0.89×) |
-| island batches, 8 | 1454 (0.90×) | 8282 (0.85×) | 131 (5.4×) | 168 (7.8×) | 140 (0.90×) |
-
-Runs agreed to within about 2%, except the 10 000 pile on 2 threads
-(543–831 µs over the three).
-
-- **Colors.** A real pile needs 7 or 8 (10 000: 4863, 4741, 2909, 1650,
-  495, 64 and 3 contacts; 40 000, 8), columns and stacks 2. None overflowed
-  Box2D's 24. Keeping contacts with a static out of color 0, as Box2D
-  does, gave the same number of colors as plain greedy coloring and
-  nearly the same sizes (only Box2D's rule was timed). The
-  split impulse solves only contacts sunk past the slop (half, in a real
-  pile), per color the same way.
-- **Order alone** is part of the speedup. The loop is latency-bound:
-  consecutive contacts that share a body wait on each other's writes, and
-  independent ones overlap. A color's contacts are all independent, so
-  colored on one thread is 1.28–1.36× serial on real piles and 2.4× on
-  stacks, whose pair order walks each stack's chain of contacts. The
-  columns are the exception, and are why `:tax`'s pile flattered the
-  serial solver: their pair order interleaves 331 columns, which is
-  already independent work. The same shows in islands: one at a time,
-  each walks its own chain, 3× slower on the columns than serial.
-  *Island batches* give each thread a run of islands solved together in
-  pair order, which keeps the interleaving and serial's arithmetic.
-- **It stops at one CCD.** A barrier costs 0.19 µs on 8 cores of one CCD
-  and 0.24 on 16 threads of one, but 0.57 across both, and a solve of a
-  real pile is 120 of them (1 + 7 colors warm starting + 8 × 7 + 8 × 7).
-  The threads at the boundary between CCDs work longest, since bodies
-  written in one color are read in the next by a thread across it. Pinned
-  one thread per core across both CCDs, the 10 000 pile's colored solve is
-  386 µs on 12 threads and 366 on 16, against 213 on 8; unpinned, the
-  scheduler's placement, it's 533 on 8 and 548 on 16. SMT helps the wide
-  solve (146 against 188), whose gathers stall, and not the scalar one.
-  At 40 000 there's more work per barrier, and 16 threads on one CCD still
-  gain.
-- **SIMD gains little here**: on one thread, from 3% slower (the columns)
-  to 20% faster (the stacks), 8% on real piles. Without rotation a
-  contact is about 30 floating-point operations between gathering its two
-  bodies and scattering them back, which stay scalar loads and stores
-  (98 of them in the batch kernel); Box2D's contacts carry rotation and
-  two points, and more arithmetic per gather. The copy into batches is
-  another transpose a step (92 µs at 10 000 here, unoptimized).
-- **Islands don't help a pile.** A real pile is one island (9992 of
-  10 000 bodies, every contact but eight). They pay only for separate
-  groups: 1000 stacks, 7.8× on 8 threads as batches. The columns are 331
-  islands, and batches give them 5.4× bit for bit the same as today: the
-  pile the docs measure could be parallelized without changing a result,
-  but no real pile could.
-- **Settling.** The same pile from its first step, 4000 steps on arrays,
-  solved serially and colored: at step 400 the deepest overlap is 0.016
-  serially and 0.025 colored, and 9912 against 9772 bodies are slower than
-  0.1; from step 2000 both have all 10 000 resting, and from 3000 both
-  the same deepest overlap, 0.0051. Colored converges a little slower, as
-  a different order of Gauss-Seidel can; neither pile comes to rest bit
-  for bit by step 4000 (171 and 119 bodies still move), and the columns
-  do at step 2233 serially and 2546 colored.
-
-**What building it costs a step**, serial, in µs, at 10 000 real / 40 000:
-coloring 29 / 150; ordering and copying the contacts into color order
-40–45 / 320–350, and back 10–13 / 46–76 (both with the arrays allocated
-fresh); islands 85 / 490. At 10 000 that's about 85 µs to save about 1100;
-at 40 000 it's as long as the solve on 16 threads, the serial part that
-would stop further scaling. Recoloring from scratch each step, only 0.06%
-of the contacts that persist change color (538 of 869 704 over 60 steps),
-and a coloring that keeps each persisting contact's color needs no more
-colors (7).
-
-**What the ECS would provide:**
-
-- **Nothing new, for the solve.** The coloring is a pure function of the
-  contacts in pair order and of which bodies move, which the storage
-  already gives the gather, so the gather can color each contact and
-  write it at its color's place instead of the next, and writing back
-  reads it from there. That keeps the property the step has now, that
-  results don't depend on when a contact began, and a reload or a replay
-  needs no stored colors.
-- **Colors in storage, only for scale.** At 40 000 bodies the serial
-  coloring and copy are the limit. Then a contact's color could
-  persist, as Box2D keeps it: rarely changing, it would be cheap to keep in
-  storage (a table per color, each in pair order, so the merge walks all
-  of them merged, as `for_each_ordered` merges tables now, and the solve
-  walks them in turn), with only beginning contacts colored. The price is
-  that colors depend on history, so they'd be state a snapshot must carry,
-  and a merge of 8 tables instead of a walk of one. Not built, and not
-  needed at 10 000.
-- **Threads.** A pool that stays alive across steps: spawning scoped
-  threads costs 125 µs for 8 and 265 for 16, more than the solve. It
-  must not be the physics mod's (a mod that spawns a thread is never
-  unmapped: [lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)),
-  so it's the scheduler's workers (get-znt.5) with a data-parallel job
-  (step 3 of [scheduling](scheduling.md#toward-parallelism)): run this
-  closure on N workers, with a barrier they share. `engine_ecs::Executor`
-  and `Workers` (then; [Parallelism](#parallelism)) were that job's shape without
-  the barrier: the solve needs every worker at once, where they run tasks
-  in any order. Those workers need to
-  be placed on one CCD (the numbers above are pinned; unpinned they're
-  2.5× slower) and kept busy between jobs, or the governor clocks them
-  down: an idle core runs a solve at half speed
-  ([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md)).
-
-**Inherent, and unbuilt.** Inherent: a colored solve is another
-computation from today's, so switching changes every recorded replay once
-(and deterministically after); it converges slightly slower; a barrier per
-color per iteration, and the cross-CCD traffic of bodies shared between
-colors, cap it at one CCD for 10 000 bodies; islands can't split a pile;
-and SIMD buys little for a contact without rotation. Unbuilt: the pool and
-its job API, placement, a parallel or persistent coloring and copy, wide
-batches built straight from the world, and anything smarter across CCDs
-(each CCD solving its own half of the bodies, meeting only at the seam).
-The prototype stayed in the bench: in the mod it would need threads the
-mod can't own, and would change the simulation, where the single-threaded
-default must stay bit for bit what it is.
-
-## Against other engines
-
-**Status: measured** (2026-09-25; the solver since replaced, and the
-settling gap closed: [Settling](#settling), 2026-09-26). `./bazel run -c opt
-//engine/std/physics2d/compare` runs the same scenes in the physics mod, in
-the same step on plain arrays (`tests/arrays.rs`, bit for bit the mod's,
-checked on every scene without rain), in **Box2D v3.1.1** and in **Rapier
-2D 0.36.0**, one thread each, and prints time per step by stage and how
-well each settled. How to run it: [runbook
-005](../runbooks/005-compare-physics-with-other-engines.md). Credits and
-licenses: [CREDITS.md](../CREDITS.md). The goal is to see the gaps, not to
-win: parallel comparisons wait for our physics to run in parallel.
-
-**Verdict: on one thread we are level on time, and ahead where the
-problem is easier for us.** At 10 000 bodies the three engines are within
-15% of each other on piles and pyramids; we are 20–30% faster in rain,
-and nearly twice as fast falling, where our broadphase shines and theirs
-re-pair everything that moved. Our time is spent differently: about
-750 µs of 3400 on storage upkeep that arrays don't pay, a broadphase that
-re-finds every pair even when nothing moved (Box2D pays nothing there),
-and a scalar solver in pair order. What they do better is **settle**:
-both are at rest in 400 steps where we creep for thousands (and so can't
-sleep), and the creep is our split impulse's. What we do better is
-**overlap**: at rest ours is the slop, 0.005, where their soft contacts
-leave 0.02–0.06 under load, and no setting of theirs changes that.
-
-### How the scenes are matched
-
-`scene.rs` builds every scene for every engine, and the bench checks what
-it can:
-
-- Every dynamic body has mass 1 whatever its shape, rotation locked
-  (Box2D `fixedRotation`, Rapier `lock_rotations`; the bench asserts no
-  body turned, which caught Box2D turning them: see
-  [lore](../lore/box2d-set-mass-data-unlocks-a-fixed-rotation.md)), and
-  friction and restitution as ours has them, mixed as ours mixes them (the
-  least friction, the greatest restitution; Box2D takes the square root of
-  the product and Rapier the average by default, so both are given the
-  rule). Gravity 20, a step of 1/60, sleeping off everywhere unless
-  `SLEEP=1`.
-- Each engine at its defaults otherwise: ours 8 iterations and a split
-  impulse; Box2D 4 substeps of its soft step (contact hertz 30, damping
-  ratio 10, push-out at most 3 a second, SSE2, continuous collision on);
-  Rapier 4 solver iterations of its soft solver (block solver, contact
-  recycling).
-- **Scenes:** a real pile (1000 bodies 41 wide, 10 000 401 wide, circles
-  and boxes, every other row shifted half a body, so it is a pile in every
-  engine: 1.44–1.57 contacts a body, 1–9 islands); `:tax`'s pile as it
-  is (the "columns" case, below); a pyramid of unit boxes (base 20, 210
-  boxes; base 100, 5050); rain, circles falling onto the heap 2 or 20 a
-  step and removed 480 steps later, 1000 alive 81 wide or 10 000 801 wide.
-  Rain is circles because locked boxes land flush on boxes and tower out
-  of the box. In the engine, rain is a system spawning through a `Spawner`
-  and despawning through rows, as a game would.
-- **Timing** is the wall clock around the steps; stages are each engine's
-  own counters (ours: the mod's timings; Box2D: `b2Profile`; Rapier:
-  `counters`, with its `profiler` feature). Broadphase is Box2D's `pairs`
-  plus `refit`, and Rapier's pair update plus its end-of-step tree update
-  ([lore](../lore/rapier-times-its-broadphase-at-the-end-of-the-step.md));
-  narrowphase is Box2D's `collide`; solver is Box2D's constraint stages
-  and Rapier's `solver_time`. "Rest" is the step less those three.
-- **Quality** is measured by the bench, the same code for every engine,
-  from positions and velocities: overlaps by exact shape, contacts a body
-  and islands (touching within 0.01), speeds and kinetic energy, and how
-  far bodies moved (per second over the 60 steps timed; for the pyramid,
-  from where they started).
-
-### Time
-
-µs per step, the median of 3 runs of 60 steps, `-c opt`, one thread;
-runs agreed within 2% except Rapier's 10 000 settled (3565–4062). Each
-cell is the step, then broadphase, narrowphase, solver and rest:
-
-| scene | ours (ECS) | ours (arrays) | Box2D | Rapier |
-|---|---|---|---|---|
-| pile 1000, falling | 142: 20, 7, 57, 58 | 135: 62, 9, 57, 7 | 209: 79, 45, 63, 22 | 232: 62, 29, 98, 44 |
-| pile 1000, settled (step 400) | 270: 25, 15, 163, 67 | 242: 47, 24, 161, 10 | 296: 0, 79, 202, 16 | 319: 4, 24, 263, 28 |
-| pile 1000, at rest (step 4000) | 227: 24, 14, 154, 35 | 219: 35, 22, 153, 8 | 289: 0, 78, 196, 15 | 311: 4, 24, 257, 26 |
-| pile 10 000, falling | 1361: 189, 59, 594, 519 | 1265: 521, 85, 593, 66 | 2518: 1110, 562, 628, 217 | 2374: 655, 295, 1022, 401 |
-| pile 10 000, settled | 3370: 450, 245, 1802, 873 | 3315: 1144, 281, 1766, 125 | 3307: 0, 1139, 2017, 151 | 3861: 123, 480, 2967, 292 |
-| pile 10 000, at rest | 2718: 437, 232, 1690, 358 | 3252: 1163, 280, 1687, 121 | 3376: 0, 1166, 2059, 152 | 3501: 62, 328, 2819, 293 |
-| pyramid 210 | 90: 6, 5, 64, 16 | 80: 8, 7, 63, 3 | 110: 0, 34, 72, 4 | 105: 1, 6, 92, 5 |
-| pyramid 5050 | 2814: 181, 116, 2251, 265 | 3174: 682, 167, 2258, 68 | 2846: 0, 1020, 1742, 84 | 2753: 21, 162, 2452, 119 |
-| rain 1000 | 342: 41, 27, 157, 117 | 281 + 5: 87, 27, 151, 16 | 386 + 1: 105, 85, 174, 22 | 418 + 1: 101, 59, 196, 61 |
-| rain 10 000 | 3601: 500, 283, 1608, 1209 | 2953 + 51: 995, 255, 1555, 148 | 4481 + 16: 1406, 1135, 1726, 214 | 5060 + 7: 1163, 884, 2130, 882 |
-
-"+" is adding the step's raindrops and removing the oldest, outside the
-step; the engine's is inside it, at the rain system's apply node.
-Contacts solved at 10 000 settled: ours 14 159 pressed (15 864 held),
-Box2D 16 230 touching (21 221 held; two points for a box pair), Rapier
-16 294.
-
-With each engine's default sleeping (`SLEEP=1`, one run), the 10 000 pile
-at step 400: Box2D and Rapier asleep, under 1 µs; ours 3682, since it
-still creeps. At step 4000 ours is asleep too, 27 µs (the look for what
-games changed). Rain never sleeps (4069 / 4703 / 5214).
-
-### Quality
-
-At the end of the steps timed: deepest overlap / mean overlap, mean
-speed, kinetic energy a body, and for the pyramids how far the boxes are
-from where they started, mean / most:
-
-| scene | ours | Box2D | Rapier |
-|---|---|---|---|
-| pile 10 000, settled | 0.016 / 0.006, 0.023, 7.7e-3 | 0.057 / 0.008, 0.0000, 1.9e-10 | 0.054 / 0.008, 0.0005, 1.6e-7 |
-| pile 10 000, at rest | 0.005 / 0.005, 0.0000, 1.3e-10 | 0.057 / 0.008, 0.0000, 1.5e-10 | 0.054 / 0.008, 0.0001, 1.9e-8 |
-| pyramid 5050, 10 s | 0.013 / 0.008, 0.19, 2.7e-2; 0.27 / 0.74 | 0.019 / 0.009, 0, 4e-11; 0.40 / 0.83 | as Box2D |
-| pyramid 5050, 60 s | 0.005 / 0.005, 0, 5e-12; 0.17 / 0.50 | unchanged | unchanged |
-| rain 10 000 | 0.38 / 0.009 | 0.66 / 0.018 | 0.54 / 0.016 |
-| columns 1000 (`:tax`'s pile), contacts a body, islands | 1.29, 2 | 1.01, 30 | 1.01, 29 |
-
-- **We converge slowly and creep.** At step 400 our 10 000 pile still has
-  bodies at up to 8.6 a second and a mean drift of 0.02 a second; theirs
-  are still. Our 5050 pyramid is still sinking at 10 s (0.19 a second on
-  average), and at rest by 60 s. All three pyramids stand.
-- **The creep is the split impulse.** The same step on arrays with its
-  pseudo velocities thrown away (`VARIANTS=arrays:nosplit`) settles the
-  1000 pile to a fastest body of 0.03 a second against 2.4 (energy 1.0e-4
-  against 1.1e-2), and keeps `:tax`'s pile standing in columns as Box2D
-  and Rapier do, where with the split impulse it falls into a pile:
-  pushing bodies apart along tilted normals moves them sideways, where
-  friction doesn't act
-  ([lore](../lore/a-pile-41-wide-stands-in-columns-until-it-is-tall.md)).
-  Without it nothing corrects overlap (0.24 deep), so dropping it isn't
-  the fix.
-- **Soft contacts sink under load, and substeps don't help.** Box2D and
-  Rapier give the same overlaps to four digits on the pyramid (Rapier's
-  solver is the same soft step), 0.019 at its base and 0.057 under a
-  pile, with the pyramid's top 0.83 lower. Box2D at 8 substeps is as deep
-  (0.060); at 2 it is 0.17 on the pile and 0.075 on the pyramid (its top
-  3.3 lower), still at rest.
-- **Rain:** we overlap about half as deep on impact (0.38 against 0.66
-  and 0.54). Nothing escapes the box in any engine.
-
-**Matched quality.** Neither side is simply cheaper-and-worse, so there is
-no single matched point: theirs are at rest and deeper, ours tighter and
-restless. The nearest: Box2D at 2 substeps costs 2786 µs on the 10 000
-pile (ours 3370) and 1992 on the pyramid (ours 2814), still at rest, at 10
-and 6 times our overlap. Rapier at 2 iterations isn't at rest (the pyramid
-comes apart), and at 8 costs 5382 for nothing its 4 lack.
-(`VARIANTS=box2d:1,box2d:2,box2d:8,rapier:1,rapier:2,rapier:8`, one run.)
-
-### Where the time goes, and what they do differently
-
-- **Broadphase.** Ours finds every pair from the spatial pages every step:
-  about 450 µs at 10 000 whether the pile creeps or rests (189 falling,
-  where the pages hold fewer pairs). Box2D keeps fat boxes (0.1 of margin)
-  in dynamic trees and queries only proxies that left theirs: 0 at rest,
-  1110 falling, when every proxy moves. Rapier refits a BVH at the end of
-  the step and pairs what moved: 62–123 at rest, 655 falling. The arrays'
-  sweep and prune is the worst of all on a pile (1144).
-- **Narrowphase.** Ours is the cheapest a pair (a normal and a depth, no
-  points: 245 µs for 15 864 pairs). Box2D computes a full manifold for
-  every pair whose fat boxes overlap, two clipped points for boxes, with
-  rotation math even when rotation is locked (1139 for 21 221). Rapier
-  reuses the manifolds of pairs that moved less than 0.05 (480).
-- **Solver.** Ours: 8 sequential passes over the contacts in pair order,
-  then 8 split-impulse passes over those sunk past the slop, scalar: about
-  7 ns a contact a pass. Box2D: contacts graph-colored and solved 4 at a
-  time (SSE2) within a color, one solving and one relaxing pass a
-  substep, soft contacts, from bodies kept in the solver's layout between
-  steps; about our speed on a pile (2017 against 1802) and faster on the
-  pyramid (1742 against 2251), where our pair order walks each chain of
-  contacts one dependent write after another. That order is our loss: on
-  one thread the same solver colored is 1.28× faster and colored and wide
-  1.4× ([Parallel solving](#parallel-solving)). Rapier's solver is the
-  slowest here (2967).
-- **Storage upkeep** is ours alone: the ECS's "rest" is 873 µs at 10 000
-  settled against the arrays' 125. Of it, outside the systems 549, most
-  of it re-sorting the contacts table as contacts begin and end
-  (get-emj.31) and the spatial re-sort of creeping bodies; copying bodies
-  and contacts into the solver and back about 250 (the arrays 80). At
-  rest, when nothing changes, it is 358, and the ECS beats the arrays,
-  whose sweep suffers. Box2D's whole "rest" is 151 (finalizing transforms
-  and boxes), Rapier's 292 (moving bodies to their final poses).
-- **Structural changes** through a `Spawner` and rows cost little we could
-  see: rain at 10 000 is 3601 µs with them in the step, where it was 3644
-  with them coming through `WorldMut` from a message each step, which cost
-  another 418 µs for 20 spawns and 20 despawns (about 10 µs each; Box2D
-  0.4, Rapier 0.2). One entity at a time from outside a frame is slow:
-  not what a game does, but tools and tests do.
-
-### What would close the gaps, ranked
-
-Estimated from the numbers above, at 10 000 bodies:
-
-1. **Settle as they do (algorithm).** Done, 2026-09-26:
-   [Settling](#settling). The split impulse kept a pile
-   moving for thousands of steps, which costs quality (drift, bodies
-   thrown at 8 a second) and, with sleeping on, nearly all the time:
-   Box2D is asleep at step 400 and we pay 3682 µs a step until the creep
-   stops. Candidates, each a different simulation for the bench to judge:
-   friction solved on the pseudo velocities too, so the correction can't
-   slide bodies; a smaller correction once a contact persists; Box2D's
-   soft step with a relax pass, which settles but sinks under load.
-2. **Ordered tables that splice (ECS, get-emj.31).** Most of the 549 µs
-   outside the systems when contacts churn (841 in rain): 10–20% of the
-   step.
-3. **An incremental broadphase (algorithm, in storage).** Keep last step's
-   pairs for pages whose bodies stayed inside grown boxes, as Box2D's fat
-   boxes do: up to about 400 µs (12%) on a pile that creeps or rests, and
-   nothing when everything falls, where ours already leads. Done
-   2026-09-27 (`Live<Contacts>`; spatial-storage.md, "Keeping pairs").
-4. **Colored, wide solving on one thread (algorithm).** 1.28–1.4× the
-   solver, about 400–500 µs at 10 000 and more on the pyramid; another
-   computation, deterministic, and the start of the parallel solve.
-   Done for turning contacts: in lanes by level, the same computation,
-   twice as fast (2026-09-27), then colored as the default (2026-09-28,
-   get-emj.61; [The solver's speed](#the-solvers-speed)).
-5. **Solver arrays kept between steps (ECS).** Most of the 170 µs the
-   copies cost over the arrays; the transpose itself is cheap ([What the
-   ECS costs](#what-the-ecs-costs)).
-6. **Cheaper structural changes from `WorldMut` (ECS).** 10 µs an entity
-   at 10 000, for tools and messages; systems don't pay it.
-
-Nothing here says the ECS is the wrong home: the arrays, with no storage
-upkeep at all, are within 2% of the ECS at 10 000 settled and slower at
-rest. The gaps that matter are algorithms (1, 3, 4) and one storage cost
-already known (2).
-
-### Bringing them in
-
-- **Box2D**, C: an `http_archive` pinned by checksum in `MODULE.bazel`,
-  and a `cc_library` over its sources (`box2d.BUILD.bazel`) with the flags
-  its CMake build uses on Linux in release (C17, `-O3`,
-  `-ffp-contract=off`, SSE2, no validation), built by the hermetic llvm
-  toolchain with no trouble. The Rust side calls a C shim
-  (`box2d_shim.c`) of scalar functions rather than mirroring Box2D's
-  definition structs, so the FFI (`box2d.rs`, the only unsafe code in the
-  comparison, and in the bench only) is 9 extern functions over numbers
-  and float buffers.
-- **Rapier**, Rust: a workspace member `Cargo.toml` pinning
-  `rapier2d = "=0.36.0"` with `profiler`, and `Cargo.lock` regenerated
-  ([runbook 001](../runbooks/001-regenerate-cargo-lock.md)); `rules_rs`
-  built its 60-odd crates unpatched.
-- Both are visible to `//engine/std/physics2d/compare` alone. Box2D is
-  pinned to its latest release; Rapier to the version current on the day,
-  so a rerun compares the same code.
-
-## Settling
-
-**Status: built** (2026-09-26, get-emj.35). The 2D solver is a soft step
-(`solver.rs`), Box2D v3's with our own stiffness and relax count, in
-place of the split impulse it had until then.[^split] Piles and pyramids
-now come to rest as soon as Box2D's and Rapier's do, sink a quarter as
-deep, and fall asleep: the 10 000 pile with sleeping on costs 24 µs a
-step at step 400, where it cost 3682.
-
-### What the other engines do (read in their fetched source)
-
-- **Box2D v3.1.1** (`solver.c`, `contact_solver.c`): a soft step. 4
-  substeps; each applies gravity, warm starts, solves once with soft
-  contacts (`b2MakeSoft`: 30 Hz, damping ratio 10, twice as stiff against
-  a static body; push-out capped at 3 u/s), integrates positions, updates
-  each contact's separation from how far its bodies moved, and relaxes
-  once (rigid, no push). Restitution once after the substeps, from the
-  closing speed before them, for contacts that pushed. Friction in both
-  passes.
-- **Rapier 0.36** (`integration_parameters.rs`,
-  `staged_island_solver/worker.rs`): the same soft step. Its
-  `num_solver_iterations` (4) are substeps, each with forces (gravity) as
-  a per-substep velocity increment, `num_internal_pgs_iterations` (1)
-  biased passes, positions, `num_internal_stabilization_iterations` (1)
-  unbiased ones; contacts 30 Hz and ζ 10, 60 Hz against a fixed body,
-  corrective velocity capped at 3, no slop in the bias, restitution after
-  all substeps. One difference from Box2D: friction only in the unbiased
-  pass (`friction_in_bias_pass: false`, "load-bearing for tall stacks").
-- **Box3D 0.1** (`solver.c`, `types.c`): Box2D's soft step in 3D, 1
-  iteration and 1 relax a substep, 30 Hz, ζ 10.
-- **Jolt 5.6** (`PhysicsSettings.h`, `ContactConstraintManager.cpp`): no
-  soft contacts. 10 velocity iterations of sequential impulses, then 2
-  position iterations (non-linear Gauss-Seidel) that move bodies apart
-  directly by Baumgarte 0.2 of the penetration past a slop of 0.02, at
-  most 0.2 a step, from positions recomputed each iteration. Box2D v2.4 did
-  the same (3 position iterations, slop 0.005); not fetched here, so from
-  memory.
-
-### The options, measured
-
-`SETTLE=1500` on the comparison (runbook 005): each scene stepped 1500
-steps and looked at every 10. "At rest" is every body under 0.05 (the
-sleep threshold of ours and Box2D's): the first step it was, and the step
-it stayed so from, when they differ. Deepest at step 400. µs is the mean
-over the 1500 steps on arrays. Every variant is in `compare/variants.rs`.
-
-| solver | pile 10 000: at rest | fastest at 400 | deepest | µs | pile 1000: at rest | pyramid 5050: at rest | deepest | top moved |
-|---|---|---|---|---|---|---|---|---|
-| split impulse (before) | 990 / never | 2.77 | 0.019 | 3636 | 560 / 1070 | 500 / 1210 | 0.024 | 0.57 |
-| (1) + friction on the pseudo velocities (`split/pf=2`) | never | 5.27 | 0.037 | 5103 | never | 500 / 1210 | 0.024 | 0.57 |
-| (2) + correction decaying with contact age (`split/decay=0.1`) | 570 / 1360 | 0.26 | 0.066 | 4183 | 430 / 580 | 500 / 1210 | 0.041 | 0.99 |
-| (3) velocity iterations, then Jolt's position iterations (`ngs`) | never | 0.96 | 0.051 | 3841 | 370 / 1490 | 500 / 1210 | 0.024 | 0.99 |
-| (4) soft, Rapier's settings (`soft/hz=30/relax=1/sub=4`) | 250 / 570 | 0.013 | 0.096 | 3129 | 250 | 90 / 170 | 0.038 | 1.67 |
-| (4') soft, Box2D's settings (the same, `bf=1`) | 210 | 0.001 | 0.092 | 3400 | 280 | 90 / 170 | 0.038 | 1.67 |
-| (5) soft, 4 substeps at 60 Hz, 1 relax | 560 / 590 | 0.12 | 0.024 | 3097 | 420 / 470 | 340 / 1110 | 0.009 | 0.42 |
-| (5) soft, 4 substeps at 60 Hz, 2 relax | 220 | 0.003 | 0.022 | 3605 | 250 | 120 / 180 | 0.009 | 0.42 |
-| **(5) soft, 5 substeps at 75 Hz, 2 relax (chosen)** | **230** | **0.001** | **0.013** | **4037** | **230** | **130 / 150** | **0.006** | **0.27** |
-| Box2D | 190 | 0.000 | 0.057 | 3387 | 260 | 40 / 70 | 0.019 | 0.83 |
-| Rapier | 200 | 0.005 | 0.054 | 3521 | 160 | 230 / 280 | 0.019 | 0.83 |
-
-Also tried, not in the table: friction on the pseudo velocities limited
-by the pseudo impulse alone (`pf=1`: the 10 000 pile never rests); a
-correction a quarter as strong for contacts pressed last step
-(`persist=0.05`: never rests, 0.056 deep); four position iterations
-(never rests); stiffer contacts at 4 substeps (90 and 120 Hz: jitter,
-energy 0.2-0.5 a body, never at rest); the soft step with the step's
-gravity all in its first substep (never rests: docs/lore); and relaxing
-only the impulse added since the warm start, so load isn't soft (never
-rests).
-
-What it shows:
-- **The creep isn't only the split impulse's.** On the pyramid every
-  variant of the split impulse is the same to three digits (fastest 0.70
-  at step 400): what creeps there is the velocity solve, 8 iterations of
-  Gauss-Seidel over 100 rows of boxes with a step's gravity at once.
-  Fixes to the correction (1, 2, 3) can't touch it. Substeps do: each
-  holds a substep's gravity, and the stack converges in a fraction of the
-  steps.
-- **Every fix to the correction fails.** Friction on the pseudo velocities
-  (1) needs a load to limit it, and the push's own impulse is too small to
-  hold while the real one lets bodies stick and slip. Weaker correction
-  (2) settles sooner, but only by sinking 3-4 times deeper. Position
-  iterations (3) are the same push, done in positions, and creep the same
-  way.
-- **Soft steps settle; stiffness decides the depth.** A soft contact sinks
-  by load / (mass ω²) (docs/lore, measured), so Box2D's and Rapier's 30
-  Hz piles sink 0.05-0.1 and no setting of theirs changes it. The
-  stiffest that holds is a quarter of the substep rate, so depth is
-  bought with substeps: 0.022 at 4, 0.013 at 5.
-- **Two relax passes, not one.** At 60 or 75 Hz one relax pass leaves the
-  pile sliding for hundreds of steps (590 on the pile, 1110 on the
-  pyramid): the stiffer push leaves more velocity to take out.
-- **Friction only in the relax passes** (Rapier's rule) is no worse and
-  cheaper: on the 10 000 pile at 60 Hz it rested at 230 either way, and
-  it saves a friction row in every pushing pass.
-
-**Why this one.** It's the only family that reaches rest as fast as the
-references on every scene, and at 5 substeps it is shallower than the
-split impulse was on the pyramid even at rest (0.006 against 0.007 at
-step 1500), and on the piles at step 400 (0.013 against 0.019), though
-not than its 0.005 once at rest, which a soft contact under a pile's
-weight can't reach. 5 substeps rather than Box2D's 4 is the price of that
-depth. The pyramid stands better than in either reference (its top 0.27
-below where it began, theirs 0.83).
-
-**Time.** One thread, `-c opt`, median of 3, the ECS mod (full tables:
-"Against other engines", which still shows the split impulse):
-
-| scene | split impulse | soft step (5 substeps) | Box2D | Rapier |
-|---|---|---|---|---|
-| pile 10 000, falling | 1361 | 1543 | 2519 | 2373 |
-| pile 10 000, settled (step 400) | 3370 (creeping) | 3409 (at rest) | 3392 | 3537 |
-| pyramid 5050 | 2814 | 2662 | 2789 | 2749 |
-| rain 10 000 | 3601 | 4534 | 4480 | 4970 |
-| pile 10 000 at step 400, sleeping on | 3682 | 24 | 0 | 1 |
-
-A pass over the contacts costs about what it did, but there are more
-passes: 5 substeps of 3 (15, and 5 warm starts) where there were 8 and up
-to 8 more over the sunk contacts. The solver is 18% slower on the pile at
-step 400 (2376 µs against 2018 on arrays) and 32% in rain, where contacts
-churn and every one is solved; it is faster on the pyramid, and the
-settled pile presses fewer contacts (12 690 against 14 159), so the step
-is level there. Rain overlaps deeper on impact (0.55 against 0.38; Box2D
-0.66, Rapier 0.54), since a deep overlap is pushed out at 3 u/s at most;
-its mean overlap is less (0.006 against 0.008).
-
-**What else changed.**
-- **Free fall is a little shorter a step.** Gravity is spread over the
-  substeps (a fifth of the step's in each, as Box2D and Rapier do), so a
-  body falls g h² (1 + 2 + 3 + 4 + 5) a step, not g dt²: 0.0033 less at
-  gravity 20. `integrate_velocities` still adds the step's gravity before
-  contacts are found (so they're found, and bounce, at the speed they
-  meet with); the solver takes it back out and spreads it
-  (`SolverBody::gravity`). Without that, a soft step never settles
-  (docs/lore).
-- **Restitution is kept on speculative contacts** (get-emj.19): a body
-  met by a speculative contact bounces at the speed it came in with, not
-  what the gap left of it (3 from 10, before). That was pong's stalled
-  ball (get-az6): at the AI's paddle, frame 200 of the rally route, it
-  now leaves at -17.6 where it stopped dead and crawled along the paddle,
-  and off the bottom wall at 5.72 where it left at 1.96
-  (`pong_test`'s `the_ai_returns_the_ball_at_full_speed`).
-- **Resting contacts touch** rather than sit at the slop: the soft step
-  has none, like Box2D's, and a box on the floor sinks 3e-5.
-- **Bit for bit** the mod and the arrays still agree on every scene
-  without rain (`:tax`, and the comparison).
-- **The games' routes**: `platformer_test` and `pong_test` pass
-  unchanged. The platformer's reload replay stands still in the corner 2
-  frames longer before its jump (33 frames, from 31), since its player
-  lands from the drop 0.35 deep and is pushed out at 3 u/s; the jump
-  still stomps the walker. The physics tests' 41-wide pile now stands in
-  columns, as it does in Box2D and Rapier, so the ones that want a pile
-  drop it staggered; a floor that falls jammed between the walls falls
-  0.99 in 30 steps where it fell 1.0 free (friction now acts on the push
-  that holds it between them).
-- `:parallel_solver` and `:solver_layout` measured the split impulse,
-  and still do, from a copy of it (`tests/split_impulse.rs`): their
-  findings are about that computation. Porting them is work for when the
-  soft step is parallelized.
-
-### How it extends to rotation
-
-The soft step is what Box2D v3, Box3D and Rapier all run with rotation,
-so the path is known: a contact gains points (anchors on each body, up to
-two in 2D, four in 3D), each substep integrates a rotation beside the
-position, and a point's separation is updated from both bodies' moves and
-turns (Box2D's `b2SolveContact`: the base separation plus the relative
-displacement of the rotated anchors, along the normal), with angular
-terms in the effective mass and the impulse. Nothing in the passes, the
-softness, the relax or the restitution depends on bodies not turning;
-they become per point. The split impulse and the position iterations
-would extend too (Bullet and Box2D v2.4 turn bodies), but carry their
-creep with them, and the position iterations need contact points
-recomputed every iteration.
-
-[^rotation]: 2026-09-26: until then an open question, proposed to stay out
-    of the MVP: "Without it, boxes don't tip over and the stress demo
-    stacks like tetris. Adding it is an angle and angular velocity per
-    body, inertia, and contact points instead of a manifold's center:
-    roughly doubling the solver." A turning contact costs 5–7 times a
-    locked one in the solver, not 2, and a world where nothing turns
-    costs what it did.
-
-[^split]: 2026-09-26: until then, sequential impulses with a split
-    impulse (Bullet's push velocities): eight velocity iterations, then
-    eight passes of pseudo velocities pushing apart contacts sunk past a
-    slop of 0.005 by 0.2 of the rest a step. It rested at the slop, 0.005
-    deep, but crept for thousands of steps: its pushes along tilted
-    normals slid bodies where no friction acted, and its velocity solve,
-    with a step's gravity at once, didn't converge on tall stacks. Kept,
-    unchanged, as `tests/split_impulse.rs`.
+A wake seen before the solve takes effect in that step (the bodies get
+their gravity and their contacts solved, so a pile whose floor goes falls
+as the same pile awake does); one seen after, from the next. A game puts
+bodies to sleep by giving them `Asleep` in an island it numbers.
+
+**What it doesn't do**: an island touching a woken one wakes a step
+later; a body moving into a sleeping one sees it immovable for one step
+(Box2D wakes both in its collide phase); a body a game puts to sleep while
+pressing on something wakes in that step; no body can opt out; and a game
+writing a velocity every frame wakes its body every time it falls
+asleep. Each is in the log's "Sleeping", with how it was found and what
+fixing it would take.[^sleep]
+
+## Spatial queries
+
+A `Spatial<Data, Filter, Changes>` is a `Query` whose entities are found
+by where their colliders are: a region query over the spatial storage,
+then an exact test of each turned or unturned shape. It hands the same
+rows and items to the same closures, declares the same footprint plus
+reads of `Position` and `Collider` (so its `Data` can't write those two),
+and sees every move made before it in the plan and none after, as any
+change.
+
+```rust
+use physics2d::{Ray, Spatial, Vec2, circle, rect};
+
+// The walkers' ledge check: solid ground just ahead and below?
+fn walk(.., mut tiles: Spatial<&Tile>) {
+    let mut ground = false;
+    tiles.overlapping(rect(ahead, Vec2::ZERO), |_, t| ground |= t.kind == SOLID);
+}
+
+// An explosion: everything with health in the radius is hurt.
+fn explode(.., mut hit: Spatial<&mut Health, (), Despawns>) {
+    hit.overlapping(circle(at, radius), |row, mut health| { /* .. */ });
+}
+
+// Line of sight: the first solid thing along the ray, nearest first.
+fn look(.., mut blockers: Spatial<&Collider>) {
+    let first = blockers.cast(Ray::new(eye, dir, 20.0), |hit, row, c| (!c.sensor).then_some((row.entity(), hit.t)));
+}
+```
+
+`overlapping(probe, f)` visits what overlaps a `Placed` (`rect`,
+`circle`), in entity order; `any_at(point)` is the point case; `cast(ray,
+f)` visits hits nearest first until `f` returns `Some`. The filter does
+what layers would (`Spatial<(), With<Tile>>` sees only tiles); layers and
+masks are for what collides. `Spatial` lives in physics's interface, not
+`engine_ecs` (the ECS knows boxes, not shapes), so changing it is an
+interface change. It is a `Compose` of two queries, `engine_api`'s
+parameter built from others: its footprint is their union, and it only
+wraps what its declared parts fetched.[^spatial]
 
 ## Rotation
 
-**Status: built** (2026-09-26, get-emj.38). Bodies turn: boxes tip over
-edges, stacks and pyramids of boxes stand on two points a contact, discs
-roll. A body that doesn't turn is the same computation as before, bit for
-bit, and every game's recorded routes pass unchanged, since no game's
-bodies turn yet. Each choice below was measured against the others it
-could have been, on the same scenes; what Box2D v3.1.1 and Rapier 0.36
-(parry2d 0.31) do was read in their fetched source.
+2D bodies turn: boxes tip over edges, stacks and pyramids stand on two
+points a contact, discs roll. `Rotation` (the cosine and sine, as Box2D's
+`b2Rot`: turning a vector is four multiplies, bounding a box no sine) on
+any collider, and `Spin` on a body; a dynamic body with both turns with
+its shape's inertia at its mass (a box's `m (w² + h²) / 12`, a disc's
+`m r² / 2`); a kinematic one turns at its spin; a static with a
+`Rotation` is a turned plank. Within the step a rotation is stepped to
+first order and normalized every substep, and a point's separation
+follows its arms as the bodies turn (Box2D's `b2SolveContact`).
 
-What was built:
-
-- **Components.** `Rotation` (the cosine and sine of the angle, as Box2D's
-  `b2Rot` and Rapier's unit complex keep it: turning a vector is four
-  multiplies, and bounding a box no sine) on any collider, and `Spin`
-  (radians a second) on a body. A dynamic body with both turns, with its
-  shape's inertia at its mass (a box's `m (w² + h²) / 12`, a disc's `m r² /
-  2`; `Collider::inertia_per_mass`); a kinematic one turns at its spin; a
-  static with a `Rotation` is a turned plank.
-- **Storage.** A body's box is its collider turned: `Position`'s extents
-  are `(Collider, Rotation)`, a pair each of which a row may lack
-  ([spatial-storage.md](spatial-storage.md#bounds-from-several-components)).
-- **The narrowphase.** Where either shape is turned, contacts have points
-  (`narrow::collide_turned`): turned boxes by Box2D's separating axis and
-  clipping (two points), a turned box and a circle or two circles at one.
-  Each point has its arms from both centers, its separation and its
-  feature id, the edges it came from. Where neither is turned, the tests
-  are the ones before rotation, with no points.
-- **Contact points** on each contact as a `ContactPoints` component, and
-  warm starting by feature id ([Contact points](#contact-points)).
-- **The solver.** A contact is solved at its points when an end turns:
-  Box2D's angular terms (each point's effective mass with its arms' cross
-  products; impulses turning the bodies; the separation following the arms
-  as the bodies turn within the step), in the same soft step, substeps,
-  relax passes and speculative margin; restitution per point. A contact
-  whose ends don't turn keeps its one row at the normal, and a step with
-  no points and nothing spinning runs a solve compiled without them
-  (`solver::solve_all::<false>`).
-- **Sleeping** goes by a turning body's edge as well as its center (Box2D's
-  `maxExtent`), stops its spin as it falls asleep, and wakes it when a game
-  writes its rotation or spin.
-- **Spatial queries** (`Spatial`) test turned colliders by their turned
-  shapes: overlaps by separating axes, rays in the box's frame.
-
-### The rotation lock
-
-A body keeps its rotation by not having a `Spin`: the lock is a component
-that's absent, not a flag. Box2D locks by a flag on the body
-(`fixedRotation`, which leaves its inverse inertia 0, `body.c`), Rapier
-by locked axes (`LockedAxes::ROTATION_LOCKED`, which zero the effective
-inverse inertia, `rigid_body_components.rs`); in both, every body carries
-an orientation. Measured here as its cost (`TURN=2` in the comparison: every
-dynamic body given a `Rotation` and no `Spin`, which is what a flag or an
-infinite inertia leaves each body with), ours, µs a step, one thread; the
-same quality either way, to three digits (a turned test of a box that
-isn't turned rounds a little differently):
-
-| scene | locked by having no `Spin` (and no `Rotation`) | every body with a `Rotation`, locked |
-|---|---|---|
-| pile 10 000, falling | 1637 (narrowphase 64) | 1815 (167) |
-| pile 10 000, settled | 3581 (218) | 3988 (509) |
-| pyramid 5050 | 2754 (126) | 3643 (754) |
-| rain 10 000 (circles) | 4573 | 4466 |
-
-A body with a rotation is tested as a turned shape, whether it turns or
-not, and pays for points it never uses: 11% on a pile, 32% on a pyramid of
-boxes. A flag could fast-path a rotation that is still the identity, but
-then every body still carries one in storage, which the storage bench
-measured at half again as much to write and 15% more to re-sort. By
-absence, a world where nothing turns pays nothing, and `Rotation` without
-`Spin` is still there for what should face a way and stay so.
-
-**The games.** The platformer's player and walkers have no `Spin`, so they
-stay upright; pong's ball has none either, and keeps its behaviour exactly:
-it is a circle with no friction, so no contact could turn it anyway (a
-normal through its center has no arm, and friction 0 no tangent), and
-giving it a spin would change nothing but what the step computes. Their
-routes (`platformer_test`, `pong_test`, the reload replays) pass
-unchanged.
-
-### The narrowphase for turned shapes
-
-Box2D and Rapier both meet boxes by the separating axis: Box2D's
-`b2CollidePolygons` (the face of either box the other is farthest out
-along, the other's most opposed edge clipped to that face's sides,
-`b2ClipPolygons`), parry's `contact_manifold_cuboid_cuboid` the same for
-cuboids. For convex shapes without a routine of their own parry takes the
-general route, GJK for the distance (or that they overlap) and EPA for the
-depth, then clips the faces the normal picks (`contact_manifold_pfm_pfm`).
-Both measured on the same 100 000 pairs of turned boxes, from 0.03 apart
-to sunk 0.12 (`./bazel run --config=bench //engine/std/physics2d:narrow_bench`, two
-runs):
-
-| way | ns a pair | contacts |
-|---|---|---|
-| **SAT and clipping, as Box2D** | **63** | 99 840 |
-| GJK and EPA, then clipping (allocation-free) | 370 | 99 998 |
-
-They agree on the normal and depth for 99.93% of the pairs both find; GJK
-also finds 158 pairs corner to corner within the margin, which our clip
-drops as disjoint and Box2D keeps through the closest features of the two
-faces (`b2SegmentDistance`, for rounded polygons and the speculative
-corner case), a branch ours leaves out: such a pair is found the step it
-touches, not the step before. Six times faster, so SAT for boxes. How many
-points: two, as Box2D and parry make them for faces. Kept to the deepest
-alone (`arrays:rot/deepest=1`), no pile or pyramid comes to rest and every
-pyramid topples, as a box on one point rocks (below).
-
-### Contact points
-
-Each contact has a `ContactPoints` component: two points, each its arms
-from both centers, its separation and its feature id, and the last solve's
-impulses at each, by feature; `Manifold::points` says how many are this
-step's and `Manifold::solved` how many the last solve solved at, so a
-contact without points never reads its `ContactPoints`. The component is
-on every contact (contacts stay one ordered table: a component some have
-would split them, as it splits spatial tables) but written only where
-there are points. The 3D spike measured four points inline on the
-contact at 2% of a step; in 2D, where every game's contacts have none
-today, the question was what they cost a world where nothing turns.
-`:tax`, µs a step at 10 000 settled (the 401-wide pile), the ECS, each
-row beside a run of the build before rotation in the same session:
-
-| points | step: before rotation → with | narrowphase | merge | solve: gather | solver |
-|---|---|---|---|---|---|
-| inline in `Manifold` and `Impulse` (first cut: every contact 76 bytes more, and the solver’s bodies 44 bytes) | 1547 → 1776 (+15%) | 92 → 162 | 35 → 42 | 80 → 130 | 1021 → 1112 |
-| inline, the solver’s bodies and contacts made small again | 1547 → 1658 (+7%) | 92 → 108 | 35 → 42 | 80 → 120 | 1021 → 1063 |
-| a `ContactPoints` component, written only where used | 1547 → 1572 (+1.6%) | 92 → 99 | 35 → 40 | 80 → 91 | 1021 → 1022 |
-| **the same, the solve compiled without points where there are none** | **1519 → 1557 (+2.5%)** | **93 → 105** | **34 → 40** | **76 → 92** | **1002 → 998** |
-
-Bit for bit the same throughout; across `:tax`’s piles the last is 1–3%
-slower (the 1000 pile 153 → 158, falling at 10 000 845 → 863). What’s left
-is a turned-or-not test per pair (the narrowphase), the contact’s points’
-index in what the merge carries, and a fifth column the solve’s gather
-walks. What the first cut showed is that a body’s angular state costs a
-world where nothing turns wherever it rides along: a `SolverBody` with
-angular fields (44 bytes, not 28) cost the solver 4%, so turning bodies
-are a list of their own (`solver::Spinning`), and a step with no points
-and nothing spinning runs a solve compiled without them
-(`solve_all::<false>`). Points as entities (four rows a contact in another
-ordered table) the 3D spike already measured as four times the churn; not
-tried again. In the comparison, locked, the ECS is within 2% of before on
-every pile and pyramid, and 3% slower in rain, where contacts begin and
-end every step and each carries its `ContactPoints` column through the
-contacts’ re-sort.
-
-**Warm starting** (read in the fetched source): Box2D matches this step's
-points to last step's by feature id (`b2UpdateContact`), and a new point
-starts from nothing; parry does the same (`ContactManifold::match_contacts`)
-and has matching by position too (`match_contacts_using_positions`); and
-nothing at all is the third choice. On the arrays, bodies turning, with
-`SETTLE=1500` (the step every body, edges included, was slower than 0.05
-from; deepest overlap at step 400):
-
-| warm start | pile 1000: at rest from | deepest at 400 | pyramid 5050: at rest from | top moved | pile 10 000: at rest from | deepest at 400 |
-|---|---|---|---|---|---|---|
-| **by feature id, as Box2D** | **290 / 180** | **0.020 / 0.019** | **440 / 440** | **0.26** | **390 / 550** | **0.024 / 0.025** |
-| by the nearest last point, within 0.1 | 280 / 410 | 0.024 / 0.031 | 440 / 440 | 0.26 | 340 / 620 | 0.024 / 0.024 |
-| by feature id, a new feature's by the nearest | – / 320 | – / 0.020 | – / 440 | 0.26 | – / 290 | – / 0.027 |
-| not at all | never | 0.10 | never: falls apart (top 15.9 lower) | | never | 0.12 |
-| Box2D (ids) | 240 | 0.12 | 160 | 1.46 | 1160 | 0.11 |
-| Rapier (ids) | 230 | 0.10 | 1100 | 1.50 | 1200 | 0.087 |
-
-Two runs a cell, the same computation but for the order of a few
-multiplies (the second after keeping each point's cross products rather
-than computing them again in each pass): a pile's step to rest moves by
-a hundred or more with rounding alone, so **only what clears that decides**.
-Without warm starting nothing comes to rest, and the big pyramid falls
-apart: a contact's impulse has to carry its load from one step to the
-next, and two points of a box on a box can't rebuild it in a step's
-passes. Between ids and positions nothing clears the noise; feature ids,
-then, as Box2D and parry have them: cheaper (no distances, no threshold
-that depends on the bodies' size), and a match that depends on which
-features the points are, not where.
-
-
-### Rotation in the soft step
-
-Box2D carries a body's turn through the substeps as a rotation stepped by
-the first order and normalized (`b2IntegrateRotation`), and a point's
-separation by its arms turned with the bodies (`b2SolveContact`). Rapier
-integrates the angular velocity as a rotation too, and updates a point's
-separation from its local points moved by the bodies' poses (`update`, in
-`contact_with_coulomb_friction.rs`): the arms turned, as Box2D. Both relax
-once a substep, with friction in it, and bounce once after. On the arrays,
-bodies turning, `SETTLE=1500`, `arrays:rot/<key>=<value>`
-(`compare/variants.rs`), µs a step over the whole run; two runs where
-there are two, as above:
-
-| variant | pile 1000: at rest from | µs | pyramid 5050: at rest from | pile 10 000: at rest from | µs |
-|---|---|---|---|---|---|
-| **as built: a rotation, arms turned, 2 relax, 2 points** | **290 / 180** | **1026 / 909** | **440 / 440** | **390 / 550** | **12 111 / 10 933** |
-| an angle, its sine and cosine each substep (`int=1`) | 220 / 230 | 1031 / 906 | 440 / 440 | 300 / 330 | 12 119 / 10 979 |
-| arms moved to first order, `r + θ × r` (`sep=1`) | 400 | 1019 | 440 | 350 | 12 026 |
-| arms fixed, turning ignored (`sep=2`) | 330 | 1034 | 440 | 1080 | 11 947 |
-| 1 relax pass (`relax=1`) | 310 | 746 | never | 490 | 9252 |
-| 3 relax passes (`relax=3`) | 240 | 1285 | 510 | 260 | 15 131 |
-| one point a contact, the deepest (`deepest=1`) | never | | never: topples | never | |
-| Box2D | 240 | 372 | 160 | 1160 | 4371 |
-| Rapier | 230 | 377 | 1100 | 1200 | 5200 |
-
-- **Two points, two relax passes, the arms turned.** One point topples
-  every pyramid; one relax pass never lets the big pyramid rest, as
-  without rotation ([Settling](#settling)); three cost a quarter more for
-  nothing that clears the noise; ignoring the arms' turn takes the big
-  pile three times as long.
-- **A rotation or an angle; turned arms or first-order ones**: within the
-  noise, at the same cost. Box2D's rotation (no sine or cosine) and its
-  turned arms were kept. The first-order arm has one thing for it: a
-  rolling disc's turned arm lifts off the ground within the step and
-  leaves the disc's `Velocity` a quarter of a step's gravity downward
-  though it doesn't sink, which the first-order arm doesn't
-  (`a_rolling_disc_leaves_a_step_falling_unless_its_arm_is_followed_to_first_order`;
-  [lore](../lore/a-rolling-disc-leaves-each-step-falling-toward-the-ground-it-rolls-on.md)).
-- **Restitution per point**, once, from each point's closing speed before
-  the step, for points that pushed (`b2ApplyRestitution`); a contact of
-  bodies that don't turn bounces as before.
-- **The speculative margin** needed nothing new: a point's separation is
-  tracked through the substeps, and a gap may close no faster than the
-  substep allows, per point. Corner-to-corner pairs just apart are the
-  one case Box2D keeps and ours drops (the narrowphase, above).
-- **Where the time goes.** A turning contact costs 5–7 times one that
-  doesn't (two points, each with angular terms, in 20 passes a step): the
-  pile of 1000 solves in 909 µs turning against about 100 locked. Box2D
-  does the same work in 8 passes and 4 warm starts of SIMD over colored
-  contacts; Rapier in 4 substeps of one biased and one unbiased pass. The
-  colored, wide solve that was measured at 1.3–1.4 times the scalar one
-  without rotation ([Parallel solving](#parallel-solving)) is where the
-  gap closes, more so with rotation's longer rows. (It closed by level
-  first, 2026-09-27, and by color since 2026-09-28: [The solver's
-  speed](#the-solvers-speed).)
-
-### Against other engines, bodies turning
-
-The comparison ([Against other engines](#against-other-engines), runbook
-005) now runs every case twice: rotation locked everywhere, as before, and
-bodies turning (Box2D and Rapier unlocked, each dynamic body given its
-shape's inertia at mass 1; ours with a `Rotation` and a `Spin`). The same
-scenes, rain still circles (it towered as locked boxes; turning, it could
-be boxes). One thread, sleeping off, `-c opt`, the median of 3 runs
-(2026-09-26); each cell the step, then broadphase, narrowphase, solver
-and the rest, µs:
-
-| scene, turning | ours (ECS) | ours (arrays) | Box2D | Rapier |
-|---|---|---|---|---|
-| pile 1000, falling | 293: 21, 18, 162, 92 | 290: 87, 24, 161, 17 | 219: 91, 45, 61, 22 | 235: 59, 38, 91, 47 |
-| pile 1000, settled | 958: 32, 83, 734, 109 | 955: 66, 113, 728, 47 | 379: 0, 106, 257, 16 | 388: 4, 32, 325, 27 |
-| pile 10 000, falling | 3028: 209, 185, 1812, 822 | 3036: 814, 254, 1795, 174 | 2756: 1272, 600, 644, 241 | 2578: 682, 426, 1010, 461 |
-| pile 10 000, settled | 10 681: 519, 901, 8215, 1047 | 11 540: 1666, 1234, 8149, 491 | 4392: 0, 1616, 2626, 150 | 4900: 89, 531, 3999, 281 |
-| pyramid 210 | 372: 7, 33, 296, 37 | 360: 12, 42, 294, 12 | 111: 0, 35, 72, 4 | 106: 1, 6, 94, 5 |
-| pyramid 5050 | 8875: 184, 801, 7324, 565 | 9541: 905, 1050, 7305, 280 | 2925: 0, 1116, 1725, 84 | 2802: 92, 166, 2425, 118 |
-| rain 1000 | 786: 48, 36, 511, 191 | 700: 103, 59, 496, 42 | 445: 126, 97, 199, 23 | 538: 124, 130, 219, 64 |
-| rain 10 000 | 8487: 528, 386, 5624, 1949 | 7654: 1157, 599, 5466, 431 | 5110: 1587, 1287, 2010, 227 | 6877: 1507, 1867, 2511, 992 |
-
-And how they stood, at the end of the steps timed: deepest / mean overlap,
-mean speed, kinetic energy a body (the turning part too), and the most any
-box is tilted from resting on a face:
-
-| scene, turning | ours | Box2D | Rapier |
-|---|---|---|---|
-| pile 10 000, settled | 0.023 / 0.0024, 0.0004, 1.8e-7, 45° | 0.11 / 0.015, 0.0002, 1.3e-5, 45° | 0.087 / 0.015, 0.0002, 5.7e-8, 45° |
-| pyramid 5050 | 0.0059 / 0.0025, 0.002, 3.3e-6, 0.3° | 0.041 / 0.014, 0.0005, 2.1e-7, 1.5° | 0.035 / 0.015, 0.016, 2.2e-4, 1.8° |
-| pyramid 5050, a minute on | 0.0059 / 0.0025, 0, 3.4e-10, 0.3° | 0.041 / 0.014, 0, 6.5e-10, 1.5° | 0.035 / 0.015, 0.0003, 7.4e-8, 1.8° |
-| rain 10 000 | 0.47 / 0.0039 | 0.53 / 0.011 | 0.51 / 0.011 |
-
-(A pile is 45° tilted somewhere in every engine: a box wedged between
-circles. The pyramids stand in all three.)
-
-- **The quality holds.** Every engine's turning piles and pyramids come to
-  rest (settling tables above: ours at 180–550 steps on the piles against
-  Box2D's 240 and 1160 and Rapier's 230 and 1200, at 440 on the big
-  pyramid against 160 and 1100). Ours sinks a fifth as deep, and its big
-  pyramid leans 0.3° where theirs lean 1.5–1.8°, as its stiffer contacts
-  did locked.
-- **The time doesn't: the solver is 2–4 times theirs** where contacts
-  press (8215 µs against 2626 and 3999 on the settled pile, 7324 against
-  1725 and 2425 on the pyramid), and the step 2.2–3 times. Falling at
-  10 000, where few contacts press and our broadphase leads, ours is 10–17%
-  slower (at 1000, 25–34%). The
-  gap is the one [Rotation in the soft step](#rotation-in-the-soft-step)
-  names: a turning contact is two points of angular terms in 20 passes a
-  step, scalar and in pair order, where Box2D's are 12 passes of SSE2 over
-  colored contacts and Rapier's 8. Since halved, the same computation:
-  [The solver's speed](#the-solvers-speed).
-- **The narrowphase is in their range**: 901 µs on the settled pile against
-  Box2D's 1616 (it clips every pair whose fat boxes overlap) and Rapier's
-  531 (it reuses manifolds of pairs that barely moved). The broadphase is
-  as it was, since boxes are boxes to it.
-- **Storage upkeep grows with what turns**: the ECS's rest over the arrays'
-  is 556 µs on the settled pile (1047 against 491), where locked it was
-  307, the rotations and spins now written and re-bounded each step.
-- **Locked, little moved**: against the build before rotation in the same
-  session, the ECS's step is within 2% on every pile and pyramid (the
-  settled 10 000 pile 3572 → 3484, the 5050 pyramid 2743 → 2741) and 3%
-  slower in rain (4476 → 4613: contacts' churn carries `ContactPoints`);
-  `:tax` 1–3% slower, bit for bit.
-
-
-### What the 3D spike predicted, and what 3D needs
-
-The spike ([3D, translation only](#3d-translation-only-spike)) predicted
-four things of rotation; in 2D:
-
-- **A spatial key that takes the transform, or extents that are a
-  tuple:** extents a pair, measured against a pose key, an angle and
-  conservative bounds (spatial-storage.md). 3D wants the same:
-  `impl SpatialKey<3> for Position { type Extent = (Collider,
-  Orientation); }`, the box of a turned box `|R| h` (nine products, where
-  2D's is four), and rows without an orientation bounded as now. A
-  sibling spike doing 3D rotation without changing `engine_ecs` would need
-  a pose key or conservative bounds, which in 2D cost every row (a pose's
-  columns, 50% more to write and 15% to re-sort) or every pair (7 times
-  the pairs); the pair lands in `engine_ecs` as generic over dimensions as
-  the rest, with `type Extent = Collider` unchanged for keys with one.
-- **The solver body growing from 7 floats to about 20, and the copies
-  tripling:** avoided, for bodies that don't turn. A body's angular state
-  is a list beside the bodies (`Spinning`), dense only inside the solve
-  and only if something spins; a 44-byte body had cost the solver 4%. In 3D
-  a spinning body adds a world inverse inertia (6 floats) and a
-  quaternion, which the same split keeps off the bodies that don't.
-- **Per-point feature ids and a clipping narrowphase, several times a
-  point-less pair:** SAT and clipping at 63 ns a turned pair, against 370
-  for GJK and EPA (and about 10 for an axis-aligned pair). Points in a
-  component of their own, written only where used (`ContactPoints`); in 3D
-  four, as Box3D and Jolt cap them.
-- **Islands and sleeping mattering more:** a turning pile solves in 3–4
-  times the time a locked one does, so its sleeping is worth that much
-  more; it falls asleep as soon (the pile test).
-
-What the 3D rotation spike (branch `physics3d-rotation`, which left
-`engine_ecs` alone and keeps a derived `Reach`, the turned box, as its
-key's extent, rewritten as a box turns) asks of the storage, and how the
-pair of extents answers:
-
-1. **Bounds from more than one extent, or bounds a system writes
-   directly.** Both: `type Extent = (Collider, Orientation)` bounds from
-   the key and both, with no derived component to keep in step; and a key
-   whose one extent is a box a system writes (`Reach`) still works, since
-   `type Extent = Collider` is the pair's first case unchanged.
-2. **Turning alone must re-bound a row.** Writing either extent marks the
-   row as writing the key does (`engine_ecs`'s
-   `a_box_from_two_extents_re_sorts_when_either_is_written`, with its
-   three mutations caught: a second extent's ticks unchecked, its name not
-   registered as moving rows, its value not passed to `bounds`).
-3. **Never sphere bounds for statics.** None here: a turned static is
-   bounded as its turned box, one that isn't by its box. The one sphere is
-   a look for what to wake around a static a game moved (`any_way`), a
-   region query, not what storage keeps.
-4. **Fat bounds or kept pairs, later (get-emj.36).** Not precluded:
-   `bounds` returns whatever box it likes, a grown one included, and the
-   order, lanes and broadphase take it as they take any.
-5. **Bigger tuples.** Not needed in 2D: a turning body is six components
-   (`Position`, `Velocity`, `Body`, `Collider`, `Rotation`, `Spin`), under
-   bundles' and query data's eight; the solve's turning query has four
-   terms and the contacts' five. The limit rotation did meet is a system
-   parameter group's four (`integrate_velocities` regrouped its queries to
-   add the sleeping bodies' rotations). A 3D solve query of eight is at
-   the data limit; the pair of extents adds nothing to a body's count
-   over a derived `Reach`, and one fewer component to keep in step.
-
-
-## What changes elsewhere
-
-- `mods/transform` and the old `mods/physics` demo went;
-  `//engine/std/physics2d` has the name `physics2d`, and `spawner` and
-  `reporter` use it. The `mod_deps` examples in mod-deps.md still hold,
-  since `physics2d` declares `Velocity` in its interface.
-- The recorded routes in `platformer_test` and `pong_test` pass
-  unchanged (see below).
-
-## 3D, translation only (spike)
-
-**Status: a spike** (2026-09-25, branch `spike/physics3d`): what 3D asks of
-the storage core, before more is built on 2D alone. Rotation is its own
-investigation, so bodies have a 3D position and velocity and no
-orientation. `//engine/std/physics3d` is the 2D step's shape in 3D, as plain
-systems on the ECS harness rather than a mod: `Position` a 3D spatial key
-([spatial-storage.md](spatial-storage.md#in-3d)) with `Collider` (a sphere or
-an axis-aligned box) as its extent, statics in tables of their own on the
-broadphase's passive side, contacts as entities in an ordered table by pair
-(`ContactPair`, `Manifold`, `Impulse`), and the 2D solver (sequential
-impulses, 8 iterations, warm-started, a split impulse for penetration,
-speculative contacts within 0.05) in 3D. Friction is the one thing 3D
-changes in the solver: the tangent is a plane, so the friction impulse is a
-vector in it, clamped to a disc, and kept as a world vector that warm
-starting projects onto the next step's plane, so no tangent basis has to
-stay put. Left out: layers, sensors, kinematic bodies, sleeping, events,
-parallelism.
-
-**Against Rapier 3D, Jolt and Box3D** (`./bazel run -c opt
-//engine/std/physics3d/compare:bench`; the harness, scenes and how each engine is
-brought in are in `engine/std/physics3d/compare`, credits in [CREDITS.md](../CREDITS.md)).
-One thread, rotations locked, sleep off, every engine at its own defaults
-(Rapier 0.36: 4 iterations; Jolt 5.6: 10 velocity and 2 position steps;
-Box3D 0.1: 4 substeps; ours 8 + 8), ms per step over the whole run, 10 000
-bodies a single run and 1000 the median of three:
-
-| | spheres 1k | spheres 10k | boxes 1k | boxes 10k | rain 1k | rain 10k |
-|---|---|---|---|---|---|---|
-| ours | 0.38 | 6.1 | 0.36 | 4.9 | 0.26 | 3.6 |
-| Rapier | 0.61 | 11.0 | 0.86 | 13.7 | 0.54 | 8.4 |
-| Jolt | 1.18 | 16.4 | 1.12 | 13.1 | 0.73 | 9.3 |
-| Box3D | 1.01 | 12.2 | 1.02 | 11.5 | 0.64 | 7.4 |
-
-Quality, the harness's own geometry over every engine's positions: every
-pile is a pile (about 0.95 of supported bodies rest off-center on what's
-below them; 3.3 to 4.1 bodies touched each), nothing escapes, and ours
-settles (in 174 to 612 steps) with penetration at its slop, 0.005 at most;
-Rapier's and Box3D's box piles never settle at their defaults (they breathe;
-see the bench's lore), and their sphere piles reach 0.10 and 0.16 deep at
-10 000. With every engine at 8 iterations ours is 2.4 to 4 times faster.
-
-**What the numbers say, and don't.** Ours is 1.6 to 2.8 times faster, and
-nearly all of that is the solver: it has no angular terms, no contact
-points and one constraint per pair, where the others run their general
-solvers, a constraint per contact point with angular terms the locks only
-zero (a translation-only step is simply less work, so this is no verdict
-on the solvers). The stages that are the storage core's say the
-opposite. At 10 000, µs per step:
-
-| | broadphase: ours / Rapier / Box3D | narrowphase: ours / Rapier / Box3D | ours: copies in and out | ours: re-sorts |
-|---|---|---|---|---|
-| spheres | 1560 / 155 / 326 | 555 / 2413 / 2638 | 210 | 154 |
-| boxes | 1129 / 393 / 437 | 336 / 966 / 1979 | 194 | 153 |
-| rain | 977 / 277 / 516 | 371 / 1111 / 1282 | 178 | 254 |
-
-The broadphase is 3 to 10 times Rapier's and 2 to 5 times Box3D's, and
-the largest thing in our step that isn't the solver. The others keep their
-pairs from step to step (Box3D a tree of fattened boxes, re-queried only
-for shapes that left theirs, `broad_phase.c`'s move array; Rapier a BVH whose
-pairs persist and are re-examined only beside colliders whose boxes
-changed, `broad_phase_bvh`, both read in the fetched source), where `near_pairs` finds
-every pair afresh from pages every step: in 3D that is 85 000 box pairs for
-25 000 contacts among 10 000 spheres, about 18 ns each. Pages of 32 rows
-cut it 13 to 15% ([spatial-storage.md](spatial-storage.md#in-3d)); keeping
-pairs between pages that haven't changed, open since the 2D broadphase was
-reworked, is what 3D makes necessary. Copies in and out of the solver and
-the re-sorts cost what they do in 2D per body. Rapier's and Box3D's
-narrowphase numbers include contact manifolds with points; ours has none.
-
-**Contacts with several points.** Translation only, a contact needs no
-points (an impulse through any point moves a body the same), so a box on
-a box is one normal and a depth. Rotation needs them: a box resting on a
-box is four points, each with its own impulses to warm-start, matched from
-step to step by feature. Measured as storage, four points inline on the
-contact (`[f32; 12]` and a count on `Manifold`, four normal impulses on
-`Impulse`; 10 000 boxes, 67 000 contacts) cost the merge and the solver's
-gather about 5.7 ns a contact a step (0.38 ms of 17.8, 2%), and the
-contacts' re-sort, falling, 40 µs more. Inline fixed arrays are what the
-schema already has; a `Vec` per contact would be a heap allocation a
-contact and a pointer chase in the gather, and points as entities would
-be four rows a contact in another ordered table, four times the churn the
-contacts' re-sort already pays for (What the ECS costs), with the pair's
-points no longer together. Four inline is the recommendation: Box3D caps a
-manifold at four (`B3_MAX_MANIFOLD_POINTS`) and Jolt prunes face contacts to
-four (`PruneContactPoints`), as read in their fetched source.
-
-**What rotation will add (predicted, not measured;** what it did add is
-in "Rotation in 3D", below**):**
-
-- **Orientation and angular state as components**: a quaternion (16
-  bytes) and an angular velocity (12), and the solver body grows from 7
-  floats to about 20 (a world inverse inertia, 6 floats, recomputed each
-  step from the body's and its rotation), so the copies in and out, 190 µs
-  here, about triple.
-- **The spatial key's bounds depend on two components**, position and
-  rotation, and on the collider: `SpatialKey` has one extent, so either a
-  `Transform` key (position and rotation together) or extents that are a
-  tuple. A body that only turns must still be re-bounded, so fewer rows are
-  still bit for bit, and re-bounding a rotated box is a matrix, not an add.
-- **Manifolds and the narrowphase**: points (above), per-point feature ids
-  for warm starting, and a clipping or GJK/EPA narrowphase, several times
-  today's per pair; a per-pair cache (the last separating axis) belongs on
-  the contact entity with the points.
-- **Islands and sleeping matter more**, since solving a settled pile is
-  where the time goes, as it is in 2D.
+**The rotation lock is absence**: a body without a `Spin` keeps its
+rotation, and one without a `Rotation` is tested as an axis-aligned shape
+with no points. A world where nothing turns pays nothing for rotation:
+its contacts keep one row at the normal, and a step with no points and
+nothing spinning runs a solve compiled without them
+(`solve_all::<false>`), the same computation as before rotation, bit for
+bit. Giving every body a `Rotation` (what a flag or an infinite inertia
+leaves) cost 11% on a pile and 32% on a pyramid. Turning bodies' angular
+state is a list beside the bodies inside the solve (`Spinning`), not in
+every body. The games' bodies don't turn.[^rotation]
 
 ## Rotation in 3D
 
-**Status: built, experimental, a mod** (2026-09-26, get-emj.38; turning
-on branch `physics3d-rotation`, a mod since `physics3d-land`).
-`//engine/std/physics3d` bodies turn: spheres and boxes with orientation,
-angular velocity and inertia, contacts of up to four points, the soft
-step with angular terms. It is a mod as `//engine/std/physics2d` is, and
-hot-reloads under a running pile ([A mod](#a-mod)). Still left out: layers,
-sensors, kinematic bodies, sleeping, events, rolling
-resistance, gyroscopic terms. The comparison runs every engine locked (as
-before) or turning (`--rotate`).
-
-### What it is
-
-- **Components** (the interface crate, `components.rs`). `Position` stays
-  the spatial key, bounded by the collider turned by the rotation, both
-  extents (choice 5, below); `Rotation` (a unit quaternion),
-  `AngularVelocity`, `Body` (with the inverse inertia about the body's own
-  axes, zero for a body that doesn't turn: `Body::new` locked,
-  `Body::solid` a solid of the collider's shape). `fixed` and `dynamic`
-  spawn the bundles. The step's settings are components too: `Gravity`,
-  and `Tuning`, every choice below that was measured more than one way.
-- **Contacts** stay entities in an ordered table by pair. `Manifold` holds
-  the normal, the offset between the two centers and up to four points
-  inline, each its anchor on `a` (from `a`'s center, in world axes) and
-  depth, four floats a point, with a feature id each and the separating
-  axis that found it; `Impulse` a normal impulse per point, and friction
-  (a vector in the tangent plane) and twist for the whole contact: 31 and
-  8 words. The spike measured four points inline at about 2% of a step.
-  Since recycling ([Still at rest](#still-at-rest)) a `Manifold` also
-  holds each body's rotation when its points were carried and a bound on
-  the pair's move since they were found: 40 words.
-- **The narrowphase** (`narrow.rs`): sphere against sphere or box, one
-  point halfway between the surfaces; box against box, the separating
-  axis test over the 15 axes, the last step's axis tried first, the face
-  that separates most as the reference (a face of `b` only when clearly
-  better), an edge pair only where it makes a face of the Minkowski
-  difference and separates clearly more, the incident face clipped to the
-  reference face, points halfway between the faces, more than four
-  reduced to four. All of that is Box3D's (`b3CollideHulls`), credited in
-  [CREDITS.md](../CREDITS.md).
-- **The solver** (`solver.rs`) is the 2D soft step with Box3D's angular
-  terms: per point, anchors on both bodies and an effective mass with the
-  angular terms, and each body's world inverse inertia, all fixed once a
-  step; within the step a point's separation is its separation when found
-  plus its anchors' moves along the normal, from each body's accumulated
-  move and turn (`b3SolveContact`). Friction is per contact at the points'
-  centroid (a 2x2 tangent mass, clamped to a disc of friction times the
-  points' normal impulse) with twist friction about the normal, only in
-  the relaxing passes, as Box3D, Rapier and Jolt all have it. A rotation is
-  stepped to first order and normalized every substep, at most a quarter
-  turn a step. The passes read a 64-byte copy of each body (velocities,
-  moves, inverse mass) and each point's crossed anchors already through
-  the inverse inertias, so a pass is dot products and adds: that took the
-  solver from 3147 to 2245 µs on 1000 turning boxes.
-
-### A mod
-
-Since 2026-09-26 (`physics3d-land`) the step is a mod, laid out as 2D's:
-an interface crate other mods depend on (`components.rs` and `math.rs`,
-crate `physics3d`), and the mod (`lib.rs`, `narrow.rs`, `gjk.rs`,
-`solver.rs`, `pipeline.rs`): `integrate_velocities`, `find_contacts`
-and the solve, in the phase `physics3d::step`, after `simulate` and
-before `late` at the simulation's rate, as `physics2d::step` is. Since
-get-znt.35 the solve is a pipeline of [flows](flows.md), as 2D's is
-([The step](#the-step)); since get-emj.90 (2026-10-03) its solver is
-three systems, its passes on `Passes`, as 2D's:[^one-solve-3d]
-
-```text
-solve            world -> Make<Settings>                 the step's Tuning and Gravity
-gather_bodies    See<Settings>, world -> Make<Bodies>    the moving bodies, dense
-gather_contacts  See<Bodies>, world -> Make<Contacts>    the contacts, in pair order
-prepare          See<Settings>, Pass<Bodies>,            grouped, seated in lanes (solver::Staged)
-                 See<Contacts> -> Make<Graph>
-passes           See<Bodies>, See<Contacts>,             the program of stages, the fill first
-                 Pass<Graph>, Passes
-finish           See<Settings>, Take<Graph>,             impulses and states back; or the step whole
-                 Pass<Bodies>, Pass<Contacts>
-scatter_contacts Take<Contacts> -> world                 impulses
-scatter_bodies   Take<Bodies> -> world                   velocities, positions, rotations
-```
-
-- **`solve` comes first**, as in 2D, so a pre-solve hook ordered
-  `.before("physics3d::solve")` runs before anything is gathered (3D has
-  no hooks yet; the name keeps the rule one rule).
-- **The order is `Tuning`'s** (`order=colored|levels`): colored, the
-  default since 2026-10-03, the sweep over Box2D's colors' order ([Colouring
-  the 3D solve](#colouring-the-3d-solve)); by level, the sweep one contact
-  at a time in pair order bit for bit, as it was until then ([The solver
-  in lanes](#the-solver-in-lanes)). Either way `prepare`
-  groups the contacts (`physics_common::levels` or `Coloring::greedy`)
-  and seats them in their lanes (`Coloring::seat`); `passes` runs the
-  program, its first stage filling the batches, every batch at once,
-  from the contacts their lanes seat (get-znt.40, [The fill as the
-  passes' first stage](#the-fill-as-the-passes-first-stage)), each stage
-  after it a block of one group's batches or a range of the bodies'
-  states (gravity with the turn cap, warm start, push, move, the refresh
-  under `Inertia::Substep`, relax, the sums, restitution); and `finish`
-  writes the impulses and states back. A step the lanes don't
-  take (batches under half full, a width but four, `lanes=0`) is solved
-  whole by `finish`, in the same order. By level, it printed every
-  baseline value as before the port, and the fingerprint held, mod and
-  kernel.
-- **The sources read, the sinks write**, as 2D's: the gathers' queries are
-  read-only, with no apply node, and the scatters walk the same tables in
-  the same order (asserted); `scatter_bodies` is last, so its apply node
-  re-sorts the bodies that moved or turned.
-- **The flows are the mod's own**, not its interface's, as 2D's.
-
-Its messages are
-`stats` (steps, contacts, time per system), `stages` (time per stage, and
-the last step's pairs, contacts, points and warm starts) and
-`reset_timings`. `pile3d` (`tests/pile.rs`) is its scene mod: it builds
-the comparison's scenes from `tests/scenes.rs`, the file the bench builds
-them in the other engines from, statics at `build` and each step's
-arrivals from a system in `simulate`, where a game's spawns would be; and
-single bodies for the tests. `pile3d_game` runs it on lockstep:
-
-    ./bazel run //engine/std/physics3d:pile3d_game
-    bazel-bin/engine/modctl/modctl send pile3d build boxes 1000
-    bazel-bin/engine/modctl/modctl send lockstep step 300
-    bazel-bin/engine/modctl/modctl send pile3d stats
-    ./bazel run //engine/std/physics3d:physics3d    # reloads the step
-
-**No static state.** The experimental step kept its settings and timings
-in static `Mutex`es, since harness systems are plain functions.[^static3d]
-A mod's statics are its image's: a reload maps a new image, whose statics
-start over. Where each could live, measured by the reload replay below
-(a pile tuned `relax=3,warm=nearest` reloaded every frame) and by what a
-step pays to read it:
-
-| settings in | survive a reload | a game or test sets them by | read, a step |
-|---|---|---|---|
-| a static in the mod | no: the replay differs at frame 3 (planted: the `Tuning` gone at load, what a new image's static is) | a call into the mod's code | a lock |
-| the mod's state | yes | a message to physics3d only | a field |
-| **a component in the world (`Tuning`, `Gravity`), as 2D's `Gravity` and `Sleep`** | **yes, and the replay compares it** | **writing it, like any data; `pile3d tune ...` does** | **a one-entity query: with a `Tuning` entity or none, every stage the same within 1 µs (1000 boxes, 1000 spheres, two runs each)** |
-
-Timings are different: they are the mod's own bookkeeping, not what a
-game sets, so they are its state (`Timings`, `Found`), as 2D's physics
-keeps them, and a reload keeps them too.
-
-**Through the engine, at the harness's cost.** The bench's ours is now the
-mod in an engine, stepped by `lockstep step 1` (so a step is a frame, with
-the schedule and apply nodes in it), as `//engine/std/physics2d:tax` drives
-2D's. The same scenes, turning, whole run in ms a step (one run each, the
-harness's the second batch of choice 5):
-
-| | spheres 1000 | boxes 1000 | planks 1000 | rain 1000 | spheres 10 000 | boxes 10 000 | planks 10 000 | rain 10 000 |
-|---|---|---|---|---|---|---|---|---|
-| harness, plain systems | 1.91 | 2.73 | 3.48 | 1.60 | 22.4 | 31.2 | 46.1 | 20.6 |
-| **the mod in the engine** | **1.92** | **2.85** | **3.51** | **1.66** | **25.0** | **29.6** | **46.0** | **21.5** |
-
-Every quality number (pairs, contacts, depths, when it settled, what moved)
-is the same in both, to the last digit printed, and the plank that tips
-off its turn goes the same 0.7449574 into the floor with its bounds
-planted wrong: the same computation. The frame costs the engine 1-4% at
-1000 bodies, within the machine's spread at 10 000.
-
-**Reloads are invisible.** `//engine/std/physics3d:reload_test` replays
-64 boxes dropped in a walled box with the step tuned away from its
-defaults, and a sphere spun onto them at frame 60, 160 frames, while
-reloading physics3d, pile3d and the scheduler (each swapped with its
-`engine_mod(twin = True)` build) every frame, one a frame in turn, and in
-mixed batches now and then, poison mode on; every frame must equal the
-run without reloads bit for bit: every physics3d component in storage
-order (contacts, manifolds with their cached axes and ids, impulses, the
-`Gravity` and `Tuning`), the change ticks, what physics3d and pile3d
-report of their state. Planted in physics3d's `load`, each of these fails
-all three plans: impulses zeroed, `Manifold` removed from contacts,
-contacts despawned, `Tuning` despawned, the cached axis zeroed, steps
-reset. `a_tuning_in_the_world_is_the_steps` checks both systems read the
-`Tuning` (planted: either ignoring it fails it).
-
-**What is shared with 2D.** Options, with what each would cost:
-
-| | components | a 3D interface change rebuilds (measured, `bazel build //...`, fastbuild) | mods to reload after it | 2D |
-|---|---|---|---|---|
-| **separate interfaces (built)** | none shared; the ECS's spatial key, `near_pairs`, ordered tables and `pair_key` are the common part | 17 actions, 0.9 s: physics3d, pile3d and their twins, the bench | physics3d, pile3d | untouched: `:tax` bit for bit, the games' replays |
-| a common interface (a transform, a velocity) both mods use | `Position`, `Velocity` at most: no layout matches (x, y against x, y, z; a rotation as (cos, sin) against a quaternion; 2D's `Body` has a kind, layers and a gravity scale, 3D's an inertia per axis) | what a 2D interface change rebuilds today: 72 actions, 1.8 s, 23 mod libraries | every mod of pong, the platformer and the demos, which reload with it | every 2D row a z and a quaternion, or a second set of names |
-| one mod over a dimension | all, generic over D | everything physics touches | every game's | as above, and `component!` has no generics |
-
-So nothing is shared but the storage: a 3D change never reaches a 2D
-game's build or its running mods, which is what mod-deps are for. What is
-copied is small: `Slots` (entity to index, 15 lines) and the pattern of
-the step's systems.
-
-[^static3d]: 2026-09-26: `TUNING` and `TIMINGS` were static `Mutex`es in
-    the experimental step (plain systems on the ECS harness, "one
-    simulation runs at a time"). Removed when it became a mod.
-
-### The solver in lanes
-
-**Status: built** (2026-10-03, get-emj.52). The passes solve four
-contacts at a time, and the result is the solve one contact at a time
-in pair order, to the bit: the same values in every baseline and in the
-exact fingerprint. It is the step before colouring the solve on
-`Passes` (get-emj.90), and keeps "is the kernel right" apart from "the
-order changed".
-
-- **Grouped by level**, as 2D's lanes first were ([The solver's
-  speed](#the-solvers-speed)): a contact's level is one past the latest
-  level of the contacts before it in pair order that share a body it
-  moves, so solving the levels in turn, each contact sees its moving
-  bodies as the sweep would have left them, and no two contacts of a
-  level share one. The rule is dimension-free over `(a, b, moves)`, so it
-  moved to `physics_common::levels`, which 2D's `Wide::Levels` now calls
-  too. It went in `physics_common`, not beside `Coloring::greedy` in
-  `engine_ecs::shape`: it is there for a physics result (the sweep's),
-  not for a schedule, it never overflows or packs differently, and a
-  change to `engine_ecs` is a change every mod links. It writes a
-  `Coloring`, so `Coloring::pack` lays the levels out as it lays out
-  colors. A contact neither end of which moves (`UNSOLVED`) still sums
-  its impulses as the sweep does, so 3D puts it in level 0.
-- **Box2D's wide layout** (`b2ContactConstraintSIMD`, as 2D's lanes have
-  it), on `physics_common::lanes::F`: a batch of `N` contacts field by
-  field (normal, tangents, the centroid's crossed arms through each
-  inverse inertia, the 2x2 tangent mass, twist), its points in an array
-  apart, as many as its lanes' most; body velocities gathered into lanes
-  and scattered back; inverse masses kept by each contact; a batch's
-  empty lanes pointed at one body past the real ones.
-- **Each lane is the scalar code, operation for operation.** `V<N>` is
-  `Vec3` lane by lane, spelled as `Vec3` is (Rust neither reassociates
-  nor contracts `f32`); the clamp to the friction disc takes the square
-  root in every lane and keeps it where the scalar code branches; `max`
-  is `f32::max` itself per lane, not `F::max`'s select, which may differ
-  on `max(-0.0, 0.0)`. Where the scalar code skips (a point a contact
-  doesn't have or one with no mass, no tangent or twist mass, a point
-  that doesn't bounce), the lane computes and a select leaves the result
-  out: a zero impulse pushed instead would turn a velocity's `-0.0` into
-  `0.0`, which the sweep wouldn't.
-- **Every `Tuning` variant is in lanes**, none left scalar: `int` (the
-  bodies' stage, which both share), `inertia=substep` (the rows'
-  angular terms refreshed per lane through `Mat3::apply` itself),
-  `anchors` (both separations, a const parameter), `fpush`, `carry`,
-  `closing` (the rows, made by the scalar code's `row` for both), and
-  `sub`, `relax`, `stiff`, `static`.
-- **What stays one at a time** (`solver::one_at_a_time`), the same result
-  either way: a step whose batches would be under half full (a stack, a
-  chain: a level a contact, where a batch costs more than the contacts
-  it holds), and a step where a body that doesn't move has a `-0.0`, an
-  infinity or a NaN in its velocity or gravity (the lanes write such a
-  body back as each read it, which is the sweep's value only when no
-  zero impulse can change it; 2D's `shareable` is the same rule for its
-  threads). Neither happens in the scenes or the tests' inputs but the
-  stack's first.
-- **Four lanes, a variant for the rest**: `Tuning`'s `lanes=4` (the
-  default), `lanes=8`, `lanes=1` (the layout and the level order without
-  lanes) and `lanes=0` (the loop in pair order, the reference). Eight
-  were slower than four on the dense pile below (14.6 ms against 12.0):
-  a 3D batch's two ends are twelve registers of velocities where 2D's
-  are six, and the four-lane kernel already spills (about 5000 `movaps`
-  in `lanes::solve::<4>` against 1400 `mulps`).
-- **Exact-preserving savings**, each the same bits: a contact's row made
-  in pair order and written straight into its lane, no rows kept to
-  transpose (the start of a step 3.8 → 1.6 ms on the pile below); the
-  first relaxing pass stores each point's bias and the second reads it,
-  since bodies don't move between them (2D's too); a pass gathers only
-  what its separation reads (`theta` not under `Anchors::Exact`).
-
-**The speed.** `//engine/std/physics3d:step_bench` (`--config=bench`,
-`taskset -c 0-7`), one frozen build, `TUNE=lanes=0` and the default
-alternated, two rounds of five runs each; the mean of the two rounds'
-medians, µs a step:
-
-| scene | solver, one at a time | solver, lanes | | whole step, one at a time | whole step, lanes |
-|---|---|---|---|---|---|
-| boxes 10 000, falling (steps 61-90) | 24 165 | 18 331 | −24% | 30 943 | 25 081 |
-| boxes 10 000, settled (901-930) | 24 569 | 18 513 | −25% | 28 696 | 22 201 |
-| planks 1000, settled (601-630) | 2662 | 2503 | −6% | 3164 | 3013 |
-| spheres 10 000, settled (901-930) | 19 339 | 15 795 | −18% | 22 584 | 19 205 |
-| boxes 10 000 locked, settled (901-930) | 23 439 | 17 101 | −27% | 28 574 | 22 182 |
-| stack 20 (301-330) | 25 | 26 | +1 µs | 35.5 | 36 |
-
-The stack is solved one at a time; its extra microsecond is finding
-that out (the levels and the layout, before falling back). By stage, on
-a synthetic dense pile (10 000 boxes in columns with side contacts,
-13 200 contacts of four points; a throwaway harness, never
-committed[^lanes3d-harness]), µs a step: one at a time 18 800; in four
-lanes 12 000, of which the start 1600, warm starts 1250, the pushing
-passes 2760, moving bodies 1180, the relaxing passes 5100. The passes
-alone are about 1.7 times faster than one at a time, where 2D's were
-twice: 3D's scalar code was already partly vectorized by LLVM, three
-components a vector op, which 2D's two-component one wasn't, and 3D's
-kernel spills. Moving bodies is the same code both ways, and the start
-is mostly building each row.
-
-**The tests.** `exact_test`'s
-`the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit` solves the
-kernel's inputs, and the same with a kinematic body, a contact neither
-end of which moves, and warm twist on ends that can't turn
-(`odd_inputs`), at 1, 4 and 8 lanes against `lanes=0`, under the twelve
-pinned tunings and `int=exact`, three steps each, every body and
-contact compared as `Debug` prints them (so `-0.0` isn't `0.0`), the
-fill rule off so the lanes are what's compared. The fingerprint's
-kernel and mod lines are solved at the default's four lanes, and
-didn't move. Planted, each alone:
-
-| planted | equivalence | kernel lines | mod lines |
-|---|---|---|---|
-| a positive normal impulse one ulp larger (`lanes::pass`) | fails (1 lane) | fail | fail, from frame 21 |
-| each lane's point mask read from the next lane | fails (4 lanes) | fail | fail, from frame 21 |
-| a level one too low (`levels`: `next = level`), so two lanes share a body | fails (4 lanes; one lane is still the sweep) | fail | fail, from frame 34 |
-| twist solved where only friction is (the twist mask dropped) | fails, on `odd_inputs` only | hold | hold |
-| a contact neither end of which moves not put in level 0 | fails, on `odd_inputs` only (no level: it panics) | hold | hold |
-| the warm start's points pushed in every lane, padding's zeros included | **passes** | hold | hold |
-| `shareable` dropped (lanes for a body that doesn't move with a `-0.0`) | **passes** | hold | hold |
-
-The last two are the sign of a zero: a padding point's impulse is zero,
-and pushing it changes a velocity only where one is exactly `-0.0`,
-which neither the inputs nor the scenes reach; nor does a body that
-doesn't move with a `-0.0` velocity. The selects and the check are kept
-for the rule, not because a test sees it (get-emj.95).
-
-**What get-emj.90 builds on.** The kernels (`warm_start`, `pass`, `rub`,
-`restitute`, `refresh`) take a `Batch` and the bodies, and don't care
-how batches were grouped: coloring by `Coloring::greedy` instead of
-`levels`, and packing by the same `Coloring::pack`, gives colored
-batches for the same kernels, and a color's batches share no moving
-body, as a level's don't. The stages, in order, are gravity with the
-turn cap (bodies), warm start, the pushing pass, moving bodies, the
-refresh (contacts, under `Inertia::Substep`), the relaxing passes (the
-first storing the bias, the rest reading it), the sums (contacts), then
-restitution once: 2D's `staged::Step` names neither the refresh nor the
-sums, so it stays 2D's until get-emj.90 decides. The equivalence it
-needs is 2D's: the colored lanes against `one_at_a_time` over the
-contacts in the colors' order. Built since, and colored the default
-([Colouring the 3D solve](#colouring-the-3d-solve)).
-
-[^lanes3d-harness]: 2026-10-03: a binary compiling `solver.rs` by path
-    with timers between the lanes' stages, on a generated pile (25 × 25
-    columns 16 high, each box on the one below or the floor, a side
-    contact every third box), median of nine solves. Deleted before the
-    first commit that has the lanes; what it measured is above.
-
-### Colouring the 3D solve
-
-**Status: decided, colored the default** (2026-10-03, get-emj.90; [The
-decision](#the-decision-cm-now)). The solve runs on `Passes` ([A
-mod](#a-mod)) in either order, `Tuning`'s `order=colored` (Box2D's
-colors, the sweep over the colors' order; the default since the
-decision) or `order=levels` (the sweep in pair order, bit for bit the
-solve before it, and the default until then). Coloring is what threads
-need (get-emj.75): a pile of 10 000 boxes has 246 levels and 11 colors.
-It is a physics change: the measurements below were made with by level
-the default, and are what the decision was taken on. "The default" in
-them is by level with the mean carry (Lm). **Threads since**
-(2026-10-03, get-znt.34): the colored passes run across the scheduler's
-pool in the running engine, the fingerprint and both baselines unchanged
-at 1 to 8 threads; what they gain is threads.md's "Measured".
-
-**What was compared.** Order (by level, colored) against what a contact
-carries to the next step (`Carry`): **C**, the mean of the substeps for
-both impulses (3D's default, `carry=mean`); **A**, both from the last
-substep (`carry=last`); **B**, the normal from the last and friction and
-twist their mean (`carry=normal`, 2D's default since get-emj.61, [The
-decision: B colored](#the-decision-b-colored)). 3D's B applies to every
-contact, where 2D's keeps the mean for contacts whose ends don't turn
-(get-emj.97). Six columns: Lm (the default), La, Ln, Cm, Cl, Cn.
-
-**Every bound** (the four suites with `TUNE=order=…,carry=…`, `MATRIX=1`,
-`--include-ignored`, `--nocapture`). Missed bounds of tests not ignored,
-each once (the long suite repeats the default's); the three ignored tests
-(get-emj.65, .71, .72) miss the same bounds under every option:
-
-| | Lm | La | Ln | Cm | Cl | Cn |
-|---|---|---|---|---|---|---|
-| bounds missed | **0** | 7 | 3 | 5 | 14 | 15 |
-| boxes 200-500 turning, the deepest at the end (bound 0.00695) | 0.0055 | 0.0063 | 0.0065 | **0.0078** | **0.0074** | **0.0074** |
-| boxes 10 000 turning: rest (median bound 895), deep while settling (0.172) | 468, 0.158 | **1239**, 0.142 | **1133**, 0.155 | 480, **0.175** | **1382**, **0.191** | **1026**, **0.192** |
-| planks 10 000 turning: rest (bound 490) | 335 | **never** | 395 | **767** | **1443** | **1316** |
-| planks 2000-5000 turning: rest median (bound 470) | 417 | 367 | 393 | **559** | **1499** | **796** |
-| boxes 400 locked: rest (bound 500), energy at the end | ok | ok | ok | ok | **never, 5.4e-4** | **never, 5.4e-4** |
-| mixed 900 turning: rest (bound 570) | ok | ok | ok | ok | ok | **never** |
-| boxes 900 turning: rest (bound 440) | ok | **965** | ok | ok | ok | ok |
-
-Every missed bound but the locked piles' and the depths is a big
-turning pile's rest, each a single run, and settling is chaotic; the
-depths are steady over seeds (below).
-
-**What moved past its band** (`baseline -- --all`, and `--long --all`,
-against the default's file; the rest within their bands):
-
-| | La | Ln | Cm | Cl | Cn |
-|---|---|---|---|---|---|
-| default suite | 7 | 8 | 10 | 10 | 10 |
-| long suite | 1 | 0 | 3 | 3 | 3 |
-
-- **Every option** stands the heavy cube on a light one at 1000 times
-  (`ratio 1000`: stands 0 → 1, top sank 0.998 → 0.110, at rest from 316
-  → 75-282) at the cost of a deeper contact and more jitter (4.6e-5 →
-  0.072 deep, jitter 1.2e-7 → 2e-4 to 0.017): today's default crushes it.
-- **Colored**, the locked pile of 200-500 sinks a tenth as deep while
-  settling (0.033 → 0.0034 median, every seed), with the mean carry
-  only; the 15- and 20-high stacks end with 1.4 to 19 times less energy;
-  `ratio 100` rests later (42 → 81) under C.
-- **Colored with A or B**, the locked piles of 200-1000 never come to
-  rest (median never, energy 5.4e-4): get-emj.97.
-- **By level with A**, planks 10 000 end at 5.5e-7 a body (6.1e-10).
-
-**Over seeds** (`--offset=1,2,3`, the default's run the fourth): the
-depths are the order's, not chance. Turning boxes 200-500, depth at the
-end (median over sizes), Lm 0.0053, 0.0052, 0.0066, 0.0052 and Cm 0.0060,
-0.0057, 0.0077, 0.0058: colored about 10% deeper on every seed, against
-a bound of 0.00695. The piles' rest medians (200-1000) overlap: boxes Lm
-189-199, Cm 174-233; planks Lm 256-288, Cm 218-335.
-
-**The families** (`bench -- <engines> --families`, `compare/family.rs`;
-600 steps, 1000 for stacks): edge-of-stability scenes, each a grid
-judged by the share that stood (the top body within half a box of where
-it began; a card house with no card moved a quarter of its half height)
-and the median step they came to rest from (of the runs that stood):
-
-| family (grid) | Rapier | Box3D | Jolt | Lm | La | Ln | Cm | Cl | Cn |
-|---|---|---|---|---|---|---|---|---|---|
-| stacks 8-40 high | 31/33, 29 | 32/33, 29 | 8/33 | 16, 14 | 16, 11 | 16, 11 | 16, 14 | 17, 11 | 17, 11 |
-| pyramids (2D's, one deep) 10-60 wide, friction 0-0.5 | 47/55, 59 | 47/55, 47 | 20/55 | 36, 47 | 46, 74 | 48, 47 | 45, **596** | 48, 76 | **48, 40** |
-| cabins of planks on edge, 8-40 layers, friction 0.2-0.8 | 36/36, 122 | 36/36, 111 | 12/36 | 24, never | 28, never | 28, 182 | 25, 599 | 24, 254 | 24, 317 |
-| card houses, 3-6 storeys, lean 23-27°, friction 0.6-0.9 | 66/120, 24 | 93/120, 26 | 85/120 | 23, 30 | 21, 30 | 22, 35 | 23, 35 | 20, 37 | 24, 34 |
-
-- **The 2D lessons, in 3D.** A 3D pyramid stands under colored order (45
-  to 48 of 55 against 36 by level with the mean), but with the mean it
-  doesn't come to rest (median 596 of 600 steps): 2D's lag, the mean two
-  substeps behind a breathing pyramid ([Why colors let the pyramid
-  fall](#why-colors-let-the-pyramid-fall)). B is 2D's fix and is 3D's:
-  colored with B the pyramids rest soonest of any option (40), sooner than
-  Rapier and Box3D. Stacks stand one higher colored with A or B (24).
-  But B costs 3D's piles what it didn't cost 2D's (15 bounds colored, 3
-  by level), so in 3D the carry that fixes pyramids isn't the one that
-  keeps piles.
-- **Card houses and tall columns are short of the references whatever
-  the order** (cards 20-24 of 120 against 66-93; cabins never at rest;
-  stacks topple from 24 where Rapier and Box3D stand 40): get-emj.98 and
-  get-emj.99, not this decision's.
-- Jolt fails stacks over 15, pyramids and cabins at its defaults
-  (damping and its own solver), and isn't a bound here.
-
-**The exact fingerprint.** The default's lines are as pinned, mod and
-kernel. Colored (`TUNE=order=colored ./bazel run
-//engine/std/physics3d:exact`), the mod's lines differ from frame 25 (the
-first contacts that color differently) in 96 of 120 frames, against the
-scene run with the default's `Tuning` named (a `Tuning` is an entity, so
-any tuned run moves every body's index from the pinned one); the
-kernel's lines differ at all 12 tunings. That is the kernel's order, not
-its arithmetic: the kernel layer solves `kernel_inputs` in the solver's
-order, and those inputs see their order (reversed, every tuning moves).
-What holds under both orders is the arithmetic, which
-`the_lanes_are_the_solve_one_contact_at_a_time_bit_for_bit` checks in
-each order, lanes against `in_order`. physics-testing.md's "Colouring
-moves the mod's lines and not the kernel's" was wrong, and is corrected.
-
-**Speed, one thread** (`step_bench`, `--config=bench`, `taskset -c 0-7`,
-`TUNE=order=levels` and `=colored` alternated on one build, two rounds of
-five runs; the mean of the rounds' medians, µs a step):
-
-| scene | solver, by level | colored | | whole step, by level | colored |
-|---|---|---|---|---|---|
-| boxes 10 000, falling | 18 171 | 18 555 | +2% | 24 742 | 25 493 |
-| boxes 10 000, settled | 19 053 | 18 867 | −1% | 22 839 | 22 907 |
-| planks 1000, settled | 2652 | 2562 | −3% | 3189 | 3079 |
-| spheres 10 000, settled | 17 254 | 17 614 | +2% | 21 242 | 21 825 |
-| boxes 10 000 locked, settled | 18 066 | 17 748 | −2% | 23 641 | 23 321 |
-| stack 20 | 26.5 | 22.5 | −4 µs | 37.5 | 34 |
-
-Level: the rounds moved by up to 8% on their own (colored falling 17 654,
-then 19 455). The same batches, kernels and fill (colored 4690 batches
-for 18 738 contacts, by level 4868 for 19 087); the stack goes in lanes
-colored (2 colors, 6 batches), where by level it falls back to one at a
-time. So colouring buys nothing on one thread.
-
-**Across threads, from the layout** (not run): the colors of one step,
-in batches (`step_bench`'s `groups`, `widest`, `narrowest`, and each
-group's batches logged once), the blocks on a stage's critical path
-`Σ ceil(batches/T)`, and the stage barriers a step (26 stages over
-batches at the default, 5 × (warm start, push, two relax, sums) and
-restitution):
-
-| step | groups | batches | 4 threads | 8 | 16 | barriers a step |
-|---|---|---|---|---|---|---|
-| boxes 10 000 settled, colored: 1243, 1230, 917, 664, 368, 192, 52, 16, 4, 3, 1 | 11 | 4690 | 4.0× | 7.9× | 15.7× | 286 |
-| boxes 10 000 settled, by level (widest 88) | 246 | 4868 | 3.7× | 6.7× | 12.4× | 6396 |
-| boxes 10 000 locked, colored | 11 | 5091 | 4.0× | 7.9× | 15.7× | 286 |
-| spheres 10 000 settled, colored | 11 | 7977 | 4.0× | 8.0× | 15.8× | 286 |
-| planks 1000 settled, colored | 12 | 752 | 3.9× | 7.6× | 14.2× | 312 |
-
-The colors are big where the work is (three quarters of the batches in
-the first four) and the tail tiny, so the blocks split near perfectly;
-by level, 6396 barriers a step at the 0.19 µs one costs on one CCD
-([Parallel solving](#parallel-solving)) are 1.2 ms, against 0.05 ms
-colored. 2D measured 4.9× at 8 threads on the same layout; the prepare
-(grouping, packing, filling: about 1.6 ms of 12 on the dense pile, "The
-solver in lanes") stayed serial until get-znt.40 moved the fill into the
-passes ([The fill as the passes' first stage](#the-fill-as-the-passes-first-stage)).
-
-#### The decision: Cm, now
-
-**Decided by the user** (2026-10-03, get-emj.90): **colored with the
-mean carry (Cm) is the default now**, ahead of threads, so that colored
-is what the default suite, the baselines and the fingerprint validate on
-every change before threading depends on it (get-emj.75). `order=levels`
-stays selectable (`pile3d tune order=levels`, `TUNE=order=levels`).
-
-What the data offered, and the reason it was set aside: on one thread
-colored is level in speed with by level and misses five bounds the
-default met, so it buys nothing until threads; but a default that only
-threads would exercise would be validated only once they land. Cm is the
-colored option closest to the bounds (5 missed, against 14 and 15 for
-A and B), keeps every locked bound, and stands as many pyramids as any.
-B (2D's fix) rests pyramids soonest but costs 3D's piles ten more
-bounds and breathes locked piles as 3D applies it (get-emj.97). What Cm
-costs: the five bounds below, and pyramids that stand but don't come to
-rest within 600 steps (2D's lag).
-
-**The known misses** (get-emj.96). Each is its own test, ignored under
-the bead with the value in its reason, and the test it came from holds
-every other bound (`quality_test.rs`' `KNOWN` and `known_miss`: a bound is
-named by its family and its pile, so no other pile's or measure's bound
-in the test is left out; planted, a known miss named at the wrong pile
-fails the test it came from, and a tighter bound on another pile of the
-same test fails it too). The single runs were run again at three other
-seeds (`bench`, each size + 1 to 3, as the baseline's `--offset`), by
-level and colored, before any was marked:
-
-| bound (test) | colored, this seed | colored, 3 other seeds | missed | by level, 4 seeds | missed |
-|---|---|---|---|---|---|
-| turning boxes 400, deep at the end ≤ 0.00695 (`piles_of_turning_boxes_rest_as_soon_as_rapier_and_box3d_do`) | 0.0078 | the deepest of 200-500: 0.0072, 0.0082, 0.0066 | 3 of 4 | 0.0055, 0.0066, 0.0097, 0.0067 | 1 |
-| turning boxes 10 000, deep while settling ≤ 0.172 (`big_piles_of_turning_boxes_…`) | 0.175 | 0.207, 0.157, 0.178 | 3 of 4 | 0.158, 0.167, 0.178, 0.152 | 1 |
-| turning planks 10 000, at rest ≤ 490 (`big_piles_of_turning_planks_…`, the median of one) | 767 | 421, 1349, 1191 | 3 of 4 | 335, 1152, 523, 362 | 2 |
-| turning planks 2000-5000, median rest ≤ 470 (`bigger_piles_of_turning_planks_…`) | 559 | 378, 771, 387 | 2 of 4 | 417, 401, 1416, 365 | 1 |
-| turning planks 4000, at rest ≤ 752 (the same test; any size past 752 at the other seeds) | 1327 | 1405, 989, none | 3 of 4 | none, 1249, never, none | 2 |
-
-- **None cleared**: each misses at the default's own seed, which the
-  test runs, and at one or two of three others.
-- **The two depths are the order's**: colored misses at three seeds of
-  four, by level at one.
-- **The big plank piles' rest is chaotic in both orders**: by level misses
-  the same bounds at one or two seeds of four. Colored misses them more
-  often, but the bounds sit inside both orders' spread; get-emj.96 has
-  both.
-- **Not marked, and close**: turning boxes 10 000's rest (bound 895, of
-  one) is 480 at the default's seed, and 1180, 1155, 1157 at the others
-  (by level 468, never, 1495, 1298): it holds here, and would miss at
-  most seeds in either order.
-
-**What moved, at the new default** (the baselines written in the same
-commit): in the default suite, the locked pile of 200-500 sinks a tenth
-as deep while settling (0.033 → 0.0034) with a tenth the overlap
-(0.0047 → 0.00055); the 15-high stack ends with a tenth the energy
-(4.4e-8 → 4.5e-9); the heavy cube 1000 times its support's mass stands
-(sank 0.998 → 0.110, at rest 316 → 282) on a deeper, livelier contact
-(4.6e-5 → 0.072 deep, jitter 1.2e-7 → 0.017); one 100 times rests later
-(42 → 81) and jitters more (0.0010 → 0.0078). In the long suite, the
-locked piles of 200-1000 the same (0.033 → 0.0051, 0.0053 → 0.0012), and
-turning boxes 10 000 end with more energy (9.9e-9 → 1.6e-7 a body). The
-fingerprint's mod lines from frame 25 (96 of 120); its kernel lines are
-now the twelve by level as pinned before, named (`kernel <tuning>`,
-unchanged to the bit), and twelve colored (`kernel colored/<tuning>`), so
-a change to the coloring moves the colored lines alone and one to the
-arithmetic both. 2D's baseline `--all` is byte-identical.
-
-The edge families stay a measurement until get-emj.100 makes them
-tests.
-
-**The tests that keep this honest**, each planted and seen to fail
-(2026-10-03): Box2D's color-0 rule dropped from the colored grouping
-fails `contacts_are_colored_as_box2d_colors_them` and moves every colored
-number (the exact tool's colored lines, 43 rows of the colored baseline)
-while the default's fingerprint and baseline stay byte-identical; the
-pipeline's `prepare` grouping by level whatever the order fails
-`the_mod_solves_in_the_order_its_world_sets`; the shared states' turn
-rate stored with two components swapped fails
-`the_mod_is_its_fingerprint_with_its_states_shared` alone; B's friction
-from the last substep in the lanes fails the equivalence at
-`carry=normal`; the colored sweep in pair order fails the equivalence
-colored and the coloring's unit test.
-
-The listing of every bound needs `--nocapture` besides `MATRIX=1`: the
-test harness keeps a passing test's output, `CHECK` lines included.
-
-### The choices, measured
-
-Every option is behind `physics3d::Tuning` (`--tune=...` on the bench,
-`P3_TUNE` in `physics3d_test`), so each can be run again. 1000 turning
-bodies, ours only, one thread, `-c opt`; "settled" is the step from which
-every body is under 0.05 m/s at its farthest point. Settling a pile is
-chaotic: one late wobble moves it by hundreds of steps, so box piles were
-run at 900, 1000 and 1100 bodies, and planks (half extents 0.5, 0.125,
-0.25), noisier still (the same variant settles anywhere from 260 to never),
-are quoted only where a variant fails outright. Times are single runs at
-1000 and move by up to 10% between batches; each table's are one batch.
-
-**1. Box against box.** Box3D: the separating axis test with a cached
-axis, and clipping. Parry (Rapier): all 15 axes every step, then the
-faces clipped. Jolt: GJK and EPA for the penetration axis, then the two
-supporting faces clipped along it, the axis kept as the normal
-(`gjk.rs`: our implementation of Jolt's approach, with brute-force
-Johnson subsets and an allocating EPA, so its time is an upper bound on
-Jolt's).
-
-| 1000 bodies | box pile settled (900 / 1000 / 1100) | step ms | narrowphase µs | warm-started | planks | rain step ms |
-|---|---|---|---|---|---|---|
-| **SAT, last axis first (Box3D)** | **272 / 180 / 198** | **2.72** | **346** | **98%** | settles | **1.58** |
-| SAT, every axis every step (Parry) | 249 / 985 / 476 | 3.70 | 1083 | 97% | settles | 1.80 |
-| GJK, EPA, clipping (Jolt's way) | never | 26.0 | 23 322 | 89% | never | 9.8 |
-
-The cache is not only cheaper (one axis for a resting pair, not 15): it
-is hysteresis. Two faces of a resting box separate within a slop of each
-other; without the cache the test flips between them, the points' ids
-change and warm starting loses them. The EPA normal, the true least
-translation, is not a face normal and moves a little every step, so its
-manifold flickers too.
-
-**2. Reducing to four, and storing them.** Box3D: the deepest point, the
-farthest from it, the largest triangle, the point adding the most area.
-Rapier and Jolt: the deepest, the farthest, and the farthest either side
-of the line through them. Or all eight a clipped face gives, inline
-(`MAX_POINTS = 8`, a rebuild).
-
-| 1000 bodies | box pile settled | pen max | step ms |
-|---|---|---|---|
-| **area (Box3D)** | **272 / 180 / 198** | **0.0071** | **2.99** |
-| line (Rapier, Jolt) | 232 / 177 / 255 | 0.0071 | 3.08 |
-| eight, inline | 265 / 242 / 159 | 0.0076 | 3.08 |
-
-Area and line are level, and eight points buy nothing for their 3%. Area stays,
-as the one Box3D pairs with its ids. Points stay inline: a contact's
-points are read and written together, and a table of points would be four
-rows a contact to churn (the spike's measurement).
-
-**3. Warm starting.** Box3D and Parry: by feature id. Jolt: the nearest
-last point within 1 cm, in each body's frame (ours compares anchors in
-world axes, the same thing for bodies at rest). Or none.
-
-| 1000 bodies | box pile settled | warm-started | pen max | turning spheres, top speed at the end |
-|---|---|---|---|---|
-| **feature ids** | **272 / 180 / 198** | **98%** | **0.0071** | **0.057** |
-| nearest within 1 cm | 331 / 163 / 202 | 98% | 0.0066 | 0.284 |
-| none | never | 0% | 0.023-0.046 | 0.620 |
-
-Ids and nearest are level on boxes; ids stay, since they cost nothing to
-match and don't depend on how far a body moved or turned in between.
-
-**4. Stepping rotation, and inertia.** Box3D and Rapier: q + h/2 w q,
-normalized every substep. Jolt: the exact turn about w. Or normalized
-once, at the end of the step. The world inverse inertia formed once a step
-(Box3D, Rapier) or again every substep. Cubes and spheres have the same
-inertia about every axis, so only planks can tell these apart, and there
-the noise is larger than any difference.
-
-| 1000 bodies | box pile settled | step ms |
-|---|---|---|
-| **first order, normalized every substep (Box3D)** | **272 / 180 / 198** | **2.99** |
-| first order, normalized once a step | 290 / 196 / 175 | 3.07 |
-| the exact turn (Jolt) | 190 / 189 / 187 | 3.02 |
-| inertia again every substep | 238 / 194 / 214 | 3.33 |
-
-None settles a pile better, and inertia every substep costs 11%. Skipping
-the normalization lets a fast spin grow the quaternion
-(`a_spinning_body_stays_a_rotation` fails without it). Also measured: a
-point's separation to first order in the turn (θ x r for a turn θ, a dot
-product with what the row holds, in place of two quaternion rotations):
-7% off the solver, and the box pile never settled. Gyroscopic terms
-(Box3D and Rapier have them on, Jolt off) are left out: they vanish for
-cubes and spheres.
-
-**5. Bounds, without changing `engine/ecs`.** A key's bounds see the key
-and one extent; a turned box's depend on its position, its rotation and
-its shape. Options: the sphere around every collider, the collider
-staying the extent (so a body that only turns is never re-bounded); the
-same for turning bodies only, statics and locked bodies keeping their
-box; or a `Reach` extent holding the box around the collider as turned
-(`|R| h`, Box3D's `b3AABB_Transform`), rewritten by the solver when a box
-turns. A pose key (position and rotation in one component) gives the same
-bounds as `Reach` and was not built: it changes every query of
-`Position`, and a write of either half re-bounds the row, where `Reach`
-is written only when a box's box changes.
-
-Ours, turning, µs a step over the run (pairs are the broadphase's, a
-step); the contacts found are the same in every row, so quality is too:
-
-| | boxes 1000: pairs | broadphase | narrowphase | step ms | boxes 10 000: pairs | broadphase | step ms | planks 10 000: pairs | broadphase | step ms |
-|---|---|---|---|---|---|---|---|---|---|---|
-| a sphere around every collider | 14 417 | 496 | 448 | 3.20 | 157 999 | 34 835 | 64.5 | 315 835 | 43 184 | 91.0 |
-| a sphere for turning bodies, statics their box | 10 114 | 138 | 408 | 2.83 | 115 613 | 2253 | 31.2 | 268 064 | 5040 | 51.3 |
-| **the box as turned (`Reach`)** | **2477** | **45** | **295** | **2.58** | **25 688** | **1180** | **30.7** | **67 876** | **2165** | **48.1** |
-
-The sphere around a wall reaches every body in the pile (docs/lore); even
-for unit cubes the sphere, 1.7 times as wide, finds four to six times
-the pairs, and the broadphase doubles at 10 000.
-
-**Now: the collider and rotation as the key's two extents.** Once the
-storage took a pair of extents (2D's rotation, spatial-storage.md, "Bounds
-from several components"), `Position` got `type Extent = (Collider,
-Rotation)` and `bounds` computes `|R| h` itself (`Collider::turned_half`),
-so a turn re-bounds the row through storage and no derived copy is kept:
-the solve writes a rotation only when the body turned, as it writes a
-position only when it moved.[^reach3d] The same bounds, so the same pairs
-and contacts: every quality number of every scene below is identical,
-before and after. Turning, one thread, `-c opt`, two batches each (the
-second pair run side by side on separate cores), µs a step:
-
-| | boxes 1000: pairs, broadphase, narrowphase, outside systems, step ms | boxes 10 000 | planks 10 000 | spheres 10 000 |
-|---|---|---|---|---|
-| `Reach`, the solve rewriting it | 2440, 44-48, 343-350, 21, 2.71-2.75 | 25 688, 1177-1198, 3402-3466, 255-261, 28.7-29.2 | 67 876, 2137-2149, 7298-7995, 986-1639, 45.8-49.5 | 51 269, 1787-1852, 1449-1645, 783-837, 24.5-24.9 |
-| **(Collider, Rotation) extents** | **2440, 45, 348-351, 27, 2.73-2.74** | **25 688, 1191-1209, 3498-3727, 331-674, 29.1-31.2** | **67 876, 2147-2194, 7318-7385, 1028-1095, 45.5-46.1** | **51 269, 1753-1790, 1034-1038, 431-472, 22.4-22.6** |
-
-Level, within the batches' spread: the broadphase is the same walk over the
-same boxes, and the re-sort ("outside systems") does a little more for
-boxes (every turned row is re-bounded, where `Reach` was rewritten only
-when its box changed) and less for spheres (a column fewer to move). The
-spread at 10 000 (a single run each) is the machine's, not the variant's.
-
-**6. The soft step, as 2D's or not.** 2D chose 5 substeps, contacts at a
-quarter of the substep rate (75 Hz), two relaxing passes, friction only in
-them. Box3D: 4 substeps at 30 Hz, one relax. Box2D's rule has friction in
-the pushing pass too.
-
-| 1000 turning bodies | box pile settled | pen max | step ms | 10 boxes stacked, 600 steps |
-|---|---|---|---|---|
-| 2D's: 5 x 75 Hz, 2 relax | 216 | 0.0054 | 2.57 | never still, 0.13 m/s |
-| **5 x 60 Hz, 2 relax** | **180** | **0.0071** | **2.65** | **at rest by 600** |
-| 5 x 45 Hz, 2 relax | 191 | 0.0104 | 2.61 | at rest by 300 |
-| 5 x 45 Hz, 1 relax | 199 | 0.0114 | 2.01 | |
-| Box3D's: 4 x 30 Hz, 1 relax | 225 | 0.0227 | 1.69 | at rest by 600, 0.026 lower |
-| Box3D's, friction pushing too | 258 | 0.0239 | 1.84 | |
-
-The same step, a notch softer. At 2D's stiffness a column of ten turning
-boxes never comes to rest: each box rocks on its four points, a mode a
-locked box doesn't have. A fifth of the substep rate is the stiffest that
-stands the stack, and sinks a third as deep as Box3D's. One relax pass is
-a quarter cheaper and settles the pile about as soon, but the stack took
-two, so two stay. Friction in the pushing pass is worse here, as in 2D.
-Static contacts stayed twice as stiff (0.4) until a five-high stack was
-found circling on its corners; they are 0.25 since ([Still at
-rest](#still-at-rest)).
-
-### Against the others, turning
-
-`./bazel run --config=bench //engine/std/physics3d/compare:bench -- all 1000,10000 all --rotate`
-(and without `--rotate` for locked). One thread, sleeping off, every engine
-at its defaults (Rapier 4 substeps at 30 Hz; Jolt 10 velocity and 2
-position iterations; Box3D 4 substeps at 30 Hz; ours 5 substeps at 60 Hz, 2
-relax); 1000 bodies the median of three runs, 10 000 one. Whole run, ms a
-step; ours is the mod in the engine, a step a lockstep frame (run again
-2026-09-26 once it was a mod: every quality number is what the plain
-systems gave, so the tables below stand):
-
-| turning | ours | Rapier | Jolt | Box3D |
-|---|---|---|---|---|
-| spheres 1000 | 2.00 | 0.87 | 1.84 | 1.58 |
-| boxes 1000 | 2.85 | 0.91 | 1.36 | 1.11 |
-| planks 1000 | 3.59 | 1.21 | 2.27 | 1.57 |
-| rain 1000 | 1.67 | 0.87 | 1.23 | 1.07 |
-| spheres 10 000 | 26.2 | 17.6 | 26.7 | 18.2 |
-| boxes 10 000 | 30.6 | 13.6 | 18.9 | 11.5 |
-| planks 10 000 | 44.5 | 23.5 | 36.3 | 22.5 |
-| rain 10 000 | 21.2 | 15.7 | 16.8 | 14.1 |
-
-| locked | ours | Rapier | Jolt | Box3D |
-|---|---|---|---|---|
-| spheres 1000 | 1.21 | 0.64 | 1.21 | 1.05 |
-| boxes 1000 | 2.62 | 0.90 | 1.13 | 1.07 |
-| spheres 10 000 | 14.2 | 13.8 | 19.9 | 12.7 |
-| boxes 10 000 | 29.0 | 14.3 | 13.6 | 12.0 |
-| planks 10 000 | 21.7 | 10.7 | 13.5 | 9.4 |
-| rain 10 000 | 12.0 | 8.5 | 9.6 | 7.6 |
-
-By stage at 10 000 turning, µs a step (Jolt exposes none):
-
-| | broadphase: ours / Rapier / Box3D | narrowphase | solver | ours: copies, re-sorts |
-|---|---|---|---|---|
-| spheres | 1825 / 198 / 391 | 1604 / 3237 / 4012 | 18 891 / 14 923 / 14 222 | 700, 835 |
-| boxes | 1190 / 121 / 202 | 4120 / 1021 / 2048 | 23 141 / 11 928 / 9626 | 678, 269 |
-| planks | 2069 / 159 / 300 | 7473 / 5132 / 6367 | 32 291 / 19 742 / 16 375 | 1051, 654 |
-
-Quality, from the harness's own geometry: deepest overlap at the end, and
-the step from which every body stays under 0.05 m/s at its farthest point:
-
-| turning | ours | Rapier | Jolt | Box3D |
-|---|---|---|---|---|
-| boxes 1000: deepest, settled | 0.007, 180 | 0.022, 304 | 0.020, 502 | 0.023, 299 |
-| boxes 10 000 | 0.013, 374 | 0.042, 716 | 0.028, 1413 | 0.043, 713 |
-| planks 1000 | 0.010, 408 | 0.030, 278 | 0.026, 840 | 0.034, 262 |
-| planks 10 000 | 0.024, never (6 moving, 0.34 m/s) | 0.076, 392 | 0.060, never (27) | 0.078, 369 |
-| spheres 10 000: deepest, energy at the end | 0.017, 0.12 | 0.063, 0.007 | 0.036, 0.010 | 0.062, 0.017 |
-| rain 10 000: deepest | 0.002 | 0.010 | 0.056 | 0.098 |
-
-No engine's turning spheres or rain come to rest: spheres roll, and none
-has rolling resistance on (docs/lore). Nothing escapes in any run.
-
-**What it shows.**
-- **It works, and piles of boxes settle best.** Turning box piles come to
-  rest sooner than in any of the three and sink a third as deep, the depth
-  bought, as in 2D, by substeps and a stiffer contact. Planks are the weak
-  spot: at 10 000 six still wobble at step 1500, where Rapier and Box3D are
-  at rest by 400.
-- **It costs 1.3 to 3 times Rapier and Box3D**, most of it the solver,
-  and most of that the passes: 5 substeps of 3 passes (and 5 warm starts)
-  against their 4 of 2. Per pass, ours is about 1.3 times Box3D's (23.1 ms
-  over 15 passes against 9.6 over 8, theirs including integration), scalar
-  against their 4-wide SIMD. Box3D's own settings in ours (choice 6) cost
-  1.69 ms at 1000 boxes against their 1.09, and sink as deep as theirs.
-- **The narrowphase is 2-4 times theirs on boxes** because they keep a
-  contact's manifold while its bodies barely move (Box3D recycles it,
-  Rapier's `try_update_contacts`, Jolt's body-pair cache), where ours
-  clips every pair every step; the cached axis only saves the axis test.
-- **The broadphase is still 5-10 times theirs**, as before rotation: they
-  keep pairs.
-- **Locked bodies now pay for manifolds.** A locked box pile runs the same
-  clipping and four-point solve as a turning one: 29 ms at 10 000, where
-  the translation-only step took 4.9 (the spike) and 6.3 (its soft step).
-  And at 60 Hz a locked 10 000 box pile breathes, 9130 bodies never at rest
-  in 1500 steps, as Rapier's and Box3D's do at their defaults
-  (docs/lore/a-locked-box-pile-breathes-forever-under-soft-contacts-at-4-iterations.md);
-  at 1000 it settles by 95. The translation-only step settled it by 204.
-
-What would close the gaps, in order: manifolds kept while bodies barely
-move (the narrowphase, and fewer re-found contacts; done 2026-09-27, box
-pairs, halving the narrowphase on piles: [Still at rest](#still-at-rest));
-a broadphase that
-keeps its pairs (both comparisons now); a colored SIMD solve; stiffness
-per contact (locked pairs as stiff as 2D's, turning ones softer); rolling
-resistance; sleeping, which piles that settle would fall into.
-
-### What 3D asks of the storage design
-
-What the step worked around, and what it wanted instead, for the design
-of rotated bounds (get-emj.38's 2D side). Items 1 and 2 are done: the
-storage takes two extents, and physics3d uses them (choice 5).
-
-1. **Bounds from more than one extent** (done). A turned box's bounds
-   depend on the key (its position), its rotation and its shape. With one
-   extent a key, the step kept a derived `Reach` as the extent;[^reach3d]
-   now `(Collider, Rotation)` are the extents and the glue computes `|R| h`
-   itself, a page at a time, in the loop that re-boxes pages.
-2. **Turning alone re-bounds** (done). A box spinning in place writes no
-   position, and its bounds still change; writing the rotation, an extent,
-   re-bounds the row (`a_planks_bounds_follow_its_turn`: a plank bounded
-   as if unturned goes 0.74 into the floor).
-3. **Not a sphere.** Rotation-invariant bounds are the cheap way out, and
-   cost 4 to 6 times the pairs (above), ten times the broadphase once
-   statics get them too. Whatever the storage offers, statics and bodies
-   that can't turn must keep exact boxes.
-4. **Fat bounds, or kept pairs** (done, 2026-09-27: `Live<Contacts>`,
-   spatial-storage.md, "Keeping pairs"). A turning body is re-bounded
-   every step it moves, where Box3D re-inserts a body in its tree only when
-   it leaves a box grown by up to 0.05 (`aabbMargin`). The re-bounding
-   stays (the order needs exact boxes); the pairs are now kept over fat
-   boxes, as Box3D's are.
-5. **Wider tuples.** Without `Reach`, a turning body is six components and
-   the solve's query five, against limits of eight (bundles, query data)
-   and four (a parameter group): the mod hit none of them. Layers,
-   sleeping or a kinematic flag would take a turning body to eight or
-   nine, where the limit would be raised in `engine_ecs` rather than
-   bundles nested.
-6. **What needed nothing.** Four points inline as `[f32; 16]` and
-   `[u32; 4]` (`OPAQUE` fields), the ordered contact table, change
-   detection: unchanged from the spike.
-
-[^reach3d]: 2026-09-26: until then, with one extent a key, the step kept
-    the box around each body as turned in a derived `Reach` component (the
-    key's extent), rewritten by the solve when a box's box changed: three
-    floats a body held twice (there and in the page lanes), and a write
-    the solve had to remember. Its measurements are the table above.
+`//engine/std/physics3d`: spheres and boxes that turn, a mod laid out as
+2D's (interface `components.rs` and `math.rs`; implementation `lib.rs`,
+`narrow.rs`, `gjk.rs`, `solver.rs`, `pipeline.rs`), on 3D spatial storage
+(`Position` bounded by `(Collider, Rotation)`, `|R| h`, so a turn
+re-bounds its row through storage).
+
+- **The solver** is 2D's soft step with Box3D's angular terms: per point,
+  anchors on both bodies and an effective mass with the angular terms,
+  each body's world inverse inertia, all fixed once a step; a point's
+  separation within the step is its separation when found plus its
+  anchors' moves along the normal. Friction is per contact at the points'
+  centroid, clamped to a disc, with twist friction about the normal, in
+  the relaxing passes only, as Box3D, Rapier and Jolt have it. A rotation
+  is stepped to first order and normalized every substep, at most π/4 a
+  step (`MAX_ROTATION`). Its kernels run in four lanes in colors as 2D's
+  do ([Order and lanes](#order-and-lanes)), every `Tuning` variant
+  included.
+- **Every measured choice is a `Tuning` in the world**: one entity, or
+  none for the defaults, read every step (`pile3d tune …`, `TUNE=` in the
+  tests and benches): substeps, relax passes and stiffness, friction in
+  the push, how rotation integrates, inertia per step or substep,
+  separations exact or linear, warm starting (ids, nearest, cold), the
+  box–box test (SAT cached, SAT, GJK and EPA), the reduction (area,
+  line), recycling, carry, closing speed, lanes and order. Settings in
+  the world, not in statics, because a reload maps a new image whose
+  statics start over; the mod's timings are its state.
+- **Reloads are invisible**: `:reload_test` replays a tuned pile of
+  boxes, and a sphere spun onto it, while physics3d, the scene and the
+  scheduler are swapped for their twins every frame, one a frame and in
+  batches, and every frame is the run without reloads bit for bit,
+  contacts, manifolds, cached axes and ticks included.
+- **`pile3d`** (`tests/pile.rs`) builds the comparison's scenes from
+  `tests/scenes.rs`, the file the comparison builds them from in every
+  engine; `pile3d_game` runs it on lockstep, with `stats` and `stages`
+  messages to physics3d.
+- **Held to the bit** by an exact fingerprint (`:exact_test`), beside the
+  baselines (physics-testing.md, "The exact fingerprint").
+- **Left out**: layers, sensors, overlaps and events, kinematic bodies,
+  sleeping, pre-solve hooks, rolling resistance, gyroscopic terms; and
+  locked bodies pay for manifolds (a locked rotation is a zero inverse
+  inertia: get-emj.80). The parity table has each.[^3d]
+
+## What the ECS costs
+
+The verdict of 2026-09-24 holds: storage is no design blocker. Against
+the same step on plain arrays, checked to be the same computation bit
+for bit (`//engine/std/physics2d:tax`), the ECS's step is within a few
+percent settled and faster at rest, where the arrays' sweep and prune
+suffers. The solver works on a copy (gathered, solved many passes over,
+written back) because the copy is a transpose into the solver's layout,
+not a patch over a storage flaw: solving in place in the world's pages
+was slower, and would save only the copy's cost
+([working-sets.md](working-sets.md) weighs storage owning it). What
+storage still costs is the copies in and out, the spatial re-sort of
+what moved, and re-sorting the contacts' ordered table as contacts begin
+and end.[^ecs]
 
 ## Quality as a test
 
-**Status: built** (2026-09-26, get-emj.37). How soon a scene comes to rest,
-how deep it sinks while it does and once it has, what energy is left,
-whether stacks and pyramids stand and nothing escapes, and that sleeping
-then follows, are tests, in 2D and 3D, locked and turning, bounded by what
-the reference engines meet on the same scenes. Until then the tests asked
-whether a pile came to rest eventually, on a pile that stood in columns,
-and a solver that crept for thousands of steps passed them
-([Settling](#settling)).
-
-| target | what | runtime |
-|---|---|---|
-| `//engine/std/physics2d/compare:quality_test` | 2D: piles 400-1200, pyramids 15-50, stacks 10 and 20, sleeping, the mod bit for bit the arrays, the baseline | 49 s (fastbuild; 1.2 s at `-c opt`), 2026-09-28 |
-| `//engine/std/physics2d/compare:quality_long_test` (manual) | 2D: piles 9000-11 000, the 5050 pyramid, and the wider families (piles 21-401 wide, mixed piles, pyramids 30-120; physics-testing.md, "Wider families") | 80 s at `-c opt` |
-| `//engine/std/physics3d/compare:quality_test` | 3D: piles of cubes (turning, locked) and planks 200-500, stacks 5-20, the baseline | 17.5 s (fastbuild; 2.0 s at `-c opt`) |
-| `//engine/std/physics3d/compare:quality_long_test` (manual) | 3D: cubes and planks at 1000 and 10 000, and the wider families (200-1000 and 2000-5000, mixed piles) | 86-130 s at `-c opt` |
-
-**And our own results, both ways.** The floor is upper bounds from the
-references; every value these tests bound is also held to our last
-accepted value, within a band set from measured noise, better or worse
-([physics-testing.md, "The baseline"](physics-testing.md#the-baseline-our-own-accepted-results)),
-and the long suites carry wider families of piles and pyramids, measured
-in every engine on the same grids
-([physics-testing.md, "Wider families"](physics-testing.md#wider-families)).
-
-**What runs.** The comparisons' own scenes and measures, not copies: 2D's
-`scene.rs` (a `Stack` scene added), `quality.rs` and `settle.rs` (the
-settling loop `SETTLE` prints, which the tests call), 3D's `scenes.rs` (a
-`Stack` kind added) and `measure.rs` (overlap now also looked at every 10
-steps while settling, and a stack's top and tilt). A bound is then the
-same number the comparison prints for Box2D, Rapier, Box3D and Jolt. 2D
-runs on the arrays, bit for bit the mod (`the_mod_is_the_arrays_bit_for_bit`
-holds that in the suite; before, only the comparison checked it, when run),
-so `SOLVER=<variant>` can put any of `variants.rs` in its place; sleeping,
-which the arrays don't have, runs on the mod. 3D runs the mod in the
-engine, `TUNE=<Tuning>` tuning it.
-
-**The measures**, each from positions and velocities alone, as every
-engine is measured:
-
-- **Steps to rest**: the look (every 10 steps) from which every body, at
-  its farthest point, stays under 0.05, the sleep threshold, to the end of
-  the run (700 steps in 2D, 2500 at 10 000; the bench's 1000 and 1500 in
-  3D).
-- **Overlap**: the deepest and the mean over touching pairs at the end, and
-  the worst of each at any look while settling, landings included.
-- **Energy** at the end, moving and turning, a body.
-- **Standing**: how far a pyramid's or a stack's top box moved, the most any
-  box leans, bodies out of the scene.
-- **That it is a pile**: contacts a body and islands in 2D, partners a body
-  and the share not in columns in 3D. A scene that went back to columns
-  (docs/lore) fails as not a pile, not as settling well.
-- **Sleeping**: every body of a pile of 1000 asleep within half a second
-  (the sleep time) of the rest bound.
-
-**How the bounds are set.** Options weighed for each:
-
-- *Steps to rest.* Bounding one run fails on noise: rest moves by 100-200
-  steps with rounding alone (docs/lore), and so does the references'. A
-  bound at the references' worst run is loose where one of theirs is an
-  outlier: Box3D rests turning planks at 209-302 steps, but at 823 at 200
-  planks. So piles run at several sizes (each size its own drop), and the
-  bound is on the distribution: **the worst of ours within twice, and the
-  median of ours within a quarter over, the later of the references'
-  medians over the sizes.** Pyramids and stacks stand and don't move with
-  rounding: one scene each, within twice the later reference.
-- *Depth.* A bound at the references' depth would let ours sink to theirs
-  unnoticed, and sinking a quarter to a fifth as deep is what the stiffer
-  contacts were chosen for ([Settling](#settling), choice 6 in 3D): **half
-  the shallower reference's worst** at rest, and a stack's or pyramid's top
-  within half the smaller reference's sinking. While settling, where every
-  engine lands as deep (push-out capped at 3 u/s in all), **a quarter over
-  the references' worst**, and the mean **within the shallower
-  reference's**.
-- *Energy.* **Ten times the references' worst** over the runs they came to
-  rest on (a pile that breathes isn't at rest), and never under 1e-8 a body,
-  below which it is rounding (every body under about 1e-4).
-- *Which references.* Box2D and Rapier in 2D. Rapier and Box3D in 3D, the
-  soft steps ours is one of; Jolt, whose hard contacts rest a turning box
-  pile last (502-1413) and a locked one first, is recorded beside them.
-
-**The bounds and what they came from** (2026-09-26; each test's comment
-has every reference value, by size). Rest in steps; the references' medians
-over the sizes, then ours, worst / median:
-
-| scene | references (median rest) | bound: worst / median | ours: worst / median | depth at rest: shallower reference / bound / ours |
-|---|---|---|---|---|
-| 2D pile 400-1200, locked | Box2D 200, Rapier 160 | 400 / 250 | 240 / 210 | 0.057 / 0.028 / 0.014 |
-| 2D pile 400-1200, turning | Box2D 210, Rapier 250 | 500 / 312 | 440 / 290 | 0.099 / 0.049 / 0.024 |
-| 2D pile 9000-11 000, locked | Box2D 200, Rapier 200 | 400 / 250 | 300 / 230 | 0.058 / 0.029 / 0.016 |
-| 2D pile 9000-11 000, turning | rest from Box2D 1760, Rapier 2490, neither staying at rest; first at rest 330, 430 | rest from 2490 / 1760, first at rest 860 / 537 | rest from 1620 / 350, first at rest 450 / 350 | 0.095 / 0.048 / 0.027 |
-| 3D cubes 200-500, turning | Rapier 203, Box3D 219 | 438 / 273 | 200 / 187 | 0.014 / 0.007 / 0.0055 |
-| 3D cubes 200-500, locked | Rapier 127, Box3D 250 | 500 / 312 | 83 / 69 | 0.0021 / 0.0011 / 0.0006 |
-| 3D planks 200-500, turning | Rapier 267, Box3D 302 | 604 / 377 | 354 / 341 | 0.031 / 0.015 / 0.0058 |
-| 3D cubes 1000 / 10 000, turning | Rapier 304 / 716, Box3D 299 / 713 | 608 / 1432 | 180 / 374 | 0.022, 0.042 / 0.011, 0.021 / 0.007, 0.013 |
-
-Stacks and pyramids rest within 10-30 steps in every engine but Box2D's
-turning 10-high stack (100); ours rest in 10-30, their tops sink a third as
-far (a 25-wide turning pyramid 0.017 lower where both references' are
-0.094), and nothing leans more than 0.1°.
-
-**Known failures**: none. A known failure is an ignored test naming its
-bead (run with `--test_arg=--include-ignored`), not a looser bound.
-Until 2026-09-27 there were three: a five-high stack of turning cubes in
-3D never rested (get-emj.42), and turning planks in 3D kept up to 1e4
-times the references' energy and never rested at 10 000 (get-emj.43),
-both fixed by contact recycling and softer static contacts; and a 20-high
-stack of turning boxes in 2D rests late at the default five substeps
-(get-emj.41), which is now tested at six, set through `physics2d::Tuning`
-as a game that stacks would ([Still at rest](#still-at-rest)).
-
-**What the tests catch** (mutation-checked, 2026-09-26: each bug planted in
-the source, or chosen by `SOLVER`/`TUNE`, and the default suite run):
-
-| planted | 2D: fails | 3D: fails | survives |
-|---|---|---|---|
-| the split impulse this step replaced (`SOLVER=split`) | piles (never at rest at 1000 and 1200; 620 at 800; energy 1e-2), pyramids and stacks (twice the depth) | – | sleeping (the mod), bit for bit |
-| one relax pass, not two | piles (rest 510-never at 1000-1200), the turning stack, sleeping | locked cubes, planks, stacks | pyramids, locked stacks; 3D turning cubes |
-| softer contacts (30 Hz, the references' stiffness) | every pile, pyramid and stack, on depth | every test | – |
-| no warm starting | every test | every test | bit for bit |
-| contacts ignoring rotation (a point's separation not following its arms) | the turning stack (energy), a solver unit test | planks (rest 989) | 2D piles and pyramids; 3D cubes and stacks |
-| the separation to first order in the turn (3D `anchors=linear`) | – | planks (rest 950-998) | cubes, stacks |
-| sleeping ten times slower to take | sleeping | – | – |
-| piles dropped unstaggered, or in a lattice (columns) | piles, as not a pile (1.0 contacts a body, 31-32 islands) | cube and plank piles, as not a pile (0.00 not columns) | – |
-
-Contacts ignoring rotation is the weakest catch, as measured before
-([Rotation in the soft step](#rotation-in-the-soft-step): `sep=2` moves a
-1000-pile's rest within the noise, and a 10 000 pile's threefold): at the
-default suite's sizes only a stack's energy and planks see it.
-`:quality_long_test`'s turning 10 000 piles are where it shows: one of
-the three never rests.
-
-## Quality beyond settling
-
-**Status: built** (2026-09-28, get-emj.13 for the view). [Quality as a
-test](#quality-as-a-test) asks whether piles, pyramids and stacks come to
-rest, how deep they sink and what energy is left. What a player feels is
-something else: whether a box on a slope holds or slides as fast as it
-should, a ball bounces as high, a heavy crate stays on a light one,
-overlap is pushed apart without a bang, a fast ball stops at a wall, and a
-structure that stands on friction stands. These are now scenes, run in
-every engine, with tests bounding ours by a hand calculation or by what
-the references do on the same scene, and a debug view to look at any of
-them.
-
-| target | what | runtime |
-|---|---|---|
-| `//engine/std/physics2d/compare:behaviour_test` | 2D: ramps, bounces, mass ratios, overlap, bullets, the card house, the ladder, dominoes; the mod bit for bit the arrays on them | 2-5 s (fastbuild) |
-| `//engine/std/physics3d/compare:behaviour_test` | 3D: ramps, bounces, mass ratios | under 1 s |
-
-### The debug view
-
-`view.rs` in the comparison draws any scene at chosen steps for every
-engine side by side: an SVG, a row a step and a column an engine, and, for
-whoever reads rather than sees (agents included), the same as text, a
-character grid. Bodies come from what every engine reports
-(`Sim::bodies`: positions and angles, boxes turned, circles with a radius
-line showing their turn), statics from the scene, sleeping bodies from
-each engine (grey; `.` in text), and contacts from each engine's own:
-ours from the arrays or, on the mod, from the world's `ContactPair`,
-`Manifold` and `ContactPoints`; Box2D's from `b2Body_GetContactData`;
-Rapier's manifolds. Each point is drawn with its normal, pressed (red,
-`*`) or held within the speculative margin (hollow orange, `+`); where
-neither end of our contact turns, it keeps no point, only a normal and a
-depth, and the view puts one on the smaller body's face (a square). It is
-test and bench code: nothing renders in the physics mod.
-
-    VIEW="pile 1000 41" VIEW_STEPS=0,100,400 VIEW_OUT=/tmp VIEW_TEXT=90 ./bazel run --config=bench //engine/std/physics2d/compare
-
-(runbook 005, "The debug view"). Behaviour scenes are drawn turning, as
-they run; `TURN=1` turns the others; `ENGINES` picks the columns.
-
-### The scenes
-
-Each is built by `scene.rs` (3D: `scenes.rs`) for every engine, bodies
-turning, and measured from positions and velocities every step by
-`behave.rs`, the same code for all (the settling measures, depth, contacts
-a body and islands, beside). Gravity 20 in 2D and 9.81 in 3D; a body and
-what it meets have the same friction and restitution, so every engine's
-rule for mixing two gives it.
-
-- **Friction on a ramp.** A unit box on a static ramp 20° steep at
-  friction 0.6 (tan 20° = 0.36): it holds, and creeps nothing. At 30° and
-  0.2 it slides at g (sin θ − μ cos θ), 6.536 (3D 3.206), from its speed
-  at steps 30 and 90. A disc at 30° and 0.6 rolls without slipping at
-  (2/3) g sin θ = 6.667 while μ ≥ tan θ / 3, its contact point still
-  (`v − ω r` along the slope); at 0.1, below that, it slips and slides at
-  g (sin θ − μ cos θ). In 3D a sphere, at (5/7) g sin θ = 3.504.
-- **Restitution.** A ball dropped 5 onto a floor, no friction, rebounds to
-  e² of the drop: its first apex against e², at e = 0.25, 0.5, 0.75 and 1;
-  at 1, over 20 s, the highest and the last apex (a lossless ball gaining
-  height is energy from nowhere).
-- **Mass ratios.** A unit box 10, 100 and 1000 times as heavy on one of
-  mass 1; 100 and 1000 times on a column of five; and Box2D's
-  "HighMassRatio2", a 20-wide box 400 times as heavy on two unit boxes 18
-  apart. How far the heavy box sinks, how deep, whether it stands, how
-  soon it rests, and what still moves in the last second (jitter).
-- **Overlap recovery.** Box2D's "Overlap Recovery": a pyramid of unit
-  boxes 4 wide spawned a quarter and half a box into each other, and one
-  10 wide at half. The fastest any body goes, the step nothing is deeper
-  than 0.01, when it rests, and its top against where it rests once apart.
-- **Fast bodies.** Pong's ball, radius 0.25, no gravity, restitution 1,
-  fired at a static wall 0.1 thick, and at one a unit thick (pong's
-  paddle), at 10 to 400 a second, each at four phases (where in a step it
-  reaches the wall). Whether it passes through.
-- **Structures.** Box2D's card house (from PEEL), five storeys, scaled five
-  times so its cards are 2 tall and 0.01 thick, friction 0.7; Box2D's 15
-  dominoes, the first knocked over as its impulse knocks it; and a ladder
-  in place of Box2D's arch, whose blocks are wedges and physics has boxes
-  and circles only: a plank 5 long and 0.2 thick leaning 30° on a
-  frictionless wall, which stands on the floor's friction while μ ≥ tan θ /
-  2 − hx / (2 hy) = 0.269 (its weight's moment about its foot against the
-  wall's push at its top), at 0.4, 0.3, 0.24 and 0.2. Whether they stand,
-  how far anything moved, whether the dominoes fall in order, and how fast.
-
-**Checked to be what they say** (the counts, and the view): the ramp
-bodies have one contact, the ladder two until it slides and one after,
-the card house one island of 2.6 contacts a card in ours (3.0 in Box2D);
-the pictures show the cards leaning in pairs under flat ones, the
-dominoes lying in a chain at the end, the ladder flat on the floor after
-sliding.
-
-### Results, 2D
-
-`BEHAVE=1 VARIANTS=rapier:ccd ./bazel run --config=bench //engine/std/physics2d/compare`
-(2026-09-28; Box2D v3.1.1, continuous on; Rapier 0.36 as shipped, its CCD
-changing nothing here; ours re-run on get-emj.61's default the same day).
-Deterministic, one run. The mod and the arrays agree on every scene to
-every digit.
-
-| scene | expected | ours | Box2D | Rapier |
-|---|---|---|---|---|
-| box, 20°, μ 0.6: crept in 2 s | 0 | 0.0001 | 0.00008 | 0.0003 |
-| box, 30°, μ 0.2: a | 6.536 | 6.536 | 6.547 | 6.536 |
-| disc, 30°, μ 0.6: a; slip | 6.667; 0 | 6.653; 0.073 | 6.641; 0.052 | 6.634; 0.052 |
-| disc, 30°, μ 0.1: a (slipping) | 8.268 | 8.277 | 8.284 | 8.274 |
-| bounce, e 0.25: first apex / drop | 0.0625 | 0.044 | 0.038 | 0.038 |
-| bounce, e 0.5 | 0.25 | 0.244 | 0.229 | 0.229 |
-| bounce, e 0.75 | 0.5625 | **0.579** | 0.548 | 0.548 |
-| bounce, e 1: first; highest; last, 20 s | 1; 1; 1 | **1.048; 1.64; 1.64** | 0.996; 0.996; 0.919 | as Box2D |
-| 10:1: top sank; deepest; at rest from | – | 0.0015; 0.0012; 2 | 0.0097; 0.0077; 3 | 0.0097; 0.0077; 2 |
-| 100:1 | – | 0.014; 0.011; 24 | 0.088; 0.072; 23 | 0.089; 0.071; 23 |
-| 1000:1 | – | stands, 0.14; 0.12; **199** | crushed (1.0 lower); 41 | crushed; 29 |
-| 100:1 on five | – | stands, 0.11; 48 | topples; 253 | crushes one (0.67); 68 |
-| 1000:1 on five | – | crushed, **four boxes out through the floor, 83 a second** | crushed, calm; 220 | crushed, 4.1 a second; 285 |
-| wide box on two, 400:1 | – | 0.028; 0.023; **69** | 0.176; 0.141; 34 | 0.176; 0.141; 33 |
-| overlap, 4 wide at 0.25: fastest; apart at; at rest | at most the cap, 3 | 3.0; 20; 24 | 3.0; 67; 55 | 3.5; 46; 48 |
-| overlap, 4 wide at 0.5 | | 3.1; 33; 37 | 3.6; 56; 54 | 4.4; 57; 58 |
-| overlap, 10 wide at 0.5 | | 11.8; 50; 130, stands | 16.8; 75; 198, topples, two out | 16.5; 101; 241, topples |
-| card house: most moved; at rest | stands | 0.10; 26[^card-house] | 0.14; 21 | **two cards fall** |
-| ladder, μ 0.4 and 0.3: slid | stands (0.269) | 0.00005 | 0.0004 | 0.00001 |
-| ladder, μ 0.24 and 0.2: slid | slides | 1.30, 1.35 | 1.31, 1.35 | 1.30, 1.35 |
-| dominoes: fell in order; wave; at rest | all | 15; 2.60 a second; 447 | 15; 2.667; 434 | 15; 2.736; 443 |
-
-**Fast bodies**, phases of four that pass through the wall:
-
-| speed (a step) | wall 0.1: ours | wall 1 (pong's paddle): ours | Box2D, Rapier (with or without CCD) |
-|---|---|---|---|
-| 10 to 21 (0.35) | 0 | 0 | 0 |
-| 25, 30 | 1 | 0 | 0 |
-| 40 (pong's fastest across), 48 (0.8) | 2 | 0 | 0 |
-| 50, 56.6 (pong's fastest diagonal), 80 | 3 | 1 | 0 |
-| 160, 400 | 4 | 3 | 0 |
-
-Ours has no continuous collision ([Open questions](#open-questions)): a
-ball is stopped only if some step leaves it within the speculative margin
-(0.05) of the wall or short of its middle, so it bounces for certain while
-a step is at most the margin, its radius and half the wall, 0.35 (21 a
-second) and 0.8 (48); past that, whether it tunnels depends on the phase.
-Pong's ball meets its paddles at 40 across the court at most, 20% under
-the paddle's 48. Box2D sweeps fast bodies against statics
-(`b2SolveContinuous`), and Rapier, with CCD off as shipped, does too
-([lore](../lore/rapier-sweeps-fast-bodies-against-fixed-colliders-with-ccd-off.md)).
-
-### Results, 3D
-
-`./bazel run --config=bench //engine/std/physics3d/compare:bench -- <scene> <n> all --rotate --behave`
-(2026-09-28; Rapier 3D 0.36, Jolt 5.6, Box3D 0.1, each at its defaults).
-
-| scene | expected | ours | Rapier | Jolt | Box3D |
-|---|---|---|---|---|---|
-| cube, 20°, μ 0.6: crept in 2 s | 0 | 0.000001 | 0.000068 | 0.000001 | 0.000063 |
-| cube, 30°, μ 0.2: a | 3.2059 | 3.2059 | 3.2059 | 3.0460 | 3.2059 |
-| sphere, 30°, μ 0.6: a; slip | 3.5036; 0 | 3.5025; 0.032 | 3.5045; 0.032 | 3.3288; 0.000 | 3.5023; 0.035 |
-| bounce, e 0.25; 0.5 | 0.0625; 0.25 | 0.053; 0.248 | 0.049; 0.238 | 0.051; 0.232 | 0.052; 0.241 |
-| bounce, e 0.75 | 0.5625 | **0.575** | 0.554 | 0.527 | 0.557 |
-| bounce, e 1: first; highest; last, 20 s | 1; 1; 1 | **1.032; 1.31; 1.31** | 0.996; 0.996; 0.962 | 0.935; 0.935; 0.529 | 0.999; 0.999; 0.998 |
-| 10:1: top sank; deepest; at rest from | – | 0.0006; 0.0008; 0 | 0.0026; 0.0030; 1 | 0.0009; 0.0023; 2 | 0.0026; 0.0030; 1 |
-| 100:1 | – | 0.0099; 0.0070; 42 | 0.033; 0.028; 55 | 0.030; 0.020; 193 | 0.033; 0.028; 21 |
-| 1000:1: crushed in all; at rest from | – | 316 | 210 | 101 | 279 |
-
-Jolt is 5% slow on the ramps because every Jolt body is damped by default
-(`BodyCreationSettings::mLinearDamping` and `mAngularDamping`, 0.05 a
-second), which the comparison leaves on: at a mean 3 a second over the
-steps measured, 0.16 of the 3.21. Its bounces lose height to the same
-([lore](../lore/jolt-damps-every-body-by-default.md)).
-
-### What they found, and what is ignored
-
-Ours meets the hand calculations as closely as any reference: every ramp
-within 0.2% (the sliding box exact), the ladder standing and sliding
-either side of its friction, the dominoes falling at Box2D's speed. It
-stands heavy boxes the references crush, sinking 5-10 times less, as its
-stiffer contacts did on piles ([Settling](#settling)); pushes overlap
-apart no faster than either (at 3.0-3.1 a second where theirs reach
-3.0-4.4; 2.2-2.5 before get-emj.61's default) and keeps the 10-wide
-pyramid standing where both topple it; and
-stands the card house Rapier drops (as measured then: at the edge, it now
-goes either way, and is judged as a family, [What a turning point
-carries](#what-a-turning-point-carries-the-decision-matrix)). Four things are wrong, each an ignored
-test naming its bead (run with `--test_arg=--include-ignored`), not a
-looser bound:
-
-- **A bounce returns a step's gravity more than it came in with**
-  (get-emj.56; 3D get-emj.60). `integrate_velocities` adds the step's
-  gravity before contacts are found, and restitution restores e times the
-  closing speed before the step, gravity included; the references take it
-  before gravity. At 14 a second that is 2.4% of speed a bounce: the
-  lossless ball climbs to 1.64 of its drop in 12 bounces (3D 1.31 in 9),
-  and e = 0.75 passes e². Below 0.5 every engine loses more to the soft
-  contact than this adds, so it hides. Pong is spared: its ball has no
-  gravity. Fixed 2026-09-29: restitution takes the closing speed before
-  the step's gravity, as the references do, and the ball at e = 1 rebounds
-  to 1.000 of its drop and keeps 1.002 (3D 0.999 and 0.995); its shape
-  over a family of bounces, and the fixes weighed: [Bounces](#bounces).
-- **A heavy box on light ones comes to rest late** (get-emj.57): at
-  1000:1 from 199 where the references rest from 41 and 29, and under the
-  wide box from 69 where they rest from 34 and 33; at 100:1 (24) and on
-  the column of five (48) no later than they do. (Before get-emj.61's
-  default, 100:1 rested from 77 and the others kept moving at 0.06 to 0.5
-  a second.) In 3D it rests (from 42 at 100:1, where Rapier rests from
-  55).
-- **A box 1000 times as heavy crushing a column of five throws four light
-  boxes out through the floor**, at up to 83 a second (get-emj.58); the
-  references crush it too, calmly. The push-out cap doesn't hold a body
-  squeezed between a static and one a thousand times its mass. It is the
-  tangent averaged over the substeps that lets it: with both impulses
-  carried from the last substep (`rot/carry=0`) nothing escapes, so it is
-  a condition of the default ([The decision](#the-decision-b-colored)).
-- **No continuous collision** (get-emj.59): the limit above, where both
-  references never tunnel. Pinned by an active test at the limit
-  (`a_ball_bounces_off_a_wall_while_a_step_is_within_the_margin_its_radius_and_half_the_wall`:
-  every phase bounces up to it, some tunnel just past it), so building
-  continuous collision fails that test, which is when to move it.
-
-**How the bounds are set**, as [Quality as a test](#quality-as-a-test)
-sets them, per scene, the reference values beside each in the tests: a
-hand calculation within 1% (the references are within 0.5%, Jolt aside);
-where there is none, twice the later reference's rest, a quarter over the
-smaller reference's fastest, half the smaller reference's sinking and
-depth where the references stand the scene, and a coarse bound where they
-fail it (half a box, a quarter of one deep, 0.1 for a pyramid that stood
-where theirs toppled); a bounce never 1% over e², nor a quarter further
-under it than the lower reference. In 3D, Rapier's and Box3D's values set
-the bounds and Jolt's, damped, is recorded beside them.
-
-**What the tests catch** (planted, 2026-09-28, each in the source, the
-suite run, the source restored):
-
-| planted | 2D fails | 3D fails |
-|---|---|---|
-| friction halved (on each body; in 3D a quarter on the body, half through the geometric mean) | the box holding, the box sliding, the slipping disc, the ladder, the card house, the dominoes | the cube holding, the cube sliding |
-| restitution ignored | the bounce, the bullets (no rebound) | the bounce |
-| inverse mass squared (a heavy box heavier) | heavy boxes standing | heavy cubes standing |
-| a disc as a ring (a sphere as a hollow one) | the rolling disc | the rolling sphere |
-| the push-out cap ten times (30) | overlap recovery (and a solver unit test) | – |
-| the speculative margin 0.01 | the bullets, at their check that the limit is 21 and 48 (and three narrowphase unit tests) | – |
-
-The rolling disc survives friction halved (0.3 still rolls it) and
-catches only its inertia; the bullets catch the margin only through the
-check of the limit their speeds are chosen about.
-
-**What the view showed.** On the settling scenes, nothing the numbers
-hadn't: the 1000-body pile at step 400 is a pile in all four (ours, the
-arrays, Box2D, Rapier), and the turning 20-wide pyramid stands in each. One
-thing the numbers put differently: our pile's top stands 1.3 higher than
-Box2D's and Rapier's (its median body 0.4-0.7), which is its shallower
-overlap (at rest 0.014 deep at most, against their 0.057-0.067) over some
-25 layers, not a looser pile. On the new scenes it showed how the worst
-mass ratio fails: "ratio 1000 5" buckles sideways by step 60 and has two
-light boxes under the floor by step 120 in ours, where Box2D's column lies
-flat on it.
-
-## Bounces
-
-**Status: built; restitution takes a contact's closing speed as the step
-began, before its gravity** (2026-09-29, get-emj.56 and get-emj.60).[^bounce] The drop above found that a lossless ball
-climbs to 1.64 of its drop in 2D (1.31 in 3D), but one drop can't say how
-an error scales, and its drops at e ≤ 0.5 hid it. So restitution is judged
-on families: one bounce over a grid of what can decide it, 2D and 3D, ours
-and the references on exactly the same grid (`compare/bounces.rs`,
-`engine/std/physics3d/compare/bounces.rs`; a bounce is `Scene::Hit`, in 3D a
-`Kind::Hit` with the bounce packed into its n).
-
-### The families
-
-| family | what | short grid (default suite) | long grid (long suite) |
-|---|---|---|---|
-| drops | a ball, a box landing flat, a box turned 30° landing on a corner (3D: a sphere, a cube flat, on an edge, on a corner), onto a static floor | e 0, 0.5, 1; impact 0.8 (under the threshold), 1.5, 5, 14 (3D 0.8, 3, 9.9); gravity 0, 20, 80 (3D 0, 9.81, 40); where in a step it meets 0 and ½ (3D 0): 216 runs (3D 108) | e by tenths (3D 0, ½, 1); 15 impacts 0.5 to 40 (3D 11 to 20); gravity 0, 10, 20, 40, 80 (3D 0, 9.81, 20, 40); four phases (3D two): 9900 (3D 1056) |
-| rates | a ball and a flat box at 60 and 30 Hz, 5 and 6 substeps in every engine | e ½, 1; impact 3, 14; gravity 20, 80: 128 (3D 32, 5 and 6 substeps only) | e by quarters, five impacts, four phases: 1280 (3D 160) |
-| oblique | angled bounces, 30° and 60° from the normal, friction 0, 0.3 and 1 | impact 5 and 14, gravity 0 and 20: 96 (3D 48) | 15° to 75°, two phases: 1600 (3D 144) |
-| pairs | a ball onto a ball equal and three times as heavy, and onto a free box (3D: two spheres), square on | e 0, ½, 1; closing 2, 14; gravity 0, 20: 72 (3D 24) | to 28, ratio 10: 1000 (3D 96) |
-| series | 20 s of bounces of a ball and a flat box | e ½, 0.75, 0.9, 1; gravity 20, 80: 16 (3D 16) | three drops, 30 Hz too: 96 (3D 48) |
-
-3D has no step axis: physics3d is a mod, stepped at the simulation's fixed
-rate, where 2D's arrays step at any. Jolt is left out of the 3D families:
-its default damping changes every free step, so its contacts can't be found
-from its states.
-
-**How a bounce is measured** (`behave::hit`, the same code for every
-engine):
-
-- *From free flight.* The contact is the first step whose velocity changed
-  by more than gravity (or whose spin changed), the bounce's end the first
-  after it free again and moving apart. What an engine does in between
-  (substeps, speculative contacts, push-out) is its own; what it came in
-  and left with is measured the same.
-- *The whole energy, its height from where the body lies flat,* over what
-  it came in with: a corner's tilt is height it turns into speed as it
-  tips, which counted from the corner would read as gained.
-- *Past the push-out.* A soft contact pushes an overlap out through
-  positions, lifting a body without costing its speed, in every engine:
-  up to gravity times the deepest overlap may leave with the bounce. Past
-  that, energy is from nowhere (`excess`).
-- *Restitution's own measure* (`gain`): the rebound's energy along the
-  normal over the impact's, past e² (and the push-out), for the bodies
-  that meet square on: a ball, a box flat without friction. A corner
-  tips, and a box friction tips turns speed along the floor into speed off
-  it.
-- *Over time,* each apex by the centre's energy height, which free flight
-  keeps whatever the body turns; a box's apexes against each other aren't
-  judged, since its turn trades with its height at every bounce.
-
-**Bounds.** The analytic answer where there is one: no bounce leaves with
-more energy than it came in with (1%, past the push-out); square-on ones
-rebound at e of their impact speed (1% of the energy); nothing under
-`BOUNCE_THRESHOLD` bounces; two free bodies keep their momentum (a
-thousandth of the impulse); a lossless ball never rises past its drop (1%),
-and no bounce keeps more than e² of the last one's height. The references
-otherwise, by the rule for a single bounce above: the median square-on
-bounce no more than a quarter further under e² than the lower reference's,
-no more of them flat than the reference that misses most, what's kept of a
-speed along the floor or of a height a quarter further from all of it than
-the lower reference's.
-
-**Checked in the debug view** (`VIEW="hit corner e=1 v=5 g=20"` and the
-others): the corner meets the floor on its corner, a point pressed there,
-and leaves turned toward flat; the ball meets the free box square on and
-both part; an angled box slides as it meets.
-
-### What it showed, before any fix
-
-**Only against something gravity doesn't move.** At gravity 0 every engine
-bounces exactly (a gain of 0.000000 on every drop); between two free bodies
-too (1000 pairs, momentum to 0.0001), since gravity moves both alike. Every
-gain is off the floor, under gravity.
-
-**Exactly one step of gravity.** Restitution restored e times the closing
-speed with the step's gravity already in it (`integrate_velocities` adds it
-before contacts are found). Measured as the rebound over e less the speed
-at the step's start, in steps of gravity, on the square-on bounces that met
-at the surface, impact 1.1 to 7 (long grids):
-
-| | gravity 10 | 20 | 40 | 80 | 30 Hz, 20 | 30 Hz, 80 |
-|---|---|---|---|---|---|---|
-| ours | +1.008 | +1.001 | +1.000 | +1.000 | +1.000 | +0.999 |
-| Box2D | −0.043 | −0.035 | −0.020 | −0.014 | −0.017 | −0.009 |
-| Rapier | −0.054 | −0.034 | −0.010 | −0.012 | −0.012 | −0.006 |
-
-**So it scales as g dt over the impact speed.** The median square-on
-bounce's gain (its energy past e², a share of what it came in with) grows
-with gravity (+0.006, +0.010, +0.014 at 10, 20, 40) and the step (+0.025
-at 30 Hz against +0.016 at 60, gravity 20), shrinks with speed (+0.038 at
-1.1, +0.021 at 3, +0.002 at 14, gravity 20), and grows with e (+0.001 at
-0.2, +0.041 at 1), where the references lose (−0.036 to −0.17); balls,
-flat boxes and corners alike. Under the threshold it bounced what
-shouldn't once a step's gravity took the closing speed past it: 278 of the
-long drops under it (at gravity 80 a step's is 1.33); Box2D none. Over 20
-s a lossless ball climbs to 10.2 of its drop (short grid) and 42.6 (long:
-30 Hz, gravity 80), and a ball keeps a median 1.22 e² of its height a
-bounce. In 3D the same: 0.061 energy past the push-out on the short drops
-(0.39 a cube on its edge), a lossless sphere to 5.4 of its drop.
-
-**What else the families found, not this bug:**
-
-- *A speculative contact catches a falling body short of the floor*
-  (get-emj.69): the last substep's relax pass limits a body within the
-  margin (0.05) to what closes the gap in the next substep, which marks the
-  point pushed, and restitution bounces it from up to a substep's travel
-  above the floor (lore). It never leaves with more than it came in with,
-  but a slow bounce at low e keeps that height too: 9% of its impact
-  energy past e² at worst. Box2D's speculative distance is 0.02, so its
-  contact isn't there a step early.
-- *Through the margin.* A body faster than the margin a step passes the
-  surface in a free step and meets under it, having fallen the overlap
-  too, and the push-out gives the overlap back as height. Every engine
-  does (Box2D 58 of the long drops, Rapier 71, ours 66 once the step's
-  gravity is out): the push-out allowance is what keeps it from reading as
-  energy from nowhere.
-- *Rapier has no restitution threshold* (lore): it bounces a contact's
-  first step at any speed, and at e ≥ 1 every step: 535 of the long drops
-  under the threshold bounce, and a lossless ball rises to 1.2 of its drop.
-- *Box2D's single restitution pass* over a flat box's two points returns
-  0.88 of e, 22.6% of the energy lost; ours passes four times
-  (`BOUNCE_ITERATIONS`).
-- *A cube on an edge at e = 1 in 3D* tips, slaps its face and leaves with
-  up to 11% more than it came in with in Box3D (8% in ours once the step's
-  gravity is out): the one pass of restitution over its points.
-
-### How the references take it (read in their fetched source)
-
-- **Box2D v3.1.1** (`contact_solver.c`): `b2PrepareContactsTask` stores
-  each point's `relativeVelocity`, the normal speed of `vB + wB × rB` less
-  `vA + wA × rA`, before `b2_stageIntegrateVelocities` adds any substep's
-  gravity; `b2ApplyRestitution` skips a point whose `relativeVelocity` is
-  over −`restitutionThreshold` or whose `totalNormalImpulse` is 0, and
-  drives its normal speed to −e times it.
-- **Box3D 0.1** the same (`contact_solver.c`: `relativeVelocity` at
-  prepare, the same test in its restitution).
-- **Rapier 0.36** (`generic_contact_constraint.rs`): the restitution seed
-  is e times the normal speed `(vel1 − vel2) · n` when the constraint is
-  built, before its substeps' gravity; `is_bouncy` (`contact_pair.rs`)
-  bounces a new contact at e > 0 and an old one only at e ≥ 1, with no
-  speed threshold.
-- **Ours** took it in the solver's prepare from `SolverBody::v`, which the
-  step's gravity is already in: the solver takes it back out for the
-  substeps (`SolverBody::gravity`), but didn't for this.
-
-### The options, measured
-
-Each is a variant (2D `rot/closing=<n>`, `solver::Closing`; 3D
-`TUNE=closing=<name>`, physics3d's `Closing`), measured on every family,
-short and long, 2D and 3D (runbook 005, "The bounce families"). Taking the
-closing speed before gravity's integration by moving
-`integrate_velocities` after `find_contacts` is option 1 in effect: the
-speculative margin doesn't depend on velocity, so contacts are found alike,
-and only the `Contact` event's speed would differ.
-
-| option | 2D long drops: excess, median gain, flat (Box2D 534, Rapier 365) | 2D rates flat, short (references 8) / long (202) | 2D long series: highest, most kept of e² | 3D: tipping on the short drops (references 0.000); flat on the long (14) | bounds it breaks |
-|---|---|---|---|---|---|
-| 0, with the step's gravity in it (as built) | 12.4, +0.001, 68 | 0 / 74 | 42.6, 1.88 | 0.394; 1 | every energy law, 2D and 3D |
-| **1, before it** (Box2D's, Box3D's, Rapier's) | **0.000**, −0.018, 502 | **16** / **207** | 0.998, 1.08 | **0.050**; **25** | flat against the references where a step's gravity passes the threshold (2D short and long, 3D long); a tipping cube (3D short); get-emj.69's |
-| 2, with half of it | 4.35, 0.000, 248 | 4 / 126 | 28.1, 1.67 | 0.218; 9 | every energy law |
-| **3, before it, grown over the gap** (or the step's fall, if less) | **0.011**, −0.001, 148 | 8 / 131 | 0.998, 1.08 | **0.062**; 2 | the energy law by 0.1%, on 5 of 11 180 bounces (2D long); a tipping cube (3D short); get-emj.69's |
-| 4, the rebound less the step's gravity (e c − g h) | 0.000, −0.036, 711 | 20 / 320 | 0.998, 1.08 | – | flat, and the losses, against the references |
-| 5, with it, the threshold judged before it | 3.87, 0.000, 442 | 0 / 126 | 42.6, 2.24 | – | every energy law |
-
-(Option 3 grown over the whole gap, not capped at the step's fall,
-returned up to 22% more than it came in with where a speculative contact
-catches a body short of the floor, from a gap it never fell. Also tried
-and dropped: the fastest closing speed at the end of any substep, whose
-lossless ball rose to 1.14 of its drop; and bouncing only what a pushing
-pass pushed, which took get-emj.69 away and left 169 of 1600 angled
-bounces flat, where pong's ball needs a speculative contact to bounce it.)
-
-**Speed**, the default as it was (`--config=bench`, the median of 5
-runs): the turning pile of 10 000 at step 400, 6627 µs a step on the mod
-without the options and 6635 with them (the solver 4514 and 4537), 7649
-and 7664 on the arrays; rain of 10 000, turning, 6491 and 6452 (arrays
-5528 and 5550); 3D's 10 000 turning boxes 29.1 ms a step, then 29.7 and
-29.0 in two runs. Within the runs' own spread.
-
-**The families' tests against each option** (the default suite's, the
-ignored ones too: `SOLVER=rot/closing=<n>`, 3D `TUNE=closing=<name>`):
-with the step's gravity (0) the four law tests fail in 2D and three in
-3D; before it (1) they pass, and the losses test fails in 2D (16 rates
-flat, 8 allowed) and the energy test in 3D (the tipping cube); with half
-of it (2), a half step more than 1, the law tests fail again; grown over
-the gap (3) every one passes in 2D, and in 3D all but the energy test.
-Restitution ignored (planted: no closing speed at all) fails the losses
-test in 2D and 3D, beside the single drops' own.
-
-### The decision: before the step's gravity
-
-Restitution takes a contact's closing speed as the step began, before the
-gravity `integrate_velocities` added (`solver::Closing::Before`, and
-physics3d's `Closing::Before`, the default in both). Why:
-
-- **It is what every reference does.** Box2D's `relativeVelocity`, Box3D's
-  and Rapier's restitution seed are all taken before the step's gravity.
-- **It can't add energy.** No bounce of the 12 780 in 2D's long grids
-  leaves with more than it came in with past the push-out's lift (0.000),
-  none in 3D's but the tipping cube, the lossless ball never rises (0.998
-  of its drop), and nothing under `BOUNCE_THRESHOLD` bounces. A bounce
-  loses up to a step of gravity instead, by where in the step it meets,
-  as the references' do (the median long drop −0.018 of its energy,
-  theirs −0.063).
-
-What it leaves, each an ignored test naming its bead:
-
-- **Bounces missed near the threshold at large g·dt** (get-emj.71): where
-  a step's gravity is large against the threshold (30 Hz at gravity 80:
-  2.67 a step), more bounces go flat than in the references (16 against 8
-  on the short rates grid, 207 against 202 on the long, 25 against 14 in
-  3D's long drops), likely our wider speculative margin catching a body a
-  step early (get-emj.69).
-- **A bounce caught short of the floor** (get-emj.69): the restitution
-  law's failures on the long grids, and 1.08 of e² kept a bounce at 30 Hz
-  and gravity 80.
-- **A slow cube tipping onto its face at e = 1** in 3D (get-emj.72): 0.050
-  past the push-out on the short grid, where the references are at 0.000.
-- **Piles:** a bounce at restitution 0.1 (a pile's) returning a little
-  less is enough to move chaotic piles. Per-size bounds on them flipped
-  under every closing speed weighed, and were replaced by bounds on each
-  family's medians (physics-testing.md, "Families of a law"). Two family
-  medians it moves: the locked piles 401 wide rest from 240 against a bound
-  of 237 (230 before), a bound inside the family's measured spread
-  (get-emj.73; get-emj.67); and more of the locked piles 81 wide rest and
-  then move again (median 310, before 260, both ignored under
-  get-emj.63, where the rests are a clue).
-
-The games are as they were: pong's ball has no gravity, under which every
-closing speed is the same, and nothing in the platformer has restitution;
-both replay their routes unchanged. The baselines moved on the bounces
-alone (the families' statistics, the single drops' apexes), none of the
-piles' past its band.
-
-**Rejected: grown over the gap** (option 3), ours: the closing speed
-before the step's gravity grown by gravity over the gap left, or the
-step's fall. Unbiased (the median long drop −0.001) and the fewest flat
-(148 on the long drops against 502), but it adds energy where the gap
-isn't the fall: 5 slow flat boxes of the 11 180 long bounces leave 1.1%
-past the push-out, over the energy law, and uncapped it returned up to
-22% where a speculative contact catches a body short. It's also ours
-alone, where no reference does it. It stays a variant (`rot/closing=3`,
-`TUNE=closing=met`), with the others.
-
-[^bounce]: 2026-09-29: until then restitution took a contact's closing
-    speed with the step's gravity already in it (`Closing::Stepped`, still
-    a variant), which returned exactly one step of gravity more than a
-    bounce came in with: a lossless ball climbed to 1.64 of its drop in 2D
-    and 1.31 in 3D, and the bounce families' tests were ignored naming
-    get-emj.56 and .60. The families were built first, with the options
-    measured on them before one was chosen (above).
-
-## Still at rest
-
-**Status: built** (2026-09-27, get-emj.41-43; 2D as a setting). The three
-known failures of [Quality as a test](#quality-as-a-test) were thought one
-cause, a box rocking on its points. Instrumented (every body's motion and
-every contact's points, ids and impulses, step by step, read from the
-world), they are three:
-
-- **Planks in 3D chatter on flickering manifolds** (get-emj.43). A plank
-  at rest has contacts whose loaded points change from one step to the
-  next and back: a vertex of the incident face lying on a side plane of
-  the reference face is kept one step (its id the vertex) and clipped the
-  next (its id the side and the plane), the same point under two ids; and
-  a clipped polygon of more than four points reduces to two different
-  fours in turn, a point carrying 0.08 of load jumping 0.21 across the
-  plank every step or two, as the plank's rock moves which is deepest.
-  Warm starting found 1188-1191 of 1191 points a step, so what feeds the
-  rock is the moving support, not lost impulses: warm starting by the
-  nearest point instead of by id changed nothing. Energy bursts came
-  every 9-10 steps, a pile at 1e-7 a body where Rapier's and Box3D's are
-  under 1e-11.
-- **A short stack in 3D circles on its corners** (get-emj.42). The five
-  cubes (each set off by up to 0.04, so the load sits off centre) circle
-  as one column at 4.3 Hz, the top 3 mm round at 0.075, the floor
-  contact's unloaded corner going round with it, energy steady at 1e-3 a
-  body from step 400 to 1000. Ids and points stay put. It hangs on the
-  stiffness against the floor: at 0.4 of the substep rate (120 Hz) it
-  never stops; at 0.3 it decays (9e-8 a body at 1000); at 0.25 or 0.2 it
-  rests at once. A cube on four points rocks at 1.22 times its contacts'
-  rate (each point's stiffness is set at its own effective mass, and the
-  four sum to 1.5 times the nominal along each rocking axis), so 0.4 puts
-  the rocking at 0.49 of the substep rate, where Box2D caps static
-  contacts at 0.5 and Box3D at 0.25.
-- **A tall stack in 2D sways near its buckling load** (get-emj.41). The
-  20-high turning stack bends as a column, each contact a rotational
-  spring of m ω² d² / 2 (22 000 N m at 75 Hz), under gravity 20: its
-  weight is 92% of the load that buckles such a column (q L³ = 7.84 EI),
-  so its first mode is slow (a 12 s period) and keeps 0.6 of its energy a
-  swing. The model predicts what was measured: at 60 Hz (0.2) it topples,
-  as Box2D's does at 30 Hz; at 90 Hz (six substeps) it stands further
-  from buckling, swings every 4 s and rests from 60. Rapier's sways too:
-  up to 2.8e-4 a body over its last 200 steps against ours' 5.6e-4, and
-  the 1.5e-7 the test's energy bound was ten times was the step where its
-  swing turned. What differs is speed: ours passes 0.05 until 580,
-  Rapier's from 220.
-
-### What the others do (read in their fetched source)
-
-- **Box3D** recycles a contact whose bodies barely moved (`b3CollideTask`,
-  physics_world.c: "Keep anchors but update separation, same as
-  sub-stepping. This eliminates jitter"): the manifold isn't found again
-  until the pair may have moved 0.05 since it was (a bound on its
-  translation plus its turn at its reach), its anchors carried with the
-  bodies, its separation updated. Its reduction to four is a pecking
-  order ("very important for contact point consistency across time
-  steps"): the first point the one farthest along a fixed tangent, not the
-  deepest, and each later candidate must beat the best by 5%. Contacts
-  are at most an eighth of the substep rate, static ones twice that at
-  half the damping. It warm-starts from the last substep's impulses, as
-  Box2D and Rapier do; ours from their mean.
-- **Rapier 0.36** keeps the arms of a contact whose pair barely moved, and
-  in 2D, by default, solves a manifold's two normals together as a 2x2
-  LCP (`solve_mlcp_two_constraints`, the `block-solver` feature, off in
-  3D), as Box2D v2.4 did. It solves speculative points rigidly, noting
-  that a softened touchdown "pumps tall stacks" (ours already does).
-- **Jolt** keeps manifolds in its body pair cache while bodies barely
-  move.
-
-### The options, measured
-
-Each run over more sizes than the tests, since settling is chaotic
-(docs/lore): 3D plank piles at 14 sizes, 150-800 (and 14 more, 175-825,
-for the finalists) and 8 of 900-2000, cube piles at 14, stacks 2-25 high;
-2D turning piles at 11 sizes, 400-1400. "Chatter" is a pile over 1e-8 a
-body at the end, "late" at rest after 604 (the planks' bound). Every
-variant is behind `physics3d::Tuning` or the comparison's `arrays:rot/...`.
-
-| 3D, turning | planks 150-800: chatter, late, median rest | planks 900-2000 | cubes 150-800: median rest | stack 5 |
-|---|---|---|---|---|
-| before (every pair found every step, static 0.4) | 9, 5, 341 | 4, 5, 772 | 200 | never |
-| (1) static contacts at 0.25 (Box3D's cap) | 2 of 4 in the test | – | – | rests |
-| (2) moving contacts at 0.15, or both at Box3D's 0.125 / 0.25 | 1 of 8 at Box3D's | – | – | rests, but the 20-high topples and piles sink past their bounds |
-| (3) three relax passes | 1 of 4 in the test | – | – | rests |
-| (4) eight substeps | 2 of 4 in the test | – | – | rests |
-| (5) warm starting from the last substep (`carry=last`) | 11, 3, 340 | – | – | rests |
-| (6) relax passes alternating direction | 1 of 4 never at rest | – | – | never |
-| (7) Box3D's reduction as it is (measured, then removed) | 4 of 8 | – | – | never |
-| (8) recycling at 0.02 | 0, 0, 263 | – | 209 | never |
-| (8) + (5), at 0.02 / 0.03 / 0.05 | 1 / 0 / 0 of 28 (0.020 deep at 0.05) | at 0.03: 0, 2, 392 | at 0.03: 169 | rests |
-| **(8) at 0.03 + (1), as built** | **0, 0, 298** | **0, 0, 288** | **200** | **rests** |
-| (8) + (7) + (5) | 0 of 14, 0.022 deep | – | – | – |
-
-Also no change on the stack: anchors to first order, inertia every
-substep, the exact turn, friction in the push. Softer damping (ζ 5, and 5
-for static contacts, as Box3D has it) moved piles either way, beyond the
-noise. Stacks of 16-25 keep 1e-8 a body or more in every row, the 25
-never rests: they sway, as 2D's (below), and their bounds allow it.
-
-- **Recycling is what stills the planks**, and alone: a resting pair
-  keeps its points, so nothing flickers to rock on. The pecking-order
-  reduction halves the chatter without it and adds nothing with it;
-  warm starting by position doesn't touch it.
-- **The short stack wants softer floor contacts or a warm start from the
-  last substep.** The last substep is what the references do, and the
-  mean lags a rocking contact by two substeps; but with recycling it let
-  piles of 1000 planks rest later (392 against 288, median; 701 at 1000,
-  past its bound of 556), so it stays a variant (`Carry::Last`). Static
-  contacts at 0.25 are Box3D's cap, and leave the rocking at 0.31 of the
-  substep rate.
-- **0.03, not Box3D's 0.05**: at 0.05 a carried plank point drifts, and a
-  pile is 0.020 deep at rest (the bound is 0.015); 0.02 let one pile of 28
-  chatter. Spheres aren't recycled: one point has no features to flicker,
-  is found for less than it costs to carry, and a carried point on a
-  rolling sphere rolls away from where it touches.
-
-**Why this one.** Recycling and static contacts at 0.25 pass every 3D
-quality test, the long ones included, which the ignored ones now are:
-10 000 turning planks at rest from 335 (never before; Rapier 392, Box3D
-369), 1000 from 324 (408). It is also faster. One thread, `-c opt`, the
-bench's whole run, ours only, before and after (2026-09-27):
-
-| turning | whole run ms | narrowphase µs | solver µs | at rest from | deepest | energy a body |
-|---|---|---|---|---|---|---|
-| boxes 1000 | 2.78 → 2.57 | 343 → 178 | 2282 → 2243 | 180 → 182 | 0.0071 → 0.0073 | 3.5e-11 → 5.8e-10 |
-| boxes 10 000 | 30.3 → 27.0 | 3737 → 1763 | 24 245 → 23 365 | 374 → 468 | 0.013 → 0.013 | 9.4e-10 → 9.9e-9 |
-| planks 1000 | 3.36 → 3.03 | 596 → 307 | 2561 → 2518 | 408 → 324 | 0.010 → 0.014 | 1.0e-9 → 1.1e-12 |
-| planks 10 000 | 44.2 → 38.2 | 7130 → 3667 | 33 594 → 31 687 | never → 335 | 0.024 → 0.035 | 2.0e-6 → 6.1e-10 |
-| spheres 1000 | 1.81 → 1.95 | 96 → 93 | 1552 → 1681 | never | 0.0070 → 0.0056 | 8.5e-7 → 7.0e-6 |
-| spheres 10 000 | 21.7 → 22.0 | 1109 → 1012 | 18 212 → 18 425 | never | 0.017 → 0.016 | 1.2e-5 → 8.3e-7 |
-| rain 10 000 | 20.1 → 19.9 | 2412 → 1884 | 14 877 → 14 976 | never | 0.0022 → 0.0049 | 8.5e-3 → 8.1e-3 |
-
-Locked, boxes and planks 10 000: 29.8 → 29.1 and 21.1 → 20.3 ms (the
-narrowphase 3857 → 2021 and 2481 → 1343 µs). The narrowphase halves on
-piles, most pairs at rest carried; a contact's `Manifold` is 40 words,
-not 31 (each body's rotation when its points were carried, and the bound
-on the pair's move). Spheres, which no engine brings to rest (they roll),
-move by a run's noise. Piles sink a little deeper against the floor (the
-planks at 10 000 0.035, against Rapier's 0.076).
-
-**2D: a setting.** Every option that stands the 20-high stack costs
-something the default shouldn't pay without a decision (get-emj.41):
-
-| 2D, turning | stack 20: at rest from, most energy a body in the last 200 | pyramid 5050: at rest from, most in the last 200 | piles 400-1400: median / worst rest | solver µs, pile 10 000 settled / pyramid 5050 |
-|---|---|---|---|---|
-| as built | 580, 5.6e-4 | 440, 2.3e-8 | 270 / 440 | 9312 / 7416 |
-| six substeps | 60, 1.3e-4 | 340, 9.0e-11 | 220 / 340 | 10 913 / 9157 (+17%, +23%) |
-| the block solver in the relax passes (`block=1`) | 240, 2.5e-4 | 1130, 1.2e-6 | 280 / 400 | 8343 / 7153 (−10%, −4%) |
-| the block solver in the pushing pass too | 240 | – | the 10-high stack and a pile of 1000 past their energy bounds | – |
-| warm starting from the last substep[^last-substep] | 240, 2.9e-4 | – | 250 / 540; a locked pile of 1300 never rests | – |
-| three relax passes | 230 | 510 | – | +40% |
-| contacts at 0.2 (60 Hz) or 0.125 | topples | – | – | – |
-| Rapier | 220, 2.8e-4 | 1100, 8.2e-8 | – | – |
-
-Six substeps get better everywhere, and cost a fifth of the solver in
-every scene, locked or turning (rain 10 000 2410 → 2949 µs). The block
-solver is cheaper than solving the points one after the other, but sets
-the big pyramid vibrating for a thousand steps, whole rows at 0.3 (as
-Rapier's, whose block solver is on in 2D, rests at 1100 too). The block
-solver stays a variant.
-
-**Decided** (2026-09-27, get-emj.41): the substep count is a setting in
-the world, `physics2d::Tuning` on one entity as 3D's `Tuning` is, read by
-the solve every step; none, or 0, is the default five. That is what both
-references do (Box2D's 4 substeps and Rapier's 4 iterations are each a
-default and a knob), and it costs no game what it didn't choose. The
-20-high stack's test runs at six through it, on the mod in the engine
-(`a_twenty_high_stack_that_turns_rests_as_soon_as_rapiers_at_six_substeps`,
-at rest from 60), and `the_mod_solves_at_the_substeps_its_world_sets`
-holds the mod at six to the arrays at six bit for bit, and apart from them
-at five; with the setting ignored, both fail (the stack at rest from 580).
-The arrays (`tests/arrays.rs`) solve at the default only, and refuse a
-world with another. The default is to be revisited once the solver's
-speed work has landed, on the new base.
-
-**The tests.** A stack's or pyramid's energy is now bounded by the most at
-any look over its last 200 steps (`Settling::energy_tail`), from the
-references' same measure: at one step a swaying scene says where in its
-swing it was. Only the swaying references' values moved (the turning
-stacks). 3D keeps its energy at the end: its references are still.
-Planted, each fails what it should: recycling off (`recycle=0`), the
-planks' energy (1.5e-7) and rest; static contacts at 0.4, the five-high
-stack; a recycled point's separation grown three times too fast,
-`a_settling_box_keeps_its_contact_and_a_sliding_one_is_found_again`,
-`a_box_stack_stands` and every 3D pile; recycling that never ends, four
-physics3d tests; the block solver's coupling halved, its unit test.
-
-## The solver's speed
-
-**Status: built** (2026-09-27). With bodies turning, the 2D solver was 2
-to 4 times Box2D v3.1.1's and Rapier 2D 0.36's (8215 µs against 2626 and
-3999 on the settled turning pile of 10 000, 7324 against 1725 and 2425 on
-the 5050 pyramid; [Against other engines, bodies
-turning](#against-other-engines-bodies-turning)). It now solves four
-contacts at a time and takes about half the time: within 10% of Box2D's
-at Box2D's number of passes, and 1.7 to 1.8 times it at ours, which are a
-quality choice ([Settling](#settling), [Still at rest](#still-at-rest)).
-Built grouped by level of the sweep in pair order, the same computation
-as before bit for bit, so that nothing the quality tests bound moved.
-Graph coloring, the order threads would share, let a turning 5050 pyramid
-fall; that turned out to be a flaw in how a step warm-starts turning
-contacts, found and fixed on 2026-09-28 (get-emj.48, [Why colors let the
-pyramid fall](#why-colors-let-the-pyramid-fall)), which did move results,
-and for the better. Since get-emj.61 (2026-09-28) the default groups by
-Box2D's colors, with a turning point's normal carried from the last
-substep and its tangent averaged ([What a turning point
-carries](#what-a-turning-point-carries-the-decision-matrix)): bit for bit
-the loop one contact at a time over the colors' order, which is what a
-parallel solve over the same colors can be too, so that going parallel
-is speed work alone.[^levels-default]
-
-### Where the time went
-
-The solver alone, on the same inputs, timed by stage
-(`./bazel run --config=bench //engine/std/physics2d/compare:solver_bench`, which
-captures the solver's input from the comparison's turning scenes at the
-steps it times; the stages by clocks put in a copy, since removed). µs
-per step, one thread, the turning pile of 10 000 (22 136 contacts, every
-one with points) and the 5050 pyramid (14 950):
-
-| stage | passes a step | pile, one at a time | pyramid, one at a time | Box2D's, pile (`b2Profile`) |
-|---|---|---|---|---|
-| preparing contacts | 1 | 1000 | 388 | 211 |
-| warm start | 5 (Box2D 4) | 493 | 345 | 214 |
-| the pushing pass | 5 (4) | 1645 | 1331 | 935 (with friction) |
-| moving bodies | 5 (4) | 103 | 52 | 152 |
-| relaxing passes | 10 (4) | 5311 | 5268 | 934 |
-| summing the substeps' impulses | 5 | 237 | 158 | – |
-| restitution, storing impulses | 1 | 141 | 37 | 149 |
-| **all** | | **9255** | **7550** | **2596** |
-
-- **It was latency, not arithmetic.** A relaxing pass was 24 ns a contact
-  on the pile and 35 on the pyramid, about 120 to 175 cycles. A contact's
-  four impulses (two points' normals, then their friction) each read the
-  velocities the last one wrote, and in pair order the next contact
-  shares a body with this one (pairs sort by their first body; a pyramid's
-  chain of contacts is the order), so every contact waited on the one
-  before. Box2D's pass is 44 ns a batch of four.
-- **Box2D** (read in v3.1.1's `solver.c`, `contact_solver.c`,
-  `constraint_graph.c`): contacts colored as they begin touching and kept
-  in their color (12 colors, the last an overflow solved one at a time;
-  a contact with a static body never in color 0), each color's contacts in
-  batches of 4 (SSE2) or 8 (AVX2) laid out field by field
-  (`b2ContactConstraintSIMD`, a one-point contact's second point zeros,
-  a color's last batch padded), bodies one array of 32-byte states
-  (`b2BodyState`: velocity, turn rate, move and turn this step) gathered
-  and scattered by transposes, inverse masses kept by each contact. A step
-  is one prepare, 4 × (warm start, pass, relax), restitution (skipping
-  batches with none), storing: 12 passes to our 20.
-- **Rapier 0.36** (its fetched source; a staged island solver, not the
-  upstream `VelocitySolver`): contacts colored in the narrowphase too,
-  by `u128` masks per body (dynamic pairs from the lowest color, pairs with
-  a fixed body from the highest), each color cut into chunks of 4
-  (`wide::f32x4` through simba) with body velocities gathered by
-  transposes; 4 substeps × (update and warm start, one biased pass
-  without friction, one unbiased with it), restitution once if anything
-  bounces: 12 passes.
-
-### The options, measured
-
-Each on the same captured inputs, one at a time before combining; µs per
-step, the median of 9 solves of each of 3 inputs; "bit for bit" is every
-body's velocity and turn rate against one contact at a time in pair order:
-
-| option | pile 10 000 | pyramid 5050 | bit for bit |
-|---|---|---|---|
-| one contact at a time in pair order, as it was | 9104 | 7470 | – |
-| the lanes' layout alone: batches of one, pair order[^pair-lanes] | 10 335 | 6434 | yes |
-| by level, 1 lane | 8793 | 5475 | yes |
-| by level, 4 lanes (built first) | 4485 | 3075 | yes |
-| by level, 8 lanes (two SSE2 registers) | 4522 | 3139 | yes |
-| graph-colored as Box2D, 1 / 4 / 8 lanes (4 the default since get-emj.61) | 8748 / 4356 / 4243 | 5456 / 2937 / 2782 | no: another order[^colored-fell]; against its own order one at a time, yes |
-
-Then, each alone on 4 lanes by level, bit for bit unless said:
-
-| change | effect |
+How soon a scene comes to rest, how deep it sinks while it does and once
+it has, what energy is left, whether stacks and pyramids stand and
+nothing escapes, how a box slides and a ball bounces, and that sleeping
+follows, are tests in 2D and 3D, locked and turning, bounded by what the
+reference engines do on the same scenes (each test's comment has the
+reference values) and held both ways to our own accepted results, each
+within a band set from measured noise. A known failure is an ignored test
+naming its bead, not a looser bound.
+
+| target | what |
 |---|---|
-| restitution skips a batch no lane of which can bounce, before gathering | 189 → 38 µs of restitution on the pile |
-| the warm start's velocities stored in the batch before scattering | the pile 4915 → 4628 µs: the stores seed LLVM's SLP vectorizer, which had left the warm start scalar (80 `mulss`, 16 `mulps`; after, none and 28) |
-| the relaxing passes' bias found by the substep's first and read by the second (positions don't move between them) | −2.5% on the pile, −3.6% on the pyramid |
-| `prepare` inlined | the prepare's loop 642 → 417 µs |
-| **rejected:** the same stores in the passes, which LLVM vectorized already | no gain (4631 → 4714) |
-| **rejected:** batches filled one after another, reading contacts in the order they're solved | the prepare 887 → 1223 µs: reading them in pair order and writing to their batch is cheaper |
-| **rejected:** hot fields apart from cold ones | not built once batches padded by 128 bytes (17%) measured the same (4915 → 4868): the passes aren't bound by memory |
-| six substeps (a `Tuning`) | +17% (5226, 3583) |
-| one relaxing pass | −26% (3337, 2289); fails the quality tests ([Rotation in the soft step](#rotation-in-the-soft-step)) |
-| Box2D's passes: 4 substeps, 1 relaxing | 2822, 1910 to 2247 against Box2D's 2596 and 1725: within about 10% like for like; fails on depth and rest |
+| `//engine/std/physics2d/compare:quality_test`, `:quality_long_test` (manual) | 2D piles, pyramids, stacks, sleeping, the families, the mod bit for bit the arrays and across threads, the baseline |
+| `//engine/std/physics2d/compare:behaviour_test`, `:behaviour_long_test` (manual) | 2D ramps, bounces, mass ratios, overlap recovery, fast bodies, card houses, ladders, dominoes, the families at the edge |
+| `//engine/std/physics3d/compare:quality_test`, `:quality_long_test` (manual) | 3D piles of cubes and planks, stacks, the families, the baseline |
+| `//engine/std/physics3d/compare:behaviour_test`, `:behaviour_long_test` (manual) | 3D ramps, bounces, mass ratios |
+| `//engine/std/physics3d:exact_test` | the 3D fingerprint, and the lanes and the shared states bit for bit |
 
-- **Levels first, then colors.** The sweep in pair order makes a contact
-  wait only on earlier contacts sharing a body it moves. A contact's
-  level is one past the latest such contact's (in pair order, the level
-  its bodies' last contact left, so one pass finds it), and solving the
-  levels in turn, each contact sees the bodies exactly as the sweep would
-  have left them: it is the sweep bit for bit, with no two contacts in a
-  level sharing a moving body, so a level's contacts can go in lanes.
-  This is level scheduling, as sparse triangular solves run in parallel
-  (Anderson and Saad, 1989). A pile of 10 000 has about 420 levels, a
-  5050 pyramid 590, and their batches are 97% and 94% full. Colors are 6
-  or 7 and solve 3% faster, in another order, so another computation, but
-  the same argument holds of them: no two contacts in a color share a
-  moving body, so solving the colors in turn is the sweep over the
-  contacts in the colors' order (`solver::order`), bit for bit. That
-  makes the colors the default (get-emj.61): with 6 or 7 of them a pass
-  threads can share them, where 420 to 590 levels would be as many
-  barriers, and a parallel solve over the colors can be the one-thread
-  solve exactly. Pair order is still the better order for a pyramid,
-  which it walks row by row from the ground (by level the 5050 rested
-  from 450, colored from 780); with the normal carried and the tangent
-  averaged, colors meet every bound in every order, which pair order
-  didn't ([What a turning point
-  carries](#what-a-turning-point-carries-the-decision-matrix)).
-- **Four lanes, not eight**: SSE2 is x86-64's baseline, and Box2D was
-  measured at SSE2; eight are two registers each, 1% slower on the pile
-  and 10% slower on the pyramid of 210.
-- **Plain arrays, no intrinsics and no unsafe**: `lanes::F` is an array
-  of `f32` with each operation a loop over the lanes, and LLVM made
-  SSE2 of it (checked in the disassembly: the relaxing pass 110 `mulps`,
-  no `mulss`), but only where a vector store seeds it, which is what the
-  warm start's stores are for. `std::simd` isn't stable; `std::arch`'s
-  loads and stores need `unsafe`.
-- **The layout** is Box2D's: bodies copied each step into one array of
-  32-byte states (velocity, turn rate, move and turn this step), their
-  masses kept by each contact; contacts in batches, field by field, a
-  one-point contact's second point and a batch's empty lanes zeros at a
-  body nothing moves. The copy is the solver's own layout for the step, as
-  decided in [What the ECS costs](#what-the-ecs-costs); nothing persists
-  outside the world.
-- **A world where nothing turns keeps the loop one contact at a time**:
-  it is level with Box2D already, and a lanes kernel adds a row's zero
-  turns, which isn't that loop to the bit the games' replays hold to
-  (get-emj.51). `Wide::Off` keeps the loop for turning contacts too: the
-  variants that only it has (the block solver, other separations) and
-  the test that the lanes are it bit for bit.
+How the bounds are set, the baseline and its bands, the families and the
+exact fingerprint are [physics-testing.md](physics-testing.md); how to run
+the comparisons and the debug view (`view.rs`, every engine's bodies and
+contacts side by side, as SVG or text) is [runbook
+005](../runbooks/005-compare-physics-with-other-engines.md).[^quality]
 
-**The tests.** `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
-(`:quality_test`) holds the default, colored in four lanes, to the loop
-one contact at a time over the colors' order (`rot/scalar=1/order=4`)
-bit for bit on a turning pile and pyramid over 150 steps, and checks that
-the loop in pair order differs, so an order is visible to it: it is the
-test a parallel solve over the colors has to pass too. Planted, it fails
-on a color off by one (a contact marking the color after its own as
-taken, so the next contact at its body can share it) and on one sum in
-the lanes' separation reassociated. Both sides solve the same order, so
-a change to the order alone passes it (a static contact kept out of
-color 1 instead of color 0): `core_test`'s
-`contacts_are_colored_as_box2d_colors_them` pins Box2D's rule on five
-contacts, and fails on both planted changes to the colors. The level
-path stays as a variant with its test,
-`the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`
-(`rot/levels=4` against `rot/scalar=1`), which fails on a level off by
-one and on the same reassociated sum. The long quality tests take 24 s
-where they took 38.
+## Against other engines
 
-### Against the others now
+The comparisons (`//engine/std/physics2d/compare` against Box2D v3.1.1
+and Rapier 2D 0.36; `//engine/std/physics3d/compare` against Rapier 3D
+0.36, Jolt 5.6 and Box3D 0.1) run every engine on one thread, ours
+included, on the same scenes, matched as the runbook says (2D's timed
+row is `Ecs::alone`, with no pool; 3D's is `Config::threads`'
+`Threads::One`). A row of ours on its own pool of n threads, pinned to
+one CCD, is added and named apart (2D `VARIANTS=threads:<n>`, 3D
+`--threads=<n>`); the references in it still run on one.[^cmp-threads]
+Where ours stands now:
 
-The comparison (runbook 005), before and after, the same session, one
-thread, `-c opt`, medians of 3 runs; each cell the step, then the solver
-stage, µs (the ECS mod; the arrays' solver agrees within 2%):
+- **Quality**: at least level everywhere the tests look, and ahead on
+  depth: piles and pyramids rest as soon as the references' and sink a
+  quarter to a fifth as deep (3D a third), in 2D heavy boxes stand where
+  the references crush them, and the hand calculations (ramps, ladders,
+  bounces) are met as closely as any reference meets them. Short of the
+  references: 3D's card houses and tall columns (get-emj.98,
+  get-emj.99), a heavy box on light ones resting late (get-emj.57), and
+  no continuous collision (get-emj.59).
+- **Time, on one thread**: in 3D ours costs about 1 to 2.3 times Rapier
+  and Box3D (below), where it was 1.3 to 3 times on 2026-09-26. Most of it is
+  the solver's passes, a quality choice: five substeps of three passes
+  against the references' four of two. On eight threads ours is faster
+  than every reference, but they ran on one: that row is how ours
+  scales, not a like-for-like comparison. 2D's timings weren't re-run
+  with this (its timed row was one thread's already): the log's tables
+  stand.
 
-| scene, turning | ours before | ours after | Box2D | Rapier |
-|---|---|---|---|---|
-| pile 1000, settled | 953 / 732 | 661 / 457 | 380 / 256 | 383 / 320 |
-| pile 10 000, falling | 3116 / 1870 | 2347 / 1110 | 2749 / 642 | 2589 / 1011 |
-| pile 10 000, settled | 10 598 / 8463 | 6639 / 4525 | 4452 / 2665 | 4901 / 3991 |
-| pyramid 210 | 368 / 294 | 216 / 141 | 111 / 72 | 106 / 93 |
-| pyramid 5050 | 8774 / 7334 | 4598 / 3094 | 2974 / 1758 | 2865 / 2489 |
-| rain 10 000 | 8606 / 5806 | 6334 / 3502 | 4997 / 1969 | 6593 / 2394 |
+**3D, measured 2026-10-04** (get-emj.113): ms a step over the whole run,
+`./bazel run --config=bench //engine/std/physics3d/compare:bench -- all
+1000,10000 all [--rotate] --threads=8`, 1000 bodies the median of three
+runs and 10 000 one, every engine at its defaults. Other agents' work
+loaded the machine (load average 6 to 34), so take ±15% as noise; the
+cases marked † were run again once it dropped, and planks 10 000
+turning, two values each, stays unreliable.
 
-Locked, where the code didn't change, within the runs' noise (the pile of
-10 000 settled 2415 → 2474 µs of solver, the pyramid 2202 → 2247). `:tax`,
-ECS / arrays: the turning pile of 10 000 settled, frame 10 568 / 11 338 →
-6750 / 7825, solver 8399 / 7999 → 4576 / 4487, bit for bit as before; 1000
-settled, 935 / 1047 → 680 / 787. The solver is now 1.1 to 1.3 times
-Rapier's and 1.7 to 1.8 times Box2D's where contacts press, from 20 passes
-to their 12 and a prepare twice Box2D's (get-emj.50); the step is 1.5 times
-Box2D's on the settled pile, where the narrowphase and upkeep are ours.
-
-**What it means for threads** (get-emj.32, get-znt.5): the levels were
-the one-thread schedule. 420 to 590 of them would be as many barriers a
-pass, where a barrier costs 0.19 µs on one CCD ([Parallel
-solving](#parallel-solving)): 80 to 110 µs a pass, more than the pass. The
-parallel solve is colors, and since get-emj.61 so is the one-thread
-default: the same batches, lanes and layout, so threads taking a color's
-batches between them compute what one thread does, and
-`the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
-is the test they have to pass.
-Built since: [Solving across threads](#solving-across-threads), which
-passes it, and its own test against one thread.
-
-**3D** (engine/std/physics3d) has the same structure, rows in pair order,
-and the level schedule applies to it unchanged. Alone, rows reordered by
-level one at a time, it gained 1 to 2% (boxes of 10 000 turning 25 072 →
-24 793 µs of solver, planks 32 514 → 31 841, bit for bit), so it wasn't
-landed: the gain is the lanes, and 3D's kernel is its own (four points,
-friction on a disc at the centroid, twist, the `Tuning` variants). Built
-since (get-emj.52, [The solver in lanes](#the-solver-in-lanes)), bit for
-bit, by the same levels, now `physics_common::levels`.
-
-### Why colors let the pyramid fall
-
-**Status: found and fixed** (2026-09-28, get-emj.48). Solved in Box2D's
-colors, a turning 5050 pyramid never came to rest and came apart, its top
-5 lower and boxes leaning 37°, where Box2D's pyramid, solved in the same
-colors, stands. It wasn't the colors. A turning contact's points began
-each step from the average of the last step's substeps' impulses, where
-Box2D's begin from where the last substep left them; the average lags
-two substeps behind, and every order but pair order leaned on it. The
-points now carry out their last substep's impulse (times the substeps,
-so the next step's share of it is that impulse), and colors stand the
-pyramid and pass every quality test.
-
-**Any order but pair order, not colors.** `arrays:rot/order=N`
-(`variants.rs`) solves the contacts in another order one at a time (the
-solve by level is the sweep of whatever order it is given, bit for bit):
-reversed, shuffled afresh each step, or row by row from the top down.
-Turning unless said, before the fix, at rest from (and the top box's
-move):
-
-| order | pyramid 20 | pyramid 50 (1500 steps) | pyramid 100 (2500 steps) |
-|---|---|---|---|
-| pair order (by level) | stands (0.011) | 160 (0.065) | 440 (0.26) |
-| colored | stands (0.011) | never: the top slid 1.29 | never: the top 5.06, boxes 37° |
-| reversed | stands (0.012) | 730: the top slid 0.75 | never: flies apart |
-| shuffled each step | stands (0.011) | 680 (0.065) | never: the top slid 0.73 |
-| rows from the top down | stands (0.013) | 660: the top slid 0.20 | never: the top slid 2.65, boxes toppled |
-| locked: pair / reversed / shuffled / top down | – | 60 / 60 / 80 / 190 (700 steps) | 150 / 150 / 260 / never |
-
-- **It needs size and stiffness, not rotation.** Small pyramids stand in
-  every order; the worse the order, the smaller the one that falls.
-  Locked, only rows from the top down fail, which in a stack's first
-  pass carry nothing down (the top pair both fall at the same speed);
-  turning adds a way to fail (a box sliding on the one below), which is
-  what colors and shuffling found. Ten substeps (as stiff, since
-  stiffness is a share of the substep rate) fell as five.
-- **It starts at once.** The pyramid starts flush and sinks onto soft
-  contacts under its weight, so in the first steps its top bounces at 1
-  to 2 a second in every order. Pair order has it down to 0.04 by step
-  100 on the 50 pyramid; colored, reversed and shuffled keep it at 0.5 to
-  1.7, and it turns into boxes sliding off each other.
-- **What kept it going** (the substeps' normal impulses summed over the
-  pyramid, each substep's total against the step's warm start, printed
-  step by step): the pyramid breathes, slowly (a period of about 40
-  steps), and through the half of a swing where it presses harder, every
-  step's substeps climb the same way: colored, steps 304 to 315 each
-  ended 1.13 to 1.25 times where it started. The next step then starts
-  from their average (at step 307, 1.15 times the last start, where the
-  substeps had got to 1.25): 8% of the load thrown away at every step, a
-  lag of two substeps in the loop that carries a pyramid's weight from
-  step to step.
-  Pair order is a pyramid's best order: one pass from the ground up
-  carries support to the top, so each step nearly converges and the warm
-  start matters little (the gap between the last substep and the average
-  falls to 0.2% by step 400). Any other order carries it a row or two a
-  pass and leans on the warm start, whose lag let the breathing grow.
-- **Box2D** (v3.1.1, read): `b2StoreImpulsesTask` stores each point's
-  accumulated impulse as the last relaxing pass left it (`normalImpulse`,
-  `tangentImpulse`; the step's sum, `totalNormalImpulse`, is kept apart
-  for reporting), and `b2PrepareContactsTask` starts the next step from it
-  at full scale, so the accumulators run on across steps as within them.
-  3D measured the same choice as `Carry::Last` ([Still at
-  rest](#still-at-rest)), and noted the mean's lag of two substeps.
-
-**What else differs from Box2D, checked** (in its `solver.c`,
-`contact_solver.c`, `constraint_graph.c`, `world.c`), none the cause:
-
-- *Overflow*: solved first, one contact at a time, as Box2D's; with 64
-  colors none of these scenes overflows (they take 6 or 7).
-- *Static bodies take no color*, and contacts with one aren't in color 0;
-  the lowest free color and Rapier's highest were measured too, and none
-  stood the pyramid (get-emj.48's first round).
-- *Warm starting* per color, after the substep's gravity and before its
-  pushing pass; *relaxing* after positions move; *restitution* once after
-  the substeps: Box2D's stages, in its order.
-- *Anchors*: fixed for the impulses, turned with the bodies for the
-  separation, as `b2SolveContactsTask`.
-- *The push split across substeps*: one soft pass with `useBias`, rigid
-  relaxing passes without, as Box2D's, but ours relaxes twice and has
-  friction only in the relaxing passes. Box2D's friction in the pushing
-  pass too was measured and is worse: pair order falls with it (the top
-  slid 2.1) and colors fly apart.
-- *Clamping*: the accumulated impulse, never a pass's, in both.
-- *Softness*: Box2D caps moving contacts at an eighth of the substep rate
-  and static ones at a quarter (`world.c`, `contactHertz`); ours are at a
-  quarter and a half. This is the rest of the order sensitivity (below),
-  not its cause.
-
-**The options, measured**, turning (the 5050 pyramid over 2500 steps;
-turning piles 41 wide at 11 sizes, 400-1400, over 700; `:quality_test`
-and `:quality_long_test` with `SOLVER=`):
-
-| option | 5050, pair order: rest, top | 5050, colored: rest, top, lean | piles 400-1400, pair / colored: median, worst | quality tests, pair / colored |
-|---|---|---|---|---|
-| as it was | 440, 0.26 | never, 5.06, 37° | 270, 440 / 270, 700 | pass / fail: the 5050, two piles' energy |
-| **points from the last substep (built)** | **450, 0.25** | **1500, 0.30, 0.4°** | **220, 330 / 230, 380** | **pass / pass** |
-| Box2D's stiffness (an eighth and a quarter) | 300, 0.89 | 590, 0.91, 2.4° | – | the 5050's top past its bound (0.73) |
-| Box2D's stiffness and passes (4 substeps, 1 relax) | – | 1140, 1.54, 1.5° | – | as above |
-| three relaxing passes | – | 1520, 0.30, 0.7° | – | – / fail: the 5050's energy, pile 10 000 never at rest; +25% time |
-| friction in the pushing pass (Box2D's) | never, 2.14 | flies apart | – | – |
-| ten substeps | – | never, 2.69 | – | – |
-| the fix + three relaxing passes | – | 340, 0.24, 0.3° | – | – / fail: pile 9000 never at rest |
-| the fix + stiffness 0.2 and 0.4 | – | 420, 0.37, 0.5° | – | fail: locked scenes past their bounds |
-| the fix + static contacts at a quarter | – | 1360, 0.30, 0.4° | – | – / pass |
-| the fix + the second relaxing pass in reverse order | 830, 0.25 | 930, 0.26, 0.4° | – | – |
-
-- **The fix is the warm start alone.** It costs nothing (a multiply a
-  point at the end of the step: `:solver_bench`'s pile of 10 000 4416 →
-  4482 µs, pyramid 3042 → 3042, noise), and moves only turning contacts'
-  points. A contact whose ends don't turn keeps the average, so a world
-  where nothing turns is bit for bit as before (the games' replays,
-  get-emj.51); it helps there too, measured with a flag since removed,
-  and is get-emj.55. `Constraint::jn`, a contact's impulse over the
-  step, stays the sum (what pressing and sleeping read).
-- **What the tests bound moved, all within bounds, most for the better**
-  (pair order, turning): piles 400-1200 at rest from 230, 220, 400, 440,
-  290 → 200, 220, 210, 250, 290, their energy at the end 1.6e-7 → 1.6e-8 a
-  body at worst, deepest while settling 0.44 → 0.54 (bound 0.66); piles
-  9000-11 000 330, 350, 1620 → 370, 310, 360; pyramids 15-25 10, 20, 30 →
-  10, 20, 20; the 20-high stack at six substeps (the mod) 60 → 30, and at
-  five 580 → 240. Locked: nothing moved.
-- **Order still matters, less.** Reversed still brings the big turning
-  pyramid down (from the top down it rests at 790, its top slid 0.77,
-  past the bound), from the top down the locked one never rests, and
-  colors settle it three times later than pair order. What's left is stiffness against passes:
-  Box2D's softness or three relaxing passes stand every order, but sink
-  the pyramid past its bound or keep a big pile moving. Relaxing
-  symmetrically (the second pass back through the colors, as parallel as
-  forward) helps colors and hurts pair order. The stiffness is a quality
-  choice ([Settling](#settling)); get-emj.54 has the rest.
-
-**Colors as the default, or the parallel path?** Both, since get-emj.61
-([What a turning point
-carries](#what-a-turning-point-carries-the-decision-matrix)). As first
-measured, with both impulses carried from the last substep, colored
-passed every quality test the default did, and was 3-5% faster at four
-lanes (pile 10 000 4338 against 4482 µs, pyramid 2881 against 3042) and
-8-11% at eight (4137, 2709), but rested the 5050 pyramid at 1500 against
-450 (Box2D 160, Rapier 1100; the bound 2200), and pyramids 40 and 50 wide
-later than their bounds allow (40 at 250 against 220; 50 kept 7.8e-6 a
-body against 8.1e-7; get-emj.54). With the tangent averaged, colored
-rests the 5050 from 780, the 50 from 120 with 5.4e-7 a body, and the 40
-in every order within its bounds, so get-emj.54 is closed and its test,
-`a_pyramid_that_turns_stands_when_its_contacts_are_colored`, runs.
-
-**The tests.** `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in`
-(`:quality_test`) holds a turning pyramid 40 wide to the references'
-bounds in the default's order and from the top down (since get-emj.61
-the colors of each), the smallest pyramid that tells the two warm starts
-apart (at 30 the average rests by 220 in every order);
-`:quality_long_test` holds the 50 in the default's order, shuffled and
-from the top down, and colored the 5050
-(`a_big_pyramid_that_turns_stands_when_its_contacts_are_colored`).
-Measured when the default was by level (pair order):
-Planted, the average back: the 40 from the top down rests from 310 and
-keeps 1.2e-6 a body, the 50 shuffled rests from 680 and top down from
-660; the last substep's
-impulse without the factor of the substeps: every turning quality test;
-the fix in the lanes and not in the loop one contact at a time:
-`the_solve_by_level_is_the_solve_one_contact_at_a_time_bit_for_bit`.
-
-### What a turning point carries: the decision matrix
-
-**Status: decided** (2026-09-28, get-emj.61): **B colored** is the
-default ([The decision](#the-decision-b-colored)). Carrying
-both impulses from the last substep (above) broke one scene the others
-hadn't measured: Box2D's 5-storey card house, which lost two cards. The
-top A-frame's apex holds on friction at 0.54 of its 0.7 limit; in the
-landing (steps 10-15) its tangent impulse swings from +0.55 to +0.06
-within a step, and carried from the last substep it sticks at the limit
-(-0.700), sliding, where the mean re-sticks at -0.54. Restitution is 0
-there, and Box2D carries both impulses from the last substep too
-(`b2StoreImpulsesTask`), so neither is the difference. The scene is at
-its edge: every engine drops it at friction 0.6; ours before fell at six
-storeys, Rapier at five, Box2D at eight. Three options, all built
-(`solver::Carry`, `arrays:rot/carry=<n>`), each also colored:
-
-- **A** (`Carry::Last`, `carry=0`, the default from get-emj.48 to the
-  decision, by level): both impulses as the last substep left them.
-- **B** (`Carry::Normal`, `carry=1`, colored the default since): the
-  normal's last, the tangent's mean.
-- **C** (`Carry::Mean`, `carry=2`): both means, as before get-emj.48.
-
-**The families.** The single card house became a family, and five more
-scenes near an edge were built as families (`family.rs`;
-physics-testing.md, "Families at the edge"), each a grid measured for
-ours and both references, with the debug view checked on the ones that
-fail (dominoes 1.2 apart: ours pushes one, Box2D three; a box 300 times
-as heavy on three: both columns knocked over). Runs that did what they
-should, on each long grid:
-
-| family (long grid) | Box2D | Rapier | A | B | C | A colored | B colored | C colored |
-|---|---|---|---|---|---|---|---|---|
-| card houses: 4-6 storeys, lean 23-27°, friction 0.65-0.9 | 104/135 | 70/135 | 87 | **102** | 91 | 91 | **105** | 98 |
-| 5-storey houses, lean 23-27° by quarters, friction 0.65-0.9 (a sweep, not a test) | – | – | 134/187 | **156** | 142 | 139 | **161** | 155 |
-| a box 0.1-2° either side of the friction angle (μ 0.3, 0.5, 0.7) | 30/30 | 30/30 | 30 | 30 | 30 | 30 | 30 | 30 |
-| the ladder 0.005-0.05 from its friction, at 20°, 30°, 40° | 24/24 | 24/24 | 24 | 24 | 24 | 24 | 24 | 24 |
-| ten dominoes 0.8-1.4 apart, friction 0.3 and 0.6 | 13/16 | 14/16 | 13 | 13 | 13 | 14 | 13 | 13 |
-| stacks 12-28 high, turning | 0/12 | 10/12 | 6 | 6 | 6 | 6 | 6 | 6 |
-| a box 10-1000 times as heavy on 1, 2, 3, 5 | 21/44 | 28/44 | 34 | 34 | 34 | 34 | 34 | 35 |
-| a pyramid 20 wide at friction 0-0.6 | 6/7 | 6/7 | 6 | 6 | 6 | 6 | 6 | 6 |
-
-- **Only the card houses tell the options apart.** B stands 15 more of
-  135 than A (and 22 more of 187 on the finer sweep), C 4 more; Box2D
-  stands 104, so B is at Box2D's reliability and A between Box2D and
-  Rapier.
-- **The rest are decided by other things.** Ramps and the ladder are
-  right in every engine at every point (Coulomb friction on one contact
-  is exact); stacks topple from 21 high in ours whichever option, Rapier
-  from 26, Box2D from 12 (it sways a column over at its softness); heavy
-  boxes stand more often in ours than in either reference; a pyramid
-  needs friction only at 0.
-- **Friction halved**, the short card grid stands none of 12 (the bound
-  is 7).
-
-**Every bound, each option** (`MATRIX=1` prints each bound's value and
-limit, met or not; `:quality_test`, `:quality_long_test`,
-`:behaviour_test` and `:behaviour_long_test` with `SOLVER=` and
-`--include-ignored`, 2026-09-28). A row a test where the options differ,
-the failing bounds with their value and limit; tests every option meets
-alike are left out, and the long suites' copies of the default tests
-counted once. The tests on the mod (the 20-high stack at six substeps,
-sleeping) can't take a variant and are left out:
-
-| suite | test | A | B | C | Ac | Bc | Cc |
-|---|---|---|---|---|---|---|---|
-| quality | `a_pyramid_that_turns_stands_whatever_order_its_contacts_are_solved_in` | 12/12 | 12/12 | **10/12**: pyramid 40: at rest from Some(310), bound 220; pyramid 40: energy 1.15e-6 a body in the last 200 steps, bound 1e-7 | **11/12**: pyramid 40: at rest from Some(250), bound 220 | 12/12 | **7/12**: pyramid 40: at rest from Some(550), bound 220; pyramid 40: its top moved 0.164, bound 0.118; … |
-| quality | `real_piles_that_turn_rest_as_soon_as_box2d_and_rapier_do` | 36/36 | **35/36**: pile 1200 41: at rest from Some(530), bound 500 | 36/36 | 36/36 | 36/36 | **33/36**: pile 400 41: energy 6.97e-7 a body at the end, bound 3.29e-7; pile 1200 41: at rest from Some(700), bound 500; … |
-| quality | `a_pyramid_that_turns_stands_when_its_contacts_are_colored (ignored)` | **5/6**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 6/6 | **2/6**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … | **5/6**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 6/6 | **2/6**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … |
-| quality_long | `quality_long::a_pyramid_50_wide_that_turns_stands_whatever_order_its_contacts_are_solved_in` | 18/18 | **17/18**: pyramid 50: energy 1.72e-6 a body in the last 200 steps, bound 8.1e-7 | **13/18**: pyramid 50: at rest from Some(680), bound 440; pyramid 50: energy 5.39e-3 a body in the last 200 steps, bound 8.1e-7; … | **17/18**: pyramid 50: energy 7.84e-6 a body in the last 200 steps, bound 8.1e-7 | 18/18 | **9/18**: pyramid 50: at rest from None, bound 440; pyramid 50: its top moved 1.186, bound 0.184; … |
-| quality_long | `quality_long::a_big_pyramid_stands_as_in_box2d_and_rapier` | 12/12 | 12/12 | 12/12 | 12/12 | 12/12 | **8/12**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … |
-| quality_long | `quality_long::a_big_pyramid_that_turns_stands_when_its_contacts_are_colored` | 6/6 | 6/6 | **2/6**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … | 6/6 | 6/6 | **2/6**: pyramid 100: at rest from None, bound 2200; pyramid 100: its top moved 5.062, bound 0.731; … |
-| behaviour | `a_ball_never_rebounds_higher_than_e_squared (ignored)` | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 | **1/3**: bounce 0.75: first apex 0.579, bound 0.568; bounce 1: most apex 1.639, bound 1.01 |
-| behaviour | `a_heavy_box_crushing_a_column_throws_nothing_through_the_floor (ignored)` | 2/2 | **0/2**: ratio 1000 5: escaped 1, bound 0; ratio 1000 5: jitter 62.560, bound 8.262 | **0/2**: ratio 1000 5: escaped 2, bound 0; ratio 1000 5: jitter 81.516, bound 8.262 | 2/2 | **0/2**: ratio 1000 5: escaped 4, bound 0; ratio 1000 5: jitter 82.876, bound 8.262 | **0/2**: ratio 1000 5: escaped 4, bound 0; ratio 1000 5: jitter 80.369, bound 8.262 |
-| behaviour | `heavy_boxes_on_light_ones_come_to_rest_as_soon_as_in_box2d_and_rapier (ignored)` | **3/5**: ratio 1000 1: at rest from 197, bound 82; bigonsmall: at rest from 72, bound 68 | **4/5**: ratio 1000 1: at rest from 296, bound 82 | **1/5**: ratio 100 1: at rest from 77, bound 46; ratio 1000 1: at rest from inf, bound 82; … | **3/5**: ratio 1000 1: at rest from 268, bound 82; bigonsmall: at rest from 74, bound 68 | **3/5**: ratio 1000 1: at rest from 199, bound 82; bigonsmall: at rest from 69, bound 68 | **2/5**: ratio 1000 1: at rest from inf, bound 82; ratio 100 1: at rest from 181, bound 46; … |
-| **all** | bounds met, tests not ignored | **338/338** | **336/338** | **327/338** | **336/338** | **338/338** | **313/338** |
-| **all** | bounds met, ignored tests too | **413/450** | **411/450** | **395/450** | **411/450** | **412/450** | **382/450** |
-| behaviour | family ramp | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) |
-| behaviour | family ladder | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) | 4/4 (≥ 4) |
-| behaviour | family ratios | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 2/4 (≥ 0) | 3/4 (≥ 0) |
-| behaviour | family dominoes | 3/4 (≥ 3) | 3/4 (≥ 3) | 3/4 (≥ 3) | 4/4 (≥ 3) | 3/4 (≥ 3) | 3/4 (≥ 3) |
-| behaviour | family stacks | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) | 1/2 (≥ 0) |
-| behaviour | family cards | 8/12 (≥ 7) | 9/12 (≥ 7) | 10/12 (≥ 7) | 11/12 (≥ 7) | 11/12 (≥ 7) | 11/12 (≥ 7) |
-| behaviour | family pyramids | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) | 1/2 (≥ 1) |
-| behaviour_long | family ramp | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) | 30/30 (≥ 30) |
-| behaviour_long | family ladder | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) | 24/24 (≥ 24) |
-| behaviour_long | family ratios | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 34/44 (≥ 21) | 35/44 (≥ 21) |
-| behaviour_long | family dominoes | 13/16 (≥ 13) | 13/16 (≥ 13) | 13/16 (≥ 13) | 14/16 (≥ 13) | 13/16 (≥ 13) | 13/16 (≥ 13) |
-| behaviour_long | family stacks | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) | 6/12 (≥ 0) |
-| behaviour_long | family cards | 87/135 (≥ 70) | 102/135 (≥ 70) | 91/135 (≥ 70) | 91/135 (≥ 70) | 105/135 (≥ 70) | 98/135 (≥ 70) |
-| behaviour_long | family pyramids | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) | 6/7 (≥ 6) |
-
-- **A** meets every bound of the tests not ignored, the card family's
-  short grid by one house (8 of 12, bound 7); of the ignored, it misses
-  the colored pyramid 50's energy (7.8e-6 a body against 8.1e-7).
-- **B** misses two: the turning pile of 1200 rests at 530 (bound 500) and
-  pyramid 50 from the top down keeps 1.7e-6 a body (8.1e-7). It passes
-  the ignored colored pyramid 50, which A doesn't.
-- **C** misses eleven, all the pyramid orders get-emj.48 was about.
-- **Colored**, B is the only option to meet every bound (338/338),
-  pyramids of 40, 50 and 5050 in every order included; A colored misses
-  two (pyramid 40 from the top down rests at 250, pyramid 50's energy);
-  C colored twenty-five.
-- The ignored tests' failures (a ball over e², bullets through a thin
-  wall, heavy boxes' rest) are the same under every option but two: the
-  column crushed by a box 1000 times as heavy throws bodies through the
-  floor under B and C, colored or not (1 to 4 escaped), and not under A.
-- **Speed**: the options differ by a multiply a point at the end of the
-  step; not measurable.
-
-**3D** carries the same choice another way: physics3d's default is the
-mean of both (`Carry::Mean`, as C), with the last substep a variant
-(`Carry::Last`; [Still at rest](#still-at-rest): the mean lags a
-rocking contact two substeps, the last let piles of 1000 planks rest
-later). It is its own solver and its own measure; this matrix is 2D's.
-
-The whole listing, every bound under every option with its value, is in
-get-emj.61.
-
-#### The decision: B colored
-
-**Built** (2026-09-28, get-emj.61). The default for turning contacts is
-B in colored order: a point's normal impulse carried from the last
-substep and its tangent averaged (`Carry::Normal`), the contacts solved in
-Box2D's graph colors, four lanes wide (`Wide::Colored(4)`). A (both from
-the last substep, by level in pair order) and C (both averaged) stay
-variants: `rot/levels=4/carry=0` is A to the bit, `rot/carry=2` C colored.
-
-- **Why: to unblock parallelism.** Bc is the only option that meets
-  every bound in every contact order (338 of 338, the colored pyramids of
-  40, 50 and 5050 included), and it stands the most card houses (105 of
-  135, Box2D 104). With the colored order the default, a parallel solve
-  over the same colors can be bit-identical to one thread: no two
-  contacts in a color share a moving body, so threads splitting a color's
-  batches compute what one thread does, and
-  `the_colored_solve_is_its_order_solved_one_contact_at_a_time_bit_for_bit`
-  is the test that path has to pass. Going parallel is then speed work
-  alone: no quality bound can move.
-- **Checked against the matrix.** The four suites with `MATRIX=1` and
-  `--include-ignored` on the new default give Bc's column above exactly,
-  every bound's value to the digit, but for the one test on the mod (the
-  20-high stack at six substeps), which the matrix ran at A because the
-  mod takes no variant; `rot/levels=4/carry=0` gives A's column exactly.
-  A world where nothing turns is untouched: no locked bound moved, and
-  pong's and the platformer's replays pass unchanged (nothing in either
-  turns).
-- **What moved**, A to Bc, every bound met: the turning piles of 400 to
-  1200 at rest from 200, 220, 210, 250, 290 → 220, 230, 200, 210, 260,
-  the deepest while settling 0.54 → 0.38; the piles of 9000 to 11 000
-  370, 310, 360 → 350, 320, 1870 (the worst bound 2490, the median 350
-  against 1760); the 5050 pyramid 450 → 780 (Box2D 160, Rapier 1100, the
-  bound 2200); pyramids of 15 to 25 at rest from 10, 20, 20 → 20, 30, 30;
-  the 40 from the top down 170 → 60; the 50 in the default's order,
-  shuffled and from the top down 150, 230, 180 → 120, 90, 90; overlap
-  recovery's fastest 2.2, 2.5, 9.1 → 3.0, 3.1, 11.8 (bounds 3.8, 4.5,
-  20.6); the card families 8 → 11 of 12 and 87 → 105 of 135. The mod's
-  20-high stack at six substeps still rests from 30, and at five from
-  240.
-- **Conditions of the default.** Under B, colored or not, the column
-  crushed by a box 1000 times as heavy throws light boxes through the
-  floor (four, at up to 83 a second), which A didn't: get-emj.58, raised
-  to P2 as a condition of this default, its test still ignored. The
-  colored pyramid 50 that A missed (get-emj.54) stands within its bounds,
-  and its test runs.
-- **Speed** (the comparison, `TURN=1`, `-c opt`, one thread, medians of
-  3 runs; the ECS mod's solver stage in µs, before → after): the turning
-  pile of 10 000 settled 4593 → 4518, the 5050 pyramid 3057 → 2936, rain
-  of 10 000 3517 → 3617 (with 5% more contacts pressing, 12 129 → 12 702,
-  since the rain falls otherwise); the whole step 6690 → 6589, 4560 →
-  4462, 6369 → 6499: 2% and 4% faster where contacts press, as the
-  solver alone measured colors (3-5%), and rain about the same a contact.
-
-## Solving across threads
-
-**Status: built** (2026-09-29, get-znt.5, get-emj.32), **and in the
-running engine on the scheduler's threads** (2026-10-03, get-znt.34,
-[threads.md](threads.md)). The turning default's colored solve runs across
-threads bit for bit the solve on one thread at any thread count, so going
-parallel moves no value a test bounds, and whatever holds the one-thread
-solve holds it. Its passes are a declared shape (`Passes`, [The
-step](#the-step)) that `engine_ecs` runs across the `threads` mod's pool
-by this protocol, rewritten as a task graph (`engine/ecs/dispatch.rs`);
-both mods' solves run on it, 3D's colored one too (get-emj.75). What
-follows measured the protocol first in the solver itself
-(`solver::solve_across`, `lanes::run_across`, removed 2026-10-03 with the
-comparison's `rot/threads=<n>` and `solver_bench`'s `THREADS`, get-emj.93:
-they build at commit `4daabfc`); what the running engine gets is
-threads.md's "Measured". On one CCD with kept threads, the solver alone is 4.9
-times faster at 8 threads on the turning pile of 10 000 and the 5050
-pyramid, and 4.1 on rain, where Box2D's own multithreaded solver gains 5.0,
-5.2 and 4.2 on the same scenes. What stops it: the solve's serial part
-(coloring and placing, about 16% at 8 threads), a barrier a color, the
-second CCD, and in the step the stages around the solver. What it needs
-from the host, which the running engine doesn't have yet (get-znt.5), is a
-pool that keeps its threads, places them on one CCD and keeps them warm:
-measured below, and each needs unsafe code or a crate, which is the
-user's decision.[^across-first]
-
-### The profile
-
-The colored solve on one thread by stage (`solver_bench`, `--config=bench`,
-clocks put in a copy, since removed), µs, medians of 21 solves over 3
-captured inputs:
-
-| stage | passes a step | pile 10 000 (22 012 contacts) | pyramid 5050 (14 950) |
-|---|---|---|---|
-| bodies into states | 1 | 20 | 10 |
-| coloring | 1 | 43 | 29 |
-| filling the batches (97 of it allocating them) | 1 | 481 | 361 |
-| gravity | 5 | 19 | 9 |
-| warm start | 5 × colors | 588 | 378 |
-| pushing pass | 5 × colors | 806 | 531 |
-| moving bodies | 5 | 113 | 57 |
-| relaxing passes | 10 × colors | 2332 | 1582 |
-| restitution | colors | 32 | 4 |
-| writing back | 1 | 82 | 47 |
-| **all** | | **4522** | **3009** |
-
-- **Colors.** The pile has 7 a pass, of 4906, 4968, 4566, 3991, 2713, 853
-  and 15 contacts, the pyramid 6 of 2401 to 2575; neither overflows. A
-  step is then 158 stages (the fill; five substeps of gravity, 7 warm
-  starts, 7 pushes, a move and 14 relaxes; 7 restitutions), the pyramid's
-  137. It is the one-thread solve's share that is split: 86% of it is
-  passes over colors or bodies.
-- **The budget.** At 8 threads the passes would be about 490 µs with
-  nothing lost. A barrier costs 0.19 to 0.24 µs on one CCD ([Parallel
-  solving](#parallel-solving)), so 158 of them are 30 to 40 µs, 6 to 8%
-  of that: affordable only as a spin on a shared counter. A wake-up, tens
-  of µs, at each stage would cost more than the solve, so threads spin
-  within a solve, and a solve is one run of the executor.
-- **How Box2D runs its stages** (v3.1.1's `solver.c`, read in the fetched
-  source): the same stages (`b2SolverStage`: prepare, integrate
-  velocities, a warm start a color, solve, integrate positions, relax,
-  restitution, store), each cut into blocks, four a worker
-  (`blocksPerWorker`); a worker starts at its share (`GetWorkerStartIndex`),
-  takes blocks forward and then back, each by compare and swap on its
-  sync index, until one is taken, and adds what it ran to the stage's
-  completion count. A main thread (worker 0) runs each stage, waits for its
-  count and publishes the next (`atomicSyncBits`); the other workers spin
-  on that, yielding now and then. Its colors persist across steps (a
-  contact is colored when it begins), so its per-step serial work is a few
-  µs (`prepareStages`).
-
-### What's built
-
-- **Stages as Box2D's, without a main thread.** Every thread runs every
-  stage in order: it takes blocks from its start forward and then back,
-  adds what it ran to the stage's count, and spins (yielding every 1024
-  turns) until the count is the stage's blocks. Whichever thread finishes a
-  stage's last block lets the others on, so no one thread is needed: one
-  alone runs every stage, and one that comes late skips what's done, as
-  Rapier 0.36's staged solver lets a straggler fast-forward
-  (`staged_island_solver/sync.rs`). A block is taken by raising an atomic
-  mark to one past the stage (`fetch_max`), which a thread still in an
-  older stage can't; a thread past a small stage's blocks starts at
-  `w % n`. Without either the first version could hang, and did
-  ([lore](../lore/a-stage-loop-without-a-main-thread-must-let-any-thread-take-any-block.md)).
-  Blocks are Box2D's size: four batches, or four blocks a thread; bodies
-  32. A panic in one thread ends the others' waits, and the executor
-  re-raises it.
-- **Who owns what.** A block owns its batches and their lanes behind a
-  lock only its taker holds (`try_lock`, which a stage that didn't wait
-  trips at once); the bodies are shared as relaxed atomics, an `f32`'s
-  bits each (`lanes::Atom`), which on x86 are plain loads and stores, so
-  there is no unsafe code. Within a color no two batches share a body that
-  moves, so no field of a moving body is written by two threads in one
-  stage, and a stage's writes reach the next through its count (released
-  by each thread adding to it, acquired by each seeing it full).
-- **What stays on the calling thread.** The bodies' states, the coloring
-  (greedy in pair order: sequential, and what makes the result a function
-  of the contacts alone), placing each contact in its lane, and the few
-  contacts nothing moves. Filling the batches is the first stage, each
-  block into room made on the calling thread
-  ([lore](../lore/memory-a-task-allocates-is-its-threads.md)); writing the
-  results back is a second run, each task its own run of contacts, points
-  and bodies, reading any batch.
-- **Why it's bit for bit.** A stage's blocks are independent, so any split
-  of them over any threads gives every batch the same inputs and the same
-  arithmetic as on one thread: the kernels are one generic function over
-  the plain states and the shared ones (`lanes::Bodies`). Two cases would
-  break that. A body that doesn't move, which batches of one color all
-  write back as they read it, gets the same value whoever writes last but
-  for a negative zero (`-0.0 - -0.0` is `0.0`), so `lanes::shareable`
-  sends a step where a still body has one to the one-thread solve; and an
-  infinite impulse (`inf * 0.0` is NaN) is a solve already lost.
-- **The one-thread solve** is the same computation, split into its head,
-  setup, run and finish so that both paths share the per-contact code: 5%
-  faster for it (the pile 4506 → 4243 µs, the pyramid 2989 → 2847), and no
-  baseline value moved.
-
-**The tests**, as they were for `solve_across` (since 2026-10-03 the mod's
-passes on the pool are held to the arrays' solve instead, by
-`the_mod_across_threads_is_the_arrays_bit_for_bit`; threads.md,
-"Determinism"). `the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`
-(`:quality_test`) held the solve across 2, 4, 8 and 16 threads, and
-across 4 that come one at a time, the last first (`rot/threads=4/late=1`),
-to the default on one thread, bit for bit on the turning pile and pyramid
-of the other equivalence tests over 150 steps. Planted, it fails on a
-race (each color's stage given the next color's first block), on the
-colors solved last first, and on a stage that doesn't wait for its count
-(which the block lock catches as a panic). In the mod, `physics2d_test`'s
-`a_turning_pile_on_four_threads_lands_where_it_does_on_one` runs a turning
-pile of 600 on kept and on spawned threads against one, and fails on the
-colors reversed; `threads_that_ran_a_builds_tasks_do_not_keep_it_mapped`
-now drops turning bodies, so the solver's tasks are among those it checks.
-
-### The options, measured
-
-How threads can share the bodies, each on the solver bench's inputs, µs;
-the one-thread solve is 4265-4287 on the pile and 2776-2850 on the
-pyramid. "All on one thread" is the shared path with every task run one
-after another on the calling thread (`POOL=late`): what sharing costs with
-nothing shared.
-
-| how | safe | all on one thread, pile / pyramid | 8 threads, one CCD | 16, one CCD with SMT |
-|---|---|---|---|---|
-| **relaxed atomics (built)** | yes | 4678-4708 / 3083-3117 (+9%) | 871 / 581 | 824 / 555 |
-| a plain array behind a raw pointer (a spike, reverted) | no | 4345 / 2806 (+1-2%) | 849 / 563 | 791 / 534 |
-| Rapier 0.36's (`SharedCtx`: raw pointers, `unsafe impl Sync`, workers in a rayon scope) | no | the spike's | | |
-| each color's results kept in its batches, then applied to the bodies by a stage of their own | yes | not built | | |
-| bodies ordered so each task writes a range it owns | – | not possible | | |
-
-- **Atomics cost what unsafe code would save: about 3%** at 8 threads
-  (2.5% on the pile, 3% on the pyramid, 4% at 16). A relaxed load is a
-  `mov` and a `movd` where a plain one is a `movss`, and the arithmetic
-  still vectorizes: 274 `mulps` to 38 `mulss` in the shared kernels, 345
-  to 61 in the one-thread solve
-  ([lore](../lore/relaxed-atomic-floats-still-vectorize-at-a-movd-a-load.md)).
-  The spike's 3% doesn't pay for unsafe code whose soundness depends on
-  the stage protocol, which would need Miri and fuzzing of concurrent
-  schedules to be trusted ([storage.md](storage.md#where-the-unsafe-is-and-isnt));
-  nothing of it landed.
-- **Per-color deltas** would keep bodies read-only within a color, and
-  apply its results in a stage after: twice the stages (30-40 µs more of
-  barriers at 8 threads), and a pass over every lane's ends a color, about
-  the traffic of the scatter it replaces. Not built: it costs more than the
-  atomics it avoids.
-- **Partitioning** can't work: a color's contacts reach bodies anywhere,
-  a different set in each color, so no order of the bodies gives each
-  task a range, and one order a color would be a copy a color.
-- **Tried, and no faster:** listing each color's contacts as the coloring
-  finds them, so that the first stage finds each lane's contact and
-  placing goes: the coloring then took 120-142 µs where coloring and
-  placing took 76 and 42 (8 threads, pile: 873-880 against 871).
-
-### The host's threads
-
-**Built since** (2026-10-03, [threads.md](threads.md)): the `threads`
-mod's rayon pool, kept, pinned to one CCD and warm, is every game's
-executor. What follows is what the solver measured before it, and why
-the pool is shaped as it is.
-
-The threads are the host's: `Workers` (then) reached whatever executor
-the world had. In the engine that was nothing then: `engine_ecs` has only `Scoped`,
-threads spawned for each run, because keeping threads that run a borrowed
-closure takes unsafe code whose soundness depends on concurrency
-([Parallelism](#parallelism)); the benchmarks use `tests/pool.rs`'s kept
-threads. What such a pool has to be, on the pile of 10 000 (the solver
-alone, µs; one thread 4270):
-
-| threads | 2 | 4 | 8 | 16 |
-|---|---|---|---|---|
-| kept, on one CCD (`taskset -c 0-7`; 16: `0-7,16-23`) | 2508 | 1397 | 882 | 829 |
-| kept, spinning until the next solve | 2475 | 1405 | 877 | – |
-| kept, parking at once | 2501 | 1412 | 884 | – |
-| kept, not warmed first | 2509 | 1420 | 1116 | – |
-| spawned for each solve (`Scoped`), one CCD | 2779 | 1531 | 994 | – |
-| kept, both CCDs, a thread a core (`0-15`) | – | – | 1765 | 1512 |
-| kept, placed by the scheduler (`0-31`) | 3968 | 2418 | 1797 | 1534 |
-| spawned for each solve, placed by the scheduler | – | – | 2049 | 2236 |
-
-- **Placement is most of it.** Left to the scheduler, a pool's threads
-  land on both CCDs and the solve runs at half the speed: two threads
-  anywhere are 1.08 times one, and sixteen cores over both CCDs are slower
-  than eight on one
-  ([lore](../lore/the-scheduler-spreads-a-pool-over-both-ccds-and-a-colored-solve-halves.md)).
-  Box2D's step loses the same way (below). A host pool has to pin its
-  threads, one CCD first, with `sched_setaffinity`: an FFI call, or a
-  crate's.
-- **Kept, not spawned**: spawning 8 threads for each solve costs about 110
-  µs. **Warm**: threads idle before a solve run it at the idle clock, 230
-  µs more at 8 ([lore](../lore/idle-cores-run-a-parallel-solve-at-half-speed.md));
-  a game's workers would be cold every frame unless the pool keeps them
-  busy, which is the pool's question (get-znt.5), not the solver's.
-- **Spinning between solves doesn't matter**: a solve is one run of the
-  executor, so one wake-up; the spinning that matters is between its
-  stages, and that is the solve's own.
-- **SMT gains 5%**: 16 threads on 8 cores and their siblings, against 8.
-
-### How it scales
-
-The solver alone (`solver_bench` with `THREADS`, kept threads on one CCD,
-warmed; 16 is the CCD's 8 cores and their SMT siblings), µs a solve and
-the speedup over one thread, every result checked bit for bit against one
-thread's:
-
-| threads | pile 10 000 (22 012 contacts) | pyramid 5050 (14 950) | rain 10 000 (17 010) | pile 1000 (2189) | pyramid 210 (590) |
+| turning | ours | ours, 8 threads | Rapier | Jolt | Box3D |
 |---|---|---|---|---|---|
-| 1 | 4266 | 2836 | 3405 | 407 | 112 |
-| 2 | 2494 (1.71×) | 1650 (1.72×) | 2111 (1.61×) | 262 (1.55×) | 92 (1.21×) |
-| 4 | 1400 (3.05×) | 925 (3.07×) | 1281 (2.66×) | 179 (2.28×) | 74 (1.51×) |
-| 8 | 871 (4.90×) | 581 (4.89×) | 823 (4.14×) | 152 (2.67×) | 75 (1.50×) |
-| 16 | 824 (5.17×) | 555 (5.11×) | 785 (4.34×) | 173 (2.36×) | 98 (1.15×) |
+| spheres 1000 | 1.70 | 0.67 | 0.88 | 1.84 | 1.41 |
+| boxes 1000 | 2.08 | 0.70 | 0.92 | 1.35 | 1.09 |
+| planks 1000 | 2.95 | 0.90 | 1.21 | 2.18 | 1.56 |
+| rain 1000 | 1.58 | 0.65 | 0.87 | 1.23 | 1.06 |
+| spheres 10 000 | 20.2 | 5.8 | 18.9 | 28.3 | 18.5 |
+| boxes 10 000 | 21.7 | 5.0 | 13.3 | 18.6 | 11.3 |
+| planks 10 000 † | 36.2 / 45.6 | 27.5 / 22.8 | 23.9 / 24.7 | 37.4 / 39.2 | 22.6 / 22.9 |
+| rain 10 000 | 19.4 | 5.6 | 15.7 | 16.3 | 14.3 |
 
-Against Box2D's multithreaded step on the same scenes (the comparison,
-`VARIANTS=threads:<n>`: the mod on kept threads, Box2D on the shim's
-task system, kept threads spinning as ours; `--config=bench`, one CCD,
-turning, medians of 3 runs), µs, the step / the solver stage:
-
-| threads | pile 10 000 settled: ours | Box2D | pyramid 5050: ours | Box2D | rain 10 000: ours | Box2D |
-|---|---|---|---|---|---|---|
-| 1 | 6690 / 4467 | 4348 / 2599 | 4429 / 2933 | 2930 / 1722 | 6418 / 3579 | 5010 / 1963 |
-| 2 | 4383 / 2717 | 2557 / 1580 | 2772 / 1709 | 1527 / 909 | 4855 / 2368 | 3214 / 1345 |
-| 4 | 2909 / 1618 | 1418 / 902 | 1771 / 981 | 888 / 537 | 3627 / 1439 | 1908 / 751 |
-| 8 | 2115 / 994 | 805 / 522 | 1352 / 629 | 527 / 332 | 2991 / 906 | 1247 / 470 |
-| 16 | 2452 / 957 | 720 / 495 | 1643 / 622 | 518 / 358 | 3379 / 861 | 1151 / 500 |
-| 16 over both CCDs | 5063 / 1954 | 1324 / 982 | 3257 / 1131 | 782 / 561 | 6388 / 1892 | 2290 / 1175 |
-
-- **The solver scales as Box2D's does, a little less**: 4.5, 4.7 and 4.0
-  times at 8 threads against Box2D's 5.0, 5.2 and 4.2. Box2D's is 1.7 to
-  1.9 times faster at every count, from 12 passes to our 20 (a quality
-  choice: [Still at rest](#still-at-rest)) and a prepare half ours
-  (get-emj.50).
-- **The step doesn't**: 3.2, 3.3 and 2.1 times at 8 against Box2D's 5.4,
-  5.6 and 4.0. The stages around the solver gain little (below), and at 16
-  threads the step gets slower (SMT siblings in stages that don't
-  compute).
-
-**Where the solve stops scaling, and why**, from the stages' own clocks at
-8 threads on the pile (thread 0's, at each stage's end; clocks put in a
-copy, since removed):
-
-- **Its serial part, about 140 µs**: the states (20), the coloring (43),
-  counting and placing (55), the atoms (15) and a second run's fork. At 8
-  threads that's 16% of the solve, and Amdahl's limit about 7 times.
-  Coloring in pair order is sequential by construction, and it is what
-  keeps the result a function of the contacts alone; Box2D's colors live
-  in storage and change only as contacts begin and end, which is the
-  "colors in storage" of [Parallel solving](#parallel-solving), and would
-  make colors state a snapshot must carry. Measured as a design for the
-  ECS, colors kept in the world and packed again every 60 steps take 41 µs
-  off this solve (879 → 838), and kept without packing nothing, since they
-  fragment: [parallel-relations.md](parallel-relations.md).
-- **Barriers and imbalance, about 110 µs**: the stages took 657 µs at 8
-  threads where their one-thread times split eight ways are 546 (the fill
-  92 against 60, relaxing 325 against 291, pushing 128 against 101, the
-  warm start 71 against 74), about 0.7 µs a stage over its share. The
-  small colors are the worst of it: the pile's seventh color, 15 contacts,
-  is one block, one thread's while seven wait.
-- **SMT and the other CCD**: 16 threads on one CCD are 5% over 8; on both
-  CCDs half the speed of 8 on one (above).
-- **Not memory bandwidth**: a pile's batches are 4.6 MB, in one CCD's 32
-  MB of L3, and the passes weren't bound by memory on one thread either
-  ([The solver's speed](#the-solvers-speed)).
-
-**The rest of the step** (get-emj.32): measured again with
-`:tax -- parallel` on one CCD (`taskset -c 0-7`), kept threads warmed by
-the arrays' run before the ECS's, the pile of 10 000, 401 wide, settled
-(the tax pile doesn't turn, so its solver stays on one thread): the
-stages but the solver, ECS / arrays, 375 / 719 µs on one thread, 439 /
-540 at 2, 376 / 367 at 4, 348 / 322 at 8. The ECS's stages no longer lose
-across threads, as get-emj.30 measured them unplaced (0.8×), but gain
-only 1.08×, where the arrays gain 2.2×: since the broadphase keeps its
-pairs (21 µs settled, from 407 then) its stages are small, and what's
-left of them is gathering and copying for one consumer, which
-[Parallelism](#parallelism) found moves data between cores more than it
-saves. The frame: 1393 → 1349 µs (ECS), 1674 → 1273 (arrays). Threads
-spawned for each run instead: 2034 / 2013 at 8.
-
-### The fill as the passes' first stage
-
-**Built** (2026-10-03, get-znt.40). Both mods fill their batches in the
-program's first stage, `Stage::All(Step::Fill)`, across the scheduler's
-threads, where `prepare` had filled them on one; it was the largest part
-of the step that didn't scale (threads.md, "Measured", before: `prepare`
-568 µs of 2D's settled 2190 at 8 threads, 2360 of 3D's 5938).
-
-**The map of `prepare`** (timers put in a copy, since removed; µs a step,
-step_bench, one thread unless said):
-
-| part | 2D pile 10 000 settled | 2D pyramid 5050 | 3D boxes 10 000 settled |
-|---|---|---|---|
-| shareable, states (`begin`) | 8, 16 | 4, 7 | 16-21 (moving, shareable), 18 (states) |
-| world inverse inertias | – | – | 111 |
-| coloring (`Coloring::greedy`) | 60 | 39-40 | 87-96 |
-| packing (`pack`) | 25 | 17 | 22 |
-| emptying the batches | 58-61 (92 at 8 threads) | 38 | 63-96 |
-| counting points, their and the anchors' room | – | – | 171-194 |
-| filling (`enter`, the rows) | 327-336 | 248-250 | 1775-1786 |
-| clearing the points | 25 | 16 | – |
-| **all** | **532** (571 at 8) | **375** | **2266-2346** |
-
-- **Into the passes**: emptying and filling the batches (and in 3D
-  their points and anchors), about 395 µs in 2D's settled pile and 2030
-  in 3D's boxes: three quarters of `prepare` and more, per item once the
-  layout is known.
-- **What stays serial, and why**: the coloring, greedy in pair order
-  (Box2D's rule): the colors, and so the result, are that order's, and a
-  parallel coloring would be another computation, re-baselined; seating
-  (`Coloring::seat`, a scatter of each contact to its lane, the size of
-  `pack`'s); the states and in 3D the world inverse inertias, which are
-  the bodies' (a stage writes items or states, and the inertias are
-  neither; formed per contact end in the fill instead they would be 3.7
-  times the work on one thread); the contacts no batch solves (both ends
-  still, few); and `finish`, the write-back, which had no shape then
-  (since a map across threads, get-znt.45: [The write-back across
-  threads](#the-write-back-across-threads)). Left: 2D's `prepare` about
-  120 µs, 3D's 270-310.
-
-**The shape**: `Stage::All`, every item in one stage, colors and overflow
-alike, for a kernel that writes its items alone and only reads the
-states; and a block's first index, so the kernel finds what its items
-hold (flows.md, "The fill is a stage, `All`, given the index"). Across
-threads its blocks are the colors' blocks together, handed out by each
-worker's share of every color (`all_order`), so a worker fills what it
-then solves: 3% off the passes at 8 threads against item order.
-
-**The kernels**, written once over the states' view as the passes are:
-
-- **By batch** (`fill`): each batch emptied and filled from the contacts
-  its lanes seat (`Coloring::seat`, `pack`'s places the other way round).
-- **On one thread** the block is every batch, which the kernel fills
-  contact by contact in pair order (`fill_all`), each into its seat
-  (`Coloring::seats`): batch by batch the reads jump between the colors'
-  contacts, 530 µs against 390 on the settled pile (the history 2026-09-27
-  measured too, 1223 against 887). It empties every batch in a sweep
-  first: emptying each as its first lane went in, while in cache, made
-  the solve 104 to 192 µs slower.
-- **What the fill read, `finish` writes** afterwards: 2D's `clear` of the
-  points and each contact's closing speed, 3D's closing speeds (`row_of`,
-  `row` with the contact only read: copying each contact for `row` made
-  3D's fill 2209-2460 µs against 2080-2197).
-- **2D's lane records** (where a lane's results go) are written by the
-  fill as relaxed atomics (`LaneCell`), beside the batches, so a stage's
-  items stay the bare batches. Measured against: the records in the batch
-  (`finish` 155 µs against 112, a line more a batch) and items of a batch
-  and its lanes as references (the one-thread solve 1.4-1.8% slower than
-  the base, against 0.7% now).
-
-**Bit for bit**, at `ENGINE_THREADS` 1, 2, 4 and 8: both mods' baselines,
-default and long, every value printed byte-identical to the ed0b68d
-tree's; the 3D fingerprint as pinned; the exact and equivalence tests
-(`quality_test`'s `the_mod_across_threads_is_the_arrays_bit_for_bit`
-among them) and pong's and the platformer's replays.
-
-**What it bought**, step_bench, `--config=bench`, the ed0b68d tree and
-this one alternated over two rounds (threads.md, "Measured", has the
-tables): at 8 threads 2D's settled pile solves in 1818 µs against
-2150-2240 (step 2554-2562 against 2897-3031), the pyramid in 1124-1131
-against 1339-1345; 3D's 10 000 boxes settled in 4246-4284 against
-6655-7375 (step 6987-7001 against 9437-10 126), falling 5762-5908 against
-7400-7426, planks 736-742 against 974-976. On one thread 2D is level
-but for the settled pile, +0.7% of the solve over five alternated rounds
-(+0.25% of the step); 3D's boxes +0.8% settled and, pooled over every
-alternated run, +1.4 to 1.7% falling, inside that case's spread of 6%
-from run to run.
-
-### The write-back across threads
-
-**Built** (2026-10-03, get-znt.45). Both mods' `finish`, which writes
-the step's impulses from the batches' lanes into the contacts (and in
-2D their points) and the states into the bodies, runs across the
-scheduler's threads as a map over parts. With the fill a stage it had
-been the largest serial part of the turning solve at 8 threads (2D's
-settled pile 178 µs of a 1130 µs solver, 3D's settled boxes 158 of
-3632).
-
-**Where its time went** (timers put in a copy, since removed; µs a step,
-step_bench, `--config=bench`, the median of 5 runs in 2D and 3 in 3D):
-
-| part | 2D pile settled, 1 / 8 threads | 2D pyramid, 1 / 8 | 3D boxes settled, 1 / 8 | 3D planks, 1 / 8 |
-|---|---|---|---|---|
-| clearing the points (2D) | 15 / 35 | 9 / 34 | – | – |
-| the contacts (and points) from their lanes | 110 / 126 | 66 / 96 | 122-139 / 135-140 | 25 / 22-24 |
-| the bodies (3D: with the turned inertia) | 5 / 7 | 2 / 4 | 18-21 / 22 | 1.6 / 3-3.5 |
-| the turning bodies (2D) | 6 / 11 | 3 / 6 | – | – |
-
-- **The contacts are most of it**, a few ns each: writes to contacts
-  wherever each batch's lanes put them, and reads of every batch.
-- **At 8 threads it was dearer than on one**, a cross-core cost: the
-  points the clear writes were last read by the fill on other cores
-  (2D's clear 15 → 35 µs, 9 → 34 on the pyramid), and the batches the
-  contacts are written from were last written by the passes there. 3D's
-  contacts barely moved (122-139 → 135-140).
-
-**The shape: a map over parts** (`ParMap::for_each_mut`, its first user;
-flows.md, "The write-back is a map over parts"). The mod cuts the
-contacts and the bodies alike into parts, four a thread (`ParMap`'s
-blocks, so a part a block) and one on one thread: in 2D a part also has
-its contacts' points, which are in the contacts' order (`gather_contacts`
-pushes each contact's as it goes), and a run of the turning bodies.
-`Staged::finish` writes a part contact by contact, each finding its lane
-by its seat (`seat_of`), then its bodies from the states; 2D clears the
-part's points first (`clear_run`, the unsolved contacts' kept impulses
-found by point). The deleted `solve_across` wrote back the same way, a
-second run, each task its own run of contacts, points and bodies,
-reading any batch;[^across-first] Box2D runs it as a stage of its
-own (`b2_stageStoreImpulses`).
-
-- **Each contact's seat is written by the fill**, as it seats the
-  contact, through the shared reference every kernel has (relaxed
-  atomics, as 2D's lane records), and by `prepare` for 2D's contacts no
-  batch solves. Formed in `prepare` from the coloring's seats instead,
-  it cost 11-14 µs more of serial `prepare` on 2D's settled pile, at any
-  thread count.
-- **Why not a last stage of `Passes`.** Its items are the batches; the
-  contacts would be a second set of items, for the one gain of not
-  starting a dispatch, which costs about 3 µs at 8 threads (an empty map
-  added to `finish`: 31 µs against 28).
-- **Why not by batches**, as the writes went on one thread: a batch's
-  lanes write contacts anywhere, so blocks of batches would share the
-  contacts, which only unsafe code or atomic contacts could write.
-- **Why not a map over the contacts alone**: 2D's points are beside the
-  contacts, and the bodies are another array; parts write all of them
-  in one map, one dispatch.
-
-**Bit for bit by construction**: every value a part writes is its lane's
-or its state's, so any cut into parts writes what one part of
-everything does. At `ENGINE_THREADS` 1, 2, 4 and 8: both mods'
-baselines, default and long, byte-identical to the 92f67c6 tree's (232,
-229, 104 and 98 lines); the 3D fingerprint as pinned; the exact and
-equivalence tests and pong's and the platformer's replays pass.
-
-**What it bought** (threads.md, "Measured", has the tables): at 8
-threads `finish` takes 28-29 µs in 2D's settled pile (178-180 before),
-21 on the pyramid (139-141), 27-28 in 3D's settled boxes (159-161), 7 on
-the planks (24-25); 2D's settled solver 964-984 µs against 1117-1120,
-its step 2426-2468 against 2550-2559. On one thread 2D's `finish` is
-about 8 µs slower on the settled pile (contacts written in order,
-batches read wherever a contact's lane is), 0.2% of its solver; 3D's is
-faster (it found each seat by walking the coloring).
-
-**What stays serial, and why**: the contacts no batch solves, which 2D's
-`prepare` starts and `finish` only finds (both ends still); and
-`solve_with`, the step nothing turns in, solved one contact at a time in
-pair order, which no shape can split.
-
-### The 3D narrowphase across threads
-
-**Built** (2026-10-03, get-emj.101). physics3d's `find_contacts` had
-run on one thread, its narrowphase a quarter to a third of the step at 8
-threads (threads.md, "The whole step, stage by stage"). Now its
-narrowphase, its gathers and its merge with the world run across the
-scheduler's threads, each a `ParMap`, bit for bit one thread's.
-
-**Where the narrowphase's time went** (timers put in a copy, since
-removed: the loop cut into three passes, each timed whole; step_bench,
-`--config=bench`, one round, the median of 3 runs, on a machine other
-agents were loading at 17 to 41). The passes add up to twice the fused
-loop, so only the shares count:
-
-| part | boxes 10 000 settled | boxes 10 000 falling | planks 1000 settled |
-|---|---|---|---|
-| the loop as it runs (one thread) | 1995 µs | 2978 | 410 |
-| finding each pair's last contact, and recycling it (Box3D's) | 2020 (45%) | 1875 (37%) | 235 (48%) |
-| the pair tests (`narrow::collide`) on pairs not recycled | 1451 (33%), 7121 pairs, 1 touching | 2396 (48%), 10 934 pairs, 2638 touching | 151 (31%), 2899 pairs, none touching |
-| the contacts built (`stored`, `warm`) | 980 (22%) | 758 (15%) | 106 (22%) |
-
-- **Settled, the pair tests are almost all misses**: all but one of the
-  18 738 contacts are recycled, and the 7121 pairs tested are pairs
-  whose grown boxes meet but whose shapes don't.
-- **The colliders' gather** (one thread, settled): the colliders 120 µs,
-  `Slots` 17, and copying the last step's contacts 282, which the
-  narrowphase reads for their axes, manifolds and impulses.
-
-**The shape, as 2D's** (`ParMap::for_each_mut` over chunks of pairs,
-2D's `chunks`, at least 256 pairs a chunk, four a thread, one on one
-thread): each chunk an item with the list it fills, made on the system's
-thread with room for a contact a pair. 64 pairs a chunk measured the same
-on the planks (52-53 µs at 8 threads).
-
-- **Nothing in it depends on order.** A pair reads this step's
-  colliders and its own last contact: the cached axis and its separation,
-  and the manifold recycling carries. Nothing a pair finds is read by
-  another pair this step. Each chunk finds its first pair's last contact
-  by a partition point, which is where a walk from the first pair would
-  have got to, since both lists are in pair order. The counts (`Found`)
-  are integer sums. So any cut finds what one walk does, and the results
-  are kept in chunk order.
-- **The results stay in their chunks' lists** (`Parts`, read through a
-  `Cursor`), not copied into one: a contact is about 200 bytes. The merge
-  reads them in order, as one list.
-- **The last step's contacts** are gathered by `par_for_each_ordered_page`
-  and left in its parts the same way. A `Peekable` of chained and
-  flattened slice iterators over them cost the narrowphase 281-284 µs at
-  8 threads on the settled boxes, against 252-258 through `Cursor`, the
-  same as from one `Vec`.
-- **The moving colliders** by `par_for_each`, joined by a copy onto the
-  first chunk's list (made with room for all), since `items` is read by
-  slot everywhere. Unlike 2D's gathers, which split and didn't gain, this
-  one gains despite the copy: at 8 threads the gather took 150-166 µs
-  where the contacts' split alone left it at 191-197.
-- **The merge** is 2D's parallel merge: each chunk of the world's
-  contacts merges with what was found from its first key on, writing in
-  place, and records its spawns and despawns, which the system makes
-  after in walk order. So the log and the ids spawns take are a single
-  walk's.
-
-**Bit for bit**, at `ENGINE_THREADS` 1, 2, 4 and 8: the 3D baselines,
-default and long (`-- --all`, `-- --long --all`), and the 2D baseline,
-byte-identical to 70a4093's (104, 98 and 232 lines); the fingerprint as
-pinned; `exact_test`, `quality_test`, `physics3d_test` and the 3D reload
-test pass at each count. The fingerprint's scene, 40 bodies, is one chunk at any
-count, so `physics3d_test`'s
-`contacts_found_across_threads_are_one_threads_bit_for_bit` runs 1000
-boxes on one thread and on four, more than four chunks, and compares
-every body, contact and entity. Planted: a chunk dropped fails it, the
-pile test, and `quality_test`'s baseline and three pile tests; a chunk
-run twice puts its results out of order, and the merge's `start - done`
-underflows (overflow checks are on) in it, the pile test and
-`quality_test`; two chunks' results swapped fail it alone; the spawns
-between merge chunks dropped fail it and two other `physics3d_test`
-tests.
-
-**What it bought** (step_bench, `--config=bench`, 70a4093 and this tree
-alternated, two rounds each, the median of 3 runs, 2026-10-03, load
-averages 3 to 16 from other agents' work. The 8-thread figures are a
-second pair of rounds: in the first pair's second round both trees'
-passes doubled, other work on the pool's cores). µs a step:
-
-| case | stage | old, 1 | new, 1 | old, 8 | new, 8 |
+| locked | ours | ours, 8 threads | Rapier | Jolt | Box3D |
 |---|---|---|---|---|---|
-| boxes 10 000 settled | gather / narrowphase / merge | 362-388 / 1781-1812 / 182-195 | 369-388 / 1852-1881 / 157-159 | 347-352 / 1762-1773 / 160-161 | 149-155 / 256-258 / 53-56 |
-| | `find_contacts` | 2637-2716 | 2697-2783 | 2566-2587 | 766-769 |
-| | whole step | 21 631-21 942 | 21 617-22 112 | 6727-6730 | 4586-4619 |
-| boxes 10 000 falling | gather / narrowphase / merge | 364-374 / 2836-2895 / 183-207 | 349-360 / 2878-2919 / 178-186 | 347-350 / 2867-2876 / 181-185 | 149-154 / 545-547 / 65-66 |
-| | `find_contacts` | 4590-4650 | 4588-4606 | 3763-3768 | 1107-1114 |
-| | whole step | 23 417-23 957 | 23 350-23 357 | 8504-8641 | 5519-5541 |
-| planks 1000 settled | gather / narrowphase / merge | 40-43 / 300-308 / 17-18 | 47-48 / 326-333 / 18 | 41-42 / 298 / 18 | 23-26 / 53-55 / 11 |
-| | `find_contacts` | 399-413 | 435-443 | 396-398 | 126 |
-| | whole step | 3023-3104 | 3134-3138 | 1141-1147 | 868-873 |
+| spheres 1000 | 1.05 | 0.49 | 0.63 | 1.20 | 1.02 |
+| boxes 1000 | 1.83 | 0.56 | 0.89 | 1.13 | 1.04 |
+| spheres 10 000 | 12.8 | 3.4 | 12.2 | 17.3 | 13.4 |
+| boxes 10 000 † | 22.3 | 5.2 | 14.8 | 14.0 | 11.8 |
+| planks 10 000 | 16.5 | 4.5 | 11.0 | 13.4 | 9.4 |
+| rain 10 000 | 11.9 | 3.1 | 8.5 | 11.5 | 7.6 |
 
-- **At 8 threads the step is a third faster** with boxes (settled 6.7
-  ms to 4.6, falling 8.6 to 5.5) and a quarter with planks: the
-  narrowphase 6.9 times as fast settled, 5.3 falling, 5.5 on planks;
-  the merge about 3 times; the gather 2.3. The passes after it gain too
-  (settled 3102-3105 µs to 2795-2807, falling 2950-2966 to 2681-2690),
-  their workers kept warm by `find_contacts`' dispatches, as the
-  broadphase's did for the falling pile (threads.md, "Every split on a
-  shape"; inferred, not measured apart).
-- **One thread pays 1-4% on the planks** (`find_contacts` 35 µs slower:
-  the narrowphase 25, the gather 6); with boxes the step is level within
-  the runs' spread. The narrowphase is 2-11% slower on one thread with
-  its loop in a chunk's closure; a closure taking its captures by value,
-  counts in locals, and a direct call skipping `for_each_mut` didn't
-  recover it (planks, three rounds each, within their ±10 µs).
+Ours by stage on one thread, 10 000 turning, µs a step (broadphase /
+narrowphase / solver / copies in and out; outside the systems 491, 428
+and 499, the bench no longer printing the re-sorts apart): spheres 572 / 1306 / 16 043 / 875,
+boxes 502 / 2047 / 17 451 / 654, planks 730 / 4184 / 28 832 / 987. The
+broadphase is under half what it was before `Live` kept pairs, and the
+narrowphase half of boxes' before recycling (the log's "Against the
+others, turning": 1190 / 4120 / 23 141 / 678 for boxes, 2026-09-26).
 
-**What stays serial, and why**: `Slots` (17 µs), filled from the
-colliders in order; the statics' gather (a few colliders); the spawns
-and despawns the merge recorded, made in walk order so the log and the
-ids are one walk's; and the contacts spawned at the apply node (8% of
-the falling step at 8 threads now 12%, the largest serial stage left in
-`find_contacts`' reach).
-
-### The 2D solve's gathers and write-backs across threads
-
-**Built** (2026-10-03, get-emj.103, .104, .105; 2D only). With the
-passes and `finish` across threads, the stages around them were the
-largest serial part of 2D's turning step at 8 threads: the contacts'
-gather 11-13%, writing the contacts and the bodies back 6-7% and 4-12%,
-and while falling the bodies' and their turning's gathers 6% and 9%
-(threads.md, "The whole step, stage by stage"). Each is now a `ParMap`
-walk of the world (`pipeline.rs`), its chunks the walk's in order:
-
-- **`gather_bodies`** writes a body a row, so the lists are resized to
-  the rows and carved per chunk: each chunk fills its own part, and
-  nothing is joined.
-- **`gather_turning`** and **`gather_contacts`** skip rows (bodies that
-  don't turn or aren't awake; contacts `disabled`), so each chunk fills
-  lists of its own, made on the system's thread
-  (docs/lore/memory-a-task-allocates-is-its-threads.md). The turning
-  bodies are joined after the first chunk's, which are the flow's own;
-  the contacts, two lists a contact (constraints and points), are copied
-  into the flow's across threads, each chunk into its own part, its
-  points renumbered after the chunks' before it: joined on the system's
-  thread, the copy was as long as the walk (48 µs of 104 on the settled
-  pile, against 14 of 84 copied across threads). The contacts' lists
-  (`Kept`) keep their length between steps, so the resize before the
-  copy writes only what grew.
-- **`scatter_contacts`** and **`scatter_bodies`** write rows: each page
-  is one chunk's, so its rows are written, and stamped (a page whole
-  where every row is written, a row where it changed), as on one thread.
-  A chunk of a write-back starts at the constraint or spinning body of
-  its first position, the positions before it less those its gather
-  skipped (`skipped`, in each flow).
-- **What's in order is collected per chunk and joined in chunk order**:
-  the links sleeping makes islands from, the sides bodies touched
-  (`Touching`, marked after the walk), and the `Contact` events, so each
-  comes out as one walk made it.
-
-**Where the time went** (µs a step at 1 / 8 threads, step_bench,
-`--config=bench`, the mod's timers): writing the contacts back is its
-walk (152 / 33 on the settled pile; the sides and events about 0.1, the
-pile has no `Touching`); writing the bodies back is their turning (83 /
-25) and their velocities and positions (54 / 21); sleeping's part is off
-in these scenes.
-
-**What stays serial, and why**: resetting `Touching` and marking it
-(looked up by entity, a few bodies), sending the events, and joining
-what's in order, all small; sleeping's bookkeeping after the write-back
-(`fall_asleep`, islands from the links in order); and the step nothing
-turns in, solved one contact at a time by `finish`.
-
-**One thread stays as it was** (0.2-0.6% of the step, in the alternated
-rounds below), but two of the shapes tried weren't. A closure called
-from both the one-thread walk and the walk across threads wasn't
-inlined: the contacts' row (`constraint_of`, now an inlined function)
-cost 294 µs against 265 on the settled pile (and up to 400 walked as one
-chunk), and a row walk pushing through the chunk's lists made the
-turning bodies' gather a fifth slower; by page, the lists taken out for
-the page, it's 73 against 69 falling
-(docs/lore/a-closure-called-from-two-walks-may-not-be-inlined-into-either.md).
-
-**Bit for bit**: at `ENGINE_THREADS` 1, 2, 4 and 8, 2D's baselines,
-default and long (`--all`), and 3D's default, byte-identical to
-70a4093's (232, 229 and 104 lines); the 2D tests, physics3d's
-`exact_test`, and pong's and the platformer's tests and replays pass at
-each count; `:tax` and `:tax -- parallel` bit for bit.
-`physics2d_test`'s piles on four threads now also hold every step's
-`Contact` events in order, the tick each row of what the step writes was
-last written at, and, falling asleep, the islands, to one thread's.
-
-**Mutants** (each planted, run, reverted): a chunk dropped from each
-split (the contacts' copy, the turning bodies' join, the bodies' carved
-gather, each write-back's walk, the write-backs' joins) fails the
-quality and pile tests (a debug assertion, a wrong index, or the
-comparison with one thread); the events joined out of order fail only
-the new event check; a write stamping rows it didn't change (positions
-on every row, `ContactPoints` on every contact) fails the ticks check,
-and positions also `a_pile_at_rest_is_not_re_sorted`.
-
-**What it bought** (step_bench, `--config=bench`, this tree and 70a4093's
-alternated over two rounds, load 2.5-3; threads.md has each stage): at 8
-threads the settled pile's step is 1891-1908 µs against 2331-2348
-(-19%), the pyramid's 1202-1211 against 1437-1451 (-17%), falling
-678-695 against 785-800 (-13%), not turning 2999-3000 against 3198
-(-6%). The contacts' gather 268 → 75 µs settled, writing them back 154 →
-35, the bodies' write-back 136 → 51, their turning's gather 92 → 37,
-their gather 51 → 34.
-
-## Open questions
-
-- **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation
-  in 3D](#rotation-in-3d)).[^rotation]
-- **Kinematic characters.** The platformer's player as a dynamic body with
-  no friction is the simplest thing that works; a dedicated character
-  controller (slopes, steps, one-way platforms) is the usual next step and
-  waits for a game that needs it.
-- **Tunneling.** No continuous collision: a body moving more than its own
-  size per step can pass through a thin collider. Pong's ball tops out at
-  40 cells/s, 0.67 cells a step against paddles a cell thick, which is
-  within it; substepping is the cheap fix if a game needs more. Measured
-  since ([Quality beyond settling](#quality-beyond-settling), get-emj.59):
-  a ball is stopped for certain while a step is at most the margin, its
-  radius and half the wall, 0.8 for pong's (48 cells/s), and pinned by a
-  test at that limit.
-
-## Spike results
-
-2026-09-23, `spike/physics` (since landed as `//engine/std/physics2d`,
-whose tests are the spike's): the mod as designed, on the real engine,
-with a stress demo (`pile`) and a platformer in miniature (`runner`: a tile
-floor with a pit, a running and jumping player, a coin, a walker that
-turns at ledges with a spatial query). `./bazel run -c opt
-//engine/std/physics2d:bench` prints the numbers below; `./bazel run
-//engine/std/physics2d:pile_game` runs the pile to play with over `modctl`.
-
-**What held up:**
-
-- **The solver hot-reloads under a running simulation.** Reloading
-  `physics` mid-pile (in the integration test, and by hand with `./bazel
-  run //spike/physics:physics_v2` and back, and in `//game` with gravity
-  flipped and restored) moves nothing, keeps the
-  contact cache and its warm-start impulses, and the pile goes on to
-  settle. Nothing about physics needed the loader.
-- **Deterministic.** The same drop settles to the same positions on every
-  run.
-- **Spatial queries fit the query API.** `Spatial<Data, Filter, Changes>`
-  is about a hundred lines in physics's interface, over a tuple of two
-  queries; the group parameter it needs (`ParamDecl::Group`, tuples of
-  parameters) is thirty in `engine_ecs`, with conflicts and footprints
-  seeing through it (checked by mutation). The walker's ledge check is
-  one line, and rows, `Changes` and conflicts behave as for `Query`.
-- **Fast enough.** Framework and all, on one thread:
-
-  | bodies | falling | settled |
-  |---|---|---|
-  | 250 | 0.06 ms/frame | 0.07 ms/frame |
-  | 500 | 0.12 | 0.14 |
-  | 1000 | 0.21 | 0.33 |
-
-  Contacts (broadphase and narrowphase) and the solver take about 40%
-  each, the index most of the rest. Nothing is tuned.
-
-**Sharp edges found, and what was done:**
-
-- **Bodies snag on the seams between tiles.** A box running along a row of
-  tiles meets the next tile's corner, flush with its top, and the axis of
-  least overlap calls its side a wall. Where two boxes are flush on one
-  axis and neither is inside the other, the narrowphase now takes the face
-  the box is sliding along, from the pair's relative velocity: that
-  separates running along a floor from falling along a wall, which have
-  the same geometry. "Flush" has to be both ways: resting exactly on a
-  floor, rounding puts the overlap a hair either side of zero.
-  Tile-based games may still want adjacent tiles merged into one collider;
-  this makes it an optimization, not a fix.
-- **Stacks never settled.** Closing speeds were read contact by contact,
-  after warm-starting the contacts before them, so contacts deep in a
-  stack saw their neighbors' impulses as their own speed and bounced on
-  them. They're read from the velocities before any impulse now. Pinned
-  by a ten-body column in `core_test` and the pile tests; with warm
-  starting or the split impulse removed, the pile doesn't settle either.
-- **A contact "began" one step early, or never.** A speculative contact
-  is held before its bodies touch, so "not held last step" is the wrong
-  test for a new contact; it's "not pressing last step".
-- **`Contact` is per pair**, so a player running across tiles begins a
-  contact with each one. "Landed" is `Touching::below` turning true, not a
-  `Contact`; the games should read it that way.
-- **Solving and moving are one system.** The split impulse's pseudo
-  velocities exist only inside the solve, so positions are integrated
-  there; the pipeline is four systems (`integrate_velocities`,
-  `find_contacts`, `solve`, `publish_index`), not the five the design
-  implied.
-- **Queries have no optional terms.** A collider may or may not have a
-  `Body` or a `Velocity`, so the step reads them through two queries
-  (`With` and `Without<Body>`) and looks velocities up per entity. An
-  `Option<&T>` term would be the ECS's fix.
-- **Bundles stopped at four components**, fewer than a physics body with a
-  marker. They go to eight now.
-- **A spatial query before the first step sees nothing**: the index is
-  published by the step. The walker turned on its first frame. A game that
-  queries on its first frame needs the index built at load.
-- **A mod's code can't be a separate library shared with its interface.**
-  The narrowphase and solver use the interface's shapes, but a second
-  build of the mod gets its own copy of the interface crate, so a library
-  depending on the first copy links two `physics` crates into one mod.
-  The pure modules are compiled into the mod, and into their test crate,
-  instead.
-- **Tall piles converge slowly.** A thousand bodies, 32 rows deep, aren't
-  all at rest after five seconds at eight iterations. More iterations, or
-  letting resting bodies sleep, when a game needs it.
+The measurements before these, scene by scene, 2D's included, are the
+log's "Against other engines", "Against other engines, bodies turning",
+"Against the others now", "Against the others, turning" and "How it
+scales".
 
 ## The games on it
 
-2026-09-23. Both games moved onto `//engine/std/physics2d`, and every
-recorded route and replay in `platformer_test` and `pong_test` passes
-unchanged: the winning run still wins on frame 255, the stomp and the
-walker's kill land on the same frames, and pong's replay still ends on
-frame 508.
+Both games moved onto `//engine/std/physics2d` on 2026-09-23 with every
+recorded route passing unchanged, and replay them, reloads included, on
+every test run.
 
-- **The platformer**: tiles are static boxes, spikes, the goal and coins
-  sensors whose `Trigger`s the rules read in `late`, the level's sides two
-  tall walls (the old collision code treated off-map as solid), and
-  walkers bodies that collide with tiles only. A walker turns at a wall
-  from `Touching` and at a ledge with a `Spatial<&Tile>` point query, and
-  meets the player by overlap, so a stomp and a touch are told apart
-  before either pushes the other. The rules no longer rebuild a tile map
-  every frame.
-- **Pong**: the ball is a circle with restitution 1 and the paddles
-  kinematic boxes; physics does the bounce, and pong adds its speed-up and
-  spin on the paddle's `Contact` and scores on a goal line's `Trigger`.
-  Everything the ball meets stands a radius back from the lines the court
-  is drawn by, so the ball's center turns where the old point ball's did.
+- **The platformer**: tiles are static boxes; spikes, the goal and coins
+  sensors whose `Trigger`s the rules read in `late`; walkers are bodies
+  that collide with tiles only, turn at a wall from `Touching` and at a
+  ledge with a `Spatial<&Tile>` point query, and sense the player, so
+  meeting it is an `Overlap`, which `walkers::meet`, a pre-solve hook,
+  tells into a stomp or a touch.
+- **Pong**: the ball is a dynamic circle with restitution 1, friction 0
+  and no gravity; the paddles are kinematic boxes moved by velocity; the
+  goal lines are sensors. Pong adds speed and spin on a paddle's
+  `Contact` and scores on a goal line's `Trigger`.
 
-**What the ports showed:**
+Neither game's bodies turn, so their replays hold the locked path to the
+bit. What porting them showed about the ECS is the log's "The games on
+it".[^games]
 
-- **A system couldn't read a component on some entities and write it on
-  others.** The walkers write walkers' velocities and read the player's;
-  pong moves the ball and reads the paddles' positions. The conflict check
-  now takes two queries as apart when one requires a table-stored
-  component the other excludes (`With<Walker>` and `(With<Player>,
-  Without<Walker>)`), as Bevy does: their guards are then on different
-  tables. A shared sparse component still conflicts, since its set is one
-  guard.
-- **Static sensors reported static walls.** Pong's goal lines overlap the
-  walls across their ends, and each overlap was a `Trigger`, a point for
-  nobody. A sensor pair now needs one collider that can move.
-- **Queries had four terms at most**, and the platformer's text interface
-  reads five. They go to eight, like bundles.
-- **The first frame has no spatial index**, as the spike found: a walker
-  set off the wrong way. Walkers start without looking; the index built at
-  load is still to do.
+## Open questions
 
-[^grid]: *(History, 2026-09-24.)* The broadphase was a uniform grid built
-    from every collider each step, and the step's last system,
-    `publish_index`, built a second grid as the `SpatialIndex` component
-    that spatial queries read: shapes as of the last step, empty on the
-    first frame, and invisible to the scheduler as a dependency on
-    positions. Both went when positions became a spatial key.
+- **Continuous collision** (get-emj.59): a ball is stopped for certain
+  while a step is at most the margin, its radius and half the wall (0.8
+  for pong's paddle, 48 a second, against pong's fastest 40), and pinned
+  by a test at that limit; Box2D sweeps fast bodies against statics.
+- **Kinematic characters**: the platformer's player is a dynamic body
+  with no friction; a character controller (slopes, steps, one-way
+  platforms) waits for a game that needs it.
+- **Friction mixing** (get-emj.81), **3D's carry and bounce passes**
+  (get-emj.82), **3D's rotation lock** (get-emj.80) and **the features 3D
+  lacks** (get-emj.77 to .79): the parity table's open rows.
+- **Kept colors** (get-emj.74): colors kept across steps, so the serial
+  coloring goes; it would make colors state a snapshot carries.
+
+## Where the old sections went
+
+Until 2026-10-04 this doc was the log, and code comments cite its
+sections by name (`physics.md, "Still at rest"`). Each is in [the
+log](../retrospectives/2026-10-04-physics-log.md) under the same name,
+whole; this table says where its current content is here. A name with a
+row of its own and no section here keeps its old anchor on this page.
+
+| old section, in the log | what it holds | the current design, here |
+|---|---|---|
+| [Goals](../retrospectives/2026-10-04-physics-log.md#goals), [Components](../retrospectives/2026-10-04-physics-log.md#components), [The step](../retrospectives/2026-10-04-physics-log.md#the-step), [Broadphase](../retrospectives/2026-10-04-physics-log.md#broadphase), [Spatial queries](../retrospectives/2026-10-04-physics-log.md#spatial-queries) (and Parameters made of parameters), [Walkthroughs](../retrospectives/2026-10-04-physics-log.md#walkthroughs) | the design as built 2026-09-23, then amended | [Goals](#goals), [Components](#components), [The step](#the-step), [Broadphase](#broadphase), [Spatial queries](#spatial-queries), [The games on it](#the-games-on-it) |
+| [What the ECS costs](../retrospectives/2026-10-04-physics-log.md#what-the-ecs-costs), [The real pile](../retrospectives/2026-10-04-physics-log.md#the-real-pile) (and Tried, and slower) | `:tax`'s tables, the ECS against arrays; solving in place, renumbering, mapping by location, tried and slower | [What the ECS costs](#what-the-ecs-costs) |
+| <a id="parallelism"></a>[Parallelism](../retrospectives/2026-10-04-physics-log.md#parallelism) | the first split of every stage across threads (2026-09-24), what serialized each, where the data lives | [Solving across threads](#solving-across-threads); threads.md |
+| [Sleeping](../retrospectives/2026-10-04-physics-log.md#sleeping), [The scenes](../retrospectives/2026-10-04-physics-log.md#the-scenes) | how it was built, its tables and costs, the three shapes of its record, its tests and mutations | [Sleeping](#sleeping) |
+| <a id="parallel-solving"></a>[Parallel solving](../retrospectives/2026-10-04-physics-log.md#parallel-solving) | the colored, wide and island solves on arrays (2026-09-24): coloring works, islands don't | [Order and lanes](#order-and-lanes), [Solving across threads](#solving-across-threads) |
+| [Against other engines](../retrospectives/2026-10-04-physics-log.md#against-other-engines) (How the scenes are matched, Time, Quality, Where the time goes, What would close the gaps, Bringing them in) | the first comparison, locked, with the split impulse (2026-09-25) | [Against other engines](#against-other-engines); runbook 005 |
+| <a id="settling"></a>[Settling](../retrospectives/2026-10-04-physics-log.md#settling) (What the other engines do, The options, measured, How it extends to rotation) | the split impulse replaced by the soft step: every option, measured (2026-09-26) | [The soft step](#the-soft-step) |
+| [Rotation](../retrospectives/2026-10-04-physics-log.md#rotation) (The narrowphase for turned shapes, Rotation in the soft step, Against other engines, bodies turning, What the 3D spike predicted) | rotation in 2D, each choice against the others (2026-09-26) | [Rotation](#rotation), [Narrowphase](#narrowphase) |
+| <a id="the-rotation-lock"></a>[The rotation lock](../retrospectives/2026-10-04-physics-log.md#the-rotation-lock) | the lock by absence, measured against a flag | [Rotation](#rotation) |
+| <a id="contact-points"></a>[Contact points](../retrospectives/2026-10-04-physics-log.md#contact-points) | where points are kept, and warm starting by feature id | [Contact points and warm starting](#contact-points-and-warm-starting) |
+| <a id="3d-translation-only-spike"></a>[3D, translation only (spike)](../retrospectives/2026-10-04-physics-log.md#3d-translation-only-spike) | 3D before rotation, against Rapier, Jolt and Box3D (2026-09-25) | [Rotation in 3D](#rotation-in-3d) |
+| [Rotation in 3D](../retrospectives/2026-10-04-physics-log.md#rotation-in-3d) (What it is, The choices, measured, Against the others, turning) | 3D's choices one by one, and the comparison turning (2026-09-26) | [Rotation in 3D](#rotation-in-3d) |
+| <a id="a-mod"></a>[A mod](../retrospectives/2026-10-04-physics-log.md#a-mod) | physics3d as a mod: its pipeline, no static state, through the engine, reloads, what is shared with 2D | [Rotation in 3D](#rotation-in-3d), [The two mods](#the-two-mods) |
+| <a id="the-solver-in-lanes"></a>[The solver in lanes](../retrospectives/2026-10-04-physics-log.md#the-solver-in-lanes) | 3D's lanes by level, bit for bit (2026-10-03, get-emj.52) | [Order and lanes](#order-and-lanes) |
+| <a id="colouring-the-3d-solve"></a>[Colouring the 3D solve](../retrospectives/2026-10-04-physics-log.md#colouring-the-3d-solve) (The decision: Cm, now) | colored or by level, and the carry, in 3D (2026-10-03, get-emj.90); the known misses (get-emj.96) | [Order and lanes](#order-and-lanes), [What a turning point carries](#what-a-turning-point-carries) |
+| <a id="what-3d-asks-of-the-storage-design"></a>[What 3D asks of the storage design](../retrospectives/2026-10-04-physics-log.md#what-3d-asks-of-the-storage-design) | bounds from two extents, turning re-bounds, never spheres, kept pairs | [Broadphase](#broadphase); spatial-storage.md |
+| [Quality as a test](../retrospectives/2026-10-04-physics-log.md#quality-as-a-test) | the measures, how bounds were set, the first bounds and what they catch (2026-09-26) | [Quality as a test](#quality-as-a-test); physics-testing.md |
+| <a id="quality-beyond-settling"></a>[Quality beyond settling](../retrospectives/2026-10-04-physics-log.md#quality-beyond-settling) (The debug view, The scenes, Results, What they found) | ramps, bounces, mass ratios, overlap, fast bodies, structures, in every engine (2026-09-28) | [Quality as a test](#quality-as-a-test), [Against other engines](#against-other-engines) |
+| <a id="bounces"></a>[Bounces](../retrospectives/2026-10-04-physics-log.md#bounces) | the bounce families, and the closing speed decided (2026-09-29) | [Restitution](#restitution) |
+| <a id="still-at-rest"></a>[Still at rest](../retrospectives/2026-10-04-physics-log.md#still-at-rest) | recycling, softer static contacts, 2D's substeps as a setting (2026-09-27) | [Narrowphase](#narrowphase), [The soft step](#the-soft-step) |
+| <a id="the-solvers-speed"></a>[The solver's speed](../retrospectives/2026-10-04-physics-log.md#the-solvers-speed) (Where the time went, The options, measured, Against the others now) | the lanes, levels then colors (2026-09-27) | [Order and lanes](#order-and-lanes) |
+| <a id="why-colors-let-the-pyramid-fall"></a>[Why colors let the pyramid fall](../retrospectives/2026-10-04-physics-log.md#why-colors-let-the-pyramid-fall) | the warm start's lag, found and fixed (2026-09-28, get-emj.48) | [What a turning point carries](#what-a-turning-point-carries) |
+| <a id="what-a-turning-point-carries-the-decision-matrix"></a>[What a turning point carries: the decision matrix](../retrospectives/2026-10-04-physics-log.md#what-a-turning-point-carries-the-decision-matrix), <a id="the-decision-b-colored"></a>[The decision: B colored](../retrospectives/2026-10-04-physics-log.md#the-decision-b-colored) | A, B and C, by level and colored, every bound (2026-09-28, get-emj.61) | [What a turning point carries](#what-a-turning-point-carries) |
+| [Solving across threads](../retrospectives/2026-10-04-physics-log.md#solving-across-threads) (The profile, What's built, The options, measured, The host's threads, How it scales) | the colored solve across threads in the solver (2026-09-29), before the threads mod | [Solving across threads](#solving-across-threads); threads.md |
+| <a id="the-fill-as-the-passes-first-stage"></a>[The fill as the passes' first stage](../retrospectives/2026-10-04-physics-log.md#the-fill-as-the-passes-first-stage) | `prepare` mapped, the fill moved into the passes (2026-10-03, get-znt.40) | [Solving across threads](#solving-across-threads) |
+| <a id="the-write-back-across-threads"></a>[The write-back across threads](../retrospectives/2026-10-04-physics-log.md#the-write-back-across-threads) | `finish` as a map over parts (2026-10-03, get-znt.45) | [Solving across threads](#solving-across-threads) |
+| <a id="the-3d-narrowphase-across-threads"></a>[The 3D narrowphase across threads](../retrospectives/2026-10-04-physics-log.md#the-3d-narrowphase-across-threads) | 3D's `find_contacts` split (2026-10-03, get-emj.101) | [Solving across threads](#solving-across-threads) |
+| <a id="the-2d-solves-gathers-and-write-backs-across-threads"></a>[The 2D solve's gathers and write-backs across threads](../retrospectives/2026-10-04-physics-log.md#the-2d-solves-gathers-and-write-backs-across-threads) | 2D's walks split (2026-10-03, get-emj.103 to .105) | [Solving across threads](#solving-across-threads) |
+| [Open questions](../retrospectives/2026-10-04-physics-log.md#open-questions), <a id="spike-results"></a>[Spike results](../retrospectives/2026-10-04-physics-log.md#spike-results), [The games on it](../retrospectives/2026-10-04-physics-log.md#the-games-on-it) | the spike's numbers and sharp edges (2026-09-23), the ports | [Open questions](#open-questions), [The games on it](#the-games-on-it) |
+
+[^goals]: *(History, 2026-09-23 to 2026-10-04.)* The goals were first "2D
+    only", 3D waiting for the renderer spike (get-y5t.8), and rotation an
+    open question kept out of the MVP; rotation landed on 2026-09-26 in
+    both dimensions, and physics3d became a mod the same day. The log's
+    "Goals".
+
+[^share]: *(History, 2026-09-26 to 2026-10-02.)* Until `physics_common`
+    the mods shared nothing but the storage, and `Slots`, `Softness` and
+    the closing speed were copied. A common interface for `Position` or
+    `Velocity` was measured and rejected: a 2D interface change rebuilds
+    72 actions and reloads 23 game mods, a 3D one 17 and none (the log's
+    "A mod").
 
 [^onestep]: *(History, 2026-09-24.)* Physics first stepped once per frame
-    by `Clock::dt`, capped at 1/30 s, since systems ran once a frame: a
-    real-time game's simulation depended on its frame rate, which only
-    lockstep hid. Fixed-rate phases replaced it.
+    by `Clock::dt`, capped at 1/30 s, so a real-time game's simulation
+    depended on its frame rate; fixed-rate phases replaced it. Until
+    get-znt.33 (2026-10-02, and get-znt.35 for 3D) the solve was one
+    system; the pipeline is its code split where its stages were (flows.md,
+    "Physics's adoption").
 
-[^one-solve]: *(History, 2026-10-02.)* Until get-znt.33 the solve was one
-    system, `solve`, which gathered the bodies and contacts into vectors
-    of its own, called `solver::solve_across` with the mod's `Workers`
-    (the colored passes across the host's threads, where it had them:
-    [Solving across threads](#solving-across-threads)), and wrote the
-    results, sides, events and sleeping back, its gathers and write-backs
-    split across the threads too. The pipeline is that system's code,
-    split where its stages were, with the passes on `Passes` instead of
-    `solve_across`, and no `Workers`: the scheduler owns parallelism
-    (get-znt.28).
+[^grid]: *(History.)* The broadphase was a uniform grid built every step,
+    with a second grid published for spatial queries (2026-09-23), until
+    positions became a spatial key (2026-09-24); it found every pair
+    afresh from the pages every step until `Live<Contacts>` kept them
+    (2026-09-27), which at 10 000 settled took it from about 400 µs to
+    about 20 (the log's "Solving across threads", "How it scales").
 
-[^one-solve-3d]: *(History, 2026-10-02.)* Until get-znt.35 physics3d's
-    solve was one system, `solve`, which read the settings, gathered the
-    moving bodies and the contacts into vectors of its own (and a `Slots`
-    built afresh), called `solver::solve`, and wrote the impulses and the
-    bodies back. The pipeline is that system's code, split where its
-    stages were. It never had `Workers`: 3D's solve, broadphase and
-    narrowphase were on one thread before and after. From get-znt.35 to
-    get-emj.90 (2026-10-03) the solver was one system of the pipeline,
-    `solver`, which ran `solver::solve` whole: no shape fitted a result
-    that was pair order's.
+[^narrow]: *(2026-09-26 to 2026-10-03.)* 2D's SAT and clipping measured 63
+    ns a turned pair against 370 for GJK and EPA, so SAT for boxes; one
+    point a contact toppled every pyramid. In 3D the cached axis kept piles
+    at rest that SAT every step didn't, and GJK and EPA never settled a
+    pile; area and line reductions were level, eight points bought
+    nothing. Recycling at 0.03 rather than Box3D's 0.05, since at 0.05 a
+    carried plank point drifts. The log's "The narrowphase for turned
+    shapes", "Rotation in 3D", "Still at rest" and "The 3D narrowphase
+    across threads".
 
-[^dead-test]: *(History, 2026-09-24.)* Before sleeping was storage, the
-    solve looked each contact's ends up to skip resting ones, and did so
-    only while something slept: the test is always false when nothing
-    does, yet made per contact in the gathering walk it cost 30 µs of 75
-    at 10 000 settled, for a reason not found (measured, not read in the
-    assembly). The walk was split on it.
+[^points]: *(2026-09-26.)* Points inline in 2D's `Manifold` cost a world
+    where nothing turns 7-15% of a step; a component written only where
+    used, 1.6-2.5%. Matching by id or by the nearest point was within the
+    noise of a pile's rest, which moves by a hundred steps with rounding
+    alone; ids cost nothing and need no threshold. The log's "Contact
+    points".
 
-[^sleep-counts]: *(History, 2026-09-25.)* Until then physics counted:
-    the sleeping bodies in the world against its own count, to see one a
-    game despawned or woke, and the statics against the last step's, to
-    see one despawned. A static spawned wasn't seen at all (a spawned
-    value wasn't written then), a count is fooled by one gone and another
-    come in the same step, and the count's repair put back to sleep the
-    rest of an island it had just woken, when a game woke one body by
-    removing its `Asleep`. It looked from the tick after the solve, so a
-    pre-solve hook's writes were missed, and a wake found in
-    `find_contacts` took effect from the next step, the bodies immovable
-    for the rest of the one that found it. Before that, sleeping was a
-    lookup per body (the prototype); against storage, µs asleep / awake,
-    medians of three: at 1000 (40 wide) the frame 51 / 134 and 9 / 133; at
-    10 000 (400 wide) the frame 506 / 1349 and 22 / 1340, gravity 20 / 20
-    and 8 / 20, the broadphase 149 / 146 and 2 / 160, writing back 61 / 66
-    and 1 / 65. Measured before pages were made blocks of the order: at
-    1000, 56 / 140 and 10 / 142; at 10 000, 580 / 1472 and 26 / 1503, the
-    broadphase 208 / 222 and 2 / 243.
+[^soft]: *(History, 2026-09-26.)* The 2D solver was sequential impulses
+    with a split impulse (Bullet's), eight velocity iterations and eight
+    of pseudo velocities: it rested at the slop, 0.005 deep, but crept for
+    thousands of steps, its pushes along tilted normals sliding bodies
+    where no friction acted. Every fix to the correction (friction on the
+    pseudo velocities, a decaying correction, Jolt's position iterations)
+    failed; soft steps settled. It is kept as `tests/split_impulse.rs`.
+    The log's "Settling", and for 3D's stiffness, "The choices, measured"
+    (choice 6) and "Still at rest".
 
-[^sleep-default]: *(2026-09-25.)* Turned on by default after both games
-    were checked with it: pong's ball never sleeps (it never goes slower
-    than 16 a second) and its paddles are kinematic, which never do, so in
-    2500 frames nothing slept and the game's state was the same at every
-    look, on or off. The platformer's player standing still sleeps one step
-    in 32 (see below) and runs and jumps in the frame it's told to, on the
-    same trajectory as awake; every recorded route passes unchanged.
-    `pong_test`'s `nothing_in_pong_falls_asleep` and `platformer_test`'s
-    `a_player_asleep_jumps_in_the_frame_it_is_told_to_as_it_does_awake`
-    pin both (each catches a mutation: kinematic bodies let sleep; the
-    jump without the step's gravity, or not waking the player). Off
-    by default, from 2026-09-24, while its gaps were open.
+[^bounce]: *(History, 2026-09-29.)* Restitution took the closing speed
+    with the step's gravity already in it (`Closing::Stepped`, still a
+    variant), returning exactly one step of gravity more than a bounce came
+    in with: a lossless ball climbed to 1.64 of its drop in 2D and 1.31 in
+    3D. Grown over the gap (`Closing::Met`) was unbiased but added energy
+    where the gap isn't the fall, and no reference does it. The log's
+    "Bounces".
 
-[^touching]: *(History, 2026-09-25.)* Waking at once every island a
-    resting contact joins to a woken one, transitively (as Box2D's islands
-    are one per touching pile), was tried: a real pile that woke then
-    never slept again, in 3000 steps. Each island that fell asleep was
-    pressed by one not yet still for `Sleep::time`, which woke it and so
-    all the islands it touched, resetting each body's time still. The
-    bottom row's speeds in the step the floor went, which the lag was
-    meant to fix, were the awake pile's already (0.13 to 3.9 a second,
-    the warm start of the contacts above solved without the floor), so it
-    was taken out.
+[^lanes]: *(History, 2026-09-27 to 2026-10-03.)* The solver was 2 to 4
+    times Box2D's and Rapier's with bodies turning: latency, each contact
+    waiting on the one before in pair order. Lanes by level halved it,
+    bit for bit (2026-09-27); colors became 2D's default with get-emj.61
+    (2026-09-28) and 3D's with get-emj.90 (2026-10-03), level in speed on
+    one thread and what threads share. Eight lanes were slower than four
+    in both. The log's "The solver's speed", "The solver in lanes" and
+    "Colouring the 3D solve".
 
-[^sleep-reload]: *(History, 2026-09-25.)* `Sleepers` was rebuilt from the
-    world at every load, so a reload restarted each awake body's time
-    still and it fell asleep `Sleep::time` late: the platformer's player,
-    standing at the start with physics reloaded every frame, never slept.
-    The reload replays found it; `a_reload_keeps_how_long_awake_bodies_have_been_still`
-    in //engine/std/physics2d:physics2d_test pins it.
+[^carry]: *(2026-09-28, 2026-10-03.)* 2D weighed A (both from the last
+    substep), B and C (both means), by level and colored, against every
+    bound of four suites: B colored met all 338, and is what lets the
+    parallel solve be the one-thread solve. Under B a column crushed by a
+    box 1000 times as heavy throws light boxes through the floor
+    (get-emj.58). 3D's colored default kept the mean (Cm) and five known
+    misses (get-emj.96). The log's "Why colors let the pyramid fall",
+    "What a turning point carries: the decision matrix" and "Colouring the
+    3D solve".
 
-[^sleep-adopt]: *(History, 2026-09-26.)* A build handed the copy also
-    adopted everything the world had asleep, as the first build does, so
-    a body a game put to sleep between frames (a message) was physics's
-    own to the next step, which found its values written since and woke
-    it: only if a reload came between. Found while measuring whether the
-    copy could move into the world (get-emj.40).
+[^threads]: *(History, 2026-09-24 to 2026-10-03.)* The first split of
+    every stage (2026-09-24) made the ECS's step slower and the arrays'
+    faster, mostly from moving data between cores; the colored solve then
+    ran across threads inside the solver (`solve_across`, 2026-09-29) on
+    a test pool, 4.9 times one thread at 8 on one CCD, and showed
+    placement on one CCD was most of it. The threads mod, the shapes'
+    dispatch and the splits stage by stage followed (2026-10-03,
+    get-znt.34, get-znt.40, get-znt.45, get-emj.101, get-emj.103 to .105),
+    and `Workers` went (get-znt.31). The log's "Parallelism", "Parallel
+    solving", "Solving across threads" and its last four sections;
+    threads.md for what was decided.
 
-[^sleep-copy]: *(History, 2026-09-24 to 2026-09-26.)* Until get-emj.40,
-    sleeping's bookkeeping was `Sleepers`, the mod's copy of who's asleep
-    by entity index, with how long each awake body had been still (in
-    seconds), the transient part the step borrowed; the old build handed
-    it to the new one through the mod's state (`unload`, then `load`),
-    and a build without one rebuilt it from `Asleep` in the world, losing
-    the times still. Removed because both halves went into the world
-    (`Still`, `Slept`) at about the cost measured below with runs; the
-    measurements that had kept it a copy follow, as they were written.
+[^sleep]: *(History, 2026-09-24 to 2026-09-26.)* Sleeping was first a
+    lookup per body in the mod's transient state, then storage
+    (2026-09-24), with its gaps closed and on by default (2026-09-25), and
+    its record moved from a copy in the mod into the world (`Still`,
+    `Slept`, 2026-09-26, get-emj.40), at about 4% of a step while a pile
+    falls asleep. Waking every touching island at once was tried and never
+    let a pile sleep again. The log's "Sleeping", with its tests and
+    mutations.
 
-    **Why the copy is per-entity data outside the world** (2026-09-26,
-    get-emj.40): it holds two things a step carries, and neither moves into
-    the world for free.
+[^spatial]: *(History, 2026-09-23.)* Built in the spike, with
+    `ParamDecl::Group` for it. Until 2026-09-24 spatial queries read a grid
+    the step published, empty on the first frame, so a walker set off the
+    wrong way; they read the world's storage since. Until 2026-10-04
+    `Spatial` was a hand-written `Param` over the group; it is a `Compose`
+    since `engine_api` stopped exporting `Param` (get-znt.51).
 
-    - *Who's asleep, as physics last saw it*, is the baseline a game's
-      changes are found against. The world has who's asleep now; a body a
-      game despawned, or woke by removing its `Asleep`, isn't in it, and its
-      island wakes only because the copy remembers it. Rebuilt from the world
-      at a reload that followed such a change, the island stayed asleep (999
-      of the real pile's 1000, against 1 without the reload). So the handoff
-      stays whatever happens to the times below.
-    - *How long each awake body has been still* would be a component, as
-      Box2D keeps `sleepTime` on each body (`b2Body`) and Rapier
-      `time_since_can_sleep` on each body's activation, and it would survive
-      a reset state too. Awake islands aren't kept (they're found afresh each
-      step), so there's no island to keep it on.
+[^rotation]: *(2026-09-26.)* Rotation was costed at "roughly doubling the
+    solver" when it was an open question; a turning contact costs 5-7 times
+    a locked one in the solver. A rotation or an angle, turned arms or
+    first-order ones, measured within the noise; one relax pass never let
+    the big pyramid rest. The log's "Rotation".
 
-    But a settling pile's bodies cross `Sleep::speed` all the time: at 10 000
-    in a real pile (401 wide), about 400 a step while it falls and 1000 while
-    it settles. Each shape was built as a prototype written only when a body
-    crosses (the copy still holding the times, so this is the least each
-    costs): `Still { since }`, the step it went slower, sparse and only on
-    bodies slower than the threshold (an insert or a remove a crossing), or on
-    every awake dynamic body (a column in each body's table, written a
-    crossing). `:tax -- sleeping`, µs a step, sleeping on / off, medians of
-    three runs on a quiet machine, 60 steps from the step given:
+[^3d]: *(History, 2026-09-25 to 2026-10-03.)* physics3d began as a
+    translation-only spike of plain systems on the ECS harness
+    (2026-09-25), turned and became a mod on 2026-09-26, kept its settings
+    in static `Mutex`es until then, and bounded turned boxes by a derived
+    `Reach` component until storage took two extents. It went into lanes
+    (get-emj.52) and colors (get-emj.90) on 2026-10-03, and across threads
+    the same day. The log's "3D, translation only (spike)", "Rotation in
+    3D", "A mod", "The solver in lanes" and "Colouring the 3D solve".
 
-    | 10 000, 401 wide | the copy (now) | sparse `Still` | `Still` on every body |
-    |---|---|---|---|
-    | falling (from step 1) | 985 / 872 | 1033 / 886 | 1071 / 887 |
-    | settling (from step 60) | 1796 / 1658 | 1895 / 1673 | 1904 / 1666 |
-    | falling asleep (from step 120) | 1848 / 1614 | 1940 / 1644 | 1947 / 1643 |
-    | of it, the `sleeping` stage (settling, on) | 130 | 166 | 149 |
-    | asleep, ten steps after all of it (on) | 23 | 23 | 36 |
+[^ecs]: *(2026-09-24 to 2026-09-27.)* `:tax` measured the ECS within 5% of
+    the arrays settled and 1.28 times falling on the columns' pile, and on
+    a real pile level settled and 17% under them at rest; the copies cost
+    about 150 µs at 10 000 falling, the re-sort 25 to 126. Solving in place
+    went from 801 to 882 µs. The log's "What the ECS costs" and "The real
+    pile".
 
-    Against sleeping off at the same step, the sparse component costs 3 to 5%
-    of a step more than the copy, two thirds of it outside the systems,
-    where the apply node makes the inserts and removes (a boxed change each),
-    and the dense one 3.5 to 7%, and half again the
-    asleep pile's step (its bodies' tables are wider). Written every step
-    (seconds, not the step it went slower), either costs at least that. At
-    1000 (41 wide) settling it's 181, 191 and 187 µs. So the times stay in
-    the copy: what components would buy (the times kept through a reset
-    state, and seen by games) isn't worth 3 to 5% of every step before a
-    pile is asleep.
+[^quality]: *(History, 2026-09-26 to 2026-09-29.)* Until get-emj.37 the
+    tests asked only whether a pile came to rest eventually, and a solver
+    that crept for thousands of steps passed them. The log's "Quality as a
+    test", "Quality beyond settling" and "Bounces" have the first bounds,
+    the first results in every engine and what each planted bug failed.
 
-    **With sparse changes as runs** (2026-09-26, get-znt.18, a spike:
-    storage.md, ["Sparse changes are runs, not
-    closures"](storage.md#sparse-changes-are-runs-not-closures)), the sparse
-    `Still` again, the same prototype, against the copy on the same ECS;
-    µs a step, sleeping on / off, medians of seven runs interleaved, 60 steps
-    from the step given:
+[^games]: *(History, 2026-09-23.)* Porting the games added the conflict
+    rule for queries apart by a table component, sensors that need one
+    collider that can move, and queries and bundles of eight terms.
 
-    | 10 000, 401 wide | the copy (ECS as it was / spike) | sparse `Still`, as it was | sparse `Still`, runs |
-    |---|---|---|---|
-    | falling (from step 1) | 965 / 852, 965 / 854 | 995 / 853 | 980 / 854 |
-    | settling (from step 60) | 1759 / 1607, 1758 / 1609 | 1833 / 1611 | 1792 / 1609 |
-    | falling asleep (from step 120) | 1807 / 1592, 1816 / 1590 | 1864 / 1581 | 1845 / 1589 |
-    | of it, the `sleeping` stage (settling, on) | 128, 129 | 162 | 151 |
-    | asleep, ten steps after all of it (on) | 23, 22 | 23 | 23 |
-
-    Over the copy that is 3.5 to 4.6% of a step as it was (this run's
-    measure of the 3 to 5% above), and 1.8 to 2.1% with runs; at 1000 (41
-    wide) settling, 4.3% and 1.9%. Its extra cost outside the `sleeping` stage,
-    mostly the apply, went from about 40 µs a step to 12; what's left is in
-    that stage, where each crossing is noticed, looked up (`Query::get`) and
-    logged. So the copy
-    stays while the spike is undecided, and the component is now on the 2%
-    bar rather than over it.
-
-[^prototype]: *(History, 2026-09-24.)* The prototype kept who's asleep only
-    in the mod's transient state, by entity, and every walk looked each
-    body (and each contact's ends) up in it: asleep, the broadphase,
-    gathering and writing back cost what they did awake, and the merge
-    and the solver's gathering more. A reload woke everything; a game's
-    write or despawn didn't wake anything; `Touching` on sleeping bodies
-    was reset each step. Its test's two surviving mutations (sleeping
-    bodies not immovable, and written back) went with the lookups.
-
-[^merged]: *(History, 2026-09-24.)* Before sleeping as storage was merged
-    with pages as blocks of the order, the latter's `:tax`, medians of
-    five: frame 133 / 125, 126 / 123, 730 / 572, 1350 / 1298 and 1288 /
-    1289 (the table's columns in order); broadphase 14, 14, 116, 150, 150.
-    Merged, `near_pairs` first chose per pair of active pages which side
-    to test row by row from: the dense layout went from 351 µs to 375, so
-    only passive pages choose now.
-
-[^tax]: *(History, 2026-09-24.)* When `:tax` was written, at 10 000
-    bodies settled: frame 2909 µs against the arrays' 1269, gathering
-    colliders 144, broadphase 996 / 277, merging 113 / 11, the solver's
-    gathering 179 / 29, writing back 184 / 19, and the re-sort 352 (32 of
-    them at 1000 bodies), as much at rest as settled. Before that the 10 000
-    frame was 4738 µs, until two fixes: the mod mapped entities to array
-    indices by sorting and binary search, three times a step, where entity
-    ids are small dense integers and a vector by index does it in O(1)
-    (`Slots`); and writing back looked up `Touching` on both ends of every
-    contact, though most bodies don't have one. The copies and the upkeep
-    were then cut apart, and merged the same day: copying in and out alone
-    took the frame to 2521, the upkeep and page lanes alone to about 2650.
-    Then, with pages split at the median of their keys, the table's 10 000
-    columns read, frame first: falling 910 / 563, broadphase 221 / 201,
-    outside the systems 196; settled 1454 / 1279, 227 / 282, 101; at rest
-    1384 / 1288, 220 / 283, 25 (medians of three runs).
-
-[^card-house]: *(History, 2026-09-28.)* Measured on the solver before
-    get-emj.48. Since, carrying both impulses from the last substep, it
-    loses two cards, as Rapier's does; the test on it became a family of
-    houses bounded by the references' share ([What a turning point
-    carries](#what-a-turning-point-carries-the-decision-matrix)).
-
-[^colored-fell]: *(History, 2026-09-27.)* When this table was measured,
-    colors let a turning 5050 pyramid fall, its top 2 to 5 lower and boxes
-    leaning 40°, with Box2D's rule for static contacts, the lowest free
-    color or Rapier's highest, six substeps, or Box2D's softness and
-    passes; three relaxing passes stood a pyramid 60 wide but not 100.
-    The cause was the warm start, not the colors: [Why colors let the
-    pyramid fall](#why-colors-let-the-pyramid-fall).
-
-[^last-substep]: *(History, 2026-09-28.)* Built since, for turning
-    contacts' points only, not rows at their normal: [Why colors let the
-    pyramid fall](#why-colors-let-the-pyramid-fall). Measured here as a
-    stack option, it was set aside for the piles' worst; on the lanes it
-    moved the turning piles' worst from 440 to 330.
-
-[^levels-default]: *(History, 2026-09-28.)* From 2026-09-27 the default
-    grouped turning contacts by level of the pair-order sweep
-    (`Wide::Levels(4)`), bit for bit the loop one contact at a time in pair
-    order, and from get-emj.48 carried both of a turning point's impulses
-    from the last substep (`Carry::Last`): A in the decision matrix.
-    get-emj.61 replaced both, so that the one-thread solve is one a
-    parallel solve can match. Both stay as variants (`rot/levels=4`,
-    `rot/carry=0`), the level path with its equivalence test.
-
-[^pair-lanes]: *(History, 2026-09-27.)* `Wide::Pair`, the lanes' layout
-    one contact to a batch in pair order, was built to check the layout
-    against the loop bit for bit before any grouping, and removed once
-    levels of one lane checked the same; so were three rules for colored
-    contacts with a static end (`Statics`: the lowest free color, not
-    color 0, the highest), since none stood the 5050 pyramid.
-
-[^across-first]: *(History, 2026-09-29.)* The first version shared only the
-    passes, filling the batches and writing back on the calling thread:
-    3.5 times one at 8 threads on the pile (1291 µs, 670 of it serial).
-    With the fill a stage, 4.3 times (997 µs, 318 serial), and with the
-    write-back a second run, 4.9 (871). It took blocks by
-    `try_lock` with a mark inside, and gave a thread past a small stage's
-    blocks no start, as Box2D does; either can leave a stage waiting on a
-    block nobody takes, and the second hung the determinism test
-    ([lore](../lore/a-stage-loop-without-a-main-thread-must-let-any-thread-take-any-block.md)).
-
-[^workers]: *(History, 2026-10-03, get-znt.31.)* `Workers`, a system parameter that
-    declared nothing (as `Dt` doesn't) and handed out the world's
-    executor, was deleted once its users had moved onto `ParMap`
-    (physics2d's gathers, broadphase and narrowphase) and the ECS's own
-    crate-private split (`near_pairs`, a `Live`'s broadphase, the
-    re-sort's re-bounding). A system had used it to fan out without
-    declaring it, which get-znt.28 ruled out.
+[^cmp-threads]: *(History, 2026-10-03 to 2026-10-04.)* From `ed0b68d` until
+    get-emj.113 the 3D comparison timed ours on the process's shared pool
+    of eight threads (`Ours::new`), against references on one; every 3D
+    table in the log predates that, so is one thread's. 2D's timed row was
+    always one thread's, so the 2026-10-04 design review's W4 was wrong
+    for 2D. The quality tests and the baseline still run ours on the shared
+    pool (`ENGINE_THREADS`), which gives the same bits.

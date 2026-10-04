@@ -6,7 +6,8 @@ How a mod's code is swapped while its state stays live. The code lives in
 
 ## The ABI
 
-A mod is a `cdylib` exporting two `extern "C"` symbols:
+A mod is a `cdylib` exporting two `extern "C"` symbols, and a third the
+loader may ask for:
 
 - `engine_mod_info() -> ModInfo`: the mod API version it was built against,
   the size, alignment and version of its state, and a function declaring
@@ -15,21 +16,35 @@ A mod is a `cdylib` exporting two `extern "C"` symbols:
   cr.h. `op` is `LOAD`, `UNLOAD`, `CLOSE`, `MESSAGE`, or, for a bootstrap,
   `RUN` (the session). A frame's work doesn't go through it: the loader
   calls each system directly (see [scheduling.md](scheduling.md)).
+- `engine_mod_build()`, optional: the Bazel label the library was built
+  as (`ENGINE_MOD_BUILD`, which `engine_mod` sets), which only
+  `Engine::build_of` asks for, to tell apart builds that run the same code
+  (the replays, [below](#reloads-the-games-cant-see)). It isn't in
+  `ModInfo`, so a library without it still loads.
 
-Everything that crosses the boundary is `#[repr(C)]`, and `Op`/`Status` are
-integer newtypes rather than Rust enums, so a value one side doesn't know is
-an unknown number rather than undefined behavior. Mods don't write any of
-this: they implement the `Mod` trait and call `export_mod!`, which also
-catches panics at the boundary (unwinding out of an `extern "C"` function
-aborts the process).
+The ABI is two layers. **The load-time tables** the symbols exchange
+(`ModInfo`, `ModContext`, `Host`) are `#[repr(C)]`, and `Op`/`Status` are
+integer newtypes rather than Rust enums, so a value one side doesn't know
+is an unknown number rather than undefined behavior. **Everything else is
+Rust types**, shared under the one-compiler rule
+([ecs.md](ecs.md#one-compiler-per-session)): the world and its parameters
+(`engine_ecs`), systems' declarations, services' arguments, and even some
+of `Host`'s own entries, which are Rust-ABI functions taking
+`&mut dyn FnMut`, `Duration` or returning `Option<FramePlan>`. Both
+layers are covered by `API_VERSION`, which a change to `engine_api` or
+`engine_ecs` bumps. Mods don't write any of this: they implement the `Mod`
+trait and call `export_mod!`, which also catches panics at the boundary
+(unwinding out of an `extern "C"` function aborts the process).
 
-The ABI is C, not Rust's, and not `abi_stable`'s, because `abi_stable`
-deliberately never unloads a library (see
-[lore](../lore/abi-stable-never-unloads-a-library.md)).
+The symbols are C, and the rest Rust's rather than `abi_stable`'s, because
+`abi_stable` deliberately never unloads a library (see
+[lore](../lore/abi-stable-never-unloads-a-library.md)).[^abi]
 
-**Open question:** whether to use `abi_stable`'s FFI-safe types (`RString`,
-`RVec`) inside the C ABI once mods exchange richer data. Its loader is out,
-but its types don't depend on it.
+**Open question:** mods built outside this workspace, which the
+one-compiler rule shuts out; `abi_stable`'s FFI-safe types (`RString`,
+`RVec`; its loader is out, but its types don't depend on it) or
+engine-owned `#[repr(C)]` containers are the ways round it
+([ecs.md](ecs.md#one-compiler-per-session)).
 
 ## Who owns state
 
@@ -41,7 +56,12 @@ three homes, by how long it has to live:
 |---|---|---|
 | one build | closures, trait objects, caches, crate objects | the mod's `Transient` |
 | across reloads | the mod's own game state | the mod's state (`mod_state!`) |
-| the process | windows, devices, threads | registered resources, resident mods (get-y5t) |
+| the process | windows, devices, threads | resident mods (below; `engine/std/threads` owns the scheduler's pool) |
+
+Resident mods are the one long-lived home built. Registered resources,
+objects and threads the loader would hold for a reloadable build and keep
+its library mapped for, are planned beside them (get-y5t.3, get-y5t.4) and
+not built.
 
 **The state** is the `Mod` type itself, declared with `mod_state!`. The loader
 allocates it, makes it from the build's `Default` on first load, and hands it
@@ -96,8 +116,17 @@ build never swapped for the rest of the session. Its code therefore stays
 mapped until the engine exits, and so does its transient part, which it makes
 once at load and drops at shutdown. That is what makes a resident mod the
 place for things that point into their own code and can't be rebuilt on every
-reload: windows, devices, and threads (the test mod `vault` owns one). Other
-mods reach them through the resident mod's services, holding plain handles.
+reload: windows, devices, and threads (the test mod `vault` owns one, and
+`engine/std/threads` the scheduler's pool, whose threads run its code
+between frames; [threads.md](threads.md)). Other mods reach them through
+the resident mod's services, holding plain handles, or, as with the pool,
+through what it installs in the world (the world's executor).
+
+That is also why resident mods are exempt from the thread lint: a
+reloadable mod's code may not start threads (`//engine:mod_lints`
+forbids the methods `//:clippy.toml` lists), since a thread running its
+code would keep its build mapped, while `engine_mod` gives a resident mod
+`//engine:mod_lints_threads_allowed` (no printing, threads allowed).
 
 A new build of a resident mod takes a restart:
 
@@ -163,16 +192,25 @@ reload sends every mod in the game. For each mod in the batch:
 
 Then, for the batch as a whole:
 
-4. **Check dependencies.** Every mod must end up running against the
-   interfaces it was built against (see [mod-deps.md](mod-deps.md)). Any
-   failure in steps 2–4 refuses the whole batch and leaves every running
-   build untouched.
+4. **Check dependencies and the plan.** Every mod must end up running
+   against the interfaces it was built against (see
+   [mod-deps.md](mod-deps.md)), and every system, the new builds'
+   included, must still fit in one order (see
+   [scheduling.md](scheduling.md)). Any failure in steps 2–4 refuses the
+   whole batch and leaves every running build untouched.
 5. **Retire the old builds**, dependents first. If a mod's state can be
    carried over or migrated, send the old build `UNLOAD` (it drops its
    transient part), then move or migrate the state. Otherwise send it `CLOSE`
    so it drops its transient part and state (only the old code knows how),
    and make the new build's `Default`.
-6. **Swap**, dependencies first. Drop the old library, bump `generation`,
+6. **Install** the new builds' components, events and flows in the world,
+   dependencies first, now the old builds have let go of theirs. A changed
+   layout migrates every stored value here ([ecs.md](ecs.md#layout-changes)),
+   and a flow's recycling bin, which an old build may have filled, is
+   dropped while that build is still mapped ([flows.md](flows.md)). The
+   checks before rule out a refusal here (an older layout, a changed
+   storage).
+7. **Swap**, dependencies first. Drop the old library, bump `generation`,
    and send the new build `LOAD`, which makes its transient part.
 
 A mod that returns `Status::ERROR` (including a caught panic in a system)
@@ -361,3 +399,13 @@ sequence depends on:
   with unresolved symbols. The `llvm` toolchain already passes it; it is
   pinned so the loader doesn't depend on a default (see
   [lore](../lore/mods-are-linked-bind-now.md)).
+
+[^abi]: *(History, 2026-10-04.)* This section said everything crossing
+    the boundary is `#[repr(C)]` and "the ABI is C, not Rust's", and named
+    two symbols. It dates from when mods reached the world through
+    `WorldApi`, a table of `extern "C"` functions. `Host`'s scheduler calls
+    were already Rust-ABI by the time the ECS landed as shared Rust types
+    (5507a6f, 2026-09-23; [ecs.md](ecs.md#why-the-loader-owns-it)), which
+    left only the load-time tables C. `engine_mod_build` was added with the
+    replays (e1c6c8d, 2026-09-25). The reload sequence didn't list the
+    install, which `load_batch` runs between retiring and swapping.

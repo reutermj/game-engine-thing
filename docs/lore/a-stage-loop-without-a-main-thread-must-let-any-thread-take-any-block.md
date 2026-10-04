@@ -39,3 +39,15 @@ holes, one of them the hang:
 Rapier 0.36's staged solver (`staged_island_solver/sync.rs`) avoids both
 the same way: stages advance on completed work, not on arrival, and a
 claim carries its stage, so a straggler's fails.
+
+*(History: 2026-10-04: `solver::solve_across`, `lanes::run_across`
+and the quality test named above were removed on 2026-10-03 (ed0b68d,
+get-emj.93). The protocol lives on in `engine/ecs/dispatch.rs`, which
+runs `Passes` across the world's executor: `first_block` starts a
+thread past a stage's blocks at `w % n`, blocks are claimed by
+`fetch_max` on their marks, and a block's data is still taken with
+`try_lock().expect(..)` (`engine/ecs/shape.rs`). Its unit test
+`every_block_runs_once_after_the_stage_before` runs on the same
+`Backwards` executor, among others. A stage there is published by
+whichever thread completes the last stage it waits for
+([threads.md, "Dispatch"](../architecture/threads.md#dispatch)).)*

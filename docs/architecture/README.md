@@ -60,8 +60,10 @@ monolithic design doc.
   block or in reserved address space against today's pages, measured for
   storage and for a solve in place, and what it means for parallel
   relations' phase 2 (deferred)
-- [physics.md](physics.md) — 2D rigid bodies as an engine mod,
-  with every piece of state in the world
+- [physics.md](physics.md) — the 2D and 3D physics mods as they are, by
+  topic, with every piece of state in the world; the measurements and
+  decisions behind them are the dated
+  [physics log](../retrospectives/2026-10-04-physics-log.md)
 - [physics-sharing.md](physics-sharing.md) — the 2D and 3D physics mods
   side by side: a parity table from the code, what each piece is
   (dimension-independent, the same algorithm over other math, or its own),

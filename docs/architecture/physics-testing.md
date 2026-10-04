@@ -35,8 +35,8 @@ different kind of test:
    Getting worse within the floor, and getting suspiciously better, should
    both be seen and agreed to.
 
-The first four layers below answer the first three; the baseline answers
-the fourth.
+Of the layers below, the baseline answers the fourth; the rest answer the
+first three, or check the tests that do (scene sanity, calibration).
 
 ## What exists today
 
@@ -151,7 +151,7 @@ says"); 5 is get-emj.68; 6 is measured and has a way out (get-emj.66).
 
 ## The design
 
-Keep the four existing layers as they are. Add a fifth, the **baseline**,
+Keep the layers that existed as they are. Add one more, the **baseline**,
 and three smaller pieces.
 
 ### The baseline: our own accepted results
@@ -640,17 +640,18 @@ own mechanism: a clue there, not noise.
 
 ### A time budget for the default suite
 
-- **Default suite:** each physics test target within about 30 s in
-  fastbuild, and the physics targets together within about 2 minutes of
-  wall time when run in parallel. A scene goes in the default suite if
-  it's fast and covers something no other default scene does. Measured
-  (2026-09-28, each target alone): `physics2d/compare:quality_test` 49 s,
+- **Default suite:** each physics test target within about 30 s, and the
+  physics targets together within about 2 minutes of wall time when run
+  in parallel. A scene goes in the default suite if it's fast and covers
+  something no other default scene does. Measured (2026-09-28, each
+  target alone, unoptimized, as builds were then; every build has been
+  optimized since, below): `physics2d/compare:quality_test` 49 s,
   `physics2d/compare:behaviour_test` 7.7 s, `physics3d/compare:quality_test` 17.5 s,
   `physics3d/compare:behaviour_test` 0.3 s, the same with the baseline tests
   skipped (it costs nothing: its runs are the other tests'). With the whole
-  suite running beside it, `:quality_test` takes 66 s. It is over the
-  budget, and was before this work (58 s beside the other physics
-  targets).
+  suite running beside it, `:quality_test` took 66 s. It was over the
+  budget, and had been before this work (58 s beside the other physics
+  targets); optimized, it takes 1.0 s.
 - **Long suite** (manual targets): everything else, with its
   own baseline. It runs before merging any change to the solver, the
   narrowphase, sleep or the step, and its baseline diff goes in that

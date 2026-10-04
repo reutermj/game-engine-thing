@@ -19,8 +19,8 @@ affected: rustc gets `-C opt-level=3` under `-c opt`.
 
 ## Resolution
 
-`bench/physics3d/copts.bzl` adds `-O3` under a `compilation_mode = opt`
-`config_setting`. A target's copts come after the toolchain's, and the last
+`engine/std/physics3d/compare/copts.bzl` adds `-O3` under a
+`compilation_mode = opt` `config_setting` (`:opt` beside it). A target's copts come after the toolchain's, and the last
 `-O` wins, which the aquery line confirms (`... -O2 ... -O3 -c file.cpp`).
 The other toolchain flags are left as they are.
 
@@ -30,3 +30,7 @@ another; `-Wno-thread-safety-analysis` on Jolt silences them. Nothing else
 in either library needed a change: both built with the hermetic toolchain on
 the first try, from a glob of their sources minus the optional GPU and
 compute-shader backends (Jolt) and nothing (Box3D).
+
+*(History: 2026-10-04: the copts moved with the comparison from
+`bench/physics3d/` to `engine/std/physics3d/compare/`; the target
+named at the top is now `//engine/std/physics3d/compare`.)*

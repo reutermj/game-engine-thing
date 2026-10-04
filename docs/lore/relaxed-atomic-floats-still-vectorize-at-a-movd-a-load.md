@@ -32,3 +32,11 @@ are one generic function over both (`lanes::Bodies`).
 So safe sharing costs about 3% of a parallel solve here, which is what
 the unsafe version would have bought, with Miri and fuzz coverage of
 concurrent code to earn it (physics.md, "Solving across threads").
+
+*(History: 2026-10-04: the code measured here is gone. `solver::solve_across`,
+its `lanes::Atom` sharing and `solver_bench`'s `THREADS` were removed on
+2026-10-03 (ed0b68d, get-emj.93), and the bench is now
+`//engine/std/physics2d/compare:solver_bench`. The choice it informed
+stands: `Passes` hands kernels their states shared as relaxed atomics of
+their bits (`Shareable`, `States::Shared` in `engine/ecs/shape.rs`), plain
+on one thread. The numbers above were not re-measured on that code.)*

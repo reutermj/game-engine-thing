@@ -118,9 +118,12 @@ page's range (splitting full pages at a boundary of a block of the
 order, big rows to big pages), then merges neighboring pages that fit in
 three quarters of one ([Upkeep, reworked](#upkeep-reworked),
 [Pages as blocks](#pages-as-blocks-of-the-order)).
-`Query::in_region` walks runs, pages, then rows; `Query::near_pairs` sweeps
-pages along x, then tests rows a page at a time, across the query's
+`Query::in_region` walks runs, pages, then rows; `near_pairs` sweeps
+pages along x, then tests rows a page at a time, across its sides'
 spatial tables ([Against sweep and prune](#against-sweep-and-prune)).
+`near_pairs` is a free function in `engine_ecs`, for tests and benches:
+a mod finds pairs through `Live` ([live.md](live.md)), which answers
+what it would.[^near-pairs-method]
 
 Tested against brute force (`//engine/ecs:spatial_test`: regions and
 pairs after random moves, spawns, table changes and a move of every row
@@ -481,12 +484,16 @@ most of it.
 
 ## In 3D
 
-**Status: a spike** (2026-09-25, branch `spike/physics3d`), for what 3D
-physics asks of the storage core before more is built on 2D alone. The
-storage is generic over the dimensions; a translation-only 3D step
-(`//engine/std/physics3d`, spheres and axis-aligned boxes) runs on it, and
+**Status: built** (in `engine_ecs`, on main). The storage is generic over
+the dimensions. The 3D physics mod (`//engine/std/physics3d`, spheres and
+boxes that turn, still experimental) runs on it, and
 `//engine/std/physics3d/compare` compares it with Rapier 3D, Jolt and Box3D
-([physics.md](physics.md#3d-translation-only-spike)).
+([physics.md](physics.md#rotation-in-3d)). It began as a spike (2026-09-25,
+branch `spike/physics3d`), for what 3D physics asks of the storage core
+before more is built on 2D alone, under a translation-only step of
+spheres and axis-aligned boxes
+([the physics log](../retrospectives/2026-10-04-physics-log.md#3d-translation-only-spike)); this section's
+measurements are that spike's, with turned boxes added the next day.
 
 **What changed in `engine_ecs`.** Everything that knows the axes takes a
 const `D` (2 or 3), defaulting to 2 so 2D code names `Bounds` and
@@ -540,7 +547,8 @@ bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
   `near_pairs` is 16% faster and its falling re-sort 19%; 2D's broadphase is
   11% faster at 10 000 and 25% slower at 1000. Page size per table (or per
   dimension), the open question in [storage.md](storage.md#other-open-questions),
-  now has a second reason; 64 rows would need `u64` masks.
+  now has a second reason; 64 rows would need `u64` masks. (Page size is
+  per table, but every spatial table's is `SPATIAL_PAGE_ROWS`, 16.)
 - **Upkeep grows less than the broadphase**: creeping, the re-sort is a
   quarter more in 3D (a key and cell per row, a lane more to re-box);
   falling, half again, since rows cross more page faces.
@@ -554,7 +562,7 @@ bodies on a lattice (0.9 apart, half extent 0.45), two runs agreeing within
   instead cost 4-6 times the pairs, and ten times the broadphase once
   walls got it too. What 3D still wants from the storage (fat bounds or
   kept pairs, wider tuples):
-  [physics.md](physics.md#what-3d-asks-of-the-storage-design).[^reach]
+  [the physics log](../retrospectives/2026-10-04-physics-log.md#what-3d-asks-of-the-storage-design).[^reach]
 
 ## Bounds from several components
 
@@ -862,8 +870,12 @@ ms against 31.5-32.3, most of it the solver; Rapier's 13.4 and Box3D's
   instead of 16 measured the same (125-133). Not found; the fixed cost of
   a call afresh (three passes over the sides' tables, the sides sorted,
   the answer moved in) is the suspect.
-- **One set a key.** A second broadphase over the same key's tables with
-  other sides or grow would start the kept pairs over each call.
+- **One set a key** *(left when measured; solved the same day)*. A second
+  broadphase over the same key's tables with other sides or grow would
+  have started the kept pairs over each call. Relations are declared now,
+  any number on one key, each its own set ([How general it
+  is](#how-general-it-is);
+  [live.md](live.md#1-more-than-one-kept-set-per-key-done)).
 
 [^spike]: 2026-09-25. `spike/spatial` was removed once `engine/ecs/spatial.rs`,
     its tests and `//engine/ecs:spatial_bench` had superseded it; it is in
@@ -875,3 +887,8 @@ ms against 31.5-32.3, most of it the solver; Rapier's 13.4 and Box3D's
     of what the collider and rotation already say, and a write the solver
     had to remember. Removed for the pair, at the same pairs and within a
     few percent of the step (physics.md, "Rotation in 3D", choice 5).
+
+[^near-pairs-method]: *(History, 2026-10-04, get-znt.51.)* `Query::near_pairs`,
+    a method a mod could call on its own query, was removed with
+    `engine_api`'s re-export of `engine_ecs`: a mod keeping pairs that way
+    would be the hidden cache live.md argues against.

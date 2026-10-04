@@ -11,8 +11,10 @@ structural changes and events reach the world is
 [storage.md](storage.md).
 
 Decided 2026-09-23, as the first of four steps toward multithreading (see
-[Toward parallelism](#toward-parallelism)). Everything here runs on one
-thread; it is shaped so the later steps don't change what mods write.
+[Toward parallelism](#toward-parallelism)). Systems run one at a time, on
+the frame's thread; what a system declares as a shape runs across the
+resident `threads` mod's pool ([threads.md](threads.md)). It is shaped so
+the later steps don't change what mods write.
 
 ## Systems
 
@@ -74,8 +76,12 @@ declaration can't drift from the code:
   or owned. The plan is checked so each use comes in turn; see
   [flows.md](flows.md).
 - **`ParMap`**, **`Reduce`**, **`Passes`**: the shapes a system's parallel
-  work takes, declared so the scheduler knows the node fans out
-  ([flows.md](flows.md#parallel-shapes)).
+  work takes, and its only way to fan out. The system calls one with its
+  kernels, and the call runs them across the world's executor
+  ([flows.md](flows.md#parallel-shapes), [threads.md](threads.md#dispatch)).
+  Each is declared (`ParamDecl::Shape`), but nothing reads the
+  declaration yet: footprints skip it, and the plan a scheduler is
+  handed names its nodes and nothing more (get-znt.50).
 
 A system has no other way into the world. **`cx.world()` panics in a
 frame**, failing the system's mod: the whole world is for hooks and message
@@ -242,7 +248,7 @@ needn't be resident: `sequential` hot-reloads like gameplay. **The threads
 are a mod of their own** (2026-10-03, [threads.md](threads.md)): `threads`,
 resident, keeps a pool on one CCD and installs it as the world's executor,
 which `engine_game` loads first unless a game names another (`threads =
-...`, or `None`). Shapes run across it (`Passes`), so a scheduler needn't
+...`, or `None`). Shapes run across it, so a scheduler needn't
 own threads to have its frame's work use them, and stays reloadable; one
 that runs systems at once (step 2) reaches the same pool.
 
@@ -254,42 +260,35 @@ The four steps, of which this document is the first:
    one that gets more expensive with every mod. Built, then reshaped by the
    storage redesign in [storage.md](storage.md): phase boundaries became
    dependency edges, and commands became changes through query rows.
-2. **System parallelism.** Systems whose footprints don't overlap run at
-   the same time. `engine_ecs::harness` already runs frames that way, in
-   tests and the benchmark; the loader's side is a resident scheduler mod
-   owning the workers (get-znt.5). Each node takes its guards with
-   `try_lock`, so a scheduler bug is a failed frame, never a data race.
-3. **Data parallelism.** `par_for_each` over a query's chunks, with a
-   restricted task context. Prototyped (2026-09-24) and measured on the
-   physics step: `Query::par_for_each` and its page walks, whose chunks'
-   changes join in walk order, across the executor the host installed in
-   the world; a task context of just its chunk, so no spawns or events
-   from tasks yet. What it showed, and who owns the threads:
-   [physics.md](physics.md#parallelism). The physics solver's passes are
-   split this way too, a stage at a time within one run
-   ([physics.md](physics.md#solving-across-threads)): tasks of a run may
-   wait for work another task has taken, never for a task to start, since
-   an executor promises that every task runs, not that they run at once.
-   Since get-znt.28 a system declares its parallel work as a shape
-   ([flows.md](flows.md#parallel-shapes)) and the scheduler runs it; the
-   host's pool and the shapes' dispatch across it are built
-   ([threads.md](threads.md), 2026-10-03), and a query's walks take the
-   system's `ParMap` for their threads. (History: they took `Workers`, a
-   parameter that declared nothing, until get-znt.31 deleted it,
-   2026-10-03.)
+2. **System parallelism**, not built (get-znt.5). Systems whose
+   footprints don't overlap run at the same time. `engine_ecs::harness`
+   already runs frames that way, in tests and the benchmark. What the
+   loader's side needs is running nodes on the `threads` mod's pool with
+   its bookkeeping thread-safe (threads.md, "What waits"); the scheduler
+   reaches that pool through the world's executor rather than owning
+   threads, so it stays reloadable
+   ([threads.md](threads.md#where-the-pool-lives)).[^workers-owner] Each
+   node takes its guards with `try_lock`, so a scheduler bug is a failed
+   frame, never a data race.
+3. **Data parallelism.** Built (2026-10-03, [threads.md](threads.md)): a
+   system's parallel work is a shape it calls (`ParMap`, `Reduce`,
+   `Passes`; [flows.md](flows.md#parallel-shapes)), run across the
+   world's executor, which the resident `threads` mod installs. A query's
+   parallel walks (`Query::par_for_each` and its page walks, whose
+   chunks' changes join in walk order) take the system's `ParMap`; a
+   task sees just its chunk, so no spawns or events from tasks. Within
+   a shape, tasks may wait for work another task has taken, never for a
+   task to start, since an executor promises that every task runs, not
+   that they run at once; and every kernel has returned when the call
+   does.[^step3]
 4. **Pipeline parallelism.** The next frame's simulation during this
    frame's render, through an extract step or double-buffering, decided with
    the renderer spike. A reload drains the pipeline first.
 
-Before step 3: measure the mod boundary (get-8in), which decides whether
-data parallelism must work on column slices only.
-
-**Open question:** worker threads and `thread_local!`. glibc keeps a library
-mapped while a thread has TLS destructors registered in it, so a reloadable
-mod using TLS on a long-lived worker leaks its old builds. The pool's
-workers are long-lived now ([threads.md](threads.md#hot-reload)); physics's
-kernels leave nothing there, which `physics2d_test` checks. Recycling
-workers at a reload's drain is the likely answer for a mod that does.
+**Worker threads and `thread_local!`**: a mod's code on a pool thread
+must leave no TLS destructor there, or that thread keeps its build
+mapped; why, and what checks it: [threads.md](threads.md#hot-reload),
+"Thread-locals".[^tls]
 
 [^step]: *(History, 2026-09-23.)* Mods used to have one per-frame hook,
     `Mod::step`, which also served as the bootstrap's session. For the first
@@ -298,3 +297,29 @@ workers at a reload's drain is the likely answer for a mod that does.
     had moved to systems: an undeclared, exclusive hook is exactly what the
     parallel steps can't schedule, and sharing a name with the session made
     a mod that ran nothing per frame opt out explicitly.
+
+[^workers-owner]: *(History, 2026-10-04.)* Step 2 was written with the
+    loader's side as "a resident scheduler mod owning the workers". The
+    pool became a resident mod of its own instead (threads.md, "Where the
+    pool lives", 2026-10-03): a scheduler that owned threads would have to
+    be resident, and scheduling policy would stop hot-reloading.
+
+[^step3]: *(History, 2026-10-04.)* Step 3 was prototyped on 2026-09-24
+    and measured on the physics step as `Query::par_for_each` and its page
+    walks across the executor the host installed in the world: what it
+    showed, and who owned the threads then,
+    [the physics log](../retrospectives/2026-10-04-physics-log.md#parallelism). The physics solver's passes were
+    split the same way, a stage at a time within one run
+    ([physics.md](physics.md#solving-across-threads)). Since get-znt.28
+    (2026-10-02) parallel work is a declared shape; the walks and the
+    solver took `Workers`, a parameter that declared nothing and handed
+    out the executor, until get-znt.31 moved them onto shapes and deleted
+    it (2026-10-03). The mod boundary's cost was to be measured before
+    this step (get-8in), to decide whether data parallelism must work on
+    column slices only; closed unmeasured on 2026-10-04 once the step was
+    built.
+
+[^tls]: *(History, 2026-10-04.)* This was an open question here until
+    threads.md answered it. It suggested recycling workers at a reload's
+    drain for a mod that does leave TLS on a worker; nothing built needs
+    that, and the dispatch leaves none.

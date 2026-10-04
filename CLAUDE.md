@@ -45,6 +45,11 @@ changing the ABI, the reload sequence or the Bazel rules.
   follows the component rule (only `FieldType` fields); anything else it
   keeps goes in its `Transient`, which each build makes for itself. See
   [docs/architecture/hot-reload.md](docs/architecture/hot-reload.md#who-owns-state).
+  Mods see the ECS only through the curated list `lib.rs` re-exports:
+  not `engine_ecs` itself, the frame machinery (`FrameCx`, `Param`), the
+  executor (`Executor`, `Scoped`) or the raw broadphase (`near_pairs`),
+  so a declaration stays the only way into the world. A parameter built
+  from others is a `Compose`.
   - `scheduler.rs` — the `Scheduler` service the engine declares, and the
     frame primitives a scheduler mod is built from.
   - `system.rs` — systems: `Mod::systems` declarations, and turning a
@@ -79,13 +84,18 @@ changing the ABI, the reload sequence or the Bazel rules.
   sparse sets, queries and their structural changes, events, and the
   footprints that decide which systems may run together. Its own crate
   because the loader and every mod link it, and mods iterate its storage
-  directly. See [docs/architecture/ecs.md](docs/architecture/ecs.md) and
+  directly; mods link it only through `engine_api`, and can't name it. See [docs/architecture/ecs.md](docs/architecture/ecs.md) and
   [docs/architecture/storage.md](docs/architecture/storage.md).
   - `erased.rs`, `schema.rs` — type-erased columns, and migrating values
-    as bytes: the unsafe core, with `component!`'s drop and default glue.
-    Tables, queries, guards and the executors are safe Rust, and no unsafe
-    code depends on concurrency (storage.md, "Where the unsafe is"), so
-    keep new unsafe beside the existing unsafe code.
+    as bytes: the unsafe core. Beside it is the glue that reads a typed
+    value out of an erased column: `component.rs` (`component!`'s drop and
+    default glue, and the unsafe `Component`, `FieldType` and `Crossing`
+    traits), `spatial.rs` (`__bounds` and `Extents::refs`, a spatial key's
+    bounds read from raw column pointers), `ordered.rs` (`__key`, an
+    ordered key read the same way) and `events.rs` (the unsafe `Event`
+    trait). Tables, queries, guards and the executors are safe Rust, and
+    no unsafe code depends on concurrency (storage.md, "Where the unsafe
+    is"), so keep new unsafe beside the existing unsafe code.
     **Growing the unsafe core is a design decision, not an optimization.**
     Every addition needs Miri and fuzz coverage before it can be trusted,
     and that testing blocked progress for as long as whole features took to
@@ -106,13 +116,15 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `shape.rs` — parallel shapes, the only way a system's work fans out:
     `ParMap`, `Reduce` and `Passes` (a program of stages over items in
     colors, its kernels handed the states plain on one thread and shared
-    on several, `States`), parameters the scheduler runs across the
-    world's threads on `dispatch`. Both physics solves' passes are
+    on several, `States`), parameters a system declares and runs across
+    the world's threads on `dispatch` from inside its node (no scheduler
+    reads the declaration yet: get-znt.50). Both physics solves' passes are
     `Passes` programs, their write-backs a `ParMap` over parts (each
     one's `pipeline.rs`), and physics2d's gathers, broadphase and
     narrowphase a `ParMap` (`Query::par_for_each` takes one).
-  - `par.rs` — the `Executor` trait the host's pool implements, `Scoped`,
-    and the crate-private `Split` the ECS's own work inside a node (a
+  - `par.rs` (a private module) — the `Executor` trait the host's pool
+    implements (the threads mod takes it from `engine_threads`, not
+    `engine_api`), `Scoped`, and the crate-private `Split` the ECS's own work inside a node (a
     `Live`'s broadphase, `near_pairs`, a re-sort's re-bounding) runs on.
   - `dispatch.rs` — the task graph every shape runs on across the world's
     executor: stages of blocks claimed from each thread's share, published
@@ -139,15 +151,20 @@ changing the ABI, the reload sequence or the Bazel rules.
   - `between.rs` — `WorldMut`, the whole world for hooks and message
     handlers, refused while a frame is open.
   - `harness.rs` — sequential and parallel executors over plain functions,
-    for tests and `:bench` without the loader.
+    for tests and `:bench` (`bench.rs`, the fire scenario's frame times)
+    without the loader.
 - `engine/control/` — the control protocol and socket path. Its own crate
   because both the engine and `modctl` speak it; neither should import the
   other.
 - `engine/modctl/` — the client. Every `engine_mod` target is a symlink to
   this binary with the mod's name and library baked in through
   `RunEnvironmentInfo`, which is what makes `bazel run //mods/x` a reload.
-- `engine/defs.bzl` — `engine_mod` (with its `interface`, `mod_deps` and
-  `resident`) and `engine_game` (with its reload target). If a mod needs a new build
+- `engine/defs.bzl` — `engine_mod` (with its `interface`, `mod_deps`,
+  `resident`, and `twin`: a testonly `<name>_twin`, the same mod as
+  another library file, which a replay swaps in to reload for real) and
+  `engine_game` (with its `bootstrap`, `scheduler`, `threads` and reload
+  target). `engine_mod` refuses `//engine/ecs` in a mod's deps, and picks
+  the mod's lint config by `resident`. If a mod needs a new build
   setting (a link flag, a runtime linkage), it goes here, so every mod gets
   it.
 - `engine/sanitize.bzl` — `<test>_asan` for the loader's tests (suite
@@ -192,8 +209,9 @@ changing the ABI, the reload sequence or the Bazel rules.
   in [docs/CREDITS.md](docs/CREDITS.md).
   `physics_common` is what the two mods share apart from the dimension
   (`Slots`, `Softness`, `Closing`, the soft step's and the broadphase's
-  constants, and `lanes::F`, the lane array a lanes kernel computes in):
-  a dependency of their implementations, never their
+  constants, `lanes::F`, the lane array a lanes kernel computes in, and
+  `levels`, the order that keeps a lanes solve in pair order), on
+  `//engine/ecs`: a dependency of their implementations, never their
   interfaces, so a change to it reloads both mods and no game. No
   statics, no unsafe. What may go in it, and what's left out and why:
   [physics-sharing.md](docs/architecture/physics-sharing.md), with the
@@ -251,14 +269,18 @@ changing the ABI, the reload sequence or the Bazel rules.
   can't.** Run them all with `./bazel test //...`. Fix a bug at the lowest
   tier that can fail on it.
   - *Unit tests* (`//engine/ecs:*`, `//engine/api:api_test`,
-    `//engine/loader:loader_test`, `//engine/control:control_test`) cover
-    pure logic: the world store against a model, the graph's overlap
-    rules, migration, the `component!` schema, `__dispatch`, the protocol.
+    `//engine/loader:loader_test`, `//engine/control:control_test`,
+    `//engine/tools:mod_links_test`) cover pure logic: the world store
+    against a model, the graph's overlap rules, migration, the
+    `component!` schema, `__dispatch`, the protocol, the interface digest.
     They are the cheap place to pin edge cases and negatives.
-  - *Integration tests* (`//engine/tests:reload_test`) load real mod
+  - *Integration tests* (`//engine/tests:reload_test`, and
+    `//engine/tests:poison_test` for the poison mode itself) load real mod
     libraries into a real `Engine` and step exact frame counts: no process,
     socket or sleeping. The only tier that exercises staging, `dlopen` and
-    the state handoff.
+    the state handoff. The games' and physics3d's `:reload_test`s are this
+    tier too: a recorded route replayed while their mods are swapped for
+    their twins under it (`engine/tests/replay.rs`).
   - *End-to-end tests* (`//engine/tests:e2e_test`) run the engine binary
     and drive it with `modctl`, the only tier that covers the manifest,
     runfiles and the socket. Keep them few; they are the slowest and the
@@ -297,7 +319,8 @@ changing the ABI, the reload sequence or the Bazel rules.
 - **Long checks run only when a change touches what they cover.** Checks
   that take more than five minutes (Miri, fuzz campaigns, planted-bug
   checks) are for changes to unsafe code (`erased.rs`, `schema.rs`,
-  component glue, the loader's `dlopen` and poison paths), the loader's
+  component glue, `spatial.rs`'s bounds glue and `ordered.rs`'s key glue,
+  the loader's `dlopen` and poison paths), the loader's
   reload sequence, or migration; runbooks 002-004 say how to run them. The
   default suite runs on every change. When a long check is skipped, say
   which and why; when one is warranted, say so before starting it.
@@ -321,7 +344,12 @@ changing the ABI, the reload sequence or the Bazel rules.
   and `run` don't lint, so a lint never blocks a hot reload. Code that runs
   inside a mod can't print (`//engine:mod_lints`): a mod's `println!` goes
   through its own copy of std, whose stdout buffer leaks when it unloads.
-  Log through `cx.log`. Formatting is checked the same way: `./bazel run
+  Log through `cx.log`. Nor can code in a reloadable mod start threads
+  (the methods `//:clippy.toml` lists, forbidden by `//engine:mod_lints`):
+  a thread it spawns keeps its build mapped, and parallel work is a
+  declared shape. Resident mods and `engine_ecs` take
+  `//engine:mod_lints_threads_allowed` (no printing, threads allowed).
+  Formatting is checked the same way: `./bazel run
   @rules_rust//:rustfmt` formats everything (`rustfmt.toml`, passed to
   rules_rust by a flag in `.bazelrc`).
 - **Comments explain why, not what.** A "what" comment is a second copy of
