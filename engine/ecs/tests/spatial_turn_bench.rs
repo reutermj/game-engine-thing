@@ -305,9 +305,9 @@ fn circled(_: &mut Cx, mut q: Query<(&mut Circled, &mut Turn)>, mut still: Query
     written(t);
 }
 
-fn probe<K: SpatialKey + 'static>(_: &mut Cx, mut q: Query<&K>) {
+fn probe<K: SpatialKey + 'static>(_: &mut Cx, q: Query<&K>) {
     let t = Instant::now();
-    let pairs = q.near_pairs(0.05);
+    let pairs = engine_ecs::near_pairs(&q, &(), 0.05);
     let mut out = OUT.lock().unwrap();
     out.1 += t.elapsed().as_nanos();
     out.2 = pairs.len();

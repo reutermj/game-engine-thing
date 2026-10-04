@@ -214,6 +214,18 @@ def engine_mod(
 def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visibility, kwargs):
     kwargs = dict(kwargs)
     mod_name = mod_name or name
+
+    # A mod sees the ECS through engine_api's curated re-exports, never the
+    # crate itself: engine_ecs's `pub` items include the frame machinery and
+    # the raw broadphase, which would let a mod fan out or fetch what its
+    # systems never declared (get-znt.51). rustc resolves a crate name only
+    # among direct deps, so this keeps it unnameable. A library in `deps`
+    # could still re-export it; none does.
+    for d in deps:
+        if native.package_relative_label(d) == Label("//engine/ecs"):
+            fail(("%s: a mod can't depend on //engine/ecs; use what //engine/api re-exports " +
+                  "(and add there what a mod legitimately needs)") % name)
+
     # Every target this macro declares is part of the mod, so all of them
     # share its testonly-ness.
     testonly = kwargs.pop("testonly", False)

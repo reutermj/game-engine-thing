@@ -34,6 +34,13 @@ pub enum ShapeKind {
     Passes,
 }
 
+/// Panics unless `decl` is the declaration of a shape of `kind`, as every
+/// other parameter's fetch checks its own: a shape is fetched only against
+/// what its node declared, which is what the scheduler reads.
+fn declared(decl: &ParamDecl, kind: ShapeKind) {
+    assert!(matches!(decl, ParamDecl::Shape(k) if *k == kind), "a {kind:?} shape fetched against {decl:?}");
+}
+
 /// Maps a function over items. The lifetime is the frame's.
 #[derive(Clone)]
 pub struct ParMap<'w> {
@@ -48,7 +55,8 @@ impl Param for ParMap<'static> {
         ParamDecl::Shape(ShapeKind::Map)
     }
 
-    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> ParMap<'w> {
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> ParMap<'w> {
+        declared(decl, ShapeKind::Map);
         ParMap { split: Split::of(cx.world), _world: PhantomData }
     }
 }
@@ -152,7 +160,8 @@ impl Param for Reduce<'static> {
         ParamDecl::Shape(ShapeKind::Reduce)
     }
 
-    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Reduce<'w> {
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Reduce<'w> {
+        declared(decl, ShapeKind::Reduce);
         Reduce { split: Split::of(cx.world), _world: PhantomData }
     }
 }
@@ -211,7 +220,8 @@ impl Param for Passes<'static> {
         ParamDecl::Shape(ShapeKind::Passes)
     }
 
-    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Passes<'w> {
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Passes<'w> {
+        declared(decl, ShapeKind::Passes);
         let across = cx.world.executor().filter(|e| e.threads() > 1);
         Passes { shared: cx.world.shapes_shared.load(Ordering::Relaxed), across, _world: PhantomData }
     }

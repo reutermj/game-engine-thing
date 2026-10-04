@@ -23,12 +23,9 @@ engine_mod(
     ],
     twin = True,
     # The implementation's, never the interface's: see
-    # //engine/std/physics_common. The ECS's own for the lanes' layout
-    # (engine_ecs::shape's `Coloring::pack`).
-    deps = [
-        "//engine/ecs",
-        "//engine/std/physics_common",
-    ],
+    # //engine/std/physics_common. Not //engine/ecs, which engine_mod
+    # refuses: the lanes' layout is engine_api::shape's `Coloring::pack`.
+    deps = ["//engine/std/physics_common"],
     visibility = ["//visibility:public"],
 )
 
@@ -82,6 +79,7 @@ rust_test(
     crate_root = "tests/core_test.rs",
     deps = [
         ":physics3d_interface",
+        "//engine/api",
         "//engine/ecs",
         "//engine/std/physics_common",
     ],
@@ -121,6 +119,7 @@ EXACT_SRCS = [
 
 EXACT_DEPS = [
     ":physics3d_interface",
+    "//engine/api",
     "//engine/control",
     "//engine/ecs",
     "//engine/loader",

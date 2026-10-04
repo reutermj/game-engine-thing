@@ -408,6 +408,27 @@ fn shapes_are_declared_and_touch_nothing() {
     assert!(s.blockers(&w, &fs, 1).is_empty(), "two shapes don't order systems");
 }
 
+/// A shape is fetched only against its own declaration: given another
+/// (a group whose shape was never declared, another shape), it refuses,
+/// so a node runs no shape the scheduler can't see in its parameters.
+#[test]
+fn a_shape_is_fetched_only_against_its_declaration() {
+    use engine_ecs::{Log, Param, frame_cx};
+    let w = World::new();
+    let log = Log::default();
+    let cx = frame_cx(&w, &log, "t::shapes", 1.0 / 60.0);
+    let wrong = [ParamDecl::Dt, ParamDecl::Group(vec![]), ParamDecl::Shape(ShapeKind::Reduce)];
+    for decl in &wrong {
+        let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(ParMap::fetch(&cx, decl))));
+        assert!(fetched.is_err(), "a ParMap fetched against {decl:?}");
+    }
+    let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(Passes::fetch(&cx, &ParamDecl::Shape(ShapeKind::Map)))));
+    assert!(fetched.is_err(), "Passes fetched against a map's declaration");
+    let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(Reduce::fetch(&cx, &ParamDecl::Dt))));
+    assert!(fetched.is_err(), "Reduce fetched against Dt's declaration");
+    drop(ParMap::fetch(&cx, &ParamDecl::Shape(ShapeKind::Map)));
+}
+
 /// Runs `f` with each shape, as a system would get them.
 fn with_shapes(f: impl Fn(&ParMap, &Reduce, &Passes) + Send + Sync + 'static) {
     let w = World::new();

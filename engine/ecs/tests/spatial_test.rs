@@ -142,7 +142,7 @@ fn probe(_: &mut Cx, mut q: Query<&At>) {
         found.push(hits);
     }
     *FOUND.lock().unwrap() = found;
-    *PAIRS.lock().unwrap() = q.near_pairs(0.05);
+    *PAIRS.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.05);
 }
 
 static FRAME: AtomicU32 = AtomicU32::new(0);
@@ -498,8 +498,8 @@ fn boxes_touching_edge_to_edge_pair() {
             }
         }
     }
-    fn pairs(_: &mut Cx, mut q: Query<&At>) {
-        *PAIRS.lock().unwrap() = q.near_pairs(0.0);
+    fn pairs(_: &mut Cx, q: Query<&At>) {
+        *PAIRS.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.0);
     }
     Schedule { systems: vec![pairs.system(&w, "pairs")] }.run_sequential(&w);
     let got = PAIRS.lock().unwrap().clone();
@@ -613,14 +613,14 @@ fn pairs_through_filters_agree_with_brute_force() {
     }
     static WITH: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
     static WITHOUT_TAG: Mutex<Vec<(Entity, Entity)>> = Mutex::new(Vec::new());
-    fn without(_: &mut Cx, mut q: Query<&At, Without<Mark>>) {
-        *PAIRS.lock().unwrap() = q.near_pairs(0.05);
+    fn without(_: &mut Cx, q: Query<&At, Without<Mark>>) {
+        *PAIRS.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.05);
     }
-    fn with(_: &mut Cx, mut q: Query<&At, With<Mark>>) {
-        *WITH.lock().unwrap() = q.near_pairs(0.05);
+    fn with(_: &mut Cx, q: Query<&At, With<Mark>>) {
+        *WITH.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.05);
     }
-    fn without_tag(_: &mut Cx, mut q: Query<&At, Without<Tag>>) {
-        *WITHOUT_TAG.lock().unwrap() = q.near_pairs(0.05);
+    fn without_tag(_: &mut Cx, q: Query<&At, Without<Tag>>) {
+        *WITHOUT_TAG.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.05);
     }
     let s = Schedule {
         systems: vec![
@@ -668,8 +668,8 @@ fn a_dense_pile_pairs_as_brute_force_says() {
             at.y += (lcg(&mut s) - 0.5) * 0.04;
         });
     }
-    fn pairs(_: &mut Cx, mut q: Query<&At>) {
-        *PAIRS.lock().unwrap() = q.near_pairs(0.05);
+    fn pairs(_: &mut Cx, q: Query<&At>) {
+        *PAIRS.lock().unwrap() = engine_ecs::near_pairs(&q, &(), 0.05);
     }
     let s = Schedule { systems: vec![jiggle.system(&w, "jiggle"), pairs.system(&w, "pairs")] };
     for _ in 0..10 {

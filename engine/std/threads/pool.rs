@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use engine_ecs::Executor;
+/// Re-exported for whoever installs a pool: the `threads` mod is an
+/// `engine_mod`, so it can't name `engine_ecs`, and `engine_api` keeps the
+/// trait from mods (get-znt.51).
+pub use engine_ecs::Executor;
 
 /// Where a pool's threads go: the CPUs they're pinned to, one a thread,
 /// the calling thread's first. A game that wants other places builds its

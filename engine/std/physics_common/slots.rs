@@ -1,4 +1,4 @@
-use engine_ecs::{Entity, Recycle};
+use engine_api::{Entity, Recycle};
 
 /// Entities to positions in a list, by entity index: ids are small dense
 /// integers, so a vector by index finds one in O(1), where sorting the list

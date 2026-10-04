@@ -940,7 +940,7 @@ fn apply_at(lin: &mut [Lin], ang: &mut [Ang], r: &Row, impulse: Vec2, (turn_a, t
 /// sweep in pair order. See physics.md, "The solver's speed".
 mod lanes {
     use super::*;
-    use engine_ecs::shape::{Colored, Coloring, EMPTY, OVERFLOW, Stage, UNSOLVED};
+    use engine_api::shape::{Colored, Coloring, EMPTY, OVERFLOW, Stage, UNSOLVED};
     use physics_common::lanes::F;
     use std::ops::Range;
     use std::sync::atomic::{AtomicU32, Ordering};

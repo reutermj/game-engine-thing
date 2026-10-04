@@ -2,8 +2,7 @@
 //! spatial order the ECS keeps positions in, then tested against colliders'
 //! exact shapes. See physics.md, "Spatial queries", and spatial-storage.md.
 
-use engine_api::engine_ecs::{Changes, Data, Declare, Filter, FrameCx, Param, ParamDecl};
-use engine_api::{Bounds, Entity, Query, Row};
+use engine_api::{Bounds, Changes, Compose, Data, Entity, Fetched, Filter, Query, Row};
 
 use crate::shapes::{Aabb, Hit, Placed, Ray, Shape, Vec2, overlaps, raycast};
 use crate::{Collider, Position, Rotation};
@@ -24,15 +23,11 @@ pub struct Spatial<'w, D: Data, F = (), C = ()> {
 
 type Shapes = (Query<'static, (&'static Position, &'static Collider)>, Query<'static, &'static Rotation>);
 
-impl<D: Data + 'static, F: Filter, C: Changes> Param for Spatial<'static, D, F, C> {
+impl<D: Data + 'static, F: Filter, C: Changes> Compose for Spatial<'static, D, F, C> {
+    type Parts = (Query<'static, D, F, C>, Shapes);
     type Item<'w> = Spatial<'w, D, F, C>;
 
-    fn declare(d: &mut Declare<'_>) -> ParamDecl {
-        <(Query<'static, D, F, C>, Shapes)>::declare(d)
-    }
-
-    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Spatial<'w, D, F, C> {
-        let (query, (shapes, turned)) = <(Query<'static, D, F, C>, Shapes)>::fetch(cx, decl);
+    fn compose<'w>((query, (shapes, turned)): Fetched<'w, Self::Parts>) -> Spatial<'w, D, F, C> {
         Spatial { query, shapes, turned }
     }
 }

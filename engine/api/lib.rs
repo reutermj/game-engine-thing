@@ -30,23 +30,36 @@ mod system;
 pub use system::__declare;
 pub use system::{Declarations, IntoSystem, PhaseBuilder, PhaseDesc, SystemBuilder, SystemDesc, SystemFn, Systems, phase};
 
-/// The ECS, shared with the loader as Rust types: see `engine_ecs`.
-pub use engine_ecs;
+// The ECS as mods see it: a curated list, not `engine_ecs` itself, which a
+// mod can't name (`engine_mod` refuses it in deps). What's here is what a
+// system declares (queries, events, flows, shapes, `Live`), what it builds
+// with (components, keys, `Compose`) and the between-frames `WorldMut`.
+// What's left out is the frame machinery (`FrameCx`, `Param` and its
+// `fetch`, `harness`), the executor (`Executor`, `Scoped`) and the raw
+// broadphase (`near_pairs`, `pairs_from`): each a way to fan out, or touch
+// the world, outside a declaration (get-znt.51, get-znt.48). Before adding
+// to it, ask whether a mod could use the item to do either.
 #[doc(hidden)]
 pub use engine_ecs::{__component_fingerprint, __drop, __drop_fn, __fingerprint, __fingerprint_struct, __fnv, __storage, __write_default};
 pub use engine_ecs::{
-    Adds, AnyOf, Bounds, Bundle, ChildOf, Colored, Coloring, ColumnMut, Component, ComponentDesc, Crossing, DefaultFn, Despawns, DropFn,
-    Dt, Entity, Event, EventReader, EventWriter, Executor, Extents, FieldDesc, FieldKind, FieldType, Flow, Live, Make, Mut, NearSide,
-    OrderKey, Page, ParMap, Pass, Passes, Proximity, Query, Recycle, Reduce, Removes, Row, Scoped, See, Shareable, SpatialKey, Spawner,
-    Stage, States, Storage, Take, With, Without, World, WorldMut, children_of, component, entity_key, event, field_struct, flow,
-    near_pairs, pair_key, pairs_from,
+    Adds, AnyOf, Bounds, Bundle, Changes, ChildOf, Colored, Coloring, ColumnMut, Component, ComponentDesc, Compose, Crossing, Data,
+    DefaultFn, Despawns, DropFn, Dt, Entity, Event, EventReader, EventWriter, Extents, Fetched, FieldDesc, FieldKind, FieldType, Filter,
+    Flow, Live, Make, Mut, OrderKey, Page, ParMap, Pass, Passes, Proximity, Query, Recycle, Reduce, Removes, Row, See, Shareable,
+    SpatialKey, Spawner, Stage, States, Storage, Take, With, Without, World, WorldMut, children_of, component, entity_key, event,
+    field_struct, flow, pair_key,
 };
+
+/// The parallel shapes' vocabulary for a kernel's own code: the coloring a
+/// `Passes` program is built from, and its sentinels.
+pub mod shape {
+    pub use engine_ecs::shape::{COLORS, Colored, Coloring, EMPTY, OVERFLOW, Shareable, Stage, States, UNSOLVED};
+}
 #[doc(hidden)]
 pub use service::{__begin_call, __end_call, __serve};
 pub use service::{CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
-pub const API_VERSION: u32 = 36;
+pub const API_VERSION: u32 = 37;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";
@@ -670,7 +683,7 @@ mod tests {
         assert!(unsafe { __declare::<Tracked>(&mut decls as *mut Declarations as *mut c_void, &world as *const World) });
         assert_eq!(decls.systems.len(), 1);
         let log = engine_ecs::Log::default();
-        let frame = engine_ecs::FrameCx { world: &world, log: &log, system: "t::tick", dt: 1.0 / 60.0 };
+        let frame = engine_ecs::frame_cx(&world, &log, "t::tick", 1.0 / 60.0);
         unsafe { (decls.systems[0].run)(ctx, &frame, &decls.systems[0].params) }
     }
 

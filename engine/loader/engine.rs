@@ -23,7 +23,7 @@ use engine_api::{
 };
 use engine_control::Request;
 use engine_ecs::schema::{self, Field};
-use engine_ecs::{Build, Change, FrameCx, Keepalive, Log, Structural, World};
+use engine_ecs::{Build, Change, Keepalive, Log, Structural, World, frame_cx};
 
 use crate::poison::ModLibrary;
 use crate::schedule::{self, ModDecls, Plan};
@@ -866,7 +866,7 @@ impl Engine {
     fn run_system(&self, m: &Loaded, index: usize, name: &str, dt: f32) -> Option<Vec<Change>> {
         let desc = &m.systems[index];
         let log = Log::default();
-        let frame = FrameCx { world: &self.world, log: &log, system: name, dt };
+        let frame = frame_cx(&self.world, &log, name, dt);
         let was_running = m.running.replace(true);
         let status = unsafe { (desc.run)(m.ctx, &frame, &desc.params) };
         m.running.set(was_running);
