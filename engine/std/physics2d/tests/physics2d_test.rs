@@ -417,22 +417,31 @@ mod pile {
     /// A game wakes a body by taking its `Asleep` off: the rest of its
     /// island wakes with it, as they rest on each other. Putting it back
     /// puts it to sleep again, as physics takes what a game says.
+    ///
+    /// The body woken is the first one dropped that has island mates, so
+    /// that there is an island to wake. *(History, 2026-10-04: it was the
+    /// first body dropped, the circle in the box's corner, which in the
+    /// 41-wide pile came to rest touching its neighbours or not by chance:
+    /// that pile settles with one body alone in an island of its own, and
+    /// with statics swept (get-lye) two, the corner circle one of them,
+    /// 0.016 further into the corner than without, so only it woke.)*
     #[test]
     fn a_game_removing_a_sleeping_bodys_asleep_wakes_its_island() {
         for (width, n) in SCENES {
             let all = n as f32;
             let e = asleep_pile("unsleep", (width, n), &[]);
-            // The island of the body `unsleep` wakes (the first dropped).
             let islands = e.world().values::<Asleep>().unwrap();
-            let first = islands.iter().map(|(b, _)| *b).min().unwrap();
+            let size = |island: u32| islands.iter().filter(|(_, a)| a.island == island).count();
+            let first = islands.iter().filter(|(_, a)| size(a.island) > 1).map(|(b, _)| *b).min().unwrap();
             let island = islands.iter().find(|(b, _)| *b == first).unwrap().1.island;
             let mates: Vec<_> = islands.iter().filter(|(_, a)| a.island == island).map(|(b, _)| (b.index, b.generation)).collect();
             let written: std::collections::HashMap<_, _> =
                 ticks(&e, "physics2d::Velocity").into_iter().map(|(i, g, t)| ((i, g), t)).collect();
-            send(&e, "pile", "unsleep");
+            send(&e, "pile", &format!("unsleep {}", first.index));
             step(&e, 1);
             let awake = asleep(&e);
-            assert!(awake < all - 1.0, "{width} wide: its island woke too: {awake} asleep");
+            let woke = all - awake;
+            assert!(woke >= mates.len() as f32, "{width} wide: its island of {} woke too: {awake} asleep", mates.len());
             // In the step it was seen, before the solve: given gravity then,
             // as awake bodies are (`fall_woken`), and solved; woken after,
             // they'd stand still a step.
@@ -440,7 +449,7 @@ mod pile {
             let unmoved = mates.iter().filter(|b| now.get(b) == written.get(b)).count();
             assert_eq!(unmoved, 0, "{width} wide: woken, and not solved in the step it woke");
             assert_eq!(in_sleeping_tables(&e).0 as f32, awake, "the world and physics agree");
-            send(&e, "pile", "resleep");
+            send(&e, "pile", &format!("resleep {}", first.index));
             step(&e, 1);
             assert_eq!(in_sleeping_tables(&e).0 as f32, asleep(&e), "{width} wide: the world and physics agree");
             // Given `Asleep` and nothing else new: a body the solve doesn't
@@ -483,7 +492,16 @@ mod pile {
             step(&e, 1);
             // Woken as the floor is found gone (in `find_contacts`, after
             // gravity), the bottom row falls in that step as the same pile
-            // awake does: gravity, and the contacts above it solved.
+            // awake does: gravity, and the contacts above it solved. The
+            // same pile: the same drop put to sleep, then woken whole by
+            // turning sleeping off, in the step its floor goes. *(History,
+            // 2026-10-04: it was the drop run as long without sleeping,
+            // which isn't the same pile: bodies stopped by sleeping and
+            // bodies left to creep settle apart, and the 41-wide pile's
+            // bottom rows fell 0.13 apart where 0.15 was allowed, and 0.48
+            // once statics were swept (get-lye); the 40-wide one's, which
+            // stands in columns, 0.00015. Now 0.0016 and 0.00002, and
+            // within 0.01.)*
             let bottom = |e: &Engine, at: f32| {
                 let heights: std::collections::HashMap<_, _> =
                     e.world().values::<Position>().unwrap().into_iter().map(|(b, p)| (b, p.y)).collect();
@@ -492,15 +510,13 @@ mod pile {
                 falling.sort_by(f32::total_cmp);
                 falling
             };
-            let awake = game("PILE", &format!("floor_off_awake_{width}"));
-            send(&awake, "pile", &format!("widen {width}"));
-            send(&awake, "pile", &drop(width, n));
-            step(&awake, field(&send(&e, "physics2d", "stats"), "steps") as u32 - 1);
+            let awake = asleep_pile("floor_off_awake", (width, n), &[]);
+            send(&awake, "pile", "sleep off");
             let awake_at = lowest(&awake);
             send(&awake, "pile", "floor off");
             step(&awake, 1);
             let (asleep, awake) = (bottom(&e, at), bottom(&awake, awake_at));
-            let near = asleep.len() == awake.len() && asleep.iter().zip(&awake).all(|(a, b)| (a - b).abs() < 0.15);
+            let near = asleep.len() == awake.len() && asleep.iter().zip(&awake).all(|(a, b)| (a - b).abs() < 0.01);
             assert!(near && asleep[0] > 0.1, "{width} wide: the bottom row as it falls, asleep before {asleep:?}, awake {awake:?}");
             let w = e.world();
             let there: std::collections::HashSet<_> = w.values::<Position>().unwrap().into_iter().map(|(e, _)| e).collect();

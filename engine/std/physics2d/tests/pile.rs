@@ -22,8 +22,9 @@
 //!   nap body   make those bodies
 //!   nap pair   spawn two bodies asleep above the box, apart, in one island
 //!   unsleep nap  remove the `Asleep` of the last body `nap` spawned
-//!   unsleep    remove the first body's `Asleep`, as a game waking it would
-//!   resleep    give it one again, as a game putting it to sleep would
+//!   unsleep [i]  remove the first body's `Asleep` (or entity index i's), as
+//!              a game waking it would
+//!   resleep [i]  give it one again, as a game putting it to sleep would
 //!   post       spawn a static body with a velocity above the box, which the
 //!              solve never writes
 //!   resleep post  give those an `Asleep`
@@ -92,6 +93,18 @@ fn first_body(world: &mut WorldMut) -> Option<Entity> {
     let mut first = None;
     world.for_each::<(&Velocity, &Body)>(|e, _| first = Some(first.map_or(e, |f: Entity| f.min(e))));
     first
+}
+
+/// The body whose entity index is `index`.
+fn body_at(world: &mut WorldMut, index: &str) -> Result<Entity, String> {
+    let index: u32 = index.trim().parse().map_err(|e| format!("{index:?}: {e}"))?;
+    let mut found = None;
+    world.for_each::<(&Velocity, &Body)>(|e, _| {
+        if e.index == index {
+            found = Some(e)
+        }
+    });
+    found.ok_or_else(|| format!("no body {index}"))
 }
 
 fn wall(world: &mut WorldMut, cx: f32, cy: f32, hx: f32, hy: f32) -> Entity {
@@ -330,6 +343,16 @@ impl Mod for Pile {
                 let first = first_body(&mut world).ok_or("nothing to put to sleep")?;
                 world.insert(first, Asleep { island: NAP_ISLAND + 2 });
                 Ok(format!("put {first:?} to sleep"))
+            }
+            Some(("unsleep", i)) if i.trim().parse::<u32>().is_ok() => {
+                let body = body_at(&mut world, i)?;
+                world.remove::<Asleep>(body);
+                Ok(format!("woke {body:?}"))
+            }
+            Some(("resleep", i)) if i.trim().parse::<u32>().is_ok() => {
+                let body = body_at(&mut world, i)?;
+                world.insert(body, Asleep { island: NAP_ISLAND + 2 });
+                Ok(format!("put {body:?} to sleep"))
             }
             // A body the solve never writes (a static one with a velocity),
             // so what's new about it once it's given `Asleep` is only that.
