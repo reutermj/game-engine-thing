@@ -79,8 +79,8 @@ the numbers below are measured against (pong's `set_up`):
 
 - **Walls**: boxes whose inner faces are at y = -0.25 and y = 20.25, a
   radius outside the court. So the ball's centre turns at **y = 0 and
-  y = 20**, not at 0.25 and 19.75 as AGENT.md tells players to fold at.
-  `beyond_wall` uses 0.25..19.75, as asked for; its `wall_overlap` is how
+  y = 20**, which is where AGENT.md tells players to fold (it said 0.25
+  and 19.75 before get-c3s's fix). `beyond_wall` uses 0.25..19.75; its `wall_overlap` is how
   far the ball is inside a wall's box (centre below 0 or above 20), which
   is the part no bounce explains.
 - **Paddles**: boxes 1 wide and 4.5 tall (half extents 0.5 and 2.25),
@@ -89,10 +89,16 @@ the numbers below are measured against (pong's `set_up`):
   centre in y. Past 2.25 (up to 2.5) it meets the box's end, a corner or
   the end cap, which pushes it vertically.
 - **Ball**: a circle of radius 0.25.
-- **Pong's rule on a hit** (`rebound`): on the first frame of any contact
-  between the ball and a paddle (`physics2d::Contact`), it multiplies `vx`
-  by 1.05 and adds `3 * (ball y - paddle y)` to `vy`, each clamped to
-  ±40. Physics has already bounced the ball by then, or not.
+- **Pong's rule on a hit** (`rebound`, `pong/core/rules.rs`): on the
+  first frame of a contact between the ball and a paddle's *face*
+  (`physics2d::Contact` whose normal, from the ball, points into the
+  paddle from the court more than along it), it multiplies `vx` by 1.05
+  and adds `3 * (ball y - paddle y)` to `vy`, then scales the velocity
+  down to a speed of 40 if it's faster. A contact with an end or the
+  back is left to physics, which bounces the ball as off a wall
+  (get-c3s). Recordings from before that fix (commit b732529 and older)
+  were played under the old rule: any paddle contact got the kick, and
+  `vx` and `vy` were clamped to ±40 apart (get-7la).
 
 ## Flags
 
@@ -127,7 +133,8 @@ three frames later it's a point):
      "began":{"n":[-0,1],"speed":33.985832}}
 
 **`hit_receding`**: the same, but the ball was already moving away from
-the paddle (the paddle caught up with it). Pong still applies its kick.
+the paddle (the paddle caught up with it). Pong applies its kick only if
+the contact was with the face.
 
 **`beyond_wall`**: the ball's centre outside 0.25..19.75, one flag for a
 run of frames: `frames` [first, last], `worst` how far outside the limits

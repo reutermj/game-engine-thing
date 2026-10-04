@@ -83,6 +83,25 @@ fn the_ai_returns_the_ball_at_full_speed() {
     assert!(ball(&e, "vx") < -16.0, "the AI's return:\n{}", state(&e));
 }
 
+/// A ball already past the face that meets the paddle's end glances off it
+/// as off a wall, and goes in: no speed-up and no spin, which used to send
+/// it on faster and steeper, still into the goal (get-c3s).
+#[test]
+fn a_ball_meeting_a_paddles_end_glances_off_it() {
+    let e = game("end_hit");
+    // The serve crosses the face (x = 2) at y = 16.3 in frame 68. Moving
+    // down from frame 56, the paddle's bottom end meets it in frame 71, the
+    // ball's centre 2.5 below the paddle's and 0.9 behind the face.
+    play(&e, "stay", 55);
+    play(&e, "down", 16);
+    // The end, moving down at 16, turned 5.6 down into 26.4, as a wall
+    // moving at 16 would. The hit rule would have made it 33.9 and vx 16.8.
+    assert!((ball(&e, "vy") - 26.4).abs() < 0.01, "{}", state(&e));
+    assert!((ball(&e, "vx") + 16.0).abs() < 0.01, "{}", state(&e));
+    play(&e, "stay", 10);
+    assert!(state(&e).contains("score you 0 ai 1"), "{}", state(&e));
+}
+
 #[test]
 fn the_same_inputs_replay_the_same_game() {
     let script = [("down", 24), ("stay", 46), ("up", 25), ("stay", 400), ("down", 13)];

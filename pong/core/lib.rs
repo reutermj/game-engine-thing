@@ -2,7 +2,7 @@
 //! `input`); `play` moves the paddles by their intent (in `simulate`);
 //! physics bounces the ball off walls and paddles; and `rebound` (in
 //! `late`) adds pong's own rules to what physics reported: spin and speed
-//! on a paddle hit, and a point and a serve when the ball reaches a goal
+//! on a hit on a paddle's face, and a point and a serve when the ball reaches a goal
 //! line.
 //!
 //! Setup is keyed on the world, not on this mod's state: if there's no ball,
@@ -16,14 +16,11 @@ use pong::{
     Steer, WIDTH,
 };
 
+mod rules;
+
 /// Vertical speed of each serve, as a fraction of `SERVE_SPEED`, in turn.
 /// Fixed rather than random so a game is reproducible from its inputs.
 const SERVE_ANGLES: [f32; 5] = [0.35, -0.6, 0.15, 0.8, -0.3];
-/// How much a hit off-center adds to vertical speed, per cell off center.
-const SPIN: f32 = 3.0;
-/// Speed gained on every paddle hit, capped.
-const SPEEDUP: f32 = 1.05;
-const MAX_SPEED: f32 = 40.0;
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -94,9 +91,10 @@ impl Core {
         });
     }
 
-    /// Pong's rules on top of physics's bounce: a paddle hit speeds the ball
-    /// up and spins it by how far off center it struck, and a ball at a goal
-    /// line is a point, and a serve to whoever lost it.
+    /// Pong's rules on top of physics's bounce: a hit on a paddle's face
+    /// speeds the ball up and spins it by how far off center it struck
+    /// (`rules`; an end or the back is only physics's bounce), and a ball at
+    /// a goal line is a point, and a serve to whoever lost it.
     fn rebound(
         &mut self,
         _: &mut (),
@@ -104,18 +102,22 @@ impl Core {
         mut contacts: EventReader<Contact>,
         mut triggers: EventReader<Trigger>,
         // Not the ball, which `balls` moves.
-        mut paddles: Query<&Position, (With<Paddle>, Without<Ball>)>,
+        mut paddles: Query<(&Paddle, &Position), Without<Ball>>,
         mut balls: Query<(&mut Position, &mut Velocity), With<Ball>>,
         mut scores: Query<&mut Score>,
         mut goals: Query<&Goal>,
     ) {
         for c in contacts.read() {
             // Physics sends each pair in entity order: either may be the ball.
-            for (ball, other) in [(c.a, c.b), (c.b, c.a)] {
-                let Some(paddle_y) = paddles.with(other, |_, p| p.y) else { continue };
+            for (ball, other, ball_is_a) in [(c.a, c.b, true), (c.b, c.a, false)] {
+                let Some((side, paddle_y)) =
+                    paddles.with(other, |_, (paddle, p)| (if paddle.face < WIDTH / 2.0 { -1.0 } else { 1.0 }, p.y))
+                else {
+                    continue;
+                };
+                let n = rules::from_ball([c.nx, c.ny], ball_is_a);
                 balls.with(ball, |_, (p, mut v)| {
-                    v.x = (v.x * SPEEDUP).clamp(-MAX_SPEED, MAX_SPEED);
-                    v.y = (v.y + (p.y - paddle_y) * SPIN).clamp(-MAX_SPEED, MAX_SPEED);
+                    [v.x, v.y] = rules::after_hit(n, side, [v.x, v.y], p.y - paddle_y);
                 });
             }
         }

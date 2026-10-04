@@ -80,12 +80,18 @@ the goal line behind it (x below 0 on your side, above 40 on the AI's), the
 other side scores, and the ball is served again from the centre toward the
 side that lost the point.
 
-On a paddle hit the ball speeds up by 5% (up to 40 cells a second) and
-gains vertical speed by how far off the paddle's centre it struck (3 cells
-a second per cell off centre): hit it with the paddle's edge to send it
-steeply. The AI follows the ball at 80% of paddle speed, so steep, fast
-returns beat it.
+When the ball meets your paddle's face (x = 2, within 2.25 of its centre)
+it bounces back, speeds up by 5% and gains vertical speed by how far off
+the paddle's centre it struck (3 cells a second per cell off centre): hit
+it near the edge of the face to send it steeply. Its speed is capped at 40
+cells a second, direction kept. The AI follows the ball at 80% of paddle
+speed, so steep, fast returns beat it.
+
+A ball that is already past the face line and meets the paddle's top or
+bottom end only glances off it, as off a wall: no speed-up, no spin, and
+it carries on into the goal. Be there before it reaches x = 2.
 
 To meet the ball, predict where it reaches x = 2: `t = (x - 2) / -vx`
-seconds away, at `y + vy * t`, folded back off the walls at y = 0.25 and
-y = 19.75.
+seconds away, at `y + vy * t`, folded back off the walls at y = 0 and
+y = 20. (The ball's centre turns there: the walls stand a radius outside
+the court.)

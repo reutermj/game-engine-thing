@@ -602,6 +602,27 @@ record and replay).
     was inside a wall's box too, by up to 0.42 cells (a 40-cell/s ball the
     paddle's end had just kicked upward).
   - `speed_loss`: none. The reported 37 to 12.9 return wasn't provoked.
+- **What the loop then fixed** (get-c3s, get-7la). Pong's hit rule now
+  applies only to a return: a contact whose normal points into the
+  paddle's face (more across than along) and that physics turned back
+  into the court (`pong/core/rules.rs`). An end hit deflects as off a
+  wall and goes in, as it always did, without the kick, since the ball
+  meets an end only once it's past the face line. Every paddle hit
+  leaves at 40 cells/s at most, the velocity scaled (not each component
+  clamped, which let one leave at 56.6), an end's hit too: an end moving
+  at 16 adds to the ball, and a replay pumped a ball pinched between an
+  end and a wall to 56. AGENT.md now folds at y = 0 and 20. Three new
+  scripted sessions after the fix (versus aiming at the paddles' ends
+  2.15 and 2.4 off centre, 6002 and 6005 frames; one player, 5004)
+  each reproduced, with 2 `hit_no_bounce` flags between them, both
+  glances off an end with the velocity physics gave (one the same hit
+  as the old session's frame 3310, which the rule used to spin from
+  -17.0 to -24.8), and no frame over 40 (the top, 40.000004, is the
+  scale's rounding). Before the fix the two old sessions had 242 and
+  1365 frames over 40. A corner hit can still send a return nearly
+  vertical (vx 3.9 at 40 cells/s), which physics's corner normal does
+  before pong's rule; the 6005-frame session then crawled, 0 to 0
+  (get-928).
 
 ## What it means for presentation.md
 
