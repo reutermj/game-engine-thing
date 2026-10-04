@@ -56,12 +56,8 @@ impl Host {
     /// may have put its own in), and joins its threads.
     fn stop(&mut self, cx: &mut Cx) {
         let Some(pool) = self.pool.take() else { return };
-        let world = cx.world();
-        let world = world.world();
-        let ours: Arc<dyn Executor> = pool.clone();
-        if world.executor().is_some_and(|e| Arc::ptr_eq(&e, &ours)) {
-            world.set_executor(None);
-        }
+        let ours: Arc<dyn Executor> = pool;
+        cx.world().world().take_executor_if(&ours);
     }
 }
 

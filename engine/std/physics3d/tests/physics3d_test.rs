@@ -221,6 +221,44 @@ fn a_tuning_in_the_world_is_the_steps() {
     assert!(kept > 0 && matched == 0, "warm-started {matched} of {kept} cold");
 }
 
+/// Balls of restitution 0.5 dropped 5 onto the floor rebound to about e²
+/// of their drop, the solve in lanes: sixteen side by side, contacts
+/// enough to fill its batches, where one ball alone would leave them too
+/// sparse (`Tuning::sparse_alone`) and be solved one contact at a time,
+/// with restitution of its own. So this sees the lanes program's `Bounce`
+/// stage, which no other default test did (get-znt.46): left out, the
+/// balls don't leave the floor (an apex of 0.0).
+#[test]
+fn balls_rebound_to_about_e_squared_through_the_lanes() {
+    const DROP: f32 = 5.0;
+    let s = floor("rebound");
+    let balls: Vec<Entity> = (0..16)
+        .map(|k| {
+            let at = Vec3::new((k % 4) as f32 * 2.0 - 3.0, 0.5 + DROP, (k / 4) as f32 * 2.0 - 3.0);
+            s.body("sphere 0.5 e 0.5", at, NONE, Vec3::ZERO, Vec3::ZERO)
+        })
+        .collect();
+    let (mut landed, mut lanes, mut apex) = (vec![false; balls.len()], 0, vec![0.0f32; balls.len()]);
+    for _ in 0..120 {
+        s.run(1);
+        if stage(&s, "batches") > 0 {
+            lanes += 1;
+        }
+        for (k, &b) in balls.iter().enumerate() {
+            let (y, vy) = (s.at(b).y - 0.5, s.v(b).y);
+            landed[k] |= vy > 0.0;
+            if landed[k] {
+                apex[k] = apex[k].max(y / DROP);
+            }
+        }
+    }
+    assert!(lanes > 0, "the solve never went in lanes");
+    // Each 0.2397 (2026-10-04), as the lone ball's 0.2481 is about e²
+    // (behaviour_test): the bound is the measured value's, so a change
+    // that moves it is seen here as well as in the baseline.
+    assert!(apex.iter().all(|a| (a - 0.2397).abs() < 0.002), "rebounds {apex:?}, not 0.2397 of the drop");
+}
+
 /// What the last step's `stages` says of `key`.
 fn stage(s: &Sim, key: &str) -> u64 {
     let stages = s.engine.send("physics3d", "stages").unwrap();

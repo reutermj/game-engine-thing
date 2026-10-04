@@ -814,8 +814,37 @@ impl World {
         *self.executor.write().unwrap_or_else(PoisonError::into_inner) = executor;
     }
 
-    pub fn executor(&self) -> Option<Arc<dyn Executor>> {
+    /// Takes `ours` out of the world if it is the executor installed, and
+    /// says whether it was: how an owner removes its threads without
+    /// removing someone else's (a test's, installed after).
+    ///
+    /// It hands back nothing the caller didn't already hold, which is why
+    /// it exists instead of `set_executor` returning the old executor: a
+    /// swap-and-restore would give any code holding the world the pool,
+    /// to run tasks on outside a declared shape (threads.md, "Where the
+    /// pool lives").
+    pub fn take_executor_if(&self, ours: &Arc<dyn Executor>) -> bool {
+        assert!(!self.frame_open(), "the executor is changed between frames");
+        let mut slot = self.executor.write().unwrap_or_else(PoisonError::into_inner);
+        let installed = slot.as_ref().is_some_and(|e| Arc::ptr_eq(e, ours));
+        if installed {
+            *slot = None;
+        }
+        installed
+    }
+
+    /// Crate-private: a system reaches the threads only through a declared
+    /// shape (`Passes`, `ParMap`, `Reduce`), and the ECS's own splits
+    /// through `Split`. Any mod can hold the world (a message handler, a
+    /// hook, `WorldMut`), and would run tasks undeclared with this.
+    pub(crate) fn executor(&self) -> Option<Arc<dyn Executor>> {
         self.executor.read().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Whether an executor is installed, and how many threads it has: for
+    /// tests and a host's status, without handing the executor out.
+    pub fn executor_threads(&self) -> Option<usize> {
+        self.executor().map(|e| e.threads())
     }
 
     pub fn frame_open(&self) -> bool {
