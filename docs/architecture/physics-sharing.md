@@ -45,10 +45,10 @@ Read from the code. "Same" means the same algorithm, whatever the math.
 A bead in the last column tracks the gap; beads marked new were filed
 with this doc.
 
-| area | 2D (`physics`) | 3D (`physics3d`) | same? | bead |
+| area | 2D (`physics2d`) | 3D (`physics3d`) | same? | bead |
 |---|---|---|---|---|
 | **shapes** | box, circle | box, sphere | same set, per dimension | – |
-| rotation | `Rotation` (cos, sin) and `Spin`; first order, normalized every substep; no cap on a step's turn | `Rotation` (quaternion) and `AngularVelocity`; first order, normalized every substep (variants: once, exact); at most a quarter turn a step | same rule, 3D caps the turn | – |
+| rotation | `Rotation` (cos, sin) and `Spin`; first order, normalized every substep; no cap on a step's turn | `Rotation` (quaternion) and `AngularVelocity`; first order, normalized every substep (variants: once, exact); at most π/4 (`MAX_ROTATION`) a step | same rule, 3D caps the turn | – |
 | inertia | a box's `m (w² + h²) / 12`, a disc's `m r² / 2`, a scalar | a diagonal about the body's axes, turned to a world `Mat3` once a step | per dimension | – |
 | statics | a collider without `Body` and `Velocity` (or `STATIC`) | a `Static` marker | no | – |
 | **broadphase** | `Live<Contacts>`, `FAT` 0.02, sides by `AnyOf` (awake with or without body or velocity, against statics and sleepers), pairs across workers | `Live<Contacts>`, `FAT` 0.02, moving against `Static`, one thread | same relation, 3D's sides simpler; `FAT` shared (`physics_common`) | – |
@@ -75,7 +75,7 @@ with this doc.
 | kinematic bodies | `KINEMATIC`: moved by velocity, never pushed, wakes what it pushes | none | 2D only | get-emj.79 (new) |
 | game surface | `Touching`, `gravity_scale`, `Spatial` queries (overlapping, any_at, cast) | none | 2D only | get-emj.79 (new) |
 | **reload coverage** | the games' replays (nothing turns), one v1 to v2 swap under a locked pile, the sleeping reload tests; nothing reloads the turning, colored, threaded path | a turning pile replayed bit for bit while physics3d, the scene and the scheduler reload every frame | 3D's is stronger | get-emj.83 (new) |
-| **tests** | 39 unit, 54 in the engine and on spatial queries, 36 quality and 51 behaviour against Box2D and Rapier, a baseline, equivalence of lanes, colors and threads bit for bit | 27 unit, 14 in the engine (reload included), 17 quality and 24 behaviour against Rapier, Jolt and Box3D, a baseline, an exact fingerprint, equivalence of the lanes bit for bit | same kinds; the harnesses are copies (being merged into a shared test kit) | – |
+| **tests** | 39 unit, 54 in the engine and on spatial queries, 36 quality and 51 behaviour against Box2D and Rapier, a baseline, equivalence of lanes, colors and threads bit for bit | 27 unit, 14 in the engine (reload included), 17 quality and 24 behaviour against Rapier, Jolt and Box3D, a baseline, an exact fingerprint, equivalence of the lanes bit for bit | same kinds; the harnesses share `physics_testkit` | – |
 
 **Where the two differ on purpose, with a measurement behind it:** the
 stiffness, manifold storage, recycling (3D first; 2D open), the tile-seam

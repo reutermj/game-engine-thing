@@ -356,7 +356,7 @@ one would have to ship those files with it.
     separation when found plus its anchors' moves along the normal, from
     each body's accumulated move and turn (`b3SolveContact`); a rotation
     stepped to first order and normalized every substep
-    (`b3IntegrateRotation`), at most a quarter turn a step
+    (`b3IntegrateRotation`), at most π/4 a step
     (`B3_MAX_ROTATION`) (`engine/std/physics3d/solver.rs`);
   - friction for a whole contact at its points' centroid, a 2x2 tangent
     mass and an impulse clamped to a disc, and twist friction limited by

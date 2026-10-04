@@ -3,7 +3,8 @@
 **Status: built** (2026-10-03; get-znt.29, the design; get-znt.20, the
 pool; get-znt.34, shapes run across it; get-znt.39, the one-thread
 guard; get-znt.40, the solves' batches filled across it; get-znt.31,
-every split on a shape or the ECS's own). The running
+every split on a shape or the ECS's own; get-znt.45, the write-back
+across it). The running
 engine has threads: a resident mod, `threads`
 (`engine/std/threads`), keeps a rayon pool on one CCD and installs it as
 the world's executor, and `Passes::run` hands a program's stages out

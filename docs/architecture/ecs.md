@@ -72,7 +72,8 @@ The macro adds `Clone` (add `Copy` yourself if every field is) and implements
 `Component`, recording each field's name, kind, offset, size, layout
 fingerprint and drop function in `Component::FIELDS`. Every field must be a
 `FieldType`: the integer and float types, `bool`, `Entity`, `String`, `Vec`,
-`Option`, `Box`, arrays, `BTreeMap`, and structs declared with
+`Option`, `Box`, arrays, tuples (up to four), `BTreeMap`, `Instant`,
+`Duration`, and structs declared with
 `field_struct!`. Not `HashMap` (see below). It is a `macro_rules!` macro
 rather than a derive, so it needs no proc-macro crate; the price is its fixed `struct Name: "id" { ... }`
 syntax. `Component` can still be implemented by hand, with no schema.

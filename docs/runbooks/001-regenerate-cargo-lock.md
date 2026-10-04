@@ -1,7 +1,7 @@
 # Runbook: regenerate Cargo.lock
 
 - **Trigger:** a crates.io dependency was added, removed or bumped in a
-  member `Cargo.toml` (today only `engine/loader/Cargo.toml`), a new member
+  member `Cargo.toml` (the root `Cargo.toml`'s `members`), a new member
   was added to the root `Cargo.toml`, or the Rust toolchain version in
   `MODULE.bazel` changed.
 

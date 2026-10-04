@@ -314,7 +314,7 @@ depends on interleavings needs model checking and luck.
 - **Concurrency is safe Rust.** Each page has a guard (a `RwLock`, or an
   atomic borrow flag), taken once when a task starts, never per access. The
   graph means a guard is never contended; a failed `try_lock` is a scheduler
-  bug, reported as a refusal. A task holds ordinary guards until it ends, so
+  bug, and panics (`world.rs`'s `contended`). A task holds ordinary guards until it ends, so
   there are no scopes, and no barriers.
 - **The unsafe core is type erasure.** The loader stores components it
   knows only as layouts and drop code from a mod's build, so a column of
@@ -531,7 +531,7 @@ spike's, ported) prints the numbers and timelines below.
   or table-stored with a target filter, `ui` starts at the top of the frame
   and runs through ignite, every apply node and physics. Sparse inserts
   don't hold up systems on other components (asserted in
-  `schedule_test`'s readiness tests, which drive the scheduler node by node
+  `//engine/ecs:graph_test`'s `readiness` tests, which drive the scheduler node by node
   and don't depend on timing).
 - **The scheduler reaches the critical path.** 8 threads: 34.7 ms sequential,
   22.5 ms parallel (sparse), against a chain of ignite (13 ms) then physics

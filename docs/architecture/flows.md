@@ -326,7 +326,7 @@ the pool to run parallel work the ECS can't see.
 ```rust
 fn solve(&mut self, _: &mut (), _: &mut Cx, turning: See<Turning>, mut graph: Pass<Graph>, passes: Passes) {
     let Graph { layout, items, states, .. } = &mut *graph;
-    passes.run(layout, items, states, &PROGRAM, |pass, block, states| solve_block(pass, block, states, &turning), |pass, range, states| integrate(pass, range, states));
+    passes.run(layout, items, states, &PROGRAM, |pass, first, block, states| solve_block(pass, first, block, states, &turning), |pass, range, states| integrate(pass, range, states));
 }
 ```
 
@@ -492,9 +492,9 @@ either, which is how physics's lanes were already written
 (`lanes::Bodies`, over `[State]` and the shared `Atom`s):
 
 ```rust
-|k, block, s| match s {
-    States::Plain(s) => kernels.block(k, block, s),
-    States::Shared(s) => kernels.block(k, block, &mut Shared(s)),
+|k, first, block, s| match s {
+    States::Plain(s) => kernels.block(k, first, block, s),
+    States::Shared(s) => kernels.block(k, first, block, &mut Shared(s)),
 }
 ```
 

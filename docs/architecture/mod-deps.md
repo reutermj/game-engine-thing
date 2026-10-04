@@ -64,7 +64,7 @@ against. Concretely:
   is refused, and the error names the game's reload target:
 
   ```
-  physics's interface changed, and spawner was built against the old one;
+  physics2d's interface changed, and spawner was built against the old one;
   reload them together with `./bazel run //game:reload`
   ```
 

@@ -21,7 +21,7 @@ fetches the pinned Bazel, which fetches hermetic Rust and LLVM toolchains.
 # edit mods/counter/lib.rs, then:
 ./bazel run //mods/counter          # per-mod state carries over too
 ./bazel run //mods/hello            # load a mod the running game didn't ship with
-./bazel run //engine/modctl -- list # or: schedule, unload <name>, quit
+./bazel run //engine/modctl -- list # or: schedule, unload <name>, send <mod> <text>, quit
 ./bazel test //...                  # unit, integration and end-to-end tests
 ```
 
@@ -56,8 +56,10 @@ level is `platformer/level/map.txt`: edit it and
 - `engine/control`: the line protocol spoken over the Unix socket
 - `engine/modctl`: the client; every `engine_mod` target is a symlink to it
 - `engine/defs.bzl`: `engine_mod` and `engine_game`
-- `engine/std`: the mods every game gets by default: the `realtime` and
-  `lockstep` bootstraps, `clock`, and the `sequential` scheduler
+- `engine/std`: the mods the engine ships. Every game gets the `realtime`
+  bootstrap (or `lockstep`, if it asks), `clock`, the `sequential`
+  scheduler and the `threads` pool by default; `physics2d` (and the
+  experimental `physics3d`) when it depends on them
 - `mods/*`: `counter` (per-mod state), `hello` (live
   load), `spawner`/`reporter` (the physics demo, on `//engine/std/physics2d`:
   mods that depend on another's components)
@@ -65,7 +67,7 @@ level is `platformer/level/map.txt`: edit it and
 
 ## How reload works
 
-1. `./bazel run //mods/foo` builds `libfoo.so`, then runs `modctl`, which sends
+1. `./bazel run //mods/foo` builds `libfoo_mod.so`, then runs `modctl`, which sends
    `load foo <path>` to `$XDG_RUNTIME_DIR/game-engine-thing/control.sock`.
 2. Between frames, when the bootstrap mod hands it control, the engine copies the `.so` to a unique path, `dlopen`s it and
    checks its `ModInfo`. A bad build leaves the old code running.
@@ -85,6 +87,7 @@ a reload. A panicking mod is disabled until it's reloaded.
 - [docs/lore/](docs/lore/): non-obvious things that cost real effort to work out
 - [docs/runbooks/](docs/runbooks/): recurring maintenance procedures
 - [docs/retrospectives/](docs/retrospectives/): what building on the engine
-  showed: pong, then the platformer
+  showed: pong and the platformer, then physics
+- [docs/reviews/](docs/reviews/): dated design and consistency reviews
 - [CLAUDE.md](CLAUDE.md): conventions for working in the repo (for agents,
   and humans too)
