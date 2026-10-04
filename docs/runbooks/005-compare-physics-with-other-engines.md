@@ -1,8 +1,11 @@
-# Runbook: compare the physics with Box2D and Rapier
+# Runbook: compare the physics with other engines
 
-- **Trigger:** a change to `//engine/std/physics2d`'s step (the solver, the
-  narrowphase, the broadphase, the storage it walks) that claims to make it
-  faster or better behaved; or bumping Box2D or Rapier.
+- **Trigger:** a change to `//engine/std/physics2d`'s or
+  `//engine/std/physics3d`'s step (the solver, the narrowphase, the
+  broadphase, the storage it walks) that claims to make it faster or
+  better behaved; or bumping a reference engine: Box2D or Rapier 2D for
+  2D, Rapier 3D, Jolt or Box3D for 3D ([Bumping a
+  library](#bumping-a-library)).
 
 ## Gap
 
@@ -276,9 +279,35 @@ a looser bound.
   field order (`box2d.rs` asserts their sizes, not their order), and
   `b2Body_SetMassData` must still leave a fixed rotation locked (the
   bench asserts no body turned; see the lore).
-- **Rapier:** the version in `engine/std/physics2d/compare/Cargo.toml`, then
-  runbook 001 for `Cargo.lock`. The counters' names move between versions
-  (see the lore on its broadphase timers), and so do the defaults the
-  tables call "defaults": note them.
-- Update the versions in docs/CREDITS.md, and the license copy in
-  `engine/std/physics2d/compare/licenses/` from the new tag.
+- **Rapier 2D:** the version in `engine/std/physics2d/compare/Cargo.toml`
+  (pinned exactly, `=0.36.0`), then runbook 001 for `Cargo.lock`. The
+  counters' names move between versions (see the lore on its broadphase
+  timers), and so do the defaults the tables call "defaults": note them.
+  Its licence is a checked-in copy: replace
+  `engine/std/physics2d/compare/licenses/rapier-LICENSE` from the new tag.
+- **Rapier 3D:** the version in `engine/std/physics3d/compare/Cargo.toml`,
+  then runbook 001. It is pinned as `0.36`, not exactly, so regenerating
+  `Cargo.lock` for any reason may move it within 0.36: after runbook 001,
+  read the `rapier3d` version `Cargo.lock` resolved. Its licence is
+  fetched, not checked in: `@rapier_license` in `MODULE.bazel`, an
+  `http_file` of the `LICENSE` at a tag, whose URL must name the tag of
+  the version `Cargo.lock` has, with its new `sha256`. Check the
+  counters (`rapier.rs`) as for 2D.
+- **Jolt** and **Box3D:** each a release's archive URL, `strip_prefix` and
+  `sha256` in `MODULE.bazel` (`@jolt`, `@box3d`). Both ship only CMake, so
+  the BUILD files are ours: check `engine/std/physics3d/compare/jolt.BUILD`
+  against the new `Jolt/Jolt.cmake` (its sources are a glob with the
+  compute backends excluded; a new optional backend needs excluding too)
+  and `box3d.BUILD` against the new `src/CMakeLists.txt`; and `copts.bzl`
+  against each one's CMake flags (Jolt's SIMD defaults in
+  `Build/CMakeLists.txt`, which every translation unit including a Jolt
+  header must share; Box3D's C standard and `-ffp-contract=off`). Then
+  the shims, `jolt_shim.cpp` and `box3d_shim.c`, against the new headers;
+  the C interface they share (`shim.h`) is ours, mirrored by hand in
+  `ffi.rs`, so if it changes, change both. Each BUILD file exports the
+  archive's own `LICENSE`, which `:licenses` ships with the bench.
+- Then, for any of them: update the versions in docs/CREDITS.md; measure
+  the references again ([Refreshing the quality tests'
+  bounds](#refreshing-the-quality-tests-bounds), [The behaviour
+  scenes](#the-behaviour-scenes), and the bounce families' grids) and set
+  each bound by physics.md's rules.
