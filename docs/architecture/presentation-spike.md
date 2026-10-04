@@ -474,6 +474,51 @@ bootstrap with a window, plus `spike_draw`, `spike_pong_view` and
   platform would take the resolution from the game, not from the
   environment.
 
+### Two agents against each other, in turns
+
+`:pong_versus` (`./bazel run //spikes/presentation:pong_versus_launch`,
+socket `/run/user/1000/pong-versus/control.sock`) is the same window with
+no `pong_ai` and no `pong_text`, for two agents playing `left` and
+`right` (`spikes/presentation/AGENT_VERSUS.md`). In lockstep whoever sends
+`step` moves time for both, so the faster thinker would get more turns:
+the game needs a **turn barrier**. A turn is N frames (6 by default,
+`turn length`); each side submits `lockstep turn <side> <up|down|stay>`,
+and when both have, the turn's frames run, paced, and the next opens.
+
+- **The barrier is the bootstrap's.** Only the bootstrap makes time move:
+  a reloadable mod's message handler can't run a frame, and the barrier's
+  state (who submitted what) has to survive any reload of the game. So
+  `lockstep_window.rs` keeps it (on with `SPIKE_TURNS=<frames>`, set by the
+  launcher; `step` is then refused), and publishes it as data, a
+  `spike_turns::Turn` component, from a new resident interface mod
+  (`spike_turns`, shaped like `clock`, since the resident bootstrap may
+  depend only on resident mods). What a turn *means* is the game's:
+  `pong_versus` (reloadable) sets both paddles' `intent` from it each
+  frame in `update`, as `pong_ai` sets the right one, and spawns a
+  `spike_turns::Outcome` when a side reaches the point limit (5 by
+  default, `first-to`), which the bootstrap reads after every frame and
+  stops on, mid-turn if need be. Pong's code doesn't change.
+- **Requests never wait for a turn.** A submit replies at once. The
+  completing submit starts the turn, and its frames run one per pass of
+  the bootstrap's loop, between pumps that wait only until the next frame
+  is due, so polls are answered while it plays. What the other side
+  submitted stays in the bootstrap's state until the turn plays; the
+  world shows only that it has.
+- **One `state` for both sides.** `pong_versus state` names `left` and
+  `right` (never "you"), with a turn line: number, open or playing (frame
+  k of N), who has submitted, the point limit, or the winner.
+- Measured, on the 4090 with the window up: with only `left` in, the frame
+  stayed at 0 for 1 s; `right`'s submit replied in 1.2 ms, and the 6-frame
+  turn played out in 85 ms with polls seeing frames 1 to 5 go by. Two
+  threaded players (one modctl process a call, polling every 10 ms)
+  played 600 turns in 60.27 s (11999 polls, 1198 submits): pacing, not
+  the barrier, sets the rate. A fixed submission script gave the same
+  final `state` to the last digit paced and unpaced, from fresh engines:
+  to a 5-0 game over at frame 637 (mid-turn) in 10.66 s against 0.54 s,
+  and with no point limit, 600 turns and 13 points in 60.31 s against
+  2.87 s. Closing the window mid-turn (turn 640, frame 4 of 6) shut the
+  engine down with exit 0.
+
 ## What it means for presentation.md
 
 - **D2 (incremental extract).** The premise that cost follows what

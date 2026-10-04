@@ -129,6 +129,7 @@ engine_mod(
     crate_root = "lockstep_window.rs",
     mod_deps = [
         ":spike_platform",
+        ":spike_turns",
         "//engine/std/clock",
     ],
     mod_name = "lockstep",
@@ -165,6 +166,70 @@ rust_binary(
     env = {
         "PONG_ENGINE": "$(rlocationpath //engine/loader:engine)",
         "PONG_MANIFEST": "$(rlocationpath :pong_window)",
+    },
+    tags = ["manual"],
+)
+
+# ---- Two agents against each other, in turns ----
+
+# The turn barrier's data (`Turn`, `Outcome`), which the bootstrap
+# publishes and the game reads. Resident, like clock, since the bootstrap
+# depends on it.
+engine_mod(
+    name = "spike_turns",
+    srcs = ["turns.rs"],
+    crate_root = "turns.rs",
+    interface = ["turns_interface.rs"],
+    resident = True,
+    tags = ["manual"],
+)
+
+# The game's side of the barrier: both paddles steered from the turn's
+# actions, a point limit, and `state`/`show` naming both sides.
+engine_mod(
+    name = "spike_pong_versus",
+    srcs = ["pong_versus.rs"],
+    crate_root = "pong_versus.rs",
+    mod_deps = [
+        ":spike_turns",
+        "//engine/std/clock",
+        "//engine/std/physics2d",
+        "//pong/core",
+    ],
+    mod_name = "pong_versus",
+    tags = ["manual"],
+)
+
+# Pong for two agents, no AI, on the windowed lockstep bootstrap in turns
+# (SPIKE_TURNS, set by the launcher). AGENT_VERSUS.md.
+engine_game(
+    name = "pong_versus",
+    bootstrap = ":spike_lockstep_window",
+    mods = [
+        ":spike_pong_versus",
+        ":spike_draw",
+        ":spike_pong_view",
+        ":spike_present",
+    ],
+    tags = ["manual"],
+)
+
+# `./bazel run //spikes/presentation:pong_versus_launch` starts
+# :pong_versus on /run/user/1000/pong-versus/control.sock, in turns of 6
+# frames (PONG_TURN_FRAMES).
+rust_binary(
+    name = "pong_versus_launch",
+    srcs = ["pong_launch.rs"],
+    crate_root = "pong_launch.rs",
+    data = [
+        ":pong_versus",
+        "//engine/loader:engine",
+        "//engine/modctl",
+    ],
+    env = {
+        "PONG_ENGINE": "$(rlocationpath //engine/loader:engine)",
+        "PONG_MANIFEST": "$(rlocationpath :pong_versus)",
+        "PONG_VERSUS": "1",
     },
     tags = ["manual"],
 )

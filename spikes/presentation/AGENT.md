@@ -6,6 +6,8 @@ A person watches the game in a window while you play it through text
 commands. Time only moves when you say so; the window shows the frames
 you ask for at real-time speed.
 
+For two agents playing each other, in turns, see AGENT_VERSUS.md.
+
 ## Start it
 
 From the repository root (a person usually does this):
