@@ -3,14 +3,14 @@
 //!
 //! ```text
 //! solve            world -> Make<Settings>
-//! gather_bodies    See<Settings>, world -> Make<Bodies>
-//! gather_turning   See<Bodies>, world -> Make<Turning>
-//! gather_contacts  See<Bodies>, world -> Make<Contacts>
+//! gather_bodies    See<Settings>, world, ParMap -> Make<Bodies>
+//! gather_turning   See<Bodies>, world, ParMap -> Make<Turning>
+//! gather_contacts  See<Bodies>, world, ParMap -> Make<Contacts>
 //! prepare          See<Settings>, See<Bodies>, See<Turning>, Pass<Contacts> -> Make<Graph>
 //! passes           See<Settings>, See<Turning>, See<Bodies>, See<Contacts>, Pass<Graph>, Passes
 //! finish           See<Settings>, Take<Graph>, ParMap -> Pass<Bodies>, Pass<Turning>, Pass<Contacts>
-//! scatter_contacts See<Settings>, Pass<Contacts> -> world
-//! scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts> -> world
+//! scatter_contacts See<Settings>, Pass<Contacts>, ParMap -> world
+//! scatter_bodies   See<Settings>, Take<Bodies>, Take<Turning>, Take<Contacts>, ParMap -> world
 //! ```
 //!
 //! The sources copy the awake bodies and the contacts out of the world;
@@ -21,6 +21,15 @@
 //! the results back, with the contacts' sides and events, and sleeping. A
 //! step where nothing turns is solved one contact at a time, in pair order,
 //! by `finish` (`solver::solve_with`), which no shape can split.
+//!
+//! The sources and sinks walk the world across threads as `ParMap` page
+//! walks, each chunk of the walk its own part of the output: the gathers'
+//! lists joined (or carved) in walk order, the write-backs' rows each a
+//! chunk's, and what's in order (links, sides, `Contact` events) collected
+//! per chunk and joined in chunk order, so the step is one thread's at any
+//! count (threads.md, "The whole step, stage by stage"). A chunk of a
+//! write-back starts where the walk that gathered it did: by position, the
+//! gathers recording the positions they skip (`skipped`).
 //!
 //! The flows are this mod's alone, not its interface's: what they carry is
 //! the solver's own layout, and a mod that saw them would be rebuilt for
@@ -81,6 +90,10 @@ flow! {
     pub(crate) struct Turning: "physics2d::flow::Turning" {
         spinning: Vec<Spinning>,
         reach: Vec<f32>,
+        /// The walk's positions of the bodies that don't (static, or not
+        /// among `Bodies`), in order: where a chunk of the write-back's
+        /// walk starts among the spinning.
+        skipped: Vec<u32>,
     }
 }
 
@@ -88,10 +101,65 @@ flow! {
     /// The contacts in pair order, their ends the bodies' indices; then the
     /// pairs that pressed, for sleeping.
     pub(crate) struct Contacts: "physics2d::flow::Contacts" {
-        constraints: Vec<Constraint>,
-        points: Vec<Points>,
+        constraints: Kept<Constraint>,
+        points: Kept<Points>,
+        /// The walk's positions of the contacts not solved (`disabled`),
+        /// in order: where a chunk of the write-back's walk starts among
+        /// the constraints.
+        skipped: Vec<u32>,
         links: Vec<(Entity, Entity)>,
     }
+}
+
+/// A list a flow keeps at its length between steps, where `Vec`'s
+/// recycling empties it: a step filling it by parts across threads
+/// resizes it to the step's count first, which writes only what grew.
+#[derive(Default)]
+pub(crate) struct Kept<T>(Vec<T>);
+
+impl<T> std::ops::Deref for Kept<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Kept<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        &mut self.0
+    }
+}
+
+impl<T> Recycle for Kept<T> {
+    fn recycle(&mut self) {}
+}
+
+/// What a chunk of `scatter_contacts`' walk makes: from constraint `next`,
+/// the links for sleeping, the sides to mark and the contacts begun.
+struct Wrote {
+    next: usize,
+    links: Vec<(Entity, Entity)>,
+    marks: Vec<(Entity, Vec2)>,
+    begun: Vec<Contact>,
+}
+
+/// What a chunk of `gather_turning`'s walk fills: from walk position `at`,
+/// its spinning bodies and their reach, and the positions it skipped.
+struct Spun {
+    at: u32,
+    spinning: Vec<Spinning>,
+    reach: Vec<f32>,
+    skipped: Vec<u32>,
+}
+
+/// What a chunk of `gather_contacts`' walk fills: from walk position `at`,
+/// its constraints, their points (indexed from the chunk's first), and the
+/// positions it skipped.
+struct Gathered {
+    at: u32,
+    constraints: Vec<Constraint>,
+    points: Vec<Points>,
+    skipped: Vec<u32>,
 }
 
 flow! {
@@ -153,9 +221,50 @@ impl Recycle for Colors {
 type Awake<'w, 'a> = Query<'w, (&'a Body, &'a Velocity, &'a Position), Without<Asleep>>;
 /// Turning bodies, read: as `Awake`, `scatter_bodies`'s walk.
 type Turns<'w, 'a> = Query<'w, (&'a Body, &'a Collider, &'a Rotation, &'a Spin), Without<Asleep>>;
+/// What `scatter_bodies`' walks hand a row: `Moving`'s and `TurningQ`'s.
+type MovingItems<'a> = (&'a Body, engine_api::Mut<'a, Velocity>, engine_api::Mut<'a, Position>);
+type TurnItems<'a> = (&'a Body, &'a Collider, engine_api::Mut<'a, Rotation>, engine_api::Mut<'a, Spin>);
 type ContactsRead<'w, 'a> = Query<'w, (&'a ContactPair, &'a Manifold, &'a Response, &'a Impulse, &'a ContactPoints), Without<Resting>>;
 type ContactsWrite<'w, 'a> =
     Query<'w, (&'a ContactPair, &'a mut Manifold, &'a Response, &'a mut Impulse, &'a mut ContactPoints), Without<Resting>>;
+
+/// A contact as the solver takes it, its ends by their index among the
+/// awake bodies (`still` for any other). A contact with points has them in
+/// `points`, beside the constraints (see `solver::Points`). Inlined into
+/// `gather_contacts`' walk, which is called from its one-thread walk and
+/// its walk across threads: as a closure there, it wasn't, and the
+/// one-thread walk took a tenth longer (docs/lore/a-closure-called-from-two-walks-may-not-be-inlined-into-either.md).
+#[inline(always)]
+fn constraint_of(
+    (slots, still): (&Slots, u32),
+    (pair, m, r, j, cp): (&ContactPair, &Manifold, &Response, &Impulse, &ContactPoints),
+    points: &mut Vec<Points>,
+) -> Constraint {
+    let index_of = |e: Entity| slots.get(e).unwrap_or(still);
+    let c = Constraint {
+        a: index_of(pair.a),
+        b: index_of(pair.b),
+        normal: Vec2::new(m.nx, m.ny),
+        depth: m.depth,
+        friction: r.friction,
+        restitution: r.restitution,
+        jn: j.normal,
+        jt: j.tangent,
+        speed: 0.0,
+        points: 0,
+    };
+    if m.points == 0 {
+        return c;
+    }
+    let mut pts = Points { count: m.points, ..Points::default() };
+    for (i, p) in pts.point.iter_mut().enumerate().take(m.points as usize) {
+        let (ra, rb) = cp.anchors(i);
+        let (jn, jt) = cp.last(m.solved, cp.ids[i]);
+        *p = ContactPoint { ra, rb, separation: cp.separations[i], jn, jt };
+    }
+    points.push(pts);
+    c.with_points(points.len() - 1)
+}
 
 impl Physics {
     /// Begins the solve with the step's settings. The pipeline's first
@@ -180,7 +289,7 @@ impl Physics {
         &mut self,
         _: &mut Sleepers,
         _: &mut Cx,
-        dt: Dt,
+        (dt, map): (Dt, ParMap),
         s: See<Settings>,
         mut moving: Awake,
         mut out: Make<Bodies>,
@@ -188,18 +297,43 @@ impl Physics {
         let start = Instant::now();
         let (dt, g) = (*dt, s.gravity.expect("made by `solve`"));
         let Bodies { entities, bodies, kinds, slots } = &mut *out;
-        entities.reserve(moving.len());
-        bodies.reserve(moving.len() + 1);
-        kinds.reserve(moving.len() + 1);
-        moving.for_each(|row, (body, v, _)| {
+        let n = moving.len();
+        let gather = |row: engine_api::Row<'_>, body: &Body, v: &Velocity| {
             // The gravity `integrate_velocities` added, computed as `fall`
             // computed it, for the solver to spread over its substeps.
             let (inv_mass, g) = if body.kind == DYNAMIC { (body.inv_mass, g) } else { (0.0, Vec2::ZERO) };
             let gravity = Vec2::new(g.x * body.gravity_scale * dt, g.y * body.gravity_scale * dt);
-            entities.push(row.entity());
-            bodies.push(SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity));
-            kinds.push((body.kind != STATIC, body.kind));
-        });
+            (row.entity(), SolverBody::new(Vec2::new(v.x, v.y), inv_mass, gravity), (body.kind != STATIC, body.kind))
+        };
+        if map.threads() > 1 {
+            // A body a row, so each chunk fills its own part of the lists,
+            // carved here in walk order: nothing to join.
+            entities.resize(n, Entity::default());
+            bodies.resize(n, SolverBody::default());
+            kinds.resize(n, (false, STATIC));
+            let mut rest = (&mut entities[..], &mut bodies[..], &mut kinds[..]);
+            let carve = |r: std::ops::Range<usize>| {
+                let (e, es) = std::mem::take(&mut rest.0).split_at_mut(r.len());
+                let (b, bs) = std::mem::take(&mut rest.1).split_at_mut(r.len());
+                let (k, ks) = std::mem::take(&mut rest.2).split_at_mut(r.len());
+                rest = (es, bs, ks);
+                (e, b, k, 0)
+            };
+            moving.par_for_each(&map, carve, |(e, b, k, i), row, (body, v, _)| {
+                (e[*i], b[*i], k[*i]) = gather(row, body, v);
+                *i += 1;
+            });
+        } else {
+            entities.reserve(n);
+            bodies.reserve(n + 1);
+            kinds.reserve(n + 1);
+            moving.for_each(|row, (body, v, _)| {
+                let (e, b, k) = gather(row, body, v);
+                entities.push(e);
+                bodies.push(b);
+                kinds.push(k);
+            });
+        }
         // Bodies with no velocity (statics) and sleeping ones all stand for
         // one immovable body at the end.
         bodies.push(SolverBody::default());
@@ -210,18 +344,59 @@ impl Physics {
         (time.solve_bodies, time.solve_gather, time.solve) = (time.solve_bodies + t, time.solve_gather + t, time.solve + t);
     }
 
-    pub(crate) fn gather_turning(&mut self, _: &mut Sleepers, _: &mut Cx, b: See<Bodies>, mut turning: Turns, mut out: Make<Turning>) {
+    pub(crate) fn gather_turning(
+        &mut self,
+        _: &mut Sleepers,
+        _: &mut Cx,
+        (b, map): (See<Bodies>, ParMap),
+        mut turning: Turns,
+        mut out: Make<Turning>,
+    ) {
         let start = Instant::now();
-        let Turning { spinning, reach } = &mut *out;
-        turning.for_each(|row, (body, c, _, spin)| {
-            let Some(k) = b.slots.get(row.entity()) else { return };
-            spinning.push(match body.kind {
-                DYNAMIC => Spinning::new(k, spin.w, b.bodies[k as usize].inv_mass * c.inertia_per_mass()),
-                KINEMATIC => Spinning::new(k, spin.w, 0.0),
-                _ => return,
-            });
-            reach.push(c.reach());
-        });
+        let (slots, bodies) = (&b.slots, &b.bodies[..]);
+        // By page, each chunk's lists its own for the page (as the
+        // contacts' walk): by row, through the chunk, it measured a fifth
+        // slower on one thread (2026-10-03).
+        type Slices<'a> = (&'a [Body], &'a [Collider], &'a [Rotation], &'a [Spin]);
+        let walk = |c: &mut Spun, page: engine_api::Page<'_>, (body, col, _, spin): Slices<'_>| {
+            let Spun { at, spinning, reach, skipped } = c;
+            for (i, &e) in page.entities().iter().enumerate() {
+                let Some(k) = slots.get(e) else {
+                    skipped.push(*at + i as u32);
+                    continue;
+                };
+                spinning.push(match body[i].kind {
+                    DYNAMIC => Spinning::new(k, spin[i].w, bodies[k as usize].inv_mass * col[i].inertia_per_mass()),
+                    KINEMATIC => Spinning::new(k, spin[i].w, 0.0),
+                    _ => {
+                        skipped.push(*at + i as u32);
+                        continue;
+                    }
+                });
+                reach.push(col[i].reach());
+            }
+            *at += page.entities().len() as u32;
+        };
+        let Turning { spinning, reach, skipped } = &mut *out;
+        // The first chunk (on one thread, the only one) fills the flow's
+        // own lists; the others' lists are made here (memory a worker
+        // allocates is its thread's: docs/lore), joined after it in walk
+        // order.
+        let mut own = Some((std::mem::take(spinning), std::mem::take(reach), std::mem::take(skipped)));
+        let made = |r: std::ops::Range<usize>| {
+            let (spinning, reach, skipped) =
+                own.take().unwrap_or_else(|| (Vec::with_capacity(r.len()), Vec::with_capacity(r.len()), Vec::new()));
+            Spun { at: r.start as u32, spinning, reach, skipped }
+        };
+        for (n, c) in turning.par_for_each_page(&map, made, walk).into_iter().enumerate() {
+            if n == 0 {
+                (*spinning, *reach, *skipped) = (c.spinning, c.reach, c.skipped);
+            } else {
+                spinning.extend(c.spinning);
+                reach.extend(c.reach);
+                skipped.extend(c.skipped);
+            }
+        }
         let t = nanos(start);
         let time = &mut self.time;
         (time.solve_turning, time.solve_gather, time.solve) = (time.solve_turning + t, time.solve_gather + t, time.solve + t);
@@ -231,53 +406,80 @@ impl Physics {
         &mut self,
         _: &mut Sleepers,
         _: &mut Cx,
-        b: See<Bodies>,
+        (b, map): (See<Bodies>, ParMap),
         mut contacts: ContactsRead,
         mut out: Make<Contacts>,
     ) {
         let start = Instant::now();
-        let still = b.entities.len() as u32;
-        let index_of = |e: Entity| b.slots.get(e).unwrap_or(still);
-        // A contact with points has them in `points`, beside the
-        // constraints (see `solver::Points`).
-        let constraint = |pair: &ContactPair, m: &Manifold, r: &Response, j: &Impulse, cp: &ContactPoints, points: &mut Vec<Points>| {
-            let c = Constraint {
-                a: index_of(pair.a),
-                b: index_of(pair.b),
-                normal: Vec2::new(m.nx, m.ny),
-                depth: m.depth,
-                friction: r.friction,
-                restitution: r.restitution,
-                jn: j.normal,
-                jt: j.tangent,
-                speed: 0.0,
-                points: 0,
-            };
-            if m.points == 0 {
-                return c;
-            }
-            let mut pts = Points { count: m.points, ..Points::default() };
-            for (i, p) in pts.point.iter_mut().enumerate().take(m.points as usize) {
-                let (ra, rb) = cp.anchors(i);
-                let (jn, jt) = cp.last(m.solved, cp.ids[i]);
-                *p = ContactPoint { ra, rb, separation: cp.separations[i], jn, jt };
-            }
-            points.push(pts);
-            c.with_points(points.len() - 1)
-        };
-        let Contacts { constraints, points, .. } = &mut *out;
-        constraints.reserve(contacts.len());
+        let on = (&b.slots, b.entities.len() as u32);
         // In pair order, which storage keeps: the solve doesn't depend on
         // when each contact began. By page, so a row costs no dispatch per
         // term (docs/lore on a query's row cost), and `ContactPoints` is
         // read only where a contact has points.
-        contacts.for_each_ordered_page(|page, (pair, m, r, j, cp)| {
+        type Slices<'a> = (&'a [ContactPair], &'a [Manifold], &'a [Response], &'a [Impulse], &'a [ContactPoints]);
+        let walk = |c: &mut Gathered, page: engine_api::Page<'_>, (pair, m, r, j, cp): Slices<'_>| {
             for i in page.rows() {
-                if !r[i].disabled {
-                    constraints.push(constraint(&pair[i], &m[i], &r[i], &j[i], &cp[i], points));
+                if r[i].disabled {
+                    c.skipped.push(c.at + i as u32);
+                } else {
+                    c.constraints.push(constraint_of(on, (&pair[i], &m[i], &r[i], &j[i], &cp[i]), &mut c.points));
                 }
             }
-        });
+            c.at += page.rows().len() as u32;
+        };
+        let Contacts { constraints, points, skipped, .. } = &mut *out;
+        let n = contacts.len();
+        skipped.clear();
+        if map.threads() == 1 {
+            // One walk, filling the flow's own lists.
+            constraints.clear();
+            points.clear();
+            constraints.reserve(n);
+            let (constraints, points) = (&mut constraints.0, &mut points.0);
+            let mut c = Gathered {
+                at: 0,
+                constraints: std::mem::take(constraints),
+                points: std::mem::take(points),
+                skipped: std::mem::take(skipped),
+            };
+            contacts.for_each_ordered_page(|page, slices| walk(&mut c, page, slices));
+            (*constraints, *points, *skipped) = (c.constraints, c.points, c.skipped);
+        } else {
+            // Each chunk's lists made here (memory a worker allocates is
+            // its thread's: docs/lore), then copied into the flow's, each
+            // chunk into its own part of them, across threads: a copy on
+            // this thread was as long as the walk. Each chunk's points go
+            // after the chunks' before it.
+            let made = |r: std::ops::Range<usize>| Gathered {
+                at: r.start as u32,
+                constraints: Vec::with_capacity(r.len()),
+                points: Vec::with_capacity(r.len()),
+                skipped: Vec::new(),
+            };
+            let parts = contacts.par_for_each_ordered_page(&map, made, walk);
+            constraints.resize(parts.iter().map(|c| c.constraints.len()).sum(), Constraint::default());
+            points.resize(parts.iter().map(|c| c.points.len()).sum(), Points::default());
+            let mut rest = (&mut constraints[..], &mut points[..]);
+            let (mut copies, mut offset) = (Vec::with_capacity(parts.len()), 0);
+            for c in parts {
+                skipped.extend_from_slice(&c.skipped);
+                let (to_c, more_c) = std::mem::take(&mut rest.0).split_at_mut(c.constraints.len());
+                let (to_p, more_p) = std::mem::take(&mut rest.1).split_at_mut(c.points.len());
+                rest = (more_c, more_p);
+                let n = c.points.len() as u32;
+                copies.push((c, to_c, to_p, offset));
+                offset += n;
+            }
+            map.for_each_mut(&mut copies, 1, |_, (c, to_c, to_p, offset)| {
+                for (to, k) in to_c.iter_mut().zip(&c.constraints) {
+                    *to = match k.points {
+                        0 => *k,
+                        at => Constraint { points: at + *offset, ..*k },
+                    };
+                }
+                to_p.copy_from_slice(&c.points);
+            });
+        }
         let t = nanos(start);
         (self.time.solve_gather, self.time.solve) = (self.time.solve_gather + t, self.time.solve + t);
     }
@@ -407,7 +609,7 @@ impl Physics {
         mut c: Pass<Contacts>,
         // A sleeping body's is left as it fell asleep.
         mut touching: Query<&mut Touching, Without<Asleep>>,
-        mut contacts: ContactsWrite,
+        (mut contacts, map): (ContactsWrite, ParMap),
         began: EventWriter<Contact>,
     ) {
         let start = Instant::now();
@@ -420,12 +622,12 @@ impl Physics {
             asking.push(row.entity());
         });
         let asking = Slots::of(asking.iter().copied());
-        let (mut marks, mut begun) = (Vec::new(), Vec::new());
-        let Contacts { constraints, points, links } = &mut *c;
-        let points = &*points;
+        let walked = Instant::now();
+        let Contacts { constraints, points, skipped, links } = &mut *c;
+        let (constraints, points) = (&*constraints, &*points);
         // A contact's results, from constraint `k`: the sides of bodies
         // that asked it touches, a link for sleeping, and whether it began.
-        let mut wrote = |k: &Constraint, pair: &ContactPair, m: &mut Manifold, j: &mut Impulse| {
+        let wrote = |out: &mut Wrote, k: &Constraint, pair: &ContactPair, m: &mut Manifold, j: &mut Impulse| {
             *j = Impulse { normal: k.jn, tangent: k.jt };
             m.solved = k.points.checked_sub(1).map(|at| &points[at as usize]).filter(|p| p.solved).map_or(0, |p| p.count);
             m.pressed = k.jn > 0.0 || m.depth >= 0.0;
@@ -433,16 +635,16 @@ impl Physics {
                 return;
             }
             if linked {
-                links.push((pair.a, pair.b));
+                out.links.push((pair.a, pair.b));
             }
             let n = Vec2::new(m.nx, m.ny);
             for (e, n) in [(pair.a, n), (pair.b, -n)] {
                 if asking.get(e).is_some() {
-                    marks.push((e, n));
+                    out.marks.push((e, n));
                 }
             }
             if !m.was_pressed {
-                begun.push(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
+                out.begun.push(Contact { a: pair.a, b: pair.b, nx: m.nx, ny: m.ny, speed: k.speed });
             }
         };
         // Each point's impulses, by feature, for the next step's to start
@@ -454,28 +656,64 @@ impl Physics {
             (cp.normals, cp.tangents, cp.solved_ids) = ([q[0].jn, q[1].jn], [q[0].jt, q[1].jt], cp.ids);
         };
         // Every contact's impulse and pressing are written, so pages are
-        // stamped whole, as in the merge.
-        let mut solved = constraints.iter();
-        contacts.for_each_ordered_page(|page, (pair, mut m, r, mut j, mut cp)| {
+        // stamped whole, as in the merge. The walk `gather_contacts` made
+        // the constraints in, so one a contact solved, in order.
+        type Slices<'a> = (
+            &'a [ContactPair],
+            engine_api::ColumnMut<'a, Manifold>,
+            &'a [Response],
+            engine_api::ColumnMut<'a, Impulse>,
+            engine_api::ColumnMut<'a, ContactPoints>,
+        );
+        let walk = |out: &mut Wrote, page: engine_api::Page<'_>, (pair, mut m, r, mut j, mut cp): Slices<'_>| {
             let (m, j) = (m.write_all(), j.write_all());
             for i in page.rows() {
                 if r[i].disabled {
                     (m[i].pressed, j[i]) = (false, Impulse::default());
                     continue;
                 }
-                let k = solved.next().expect("a constraint per contact solved");
-                wrote(k, &pair[i], &mut m[i], &mut j[i]);
+                let k = &constraints[out.next];
+                out.next += 1;
+                wrote(out, k, &pair[i], &mut m[i], &mut j[i]);
                 if m[i].solved > 0 {
                     solved_at(k, cp.get_mut(i));
                 }
             }
-        });
+        };
+        let (marks, begun) = if map.threads() > 1 {
+            // Each chunk's links, sides and events, joined in walk order:
+            // what one walk would have made, in its order. Made here, as
+            // the gathers' are; a chunk starts at its first position's
+            // constraint, the contacts before it less those skipped.
+            let made = |r: std::ops::Range<usize>| Wrote {
+                next: r.start - skipped.partition_point(|&at| (at as usize) < r.start),
+                links: Vec::with_capacity(if linked { r.len() } else { 0 }),
+                marks: Vec::new(),
+                begun: Vec::with_capacity(r.len() / 8),
+            };
+            let parts = contacts.par_for_each_ordered_page(&map, made, walk);
+            let (mut marks, mut begun) = (Vec::new(), Vec::new());
+            for out in parts {
+                links.extend(out.links);
+                marks.extend(out.marks);
+                begun.extend(out.begun);
+            }
+            (marks, begun)
+        } else {
+            let mut out = Wrote { next: 0, links: std::mem::take(links), marks: Vec::new(), begun: Vec::new() };
+            contacts.for_each_ordered_page(|page, slices| walk(&mut out, page, slices));
+            *links = out.links;
+            (out.marks, out.begun)
+        };
+        let sided = Instant::now();
         // Touching is marked after the walk, which only ever sets sides.
         for (e, n) in marks {
             touching.with(e, |_, mut t| mark(&mut t, n));
         }
         begun.into_iter().for_each(|c| began.send(c));
         let t = nanos(start);
+        self.time.write_contacts += (sided - walked).as_nanos() as u64;
+        self.time.write_sides += t - (sided - walked).as_nanos() as u64;
         (self.time.write_back, self.time.solve) = (self.time.write_back + t, self.time.solve + t);
     }
 
@@ -487,7 +725,7 @@ impl Physics {
         &mut self,
         sleep: &mut Sleepers,
         _: &mut Cx,
-        (dt, s): (Dt, See<Settings>),
+        (dt, s, map): (Dt, See<Settings>, ParMap),
         (b, t, c): (Take<Bodies>, Take<Turning>, Take<Contacts>),
         // Awake bodies only: a sleeping one is immovable, and in tables of
         // its own, so walks over bodies skip it by what they match.
@@ -515,15 +753,20 @@ impl Physics {
         };
         // Rotations and spins, written only when they changed, as positions
         // are: a write re-bounds the row.
+        let t_turns = Instant::now();
         if !t.spinning.is_empty() {
-            // The walk that gathered them, in the same order.
-            let mut each = t.spinning.iter();
-            turning.for_each(|row, (body, _, mut q, mut spin)| {
-                let Some(k) = b.slots.get(row.entity()) else { return };
+            // The walk that gathered them, in the same order: a chunk from
+            // walk position `at` starts at the spinning body of its first
+            // position, those before it less the ones skipped.
+            let (spinning, slots) = (&t.spinning[..], &b.slots);
+            let first = |r: std::ops::Range<usize>| r.start - t.skipped.partition_point(|&at| (at as usize) < r.start);
+            let turn = |each: &mut usize, row: engine_api::Row<'_>, (body, _, mut q, mut spin): TurnItems<'_>| {
+                let Some(k) = slots.get(row.entity()) else { return };
                 if body.kind != DYNAMIC && body.kind != KINEMATIC {
                     return;
                 }
-                let s = each.next().expect("a spinning body per one gathered");
+                let s = &spinning[*each];
+                *each += 1;
                 debug_assert_eq!(s.body, k);
                 let Some(to) = s.turned_from(q.rot(), spin.w).filter(|_| kinds[k as usize].0) else { return };
                 if spin.w.to_bits() != s.w.to_bits() {
@@ -532,19 +775,24 @@ impl Physics {
                 if (to.c.to_bits(), to.s.to_bits()) != (q.c.to_bits(), q.s.to_bits()) {
                     *q = Rotation::of(to);
                 }
-            });
+            };
+            turning.par_for_each(&map, first, turn);
         }
+        self.time.write_turns += nanos(t_turns);
+        let t_moves = Instant::now();
         // The walk that gathered them, in the same order: nothing between
-        // the two moves a body's row.
-        let mut i = 0;
-        moving.for_each(|row, (body, v, p)| {
-            debug_assert_eq!(row.entity(), b.entities[i], "the bodies walked as they were gathered");
-            let (s, moves) = (bodies[i], kinds[i].0);
-            i += 1;
+        // the two moves a body's row. A chunk's first body is its first
+        // position's.
+        let moved = |i: &mut usize, row: engine_api::Row<'_>, (body, v, p): MovingItems<'_>| {
+            debug_assert_eq!(row.entity(), b.entities[*i], "the bodies walked as they were gathered");
+            let (s, moves) = (bodies[*i], kinds[*i].0);
+            *i += 1;
             if moves {
                 write(body, &s, v, p);
             }
-        });
+        };
+        moving.par_for_each(&map, |r| r.start, moved);
+        self.time.write_moves += nanos(t_moves);
         if let Some(config) = s.sleep {
             let t_sleeping = Instant::now();
             self.fall_asleep(

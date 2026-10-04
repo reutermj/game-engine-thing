@@ -5059,6 +5059,92 @@ ids are one walk's; and the contacts spawned at the apply node (8% of
 the falling step at 8 threads now 12%, the largest serial stage left in
 `find_contacts`' reach).
 
+### The 2D solve's gathers and write-backs across threads
+
+**Built** (2026-10-03, get-emj.103, .104, .105; 2D only). With the
+passes and `finish` across threads, the stages around them were the
+largest serial part of 2D's turning step at 8 threads: the contacts'
+gather 11-13%, writing the contacts and the bodies back 6-7% and 4-12%,
+and while falling the bodies' and their turning's gathers 6% and 9%
+(threads.md, "The whole step, stage by stage"). Each is now a `ParMap`
+walk of the world (`pipeline.rs`), its chunks the walk's in order:
+
+- **`gather_bodies`** writes a body a row, so the lists are resized to
+  the rows and carved per chunk: each chunk fills its own part, and
+  nothing is joined.
+- **`gather_turning`** and **`gather_contacts`** skip rows (bodies that
+  don't turn or aren't awake; contacts `disabled`), so each chunk fills
+  lists of its own, made on the system's thread
+  (docs/lore/memory-a-task-allocates-is-its-threads.md). The turning
+  bodies are joined after the first chunk's, which are the flow's own;
+  the contacts, two lists a contact (constraints and points), are copied
+  into the flow's across threads, each chunk into its own part, its
+  points renumbered after the chunks' before it: joined on the system's
+  thread, the copy was as long as the walk (48 µs of 104 on the settled
+  pile, against 14 of 84 copied across threads). The contacts' lists
+  (`Kept`) keep their length between steps, so the resize before the
+  copy writes only what grew.
+- **`scatter_contacts`** and **`scatter_bodies`** write rows: each page
+  is one chunk's, so its rows are written, and stamped (a page whole
+  where every row is written, a row where it changed), as on one thread.
+  A chunk of a write-back starts at the constraint or spinning body of
+  its first position, the positions before it less those its gather
+  skipped (`skipped`, in each flow).
+- **What's in order is collected per chunk and joined in chunk order**:
+  the links sleeping makes islands from, the sides bodies touched
+  (`Touching`, marked after the walk), and the `Contact` events, so each
+  comes out as one walk made it.
+
+**Where the time went** (µs a step at 1 / 8 threads, step_bench,
+`--config=bench`, the mod's timers): writing the contacts back is its
+walk (152 / 33 on the settled pile; the sides and events about 0.1, the
+pile has no `Touching`); writing the bodies back is their turning (83 /
+25) and their velocities and positions (54 / 21); sleeping's part is off
+in these scenes.
+
+**What stays serial, and why**: resetting `Touching` and marking it
+(looked up by entity, a few bodies), sending the events, and joining
+what's in order, all small; sleeping's bookkeeping after the write-back
+(`fall_asleep`, islands from the links in order); and the step nothing
+turns in, solved one contact at a time by `finish`.
+
+**One thread stays as it was** (0.2-0.6% of the step, in the alternated
+rounds below), but two of the shapes tried weren't. A closure called
+from both the one-thread walk and the walk across threads wasn't
+inlined: the contacts' row (`constraint_of`, now an inlined function)
+cost 294 µs against 265 on the settled pile (and up to 400 walked as one
+chunk), and a row walk pushing through the chunk's lists made the
+turning bodies' gather a fifth slower; by page, the lists taken out for
+the page, it's 73 against 69 falling
+(docs/lore/a-closure-called-from-two-walks-may-not-be-inlined-into-either.md).
+
+**Bit for bit**: at `ENGINE_THREADS` 1, 2, 4 and 8, 2D's baselines,
+default and long (`--all`), and 3D's default, byte-identical to
+70a4093's (232, 229 and 104 lines); the 2D tests, physics3d's
+`exact_test`, and pong's and the platformer's tests and replays pass at
+each count; `:tax` and `:tax -- parallel` bit for bit.
+`physics2d_test`'s piles on four threads now also hold every step's
+`Contact` events in order, the tick each row of what the step writes was
+last written at, and, falling asleep, the islands, to one thread's.
+
+**Mutants** (each planted, run, reverted): a chunk dropped from each
+split (the contacts' copy, the turning bodies' join, the bodies' carved
+gather, each write-back's walk, the write-backs' joins) fails the
+quality and pile tests (a debug assertion, a wrong index, or the
+comparison with one thread); the events joined out of order fail only
+the new event check; a write stamping rows it didn't change (positions
+on every row, `ContactPoints` on every contact) fails the ticks check,
+and positions also `a_pile_at_rest_is_not_re_sorted`.
+
+**What it bought** (step_bench, `--config=bench`, this tree and 70a4093's
+alternated over two rounds, load 2.5-3; threads.md has each stage): at 8
+threads the settled pile's step is 1891-1908 µs against 2331-2348
+(-19%), the pyramid's 1202-1211 against 1437-1451 (-17%), falling
+678-695 against 785-800 (-13%), not turning 2999-3000 against 3198
+(-6%). The contacts' gather 268 → 75 µs settled, writing them back 154 →
+35, the bodies' write-back 136 → 51, their turning's gather 92 → 37,
+their gather 51 → 34.
+
 ## Open questions
 
 - **Rotation**: built, in 2D ([Rotation](#rotation)) and 3D ([Rotation
