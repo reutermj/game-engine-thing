@@ -25,6 +25,10 @@ monolithic design doc.
   broadphase's pairs, what it costs storage, and how it could grow
 - [relationships.md](relationships.md) — how entities refer to each
   other: contacts, colliders and hierarchy, measured
+- [presentation.md](presentation.md) — rendering, input and AI
+  playtesting as mods: games describe and presenters draw (window, CPU
+  pixels, text, data), input as actions, one agent interface, rendering
+  pipelined with the next frame (sketch)
 - [parallel-relations.md](parallel-relations.md) — systems whose
   relation rows write the entities they name, across threads in colors:
   who wants it, what other engines keep in and out of the ECS, colors as
