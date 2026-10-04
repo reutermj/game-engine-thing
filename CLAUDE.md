@@ -338,7 +338,10 @@ changing the ABI, the reload sequence or the Bazel rules.
   project, authors and license as its own files state them, what we use it
   for. Its license text travels with whatever links it, and code that
   implements an idea from one (speculative contacts, the split impulse, a
-  graph-colored solve) names the source in a comment.
+  graph-colored solve) names the source in a comment. The same goes for
+  research: a paper, model card or lab write-up a design or
+  implementation draws on is cited by link in the design doc, gets a
+  CREDITS.md entry, and is named in a comment where the idea is built.
 - **`./bazel test` lints.** Clippy runs over every Rust target a test run
   builds (`.bazelrc`), so a lint fails the run like a compile error; `build`
   and `run` don't lint, so a lint never blocks a hot reload. Code that runs
