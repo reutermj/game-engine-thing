@@ -498,14 +498,14 @@ median of each stage, so the stages needn't add to the step exactly.
 | merge with the world | 133 / 30 (1%) | 83 / 22 (2%) | 9 / 11 (1%) | 62 / 28 (1%) | scales: a `ParMap` walk |
 | rest of `find_contacts` (overlaps, waking) | 13 / 11 (0%) | 6 / 8 (1%) | 7 / 8 (1%) | 6 / 8 (0%) | serial |
 | apply(find_contacts): contacts spawned, despawned | 47 / 46 (2%) | 0 / 0 (0%) | 43 / 43 (5%) | 0 / 0 (0%) | serial |
-| gather_bodies | 54 / 51 (2%) | 24 / 26 (2%) | 47 / 50 (6%) | 46 / 50 (2%) | serial |
-| gather_turning | 95 / 92 (4%) | 36 / 37 (3%) | 71 / 69 (9%) | 1 / 1 (0%) | serial |
-| gather_contacts | 267 / 270 (11%) | 190 / 194 (13%) | 12 / 12 (2%) | 82 / 84 (3%) | serial |
+| gather_bodies † | 53 / 34 (2%) | 24 / 23 (2%) | 48 / 35 (5%) | 47 / 35 (1%) | scales: a `ParMap` walk, carved |
+| gather_turning † | 98 / 37 (2%) | 39 / 23 (2%) | 73 / 34 (5%) | 1 / 1 (0%) | scales: a `ParMap` page walk, joined |
+| gather_contacts † | 268 / 75 (4%) | 203 / 64 (5%) | 12 / 12 (2%) | 79 / 36 (1%) | scales: a `ParMap` page walk, copied across threads |
 | prepare (coloring, seating) | 121 / 122 (5%) | 73 / 77 (5%) | 36 / 42 (5%) | 0 / 0 (0%) | serial |
 | passes (fill and solve) | 4200 / 818 (34%) | 2702 / 507 (35%) | 297 / 126 (16%) | 0 / 0 (0%) | scales: `Passes` |
 | finish (write-back; not turning: the whole solve) | 134 / 29 (1%) | 80 / 22 (1%) | 15 / 10 (1%) | 2509 / 2523 (78%) | scales: `ParMap` (not turning: serial) |
-| scatter_contacts | 156 / 155 (7%) | 90 / 93 (6%) | 12 / 12 (1%) | 83 / 83 (3%) | serial |
-| scatter_bodies | 154 / 138 (6%) | 53 / 57 (4%) | 86 / 99 (12%) | 48 / 51 (2%) | serial |
+| scatter_contacts † | 154 / 35 (2%) | 92 / 26 (2%) | 12 / 12 (2%) | 80 / 43 (1%) | scales: a `ParMap` page walk writing rows |
+| scatter_bodies † | 143 / 51 (3%) | 57 / 33 (3%) | 90 / 44 (6%) | 51 / 25 (1%) | scales: `ParMap` walks writing rows (sleeping: serial) |
 | apply(scatter_bodies): the re-sort | 146 / 33 (1%) | 50 / 23 (2%) | 153 / 66 (8%) | 81 / 60 (2%) | re-bounding split, moves serial |
 | everything else (other nodes, outside them) | 11 / 11 (0%) | 9 / 11 (1%) | 12 / 12 (2%) | 5 / 6 (0%) | serial |
 | **whole step** | 6836 / 2377 (100%) | 4388 / 1454 (100%) | 1110 / 793 (100%) | 3370 / 3245 (100%) |  |
@@ -531,14 +531,28 @@ median of each stage, so the stages needn't add to the step exactly.
 | apply(scatter_bodies): the re-sort | 243 / 72 (1%) | 272 / 97 (1%) | 20 / 20 (2%) | re-bounding split, moves serial |
 | **whole step** | 21734 / 6835 (100%) | 23754 / 9415 (100%) | 3066 / 1156 (100%) |  |
 
-- **2D's serial stages over 5% at 8 threads**: the contacts gathered for
-  the solve (11-13% turning), `Live`'s kept pairs (5-13%), writing the
-  contacts and the bodies back (6-7% and 4-12%), `prepare` (5%); while
-  falling also the bodies' and their turning's gathers (6% and 9%), the
-  contacts spawned at `find_contacts`' apply node (5%), and the re-sort's
-  moves (8%). The colliders' gathers and gravity split but don't gain:
+- **2D's serial stages over 5% at 8 threads**: `Live`'s kept pairs
+  (5-13%), `prepare` (5%); while falling also the contacts spawned at
+  `find_contacts`' apply node (5%) and the re-sort's moves (8%). The
+  solve's gathers and write-backs (†, get-emj.103-105) were 11-13% (the
+  contacts gathered, turning), 6-7% and 4-12% (the contacts and the
+  bodies written back), and while falling 6% and 9% (the bodies' and
+  their turning's gathers); split, each is 1-6% of the step (below). The colliders' gathers and gravity split but don't gain:
   memory-bound walks whose chunks are joined by a copy on the system's
   thread.
+- **† The solve's gathers and write-backs across threads** (get-emj.103-105,
+  2026-10-03; physics.md, "The 2D solve's gathers and write-backs across
+  threads"): those rows re-measured on that tree, the same bench against
+  70a4093's alternated over two rounds (load 2.5-3), each cell the mean
+  of the rounds' medians and its share of the new step. The whole step at
+  8 threads: settled pile 1891-1908 µs against 2331-2348 (-19%), pyramid
+  1202-1211 against 1437-1451 (-17%), falling 678-695 against 785-800
+  (-13%), not turning 2999-3000 against 3198 (-6%); at one thread level
+  but for 0.2-0.6% (1102-1107 against 1093-1110 falling, 6718-6731
+  against 6691-6731 settled, 4377-4399 against 4356-4359 on the pyramid,
+  3336-3339 against 3321-3324 not turning). The bodies' gather gains
+  where the colliders' don't because it's carved, not joined: every row
+  is a body, so each chunk writes its own part of the lists.
 - **3D's narrowphase is a quarter to a third of its step**, on one thread
   (3D never split it); its colliders' and contacts' gathers are 4-5%, its
   contacts spawned while falling 8%.
