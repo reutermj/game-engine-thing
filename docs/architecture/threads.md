@@ -65,7 +65,14 @@ Three places could own the threads. What each has to satisfy:
    library made the pool; unmapping that library under it is a crash.
 2. **Mods reach the pool only through the world's executor**
    (`World::set_executor`, `Arc<dyn Executor>`), a trait object, so no
-   mod links the pool or depends on whoever made it.
+   mod links the pool or depends on whoever made it. And the world hands
+   it to no one: a system runs on it only through a declared shape, and
+   `World::executor` is crate-private, so a mod holding the world (a
+   message handler, a hook, `WorldMut`) can't take it and run tasks
+   undeclared (get-znt.47). Its owner removes it with
+   `take_executor_if(&ours)`, which hands back nothing the owner didn't
+   hold; `set_executor` returning the old one would have, to anyone, by
+   swapping and restoring.
 3. **The loader stays bare** (CLAUDE.md).
 
 | home | 1: never swapped | 2: the world's executor | 3: the loader bare | as policy |
@@ -88,7 +95,8 @@ What being a mod needs, and has:
 
 - **Load and close.** `load` makes the pool and installs it
   (`set_executor`, between frames). `close` takes it out of the world if
-  it is still there (a test may have put its own in), and its transient
+  it is still there (`take_executor_if`: a test may have put its own in;
+  `threads_test` holds both), and its transient
   part, dropped after, joins the threads while the library is mapped: the
   pool spawns them itself (`spawn_handler`) to keep the handles, since a
   dropped rayon pool's threads leave on their own time.
@@ -775,7 +783,16 @@ flows order them), and a dispatch returns only once every stage is
 complete and its threads have left. Left out of the 3D program,
 restitution failed no default test (the mod's bounces are the long
 suite's; the arrays' solve, which `exact_test` checks restitution on,
-has its own program), so the 3D row drops the last sums instead. Long
+has its own program), so the 3D row drops the last sums instead. Why
+(get-znt.46, 2026-10-04): a lone ball's one contact is too sparse for
+the lanes (`Tuning::sparse_alone`), so every bounce scene, the long
+suite's included, was solved one contact at a time, with restitution of
+its own; the long suites pass with the stage gone. `physics3d_test`'s
+`balls_rebound_to_about_e_squared_through_the_lanes` drops sixteen
+balls side by side, enough to fill the batches, and is the one default
+test that fails with the stage dropped from the mod's program alone
+(their apexes 0.2397 of the drop, 0.0 without it). Dropped from
+`Staged::program` itself, `exact_test` fails as well. Long
 checks for it: the 2D and 3D long suites; not the reload fuzzer or Miri,
 since neither the reload sequence nor the unsafe core changed.
 
