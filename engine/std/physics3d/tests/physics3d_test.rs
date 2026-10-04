@@ -7,7 +7,7 @@ mod sim;
 use std::f32::consts::FRAC_PI_2;
 
 use engine_ecs::Entity;
-use physics3d::{Collider, ContactPair, Manifold, Position, Rotation, Vec3, Velocity};
+use physics3d::{AngularVelocity, Collider, ContactPair, Impulse, Manifold, Position, Rotation, Vec3, Velocity};
 use sim::Sim;
 
 const UNIT: &str = "box 0.5 0.5 0.5";
@@ -261,4 +261,45 @@ fn a_settling_box_keeps_its_contact_and_a_sliding_one_is_found_again() {
     slide.body(UNIT, Vec3::new(0.0, 0.5, 0.0), NONE, Vec3::new(4.0, 0.0, 0.0), Vec3::ZERO);
     slide.run(10);
     assert_eq!(stage(&slide, "recycled"), 0, "a box moving 0.067 a step is found again");
+}
+
+/// `find_contacts` across threads (its gathers, narrowphase and merge, each
+/// a `ParMap`) is one thread's, bit for bit: a pile of 1000 boxes falling
+/// and landing, contacts found, recycled, spawned and despawned, on one
+/// thread and on four, every body and contact the same, and the same
+/// entities. The fingerprint's scene is too small to split.
+#[test]
+fn contacts_found_across_threads_are_one_threads_bit_for_bit() {
+    let piles = [("threads 1", Sim::new("one_thread")), ("threads 4", Sim::new("four_threads"))];
+    for (threads, s) in &piles {
+        s.engine.send("threads", threads).unwrap();
+        s.send("build boxes 1000");
+    }
+    // Debug prints each float exactly (the shortest text that reads back
+    // as it), so equal text is equal bits.
+    let world = |s: &Sim| {
+        let w = s.engine.world();
+        let contacts = w.values::<Manifold>().unwrap_or_default().into_iter().zip(w.values::<Impulse>().unwrap_or_default());
+        format!(
+            "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+            w.values::<Position>(),
+            w.values::<Rotation>(),
+            w.values::<Velocity>(),
+            w.values::<AngularVelocity>(),
+            w.values::<ContactPair>(),
+            contacts.collect::<Vec<_>>(),
+        )
+    };
+    for steps in [60, 90] {
+        for (_, s) in &piles {
+            s.run(steps);
+        }
+        let [(_, one), (_, four)] = &piles;
+        // Enough pairs for several chunks (`PAIRS_A_CHUNK`, 256) at four
+        // threads, so the split is what's tested.
+        assert!(stage(four, "pairs") > 4 * 256, "{} pairs", stage(four, "pairs"));
+        assert!(world(one) == world(four), "after {steps} more steps, one thread and four differ");
+    }
+    let [_, (_, four)] = &piles;
+    assert!(stage(four, "recycled") > 0, "nothing recycled");
 }

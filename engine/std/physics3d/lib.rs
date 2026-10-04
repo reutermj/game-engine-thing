@@ -16,8 +16,8 @@
 //! step under a running simulation, as it does the 2D one.
 //!
 //! What it leaves out of the 2D step: layers and sensors, kinematic bodies,
-//! sleeping, events, parallelism, and the tile-seam rule for boxes. Design
-//! and measurements: physics.md, "Rotation in 3D".
+//! sleeping, events, and the tile-seam rule for boxes. Design and
+//! measurements: physics.md, "Rotation in 3D".
 
 mod gjk;
 mod narrow;
@@ -26,7 +26,7 @@ mod solver;
 
 use std::time::Instant;
 
-use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
+use engine_api::{Cx, Despawns, Dt, Entity, Live, Mod, ParMap, Proximity, Query, Spawner, Systems, With, export_mod, field_struct, phase};
 use narrow::{Narrow, Solid};
 use physics_common::{FAT, Slots};
 pub use physics3d::{
@@ -176,6 +176,146 @@ fn recycle(m: &Manifold, a: &Item, b: &Item, tolerance: f32) -> Option<Manifold>
     near.then_some(out)
 }
 
+/// A contact as `find_contacts` finds it and the world holds it.
+type Contact = (ContactPair, Manifold, Impulse);
+
+/// One list in order, in the parts a parallel walk or map leaves it in,
+/// read as one: joining them would copy every contact again (about 200
+/// bytes each). Parts are never empty, so each part's last item says
+/// where it ends.
+struct Parts<T> {
+    parts: Vec<Vec<T>>,
+    /// Where each part starts in the whole.
+    starts: Vec<usize>,
+    len: usize,
+}
+
+/// A place in `Parts`, read forward an item at a time: the rest of its
+/// part, and the parts after. Not a `Peekable` of chained and flattened
+/// slice iterators: the narrowphase walking the last step's contacts
+/// through one took 281-284 µs at 8 threads on 10 000 settled boxes,
+/// against 252-258 through this, as against a whole `Vec` (step_bench,
+/// 2026-10-03).
+struct Cursor<'a, T> {
+    at: &'a [T],
+    rest: &'a [Vec<T>],
+}
+
+impl<'a, T> Cursor<'a, T> {
+    fn peek(&self) -> Option<&'a T> {
+        self.at.first()
+    }
+
+    /// The next item if `f` is true of it, as `Peekable::next_if`.
+    fn next_if(&mut self, f: impl FnOnce(&T) -> bool) -> Option<&'a T> {
+        let x = self.peek().filter(|x| f(x))?;
+        self.at = &self.at[1..];
+        if self.at.is_empty()
+            && let Some((part, rest)) = self.rest.split_first()
+        {
+            (self.at, self.rest) = (part, rest);
+        }
+        Some(x)
+    }
+}
+
+impl<'a, T> Iterator for Cursor<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        self.next_if(|_| true)
+    }
+}
+
+impl<T> Parts<T> {
+    fn new(parts: impl IntoIterator<Item = Vec<T>>) -> Parts<T> {
+        let parts: Vec<Vec<T>> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+        let starts = parts.iter().scan(0, |n, p| Some(std::mem::replace(n, *n + p.len()))).collect();
+        let len = parts.iter().map(Vec::len).sum();
+        Parts { parts, starts, len }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The index of the first item `before` is false of, as a slice's
+    /// `partition_point`: the items it's true of all come first.
+    fn partition_point(&self, before: impl Fn(&T) -> bool) -> usize {
+        let p = self.parts.partition_point(|part| before(part.last().expect("parts are never empty")));
+        self.parts.get(p).map_or(self.len, |part| self.starts[p] + part.partition_point(before))
+    }
+
+    /// The items from the `n`-th on.
+    fn from(&self, n: usize) -> Cursor<'_, T> {
+        let p = self.starts.partition_point(|&s| s <= n).saturating_sub(1);
+        // Within its part, which no part is empty to end before, unless `n`
+        // is past the last.
+        match self.parts.get(p) {
+            Some(part) => Cursor { at: &part[(n - self.starts[p]).min(part.len())..], rest: &self.parts[p + 1..] },
+            None => Cursor { at: &[], rest: &[] },
+        }
+    }
+}
+
+/// What a chunk of the merge did, for `find_contacts` to make after:
+/// where in what was found it started and got to, its place there, and
+/// the spawns and despawns, in the order a walk makes them.
+struct Merged<'a> {
+    start: Option<usize>,
+    next: usize,
+    from: Option<Cursor<'a, Contact>>,
+    made: Vec<Made<'a>>,
+}
+
+enum Made<'a> {
+    Spawn(&'a Contact),
+    Despawn(Entity),
+}
+
+/// A chunk of the narrowphase's pairs, with the list it fills and what it
+/// counts: an item of `ParMap::for_each_mut`.
+struct Tested {
+    found: Vec<Contact>,
+    counts: Counts,
+    pairs: std::ops::Range<usize>,
+}
+
+/// What a chunk of the narrowphase counts for `Found`: sums, so the
+/// chunks' add to one walk's whatever the cut.
+#[derive(Default)]
+struct Counts {
+    points: u64,
+    kept: u64,
+    matched: u64,
+    reused: u64,
+}
+
+impl Counts {
+    fn plus(self, o: &Counts) -> Counts {
+        Counts {
+            points: self.points + o.points,
+            kept: self.kept + o.kept,
+            matched: self.matched + o.matched,
+            reused: self.reused + o.reused,
+        }
+    }
+}
+
+/// The fewest pairs a chunk of the narrowphase has (unless there are
+/// fewer): 2D's. 64 measured the same on the planks' 2900 pairs at 8
+/// threads (52-53 µs either way, step_bench, 2026-10-03).
+const PAIRS_A_CHUNK: usize = 256;
+
+/// `0..n` in contiguous ranges of at least `min` (fewer, longer ones if
+/// `n` is short), four a thread, one on one thread: 2D's (physics2d's
+/// `chunks`), the narrowphase's chunks, each a block of
+/// `ParMap::for_each_mut`. Results are kept in chunk order, so any cut
+/// gives the same step.
+fn chunks(n: usize, min: usize, threads: usize) -> Vec<std::ops::Range<usize>> {
+    let k = if threads == 1 { 1 } else { (n / min).clamp(1, threads * 4) }.min(n.max(1));
+    (0..k).map(|i| n * i / k..n * (i + 1) / k).collect()
+}
+
 type Moving<'w, 'a> = Query<'w, (&'a Position, &'a Rotation, &'a Collider, &'a Body, &'a Velocity)>;
 type Statics<'w, 'a> = Query<'w, (&'a Position, &'a Rotation, &'a Collider, &'a Body), With<Static>>;
 
@@ -256,20 +396,22 @@ impl Physics3d {
     }
 
     /// Finds this step's contacts, and brings the world's in line in one pass,
-    /// both in pair order, as the 2D step's `find_contacts` does.
+    /// both in pair order, as the 2D step's `find_contacts` does; the
+    /// gathers, the narrowphase and the merge across the scheduler's threads
+    /// (`ParMap`), bit for bit one thread's (physics.md, "The 3D narrowphase
+    /// across threads").
     fn find_contacts(
         &mut self,
         _: &mut (),
         _: &mut Cx,
         mut tuning: Query<&Tuning>,
-        (mut moving, mut statics, mut near): (Moving<'_, '_>, Statics<'_, '_>, Live<'_, Contacts>),
+        (mut moving, mut statics, mut near, map): (Moving<'_, '_>, Statics<'_, '_>, Live<'_, Contacts>, ParMap),
         mut contacts: Query<(&ContactPair, &mut Manifold, &mut Impulse), (), Despawns>,
         new_contacts: Spawner<(ContactPair, Manifold, Impulse)>,
     ) {
         let start = Instant::now();
         let how = tuning.single(|_, t| *t).unwrap_or_default();
         let narrow = Narrow::of(&how);
-        let mut items = Vec::with_capacity(moving.len() + statics.len());
         let item = |entity, p: &Position, q: &Rotation, c: &Collider, b: &Body| Item {
             entity,
             solid: Solid { at: p.at(), rot: q.quat().matrix(), shape: c.of() },
@@ -278,78 +420,144 @@ impl Physics3d {
             friction: b.friction,
             restitution: b.restitution,
         };
-        moving.for_each(|row, (p, q, c, b, _)| items.push(item(row.entity(), p, q, c, b)));
+        // The moving colliders across threads, joined by a copy onto the
+        // first chunk's list, made with room for all, since `items` is read
+        // by slot everywhere. Every list a task fills is made here, on this
+        // thread: memory a worker allocates is its thread's
+        // (docs/lore/memory-a-task-allocates-is-its-threads.md). It gains
+        // despite the copy, where 2D's gathers didn't (physics.md, "The 3D
+        // narrowphase across threads").
+        let total = moving.len() + statics.len();
+        let mut first = true;
+        let room_items = |r: std::ops::Range<usize>| Vec::with_capacity(if std::mem::take(&mut first) { total } else { r.len() });
+        let mut parts =
+            moving.par_for_each(&map, room_items, |out, row, (p, q, c, b, _)| out.push(item(row.entity(), p, q, c, b))).into_iter();
+        let mut items = parts.next().unwrap_or_else(|| Vec::with_capacity(total));
+        parts.for_each(|p| items.extend(p));
         statics.for_each(|row, (p, q, c, b)| items.push(item(row.entity(), p, q, c, b)));
         let slots = Slots::of(items.iter().map(|i| i.entity));
         // The last step's contacts, for their separating axes and impulses: in
-        // pair order, as `near` is.
-        let mut old = Vec::with_capacity(contacts.len());
-        contacts.for_each_ordered(|_, (pair, m, j)| old.push((*pair, *m, *j)));
+        // pair order, as `near` is; in the parts the walk leaves, not joined.
+        let room = |r: std::ops::Range<usize>| Vec::with_capacity(r.len());
+        let old = Parts::new(contacts.par_for_each_ordered_page(&map, room, |out, page, (pair, m, j)| {
+            out.extend(page.rows().map(|i| (pair[i], m[i], j[i])));
+        }));
         let gathered = Instant::now();
         // Kept live between steps (`Contacts`), as 2D's are.
         let near = near.pairs();
         let paired = Instant::now();
         let key = |p: &ContactPair| (p.a, p.b);
-        let mut found: Vec<(ContactPair, Manifold, Impulse)> = Vec::with_capacity(near.len());
-        let mut o = 0;
-        let (mut points, mut kept, mut matched, mut reused) = (0u64, 0u64, 0u64, 0u64);
-        for &(a, b) in near {
-            let (i, j) = (&items[slots.get(a).expect("gathered") as usize], &items[slots.get(b).expect("gathered") as usize]);
-            let pair = ContactPair { a, b };
-            while old.get(o).is_some_and(|x: &(ContactPair, Manifold, Impulse)| key(&x.0) < (a, b)) {
-                o += 1;
-            }
-            let prev = old.get(o).filter(|x| x.0 == pair).map(|x| (&x.1, &x.2));
-            let cache = prev.map_or((0, 0.0), |(m, _)| (m.axis, m.axis_sep));
-            // Box pairs only: a sphere's one point has no features to
-            // flicker between, is found for less than carrying it costs, and
-            // carried it rolls away from where the sphere touches (a pile of
-            // spheres kept ten times the energy).
-            let boxes = matches!((i.solid.shape, j.solid.shape), (Shape::Box(_), Shape::Box(_)));
-            let recycled = if how.recycle > 0.0 && boxes { prev.and_then(|(m, _)| recycle(m, i, j, how.recycle)) } else { None };
-            if let Some(manifold) = recycled {
-                points += manifold.count as u64;
-                kept += manifold.count as u64;
-                reused += 1;
-                found.push((pair, manifold, warm(prev, &manifold, how.warm(), &mut matched)));
-            } else if let Some(m) = narrow::collide(&i.solid, &j.solid, cache, narrow) {
-                let manifold = stored(&m, i, j);
-                points += m.count as u64;
-                kept += if prev.is_some() { m.count as u64 } else { 0 };
-                found.push((pair, manifold, warm(prev, &manifold, how.warm(), &mut matched)));
-            }
-        }
-        let narrowed = Instant::now();
-        let spawn = |f: (ContactPair, Manifold, Impulse)| {
-            new_contacts.spawn(f);
-        };
-        let mut next = 0;
-        contacts.for_each_ordered_page(|page, (pair, mut m, mut j)| {
-            let (m, j) = (m.write_all(), j.write_all());
-            for i in page.rows() {
-                while found.get(next).is_some_and(|f| key(&f.0) < key(&pair[i])) {
-                    spawn(found[next]);
-                    next += 1;
+        let (items, slots, old) = (&items, &slots, &old);
+        // Each pair alone: what it reads is this step's colliders and its
+        // own last contact (its cached axis, the manifold it recycles), so
+        // where a chunk starts changes nothing it finds.
+        let test = move |t: &mut Tested| {
+            let Some(&first) = near.get(t.pairs.start) else { return };
+            // The last step's contacts from this chunk's first pair on, where
+            // a walk from the first chunk's would have reached: both are in
+            // pair order.
+            let mut old = old.from(old.partition_point(|x| key(&x.0) < first));
+            let mut counts = Counts::default();
+            for &(a, b) in &near[t.pairs.clone()] {
+                let (i, j) = (&items[slots.get(a).expect("gathered") as usize], &items[slots.get(b).expect("gathered") as usize]);
+                let pair = ContactPair { a, b };
+                while old.next_if(|x| key(&x.0) < (a, b)).is_some() {}
+                let prev = old.peek().filter(|x| x.0 == pair).map(|x| (&x.1, &x.2));
+                let cache = prev.map_or((0, 0.0), |(m, _)| (m.axis, m.axis_sep));
+                // Box pairs only: a sphere's one point has no features to
+                // flicker between, is found for less than carrying it costs, and
+                // carried it rolls away from where the sphere touches (a pile of
+                // spheres kept ten times the energy).
+                let boxes = matches!((i.solid.shape, j.solid.shape), (Shape::Box(_), Shape::Box(_)));
+                let recycled = if how.recycle > 0.0 && boxes { prev.and_then(|(m, _)| recycle(m, i, j, how.recycle)) } else { None };
+                let c = &mut counts;
+                if let Some(manifold) = recycled {
+                    c.points += manifold.count as u64;
+                    c.kept += manifold.count as u64;
+                    c.reused += 1;
+                    t.found.push((pair, manifold, warm(prev, &manifold, how.warm(), &mut c.matched)));
+                } else if let Some(m) = narrow::collide(&i.solid, &j.solid, cache, narrow) {
+                    let manifold = stored(&m, i, j);
+                    c.points += m.count as u64;
+                    c.kept += if prev.is_some() { m.count as u64 } else { 0 };
+                    t.found.push((pair, manifold, warm(prev, &manifold, how.warm(), &mut c.matched)));
                 }
-                match found.get(next) {
-                    Some(f) if f.0 == pair[i] => {
+            }
+            t.counts = counts;
+        };
+        // Room for a contact a pair, made here, as the gathers' lists.
+        let mut tested: Vec<Tested> = chunks(near.len(), PAIRS_A_CHUNK, map.threads())
+            .into_iter()
+            .map(|pairs| Tested { found: Vec::with_capacity(pairs.len()), counts: Counts::default(), pairs })
+            .collect();
+        map.for_each_mut(&mut tested, 1, |_, t| test(t));
+        let narrowed = Instant::now();
+        let c = tested.iter().fold(Counts::default(), |s, t| s.plus(&t.counts));
+        let found = Parts::new(tested.into_iter().map(|t| t.found));
+        let found = &found;
+        let spawn = |f: &Contact| {
+            new_contacts.spawn(*f);
+        };
+        // 2D's merge across threads (physics2d's `find_contacts`): each chunk
+        // of the world's contacts merges with those found from its first key
+        // on, writing in place, and records the spawns and despawns it would
+        // have made. Those are made here after, in order, those between two
+        // chunks' keys first: the log, and the ids spawns reserve, a single
+        // walk's.
+        let made = |r: std::ops::Range<usize>| Merged { start: None, next: 0, from: None, made: Vec::with_capacity(r.len() / 4 + 8) };
+        let merged = contacts.par_for_each_ordered_page(&map, made, |c, page, (pair, mut m, mut j)| {
+            let (m, j) = (m.write_all(), j.write_all());
+            let mut rows = page.rows().peekable();
+            let Some(&first) = rows.peek() else { return };
+            if c.from.is_none() {
+                let n = found.partition_point(|f| key(&f.0) < key(&pair[first]));
+                (c.start, c.next, c.from) = (Some(n), n, Some(found.from(n)));
+            }
+            let from = c.from.as_mut().expect("set above");
+            for i in rows {
+                while let Some(f) = from.next_if(|f| key(&f.0) < key(&pair[i])) {
+                    c.made.push(Made::Spawn(f));
+                    c.next += 1;
+                }
+                match from.next_if(|f| f.0 == pair[i]) {
+                    Some(f) => {
                         (m[i], j[i]) = (f.1, f.2);
-                        next += 1;
+                        c.next += 1;
                     }
-                    _ => page.row(i).despawn(),
+                    None => c.made.push(Made::Despawn(page.entity(i))),
                 }
             }
         });
-        found[next..].iter().copied().for_each(spawn);
+        let mut done = 0;
+        for c in merged {
+            let Some(start) = c.start else { continue };
+            found.from(done).take(start - done).for_each(spawn);
+            for made in c.made {
+                match made {
+                    Made::Spawn(f) => spawn(f),
+                    Made::Despawn(e) => contacts.get(e).expect("a contact the walk had").despawn(),
+                }
+            }
+            done = c.next;
+        }
+        found.from(done).for_each(spawn);
         let end = Instant::now();
+        let count = found.len() as u64;
         let t = &mut self.time;
         t.gather += nanos(start, gathered);
         t.broadphase += nanos(gathered, paired);
         t.narrowphase += nanos(paired, narrowed);
         t.merge += nanos(narrowed, end);
         t.contacts += nanos(start, end);
-        self.found =
-            Found { pairs: near.len() as u64, contacts: found.len() as u64, points, kept, matched, recycled: reused, ..Found::default() };
+        self.found = Found {
+            pairs: near.len() as u64,
+            contacts: count,
+            points: c.points,
+            kept: c.kept,
+            matched: c.matched,
+            recycled: c.reused,
+            ..Found::default()
+        };
     }
 }
 
