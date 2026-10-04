@@ -75,8 +75,9 @@ This is a report for the scheduler's design (get-znt.29) and flows stage 3
 ## The question
 
 In stage 3, `Passes::run` hands a program's (stage, block) tasks to the
-scheduler's threads ([flows.md](flows.md#declared-and-run-by-the-scheduler)).
-`lanes::run_across` does this today for one solve
+pool's threads ([flows.md](flows.md#declared-and-run-by-the-scheduler)).
+`lanes::run_across` did this, when the spike ran, for one solve (stage 3
+removed it, 2026-10-03)
 ([physics.md](physics.md#solving-across-threads)): a fixed list of stages,
 every thread walking all of them, blocks claimed by raising a mark
 (`fetch_max`), a count per stage, spinning with yields between stages, no
@@ -287,7 +288,9 @@ Pile of 10 000, falling:
 - **One thread on shared states costs 8 to 10%** (3799 against 3510;
   3D 10 to 18%): flows.md's
   "On one thread" cost, which stage 1 avoids by handing kernels their
-  states plain; a dispatcher at one thread should too.
+  states plain; a dispatcher at one thread should too. (What this spike
+  measured; the figure the engine quotes, with this one beside it, is
+  threads.md's, "One thread, plain".)
 - **Every protocol's solve is slower than `solve_across`** by the fill
   in `prepare` (above), at every count above one: the passes themselves
   at 8 threads (642) are well under `solve_across`'s whole (873).
@@ -517,7 +520,8 @@ the only protocol measured that gains from a second program.
 What it needs, beyond the spike:
 
 - **Plain states on one thread**: at one worker the dispatcher should run
-  stage 1's plain path (8 to 18% faster than shared).
+  stage 1's plain path (faster than shared: above, and threads.md,
+  "One thread, plain"). Built so.
 - **The fill in the passes** (get-znt.34's open call): the remaining gap
   to `run_across` in 2D, and 40% of 3D's solve at 8 threads, is
   `prepare`'s serial batch fill. Filled in the first stage, as
@@ -544,7 +548,10 @@ other.
 - **Warmth in a real frame.** The cold figure is a bench sleeping 16 ms;
   a game's frame keeps some threads busy with other systems. How warm a
   scheduler's workers are in a running frame needs the scheduler's
-  workers (get-znt.5).
+  workers (get-znt.5). (Since measured within a physics step on the
+  `threads` mod's pool, which keeps its workers warm for a millisecond:
+  threads.md, "Warmth". Other systems' work on the pool still waits for
+  get-znt.5.)
 - **Several programs' order.** The graph runs any ready stage; which
   program's stage a thread prefers (the oldest, the one with the longest
   path left) wasn't varied. With two equal programs it didn't matter.

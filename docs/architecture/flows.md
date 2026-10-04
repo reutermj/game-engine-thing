@@ -9,11 +9,14 @@ systems over five flows, its passes on `Passes`, bit for bit the solve it
 replaced ([below](#physicss-adoption-stage-2)); since get-znt.26 its
 kernels get plain memory on one thread ([On one thread](#on-one-thread)).
 physics3d's solve followed (2026-10-02, get-znt.35): six systems over
-three flows, its solve whole in one system and no shape, bit for bit
+three flows, its solve whole in one system and no shape, bit for bit;
+since get-emj.90 (2026-10-03) eight systems over four flows, its passes
+on `Passes` and, since get-znt.45, its write-back a `ParMap`
 ([below](#physics3d)). **Stage 3 built** (2026-10-03, get-znt.34): the
-scheduler's threads, a resident mod's pool, and `Passes` run across them
-as a task graph, both physics solves among them, bit for bit
-([threads.md](threads.md)).
+threads, a resident mod's pool (the `threads` mod's, not the
+scheduler's: threads.md, "Where the pool lives"), and the shapes run
+across them, `Passes` as a task graph, both physics solves among them,
+bit for bit ([threads.md](threads.md)).
 The spike behind every choice here, with its measurements, is
 [flows-spike.md](flows-spike.md); this doc cites its numbers rather than
 restating them.
@@ -25,9 +28,10 @@ restating them.
   from the world, stages see, edit or take it, and a sink writes what it
   carries back. Systems take it as parameters, `Make<T>`, `See<T>`,
   `Pass<T>` and `Take<T>`, so every use is a declaration.
-- **It's for systems that already copy.** Physics's solve, as eight
-  systems passing four flows, was bit for bit the solve as built and cost
-  the same at 8 threads. Transform propagation as flows cost 1.5 to 4.7
+- **It's for systems that already copy.** In the spike, physics's solve
+  as eight systems passing four flows was bit for bit the solve as built
+  and cost the same at 8 threads (as built, 2D's is nine over five and
+  3D's eight over four). Transform propagation as flows cost 1.5 to 4.7
   times the idiom it would replace. A flow is a copy, and it pays only
   where the work is many times the copy.
 - **Order comes from the plan, as now.** Flows add a check at load that
@@ -46,7 +50,7 @@ restating them.
   are parameters, and the kernels a system hands them are the only code
   that may run across threads. Stage 1 fixed their results on the
   system's own thread; since stage 3 they reproduce them across the
-  scheduler's threads, at any count (`Passes` with stage 3, `ParMap` and
+  `threads` mod's pool, at any count (`Passes` with stage 3, `ParMap` and
   `Reduce` since get-znt.45 and get-znt.31). A system has no other way
   to fan out.
 
@@ -272,8 +276,9 @@ sort with each `Make` before its uses, and mods that don't know each other
 would get a working order without naming each other's systems. It isn't
 done, for now, because:
 
-- **every user so far is one mod.** Physics's eight systems are
-  physics2d's, and so would be a hierarchy pipeline. Within one mod,
+- **every user so far is one mod.** Each physics pipeline's systems are
+  its own mod's (physics2d's nine, physics3d's eight), and so would be a
+  hierarchy pipeline's. Within one mod,
   declaration order already is the pipeline's order; the check only
   confirms it.
 - **a consumer in another mod already names its producer** for anything
@@ -384,9 +389,8 @@ Why each choice, from the spike:
   7 to 16% at 8 lanes. With a block kernel the generic primitive was level
   with the hand-tuned run at one thread (−1.0% to +1.6%).
 - **Shapes are generic over their kernels**, so the mod's compiler inlines
-  them. A kernel behind `&dyn Fn` cost 1 to 4%. The scheduler's side of
-  stage 3 sees only a block at a time: one dynamic call a block, not an
-  item.
+  them. A kernel behind `&dyn Fn` cost 1 to 4%. Stage 3's dispatch
+  sees only a block at a time: one dynamic call a block, not an item.
 - **The shapes are closed.** Colors of items, stages over items or
   ranges, a map, a fixed-order reduction. Physics's whole staged solve
   fits in them with no physics in the shape.
@@ -419,20 +423,26 @@ Why each choice, from the spike:
 ### Declared, and run by the scheduler
 
 The system calls its shape with the frame's data and its kernels; what
-runs them is the scheduler's. That is the line get-znt.28 draws:
+runs them isn't the system's. That is the line get-znt.28 draws, and how
+far it is met today:
 
-- **the declaration** is the parameter: the plan knows, before a frame
-  runs, which nodes fan out and how (a map, a reduction, a colored run).
-  Stage 3 sizes its work by it, and keeps such a node from waiting behind
-  threads another system's tasks hold;
-- **the execution** is the scheduler's. `Passes::run` turns the program
-  into (stage, block) tasks on the scheduler's threads, each stage's
-  blocks after the last stage's, as a task graph (built, stage 3:
-  [threads.md](threads.md#dispatch); any thread takes any block, a late
-  thread skips stages already done). The system's thread is one of the
-  workers, and every kernel has returned when `run` does, so no mod code
-  is on a worker's stack once the node ends (get-znt.29's rule for hot
-  reload);
+- **the declaration** is the parameter (`ParamDecl::Shape`, its kind),
+  so a plan could know, before a frame runs, which nodes fan out and how
+  (a map, a reduction, a colored run), size its work by it, and keep
+  such a node from waiting behind threads another system's tasks hold.
+  **Nothing reads it yet**: footprints skip it (`graph.rs`), and the plan
+  a scheduler mod is handed names its nodes and nothing more. Whether the
+  scheduler comes to read it, with system parallelism, or the ECS is
+  simply said to run shapes, is get-znt.50;
+- **the execution** is the shape's call, inside the node, onto the
+  world's executor, the `threads` mod's pool; the scheduler mod only runs
+  the node. `Passes::run` turns the program into (stage, block) tasks,
+  each stage's blocks after the last stage's, as a task graph (built,
+  stage 3: [threads.md](threads.md#dispatch); any thread takes any block,
+  a late thread skips stages already done). The system's thread is one of
+  the workers, and every kernel has returned when `run` does, so no mod
+  code is on a worker's stack once the node ends (get-znt.29's rule for
+  hot reload);
 - **the system holds no pool.** Its parameters give it no way to start a
   thread. (History: `Workers`, a parameter that declared nothing and
   reached the executor, ran physics2d's broadphase, narrowphase and
@@ -517,10 +527,12 @@ of 5 runs, µs a step of the `passes` system):
 | shared, matched once an access | 439 | 5389 | 3309 |
 
 - **A match an access costs 19 to 20%** of the passes plain, and more
-  than the atomics: LLVM doesn't hoist the match out of the kernels'
-  loops. The atomics cost 6 to 7% of the passes settled and on the
-  pyramid, 24% falling, about what the spike measured. So a mod whose kernels are hot writes them generic over a
-  view of its own, as physics does, and matches once a call.
+  than the atomics do (the third row against the first; what shared
+  states cost on one thread, from this table and the dispatch spike, is
+  quoted in one place, threads.md's "One thread, plain"): LLVM doesn't hoist the match out
+  of the kernels' loops. So a mod whose kernels are hot writes them
+  generic over a view of its own, as physics does, and matches once a
+  call.
 - **Considered and not built:** kernels as a trait with generic methods
   (`fn block<V: View<T>>`), the engine choosing the view. The same code
   in the mod, a trait in place of two closures, and an engine-defined
@@ -666,7 +678,7 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
   get plain memory on one thread, and the pipeline is level with the
   solve it replaced or faster (below, "On one thread").
 - **Eight threads: the solve's threads were gone until stage 3**, as
-  planned (they are back, on the scheduler's pool: threads.md,
+  planned (they are back, on the `threads` mod's pool: threads.md,
   "Measured"). With no shape run across threads the solve takes its
   one-thread time (5327 against 1415 settled), and the step loses what
   the solve gained. The broadphase and
@@ -708,9 +720,12 @@ scatter_bodies   Take<Bodies> -> world
   (get-emj.75).
 - **No sleeping, sides or events** in 3D, so `scatter_bodies` writes
   bodies alone, and the contacts are taken by `scatter_contacts`.
-- **Nothing to move onto shapes** (get-znt.31): 3D never split its step. Its
-  `Live` broadphase found afresh is split across the world's threads
-  since then, as 2D's was.
+- **Nothing to move onto shapes** when get-znt.31 deleted `Workers`
+  (2026-10-03): 3D had never split its step. Since then its `Live`
+  broadphase found afresh splits across the world's threads, as 2D's
+  does; its narrowphase and its colliders' gathers are `ParMap`s since
+  get-emj.101, and its write-back since get-znt.45 (threads.md, "The
+  whole step, stage by stage").
 
 **Bit for bit.** Every value of both baselines printed as it was (100
 default, 94 long, `baseline -- --all`, diffed whole), and the reload
@@ -749,7 +764,10 @@ whose code didn't change: the runs were one after the other, not
 alternated, so that is the machine's drift, not the port's.
 
 **On `Passes`** (2026-10-03, get-emj.90). `solver` is now `prepare`,
-`passes` and `finish`, as 2D's, the passes a program on `Passes`
+`passes` and `finish`, as 2D's, so the pipeline is eight systems over
+four flows (`Graph` the fourth; the diagram as built is
+`engine/std/physics3d/pipeline.rs`'s, `finish` taking a `ParMap` for
+the write-back since get-znt.45), the passes a program on `Passes`
 (physics.md, "A mod"): colored (`Tuning`'s `order=colored`, the default
 since the same day, decided ahead of threads so the default suite
 validates it) Box2D's colors, 11 on a pile of 10 000, a physics change,
@@ -775,9 +793,12 @@ the refresh under `Inertia::Substep` and the impulse sums, which 2D's
 - **Recycling across types**, and a `Take` that hands its allocation to
   another flow's `Make`.
 - **Flows across frames or groups**, and flows in snapshots or replays.
-- **Shapes over world storage.** Shapes run over what a system holds,
-  normally a flow. A colored iteration over a relation's rows
-  (parallel-relations.md, phase 3) stays deferred.
+- **Colored shapes over world storage.** Shapes run over what a system
+  holds, normally a flow. The one way a shape reaches world storage is a
+  query's parallel walk, which takes a `ParMap` for its threads
+  (`Query::par_for_each` and its page walks), each chunk its own rows. A
+  colored iteration over a relation's rows (parallel-relations.md, phase
+  3) stays deferred.
 - **A shape that names its flow**, so the scheduler could pipeline one
   system's blocks into the next's (get-znt.23). Shapes take slices.
 

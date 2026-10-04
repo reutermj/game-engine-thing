@@ -25,7 +25,8 @@ under "Recommendation".
   flows, bit for bit the solve as built at one thread and at eight. At 8
   threads it costs what the solve as built costs: −4% to +1% on the three
   scenes. At one thread it's 4 to 7% slower, all of it the shared atomics
-  the generic primitive always uses (below).
+  the generic primitive always uses (below; since avoided by a plain
+  path, whose figure is threads.md's, "One thread, plain").
 - **The mechanism is cheap.** A flow's use costs about 85 ns a system,
   apply node included. The pipeline of eight systems runs within noise of
   the same stages called in one system.
@@ -425,6 +426,8 @@ What it shows:
   falling 900 against 788).
   The generic primitive could offer a plain path too, if its kernels
   were written over a state view, as `lanes::Bodies` is: get-znt.26.
+  (What this spike measured; superseded by the built path's figure,
+  quoted in threads.md, "One thread, plain".)
 
 ## The second user: hierarchy propagation
 
@@ -585,7 +588,8 @@ Reasoned, not built:
   2026-10-02 (get-znt.28): parallel work is declared and run by the
   scheduler, never by a system. A shape is a declaration the scheduler
   turns into tasks on its own threads (get-znt.29), not a call a system
-  makes through `Workers`.
+  makes through `Workers`. (`Workers` itself was deleted by get-znt.31,
+  2026-10-03.)
 - **No unsafe code.** States are shared as relaxed atomics (`lanes::Atom`),
   blocks behind a lock each, as `run_across` does. The benchmarks' pool
   (`tests/pool.rs`) is the only unsafe code the spike runs, as every
@@ -610,7 +614,8 @@ settle these:
 5. **The parallel shapes:**
    - `Colored::passes` with a block kernel;
    - a one-thread path without atomics (get-znt.26), or the 6 to 14% at
-     one thread accepted;
+     one thread accepted (built: the plain path, flows.md, "On one
+     thread");
    - the shapes as declarations the scheduler runs, as decided
      (get-znt.28): how a system declares a program of stages, and how
      the scheduler hands out its tasks (get-znt.29, get-znt.30).
@@ -629,6 +634,8 @@ settle these:
   on recycled allocations than on fresh ones (get-znt.27).
 - **Open question:** whether a generic primitive's one-thread path can be
   plain memory without making kernels generic over a state view.
+  (Answered 2026-10-02, get-znt.26: it can, at a cost; flows.md, "On
+  one thread".)
 - **Open question:** whether flows should be visible to snapshots and
   replays. They're frame-scoped, so they needn't be, but a replay that
   stops between two stages would see one.

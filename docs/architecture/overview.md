@@ -45,12 +45,8 @@ back once per event; a bootstrap on one pumps the loader from its per-frame
 callback. The test bootstrap `engine/tests/mods/fake_os.rs` has that shape,
 with a fake event loop in place of a window: the tests reload a mod, message
 the bootstrap (feeding its event queue) and quit, all while its loop runs.
-
-Decided 2026-09-23. Before, the loader's `main` looped over "poll the socket,
-step the bootstrap once", so the bootstrap could be reloaded, but it couldn't
-block (`lockstep` slept 2 ms a call to avoid spinning) and couldn't sit
-under an event loop that won't return. A resident bootstrap costs a restart
-to change it, which is rare next to changing gameplay.
+A resident bootstrap costs a restart to change it, which is rare next to
+changing gameplay.[^loop]
 
 Tests and tools can drive an `Engine` with no bootstrap: `Engine::step_all`
 runs a frame, and `Engine::pump` serves requests.
@@ -72,10 +68,19 @@ a test) would need a time-control protocol every bootstrap implements. See
 **Ordering** is by systems and phases: each mod declares its systems, and a
 frame runs them in plan order. See [scheduling.md](scheduling.md).
 
-**Open question:** threading. Mods run on the one thread that owns the loop
-(the control socket's thread runs only loader code). A mod that spawns a thread makes unloading unsafe, because the thread
-can still be running code in the library being unmapped. How mods get
-concurrency without breaking reload is undecided.
+**Threads** are a mod's too (decided 2026-10-03,
+[threads.md](threads.md)). Systems run one at a time on the thread that
+owns the loop (the control socket's thread runs only loader code). The
+resident `threads` mod keeps a pool and installs it as the world's
+executor. A system's work reaches it only through a shape it declares
+(`ParMap`, `Reduce`, `Passes`) or the ECS's own splits inside a node,
+and every kernel has returned when the call does, so no reloadable code
+is on a pool thread when the loader swaps builds. A mod that spawns
+threads of its own still makes unloading unsafe, since such a thread can
+be running code in the library being unmapped
+([lore](../lore/a-mod-that-spawns-a-thread-is-never-unmapped.md)).
+Running systems themselves in parallel is get-znt.5
+([scheduling.md](scheduling.md#toward-parallelism)).[^threads]
 
 ## Bazel is the build and the reload trigger
 
@@ -106,3 +111,14 @@ called in its new build: see
 workspace or shipped to players decides whether the ABI must be stable
 across builds or only within one. Today it only has to hold within one build,
 and `API_VERSION` exists to fail loudly when it doesn't.
+
+[^loop]: *(History, 2026-09-23.)* Before the bootstrap ran the session,
+    the loader's `main` looped over "poll the socket, step the bootstrap
+    once", so the bootstrap could be reloaded, but it couldn't block
+    (`lockstep` slept 2 ms a call to avoid spinning) and couldn't sit
+    under an event loop that won't return.
+
+[^threads]: *(History, 2026-10-04.)* Threading was an open question here,
+    with every mod on the loop's thread and "how mods get concurrency
+    without breaking reload" undecided, until the `threads` mod and the
+    shapes' dispatch were built (get-znt.34, 2026-10-03).

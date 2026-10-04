@@ -1,13 +1,21 @@
 # Parallel relations
 
-**Status: proposed** (2026-09-29, get-znt.19). Nothing here is built. The
-2D solver runs across threads, bit for bit the same at any thread count
+**Status: a design study, resolved by later decisions** (2026-09-29,
+get-znt.19; closed 2026-10-04). Of what it proposes: (d), the host pool,
+is built, as the resident `threads` mod ([threads.md](threads.md),
+2026-10-03); phase 1, contacts' colors kept in the world, is open
+(get-emj.74); phase 2 was rejected and replaced by shapes a system
+declares ([flows.md](flows.md#parallel-shapes), get-znt.28); phase 3 is
+deferred and likely superseded by `Passes` over flows. Both physics
+solves run across threads, bit for bit the same at any thread count
 (physics.md, [Solving across threads](physics.md#solving-across-threads)),
-but that parallelism lives in physics's own per-step copy of bodies and
-contacts. This doc asks how the ECS could grow so that the same kind of
-parallelism fits the world instead of living beside it. Its claims are
-measured by a spike, `//engine/std/physics2d/compare:colors_spike`
-(`colors_spike.rs`, a bench target, not engine code).[^spike-code]
+on physics's own per-step copy of bodies and contacts, declared as flows
+since 2026-10-02. This doc asks how the ECS could grow so that the same
+kind of parallelism fits the world instead of living beside it. Its
+claims are measured by a spike,
+`//engine/std/physics2d/compare:colors_spike` (`colors_spike.rs`, a bench
+target, not engine code).[^spike-code] Where it describes the engine, it
+describes it as of 2026-09-29 unless it says otherwise.
 
 **The recommendation, in short:**
 
@@ -68,7 +76,7 @@ over one table doesn't have:
   color, and the colors' order) alone, never of the threads. The solver's
   test held it bit for bit across 1 to 16 threads
   (`the_colored_solve_across_threads_is_the_solve_on_one_bit_for_bit`; since
-  2026-10-03 the mod's passes on the scheduler's pool,
+  2026-10-03 the mod's passes on the `threads` mod's pool,
   `the_mod_across_threads_is_the_arrays_bit_for_bit`, threads.md), and
   the spike asserts it for colors kept across steps too.
 
@@ -134,9 +142,10 @@ order of the phases below.
   [relationships.md](relationships.md));
 - the broadphase's pairs, a live relation (`Live<Contacts>`,
   [live.md](live.md));
-- the threads' entry point: `Workers`, a parameter that declares nothing
-  and hands out the executor the host installed (`engine_ecs::par`), with
-  `par_for_each` and the page walks split over it.
+- the threads' entry point: the shapes (`ParMap`, `Reduce`, `Passes`),
+  parameters a system calls with its kernels, run across the executor the
+  resident `threads` mod installs in the world (threads.md), with
+  `par_for_each` and the page walks split over a `ParMap`.[^workers]
 
 **Outside it, in the solve system's per-step copy** (`solver::solve_across`
 when this was written; since 2026-10-03 the pipeline's flows, its passes on
@@ -147,14 +156,18 @@ when this was written; since 2026-10-03 the pipeline's flows, its passes on
 | bodies as dense states, by an index the step makes (`Slots`) | `Head::s`, then `lanes::Atom`s (each `f32`'s bits in an `AtomicU32`) | the passes want dense, stable indices; spatial pages move rows every step ([What the ECS costs](physics.md#what-the-ecs-costs)) |
 | each contact's color | `Head::groups`, from `lanes::group`, greedy in pair order, **every step** | a pure function of the contacts: nothing to store, and replays need nothing stored |
 | contacts in batches of four lanes, by color | `Batch<N>`, `Lane` | SIMD layout, a transpose of the contacts |
-| the stages and their barriers | `lanes::run_across`: stages claimed by `fetch_max`, a count a stage, no main thread | a protocol inside one run of the executor, which the ECS has no word for |
-| the threads | the host's, through `Workers` | a mod can't own threads (physics.md, [Parallelism](physics.md#parallelism)) |
+| the stages and their barriers | `lanes::run_across` when this was written: stages claimed by `fetch_max`, a count a stage, no main thread. Since 2026-10-03, `Passes`' program, its stages dispatched by `engine_ecs::dispatch` (threads.md, "Dispatch") | a protocol inside one run of the executor, which the ECS had no word for; now a shape it provides |
+| the threads | the host's, through `Workers`, when this was written; since 2026-10-03 the `threads` mod's pool, through `Passes` | a reloadable mod can't own threads (physics.md, [Parallelism](physics.md#parallelism)) |
 
-So the parallelism is three things the ECS doesn't see:
+So the parallelism was three things the ECS doesn't see:
 
 1. a **derived relation**, the coloring, recomputed every step;
 2. a **sharing mechanism**, relaxed atomics over a copy;
 3. an **execution protocol**, stages within one run.
+
+The third is the ECS's since 2026-10-03: `Passes`. The second is split:
+the shape shares the states across threads, in a form the mod defines
+(`Shareable`; flows.md, "On one thread"). The first is still physics's.
 
 **What the scheduler sees is enough.** The solve system declares that it
 writes `Velocity` and `Position` in the bodies' tables and `Impulse` in the
@@ -368,6 +381,9 @@ fn exchange_heat(
 }
 ```
 
+(The sketch predates shapes. `Workers` is gone (get-znt.31); a walk
+today takes its threads from a `ParMap`.)
+
 **Footprint.** `Colored<R>` declares:
 
 - a read of `R`'s columns in its tables, a query;
@@ -446,8 +462,8 @@ the colored contacts, 20 passes, one thread, µs:
 The threads are the host's (get-znt.20): kept, placed on one CCD first,
 and kept warm. That was measured to be most of the solver's scaling (882 µs
 kept and placed, 1797 left to the scheduler). Everything above runs on
-them through `Workers` and `Executor`, so for this design the pool is a
-dependency, not a part:
+them through the world's `Executor`, which the shapes dispatch onto, so
+for this design the pool is a dependency, not a part:
 
 - **One pool for everything:** systems at once, `par_for_each`, the
   broadphase's split, the solve's stages, and a colored walk. Two pools
@@ -463,8 +479,9 @@ dependency, not a part:
 Whether the pool is rayon's or our own, and how it pins, was the user's
 decision (get-znt.20). **Built** (2026-10-03, [threads.md](threads.md)):
 rayon as the thread host, pinned to one CCD with core_affinity, in a
-resident mod that installs it as the world's executor; one pool for
-`Workers` and the shapes alike.
+resident mod that installs it as the world's executor; one pool for the
+shapes and the ECS's own splits alike (threads.md, "The ECS's own
+splits").
 
 ### (e) Others considered
 
@@ -576,7 +593,9 @@ three spikes since settled the copy's place: storage shouldn't own it
 (contiguous-columns.md), and as declared flows it costs nothing at 8
 threads (flows-spike.md). A system declares the shape of its work (a map,
 a fixed-order reduction, a colored staged run over a flow), and the
-scheduler turns it into tasks on its own threads (get-znt.29). Kept below
+scheduler turns it into tasks on its own threads (get-znt.29). The
+protocol did move into `engine_ecs`, as the dispatch behind `Passes`
+(threads.md, "Dispatch"), not as a call any system can make. Kept below
 for the record.
 
 The proposal: move `lanes::run_across`'s protocol into `engine_ecs::par`: stages run in
@@ -649,5 +668,11 @@ that make one cheap pass, where a copy costs more than the work.
   and keep results independent of history. Not tried.
 - **Open question:** for phase 3, whether `AtomicU32::from_mut_slice` (or a
   stable equivalent) removes the need for an unsafe cast.
+
+[^workers]: *(History, 2026-10-04.)* When this was written the entry
+    point was `Workers`, a parameter that declared nothing and handed out
+    the executor the host installed (`engine_ecs::par`), with
+    `par_for_each` and the page walks split over it. get-znt.31 moved
+    every split onto a shape and deleted it (2026-10-03).
 
 [^spike-code]: *(History, 2026-10-02.)* The spike's code was removed once its findings were written here: spikes are built to answer a question and then thrown away. Every spike target and command named in this doc builds and runs at commit `c72e8b2` (`git checkout c72e8b2`), the last commit with every spike building.

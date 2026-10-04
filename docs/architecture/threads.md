@@ -83,8 +83,8 @@ Three places could own the threads. What each has to satisfy:
 | the bootstrap | yes: resident | yes | yes | tied to time policy: both bootstraps would carry it, and a game replacing its bootstrap would lose its threads |
 
 **The resident mod** is where hot-reload.md already puts threads ("Resident
-mods are the right home for threads"), and where scheduling.md said the
-parallel scheduler's workers would be. It is its own mod rather than the
+mods are the right home for threads"), and where scheduling.md's step 2
+first put the parallel scheduler's workers. It is its own mod rather than the
 scheduler's, because a scheduler that owned threads would have to be
 resident, and scheduling policy would stop hot-reloading; `sequential`
 keeps reloading like gameplay. When systems run in parallel (get-znt.5),
@@ -256,7 +256,17 @@ what lets the loader swap the mod at the next pump.
 
 **One thread, plain.** Where the world has no executor, or one thread,
 `run` runs the stages in order on the system's thread with the states
-plain (stage 1's path, 8 to 18% faster than shared, dispatch-spike.md).
+plain (stage 1's path). What that saves is quoted here, and only here:
+
+- **The engine's figure**, 2D's `passes` system on `step_bench`, one
+  thread, kernels matched once a call (get-znt.26): shared states cost 6
+  to 7% settled and on the pyramid, and 24% on the falling pile
+  (flows.md, "On one thread", has the table).
+- **The spikes'**, their 2D figures superseded by the engine's: the
+  flows spike, 6 to 14% on the solve against the hand-tuned solve's
+  plain path (flows-spike.md); the dispatch spike, 8 to 10% on 2D's
+  passes and 10 to 18% on 3D's, the only 3D figure (dispatch-spike.md,
+  "2D: the solve against `run_across`").
 
 **The guard, get-znt.39.** `passes.serial(true)` runs that call on one
 thread, plain. physics2d's `prepare` decides it each step
