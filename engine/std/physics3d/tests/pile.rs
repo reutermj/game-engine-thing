@@ -13,8 +13,9 @@
 //!   fixed <x> <y> <z> <hx> <hy> <hz>  a static box
 //!   body sphere <r> | box <hx> <hy> <hz>, then at <x> <y> <z>, and
 //!              optionally turn <ax> <ay> <az> <radians>, v <x> <y> <z>,
-//!              w <x> <y> <z>: a body of mass 1, solid (turning) unless
-//!              locked; says its entity, `index:generation`
+//!              w <x> <y> <z>, e <restitution>: a body of mass 1, solid
+//!              (turning) unless locked; says its entity,
+//!              `index:generation`
 //!   bodies <from>  the entities `build` has added, from the from-th, in
 //!              the order the scene adds them: the bench reads its bodies
 //!              back in that order
@@ -167,9 +168,13 @@ impl Pile {
             }
             _ => return Err("body sphere <r> | box <hx> <hy> <hz> ...".into()),
         };
-        let (mut pos, mut rot, mut v, mut w) = (Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO);
+        let (mut pos, mut rot, mut v, mut w, mut e) = (Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO, 0.0);
         while at < words.len() {
             match words[at] {
+                "e" => {
+                    e = nums(at + 1, 1)?[0];
+                    at += 2;
+                }
                 "at" | "v" | "w" => {
                     let x = nums(at + 1, 3)?;
                     let x = Vec3::new(x[0], x[1], x[2]);
@@ -185,10 +190,11 @@ impl Pile {
                     rot = Quat::axis_angle(Vec3::new(x[0], x[1], x[2]).normalize(), x[3]);
                     at += 5;
                 }
-                other => return Err(format!("{other:?}: at, turn, v or w")),
+                other => return Err(format!("{other:?}: at, turn, v, w or e")),
             }
         }
         let (p, q, c, body, _, _) = moving(pos, rot, c, self.locked);
+        let body = Body { restitution: e, ..body };
         let e = world.spawn((p, q, c, body, Velocity { x: v.x, y: v.y, z: v.z }, AngularVelocity { x: w.x, y: w.y, z: w.z }));
         Ok(format!("body {}:{}", e.index, e.generation))
     }
