@@ -4807,8 +4807,10 @@ step_bench, one thread unless said):
   the bodies' (a stage writes items or states, and the inertias are
   neither; formed per contact end in the fill instead they would be 3.7
   times the work on one thread); the contacts no batch solves (both ends
-  still, few); and `finish`, the write-back, which has no shape yet
-  (get-znt.45). Left: 2D's `prepare` about 120 µs, 3D's 270-310.
+  still, few); and `finish`, the write-back, which had no shape then
+  (since a map across threads, get-znt.45: [The write-back across
+  threads](#the-write-back-across-threads)). Left: 2D's `prepare` about
+  120 µs, 3D's 270-310.
 
 **The shape**: `Stage::All`, every item in one stage, colors and overflow
 alike, for a kernel that writes its items alone and only reads the
@@ -4857,6 +4859,86 @@ but for the settled pile, +0.7% of the solve over five alternated rounds
 (+0.25% of the step); 3D's boxes +0.8% settled and, pooled over every
 alternated run, +1.4 to 1.7% falling, inside that case's spread of 6%
 from run to run.
+
+### The write-back across threads
+
+**Built** (2026-10-03, get-znt.45). Both mods' `finish`, which writes
+the step's impulses from the batches' lanes into the contacts (and in
+2D their points) and the states into the bodies, runs across the
+scheduler's threads as a map over parts. With the fill a stage it had
+been the largest serial part of the turning solve at 8 threads (2D's
+settled pile 178 µs of a 1130 µs solver, 3D's settled boxes 158 of
+3632).
+
+**Where its time went** (timers put in a copy, since removed; µs a step,
+step_bench, `--config=bench`, the median of 5 runs in 2D and 3 in 3D):
+
+| part | 2D pile settled, 1 / 8 threads | 2D pyramid, 1 / 8 | 3D boxes settled, 1 / 8 | 3D planks, 1 / 8 |
+|---|---|---|---|---|
+| clearing the points (2D) | 15 / 35 | 9 / 34 | – | – |
+| the contacts (and points) from their lanes | 110 / 126 | 66 / 96 | 122-139 / 135-140 | 25 / 22-24 |
+| the bodies (3D: with the turned inertia) | 5 / 7 | 2 / 4 | 18-21 / 22 | 1.6 / 3-3.5 |
+| the turning bodies (2D) | 6 / 11 | 3 / 6 | – | – |
+
+- **The contacts are most of it**, a few ns each: writes to contacts
+  wherever each batch's lanes put them, and reads of every batch.
+- **At 8 threads it was dearer than on one**, a cross-core cost: the
+  points the clear writes were last read by the fill on other cores
+  (2D's clear 15 → 35 µs, 9 → 34 on the pyramid), and the batches the
+  contacts are written from were last written by the passes there. 3D's
+  contacts barely moved (122-139 → 135-140).
+
+**The shape: a map over parts** (`ParMap::for_each_mut`, its first user;
+flows.md, "The write-back is a map over parts"). The mod cuts the
+contacts and the bodies alike into parts, four a thread (`ParMap`'s
+blocks, so a part a block) and one on one thread: in 2D a part also has
+its contacts' points, which are in the contacts' order (`gather_contacts`
+pushes each contact's as it goes), and a run of the turning bodies.
+`Staged::finish` writes a part contact by contact, each finding its lane
+by its seat (`seat_of`), then its bodies from the states; 2D clears the
+part's points first (`clear_run`, the unsolved contacts' kept impulses
+found by point). The deleted `solve_across` wrote back the same way, a
+second run, each task its own run of contacts, points and bodies,
+reading any batch;[^across-first] Box2D runs it as a stage of its
+own (`b2_stageStoreImpulses`).
+
+- **Each contact's seat is written by the fill**, as it seats the
+  contact, through the shared reference every kernel has (relaxed
+  atomics, as 2D's lane records), and by `prepare` for 2D's contacts no
+  batch solves. Formed in `prepare` from the coloring's seats instead,
+  it cost 11-14 µs more of serial `prepare` on 2D's settled pile, at any
+  thread count.
+- **Why not a last stage of `Passes`.** Its items are the batches; the
+  contacts would be a second set of items, for the one gain of not
+  starting a dispatch, which costs about 3 µs at 8 threads (an empty map
+  added to `finish`: 31 µs against 28).
+- **Why not by batches**, as the writes went on one thread: a batch's
+  lanes write contacts anywhere, so blocks of batches would share the
+  contacts, which only unsafe code or atomic contacts could write.
+- **Why not a map over the contacts alone**: 2D's points are beside the
+  contacts, and the bodies are another array; parts write all of them
+  in one map, one dispatch.
+
+**Bit for bit by construction**: every value a part writes is its lane's
+or its state's, so any cut into parts writes what one part of
+everything does. At `ENGINE_THREADS` 1, 2, 4 and 8: both mods'
+baselines, default and long, byte-identical to the 92f67c6 tree's (232,
+229, 104 and 98 lines); the 3D fingerprint as pinned; the exact and
+equivalence tests and pong's and the platformer's replays pass.
+
+**What it bought** (threads.md, "Measured", has the tables): at 8
+threads `finish` takes 28-29 µs in 2D's settled pile (178-180 before),
+21 on the pyramid (139-141), 27-28 in 3D's settled boxes (159-161), 7 on
+the planks (24-25); 2D's settled solver 964-984 µs against 1117-1120,
+its step 2426-2468 against 2550-2559. On one thread 2D's `finish` is
+about 8 µs slower on the settled pile (contacts written in order,
+batches read wherever a contact's lane is), 0.2% of its solver; 3D's is
+faster (it found each seat by walking the coloring).
+
+**What stays serial, and why**: the contacts no batch solves, which 2D's
+`prepare` starts and `finish` only finds (both ends still); and
+`solve_with`, the step nothing turns in, solved one contact at a time in
+pair order, which no shape can split.
 
 ## Open questions
 

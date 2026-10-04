@@ -268,12 +268,22 @@ canary isn't this copy's is a foreign exception, and
 
 ### `ParMap` and `Reduce`
 
-They stay on the system's thread. No system declares either yet: the
-broadphase's and narrowphase's splits, their natural users, still go
-through `Workers` until get-znt.31 moves them, so there are no sizes to
-measure them at. When they get users, each is a plan of one stage
-(`ParMap` chunks of at least `min` items, `Reduce` its fixed chunks,
-folded in order after), on the same dispatch.
+**`ParMap::for_each_mut` runs across threads** (get-znt.45, 2026-10-03):
+a plan of one stage, the items in blocks of at least `min`, at most four
+a thread (`blocks_of`, as `Passes` cuts a color), each block's items
+behind a lock only its taker takes, on the same dispatch; one block, or
+one thread, runs on the system's thread in order. Its first user is both
+physics mods' write-back, whose items are parts of the mod's own making,
+each a run of several arrays (physics.md, "The write-back across
+threads"). An empty map's dispatch costs about 3 µs at 8 threads (an
+extra one in physics2d's `finish`, the settled pile: 31 µs against 28).
+
+`map_into` and `Reduce` stay on the system's thread. No system declares
+either yet: the broadphase's and narrowphase's splits, their natural
+users, still go through `Workers` until get-znt.31 moves them, so there
+are no sizes to measure them at. Across threads `map_into` needs room for
+its results before the run (`R: Default`) or a vector a block, and
+`Reduce` its fixed chunks mapped in a stage and folded in order after.
 
 ### `Workers`, until get-znt.31
 
@@ -322,8 +332,10 @@ values in any order. Proved here by:
 
 - **Unit:** `Passes` on threads that come at once, late and one by one, at
   1 to 8, against one thread (`flow_test`); on the real pool at 1, 2, 4
-  and 8, warm and cold (`pool_test`); the dispatch's every block once and
-  each stage after its predecessor (`dispatch.rs`'s tests).
+  and 8, warm and cold (`pool_test`); `ParMap::for_each_mut` the same
+  ways, every item once at its own index, the calling thread among its
+  takers; the dispatch's every block once and each stage after its
+  predecessor (`dispatch.rs`'s tests).
 - **The mods:** `quality_test`'s
   `the_mod_across_threads_is_the_arrays_bit_for_bit` (2D's mod on the pool
   at 1 to 16 threads and one by one, against the arrays' one-thread solve);
@@ -454,13 +466,63 @@ whole step.
 - **`finish` grew at 8 threads** (2D's settled 108 → 178 µs, the pyramid
   65 → 141, 3D's boxes 131 → 158): the contacts, points and lanes it
   writes and reads were last touched by the fill and the passes on other
-  cores. It is the largest serial part left (get-znt.45).
+  cores. It was the largest serial part left, until get-znt.45 shared it
+  out (below).
 - **One thread.** 2D level within the rounds' noise but for its settled
   pile, +0.7% of the solve over five more alternated rounds (4483 µs
   against 4450, the step +0.25%); 3D's settled boxes +0.8%, its falling
   boxes +1.4 to 1.7% pooled over every alternated run (17 702-17 779 µs
   mean against 17 408-17 531), a case whose base itself ranged 16 882 to
   17 944.
+
+### The write-back across threads (get-znt.45)
+
+The same benches, the 92f67c6 tree and the get-znt.45 one alternated,
+two rounds each (their range; 2026-10-03; load averages 2 to 5 but 18 at
+the start of 2D's first round). Why it's shaped as it is: physics.md,
+"The write-back across threads".
+
+**2D**, µs a step: the solver (`prepare`, `passes`, `finish`), and the
+whole step.
+
+| case | before, 1 | after, 1 | before, 8 | after, 8 |
+|---|---|---|---|---|
+| pile 10 000 turning, settled | 4407-4459 (121, 4160-4213, 126) / 6739-6792 | 4458-4471 (122-123, 4201-4213, 134) / 6811-6880 | 1117-1120 (123, 812-816, 178-180) / 2550-2559 | 964-984 (124-125, 812-833, 28-29) / 2426-2468 |
+| pyramid 5050 turning | 2836-2890 (73-74, 2680-2733, 82) / 4371-4424 | 2848-2851 (74-75, 2694-2697, 79) / 4366-4370 | 725-727 (74-75, 510-511, 139-141) / 1592-1605 | 611-620 (77-78, 512-522, 21) / 1484-1485 |
+| pile 10 000 turning, falling | 344-348 (finish 14-15) / 1138-1145 | 343-351 (14-15) / 1090-1106 | 183 (36, 123-124, 24) / 807-810 | 175-181 (43, 124-128, 9) / 794-819 |
+| pile 10 000 not turning, settled | 2494-2498 / 3354-3366 | 2496-2498 / 3357-3360 | 2508-2525 / 3242-3263 | 2511-2516 / 3250-3255 |
+
+**3D**, µs a step: the solver (`prepare`, `passes`, `finish`), and the
+whole step.
+
+| case | before, 1 | after, 1 | before, 8 | after, 8 |
+|---|---|---|---|---|
+| boxes 10 000 settled | 18 122-18 450 (finish 143-152) / 21 853-22 182 | 17 855-17 950 (134-135) / 21 521-21 691 | 3630-4386 (277-283, 3176-3953, 159-161) / 7002-7786 | 3455-3456 (271, 3157-3165, 27-28) / 6804-6824 |
+| boxes 10 000 falling | 17 520-17 629 (138-141) / 23 914-23 986 | 16 878-16 948 (120) / 23 061-23 145 | 5239-5301 (155-156) / 11 358-11 383 | 4941-5318 (35-40) / 11 067-11 576 |
+| planks 1000 settled | 2597-2626 (27-29) / 3112-3145 | 2557-2589 (20-21) / 3063-3106 | 671-675 (24-25) / 1170-1174 | 650-652 (7) / 1150-1164 |
+
+- **`finish` at 8 threads takes a fifth to a sixth of what it did**: 2D's
+  settled pile 178-180 → 28-29 µs, the pyramid 139-141 → 21, 3D's
+  settled boxes 159-161 → 27-28, planks 24-25 → 7. The solver at 8 is
+  12-14% faster in 2D's settled pile and 15% on the pyramid; the step
+  3-5% and 7%. 3D's settled boxes gain the 130 µs (their passes vary
+  more than that from run to run, 3157-3953 in the base).
+- **One thread.** 2D's `finish` is 8 µs slower on the settled pile (134
+  against 126; 134-138 against 125-131 in one build switching between
+  the two at run time, so about 0.2% of the solver), level on the pyramid: the contacts are
+  written in order now and the batches read wherever a contact's lane
+  is, where it was the other way round. The settled pile's solver ranged
+  +0.0 to +1.4% over the two rounds and the step +1.0 to +1.3%, the base
+  itself ranging 1.2% between rounds. 3D's `finish` is faster on one
+  thread (settled boxes 134-135 against 143-152, falling 120 against
+  138-141): the base found each contact's seat by walking the coloring
+  (`Coloring::seats`), where it is now read (`seat_of`).
+- **Gathering looked dearer and isn't.** The new tree's 2D gather read
+  about 25 µs more than the base's at both thread counts in the first
+  runs (435 against 410 settled); one build switching between the old
+  write-back and the new at run time gathered alike either way (411-412
+  at 8 threads, 404-427 at 1), so it was the build's layout, not the
+  contacts' lines being on other cores.
 
 ## What waits
 
@@ -479,12 +541,10 @@ whole step.
   inside the same dispatch.
 - **Block sizes by work (get-znt.41)**: the plan's blocks are Box2D's
   sizes; a stage's blocks could be cut by points, or more of them.
-- **A write-back across threads (get-znt.45).** With the fill a stage
-  ("Measured"), each mod's `finish` is the largest serial part left of a
-  turning solve at 8 threads.
 
 (History, 2026-10-03: filling the batches in the first stage waited here
-too, until get-znt.40 built it, "Measured".)
+too, until get-znt.40 built it, and the write-back across threads, until
+get-znt.45 did; "Measured".)
 
 ## Testing, and the mutants
 
@@ -494,10 +554,12 @@ The tiers (CLAUDE.md), each test where the bug it's for shows first:
   after the one it waits for, a panic raised on the caller and the rest
   stopped, on threads at once, late and one by one, 1 to 8); `flow_test`
   (`Passes` on test executors against one thread, its items filled by an
-  `All` stage from their seats, `serial`, a kernel's panic);
+  `All` stage from their seats, `serial`, a kernel's panic;
+  `ParMap::for_each_mut`'s every item once at its index, the calling
+  thread among its takers, a call's panic);
   `//engine/std/threads:pool_test` (every task once and `run`
   returning after the last, `Passes` on the real pool at 1, 2, 4 and 8
-  warm and cold, workers pinned where the placement says, a second pool
+  warm and cold, `ParMap` on it the same, workers pinned where the placement says, a second pool
   made from a pinned thread placed as the first, the threads ended on
   drop, sysfs topology parsed).
 - **Integration:** `physics2d_test`'s `threads` module: a reload of
@@ -550,7 +612,31 @@ tests:
 `pool_test` failed none: it runs no `All` stage. The 2D rows were run
 again once the lanes became `LaneCell`s, with the same results.
 
-**Long checks run:** the reload fuzzer (runbook 003; the loader's reload
+**The write-back across threads** (get-znt.45, 2026-10-03), each run
+against `flow_test`, `pool_test` and both physics mods' tests:
+
+| mutant | fails |
+|---|---|
+| a map's block run twice (block 0) | `flow_test`, `pool_test` alone: both mods' write-backs write each value whole, so a part written twice is the part written once, which no physics test can see, and needn't |
+| a map's block skipped (block 0) | `flow_test`, `pool_test`; `physics2d_test`, 2D's `quality_test`; `exact_test`, `physics3d_test`, 3D's `quality_test` |
+| 2D's write-back skipping each part's first contact | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 2D's write-back clearing a part's points again after writing them | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 2D's fill by batch writing no contact's seat (each read the step before's) | `physics2d_test`, `quality_test`, `behaviour_test` |
+| 3D's write-back skipping each part's first contact | `exact_test`, `physics3d_test`, `quality_test`, `smoke_test` |
+| the write-back reading the batches before the passes' last stage (2D: restitution left out of the program; 3D: the last substep's sums) | 2D's `quality_test`, `behaviour_test`; `exact_test`, `physics3d_test`, 3D's `quality_test` |
+| a dispatch's threads leaving once all but its last stage are done (and its "every stage done" check gone) | `flow_test`, `pool_test`, every physics test above but 3D's `reload_test`, and 3D's `behaviour_test` |
+
+The write-back can't run before the passes are done other than by such
+a mutant: `finish` takes the graph the `passes` system passes on (the
+flows order them), and a dispatch returns only once every stage is
+complete and its threads have left. Left out of the 3D program,
+restitution failed no default test (the mod's bounces are the long
+suite's; the arrays' solve, which `exact_test` checks restitution on,
+has its own program), so the 3D row drops the last sums instead. Long
+checks for it: the 2D and 3D long suites; not the reload fuzzer or Miri,
+since neither the reload sequence nor the unsafe core changed.
+
+**Long checks run for the pool** (get-znt.34): the reload fuzzer (runbook 003; the loader's reload
 sequence is unchanged, and its mods declare no shapes, so it checks that
 reloads still hold with the engine changed under them, not threads), and
 the loader's sanitizer suite (runbook 004, `//engine/tests:asan`, whose

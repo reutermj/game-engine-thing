@@ -45,8 +45,9 @@ restating them.
 - **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
   are parameters, and the kernels a system hands them are the only code
   that may run across threads. Stage 1 fixed their results on the
-  system's own thread; since stage 3 `Passes` reproduces them across the
-  scheduler's threads, at any count.
+  system's own thread; since stage 3 `Passes`, and `ParMap`'s
+  `for_each_mut`, reproduce them across the scheduler's threads, at any
+  count.
 
 ## What a flow is, and isn't
 
@@ -335,8 +336,11 @@ nothing else: no footprint, no apply node.
 
 - **`ParMap`**: `map_into(items, min, out, f)` sets `out` to `f(i, item)`
   of each item, in the items' order, keeping `out`'s allocation;
-  `for_each_mut(items, min, f)` calls `f(i, &mut item)`. `min` is the
-  fewest items a task is worth.
+  `for_each_mut(items, min, f)` calls `f(i, &mut item)`, across threads
+  in blocks since get-znt.45 ([threads.md](threads.md#parmap-and-reduce)).
+  `min` is the fewest items a task is worth. An item may be a part of
+  the caller's making, runs of several arrays cut alike, so that one map
+  writes them all (physics's write-back, below).
 - **`Reduce`**: `reduce(items, chunk, map, fold)` maps fixed chunks of
   `chunk` items and folds the results left to right, in the items' order.
   The chunks are the input's, not the threads', so a float sum is the
@@ -394,6 +398,19 @@ Why each choice, from the spike:
   (`pack`'s width) and an edge-to-item scatter in the shape, when the
   index is all a kernel needs to find its own. What it cost and bought:
   physics.md, "The fill as the passes' first stage".
+- **The write-back is a map over parts** (get-znt.45, 2026-10-03).
+  After the passes, physics writes each contact's impulses from its
+  lane, and each body's state, into the arrays the sinks read: a
+  `ParMap::for_each_mut` over parts the mod cuts, each a run of the
+  contacts (with, in 2D, their points, which are in the contacts'
+  order) and a run of the bodies, each contact finding its lane by its
+  seat (the fill writes each contact's as it seats it). No new shape:
+  a part is an item. *Considered:* a last stage of `Passes`, which
+  would need the contacts as a second set of items, and saves only the
+  map's own dispatch, about 3 µs at 8 threads; a map over the contacts
+  alone, which can't write 2D's points or the bodies; and a split by
+  batches, which would write contacts anywhere, so not in safe Rust.
+  physics.md, "The write-back across threads".
 
 ### Declared, and run by the scheduler
 
@@ -529,9 +546,10 @@ system's own thread:
 That is the result stage 3 must reproduce, and does: since stage 3
 (2026-10-03, [threads.md](threads.md)) `Passes` runs across the world's
 executor where it has more than one thread, and this path where it
-doesn't, or where the system says `serial` (get-znt.39). `ParMap` and
-`Reduce` stay on one thread until they have users (threads.md, "ParMap
-and Reduce").
+doesn't, or where the system says `serial` (get-znt.39); so does
+`ParMap::for_each_mut` since physics's write-back uses it (get-znt.45).
+`map_into` and `Reduce` stay on one thread until they have users
+(threads.md, "ParMap and Reduce").
 
 `API_VERSION` goes up: `ParamDecl` gains `Flow` and `Shape`, the world a
 flow store, and `Declarations` the flows a build uses.
@@ -562,8 +580,10 @@ Each tier proves what the others can't (CLAUDE.md):
   change.
 - **Stage 3** adds what only threads can show: `Passes` bit for bit at 1
   to 8 threads, at once, late and one by one, on test executors
-  (`flow_test`) and on the real pool (`//engine/std/threads:pool_test`);
-  the mods held to one thread across it (threads.md, "Determinism").
+  (`flow_test`) and on the real pool (`//engine/std/threads:pool_test`),
+  and `ParMap::for_each_mut`'s every item once at its index the same
+  ways; the mods held to one thread across it (threads.md,
+  "Determinism").
 
 ## Physics's adoption (stage 2)
 
