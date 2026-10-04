@@ -49,8 +49,19 @@ what rewriting physics.md found), so a reader isn't misled by them:
   built, 3D's lanes (get-emj.52) and colors (get-emj.90).
 - **"Parallel comparisons wait for our physics to run in parallel"**
   ("Against other engines"): both solves run across threads since
-  2026-10-03; the comparisons run every engine on one thread
-  (get-emj.113).
+  2026-10-03; the comparisons run every engine on one thread, and add a
+  named row of ours on n threads (2D `VARIANTS=threads:<n>`, 3D
+  `--threads=<n>`). 2D's timed row was always one thread (`Ecs::alone`);
+  3D's ran on the shared pool from `ed0b68d` (2026-10-03) until
+  get-emj.113 gave the harness `Config::threads`, so every 3D table in
+  this log, measured before that, is one thread's. The 2026-10-04
+  design review's W4 said both were on the pool: wrong for 2D.
+- **"Porting them is work for when the soft step is parallelized"**
+  ("Settling", What else changed, of `:parallel_solver` and
+  `:solver_layout`): obsolete. Both were deleted unported
+  (get-emj.112), as the spike rule says; `:solver_layout` measured the
+  split-impulse solver, so it couldn't re-check the copy claim ("What the
+  ECS costs") for today's solver, which stands on its written numbers.
 - **"3D, translation only (spike)"** calls physics3d plain systems on the
   ECS harness: it is a mod since 2026-09-26 ("A mod"). The **Goals**' "2D
   only" predates it.

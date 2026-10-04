@@ -26,8 +26,8 @@ look slower than 2.
 ## What it means
 
 - **A benchmark of threads must warm them for longer than the governor's
-  window**, not just wake them: `:parallel_solver` keeps each variant's
-  threads busy 300 ms before timing it, and runs one variant's runs back to
+  window**, not just wake them: `:parallel_solver`[^spike-code] kept each variant's
+  threads busy 300 ms before timing it, and ran one variant's runs back to
   back rather than round robin.
 - **A game's workers will be cold every frame** (inferred, not measured
   in a frame loop): physics on 8 threads for about 0.2 ms of a 16.7 ms

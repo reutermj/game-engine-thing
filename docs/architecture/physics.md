@@ -520,8 +520,13 @@ contacts side by side, as SVG or text) is [runbook
 
 The comparisons (`//engine/std/physics2d/compare` against Box2D v3.1.1
 and Rapier 2D 0.36; `//engine/std/physics3d/compare` against Rapier 3D
-0.36, Jolt 5.6 and Box3D 0.1) run every engine on one thread, on the same
-scenes, matched as the runbook says. Where ours stands now:
+0.36, Jolt 5.6 and Box3D 0.1) run every engine on one thread, ours
+included, on the same scenes, matched as the runbook says (2D's timed
+row is `Ecs::alone`, with no pool; 3D's is `Config::threads`'
+`Threads::One`). A row of ours on its own pool of n threads, pinned to
+one CCD, is added and named apart (2D `VARIANTS=threads:<n>`, 3D
+`--threads=<n>`); the references in it still run on one.[^cmp-threads]
+Where ours stands now:
 
 - **Quality**: at least level everywhere the tests look, and ahead on
   depth: piles and pyramids rest as soon as the references' and sink a
@@ -531,18 +536,55 @@ scenes, matched as the runbook says. Where ours stands now:
   references: 3D's card houses and tall columns (get-emj.98,
   get-emj.99), a heavy box on light ones resting late (get-emj.57), and
   no continuous collision (get-emj.59).
-- **Time, on one thread**: the latest figures are below. Where ours is
-  slower it was, when last measured, mostly the solver's passes, a
-  quality choice: five substeps of three passes against Box2D's and
-  Box3D's four of two.
+- **Time, on one thread**: in 3D ours costs about 1 to 2.3 times Rapier
+  and Box3D (below), where it was 1.3 to 3 times on 2026-09-26. Most of it is
+  the solver's passes, a quality choice: five substeps of three passes
+  against the references' four of two. On eight threads ours is faster
+  than every reference, but they ran on one: that row is how ours
+  scales, not a like-for-like comparison. 2D's timings weren't re-run
+  with this (its timed row was one thread's already): the log's tables
+  stand.
 
-<!-- TODO get-emj.113 numbers -->
-The one-thread timings, re-measured with every engine on one thread
-(get-emj.113), go here.
+**3D, measured 2026-10-04** (get-emj.113): ms a step over the whole run,
+`./bazel run --config=bench //engine/std/physics3d/compare:bench -- all
+1000,10000 all [--rotate] --threads=8`, 1000 bodies the median of three
+runs and 10 000 one, every engine at its defaults. Other agents' work
+loaded the machine (load average 6 to 34), so take ±15% as noise; the
+cases marked † were run again once it dropped, and planks 10 000
+turning, two values each, stays unreliable.
 
-The measurements behind these, scene by scene, are the log's "Against
-other engines", "Against other engines, bodies turning", "Against the
-others now", "Against the others, turning" and "How it scales".
+| turning | ours | ours, 8 threads | Rapier | Jolt | Box3D |
+|---|---|---|---|---|---|
+| spheres 1000 | 1.70 | 0.67 | 0.88 | 1.84 | 1.41 |
+| boxes 1000 | 2.08 | 0.70 | 0.92 | 1.35 | 1.09 |
+| planks 1000 | 2.95 | 0.90 | 1.21 | 2.18 | 1.56 |
+| rain 1000 | 1.58 | 0.65 | 0.87 | 1.23 | 1.06 |
+| spheres 10 000 | 20.2 | 5.8 | 18.9 | 28.3 | 18.5 |
+| boxes 10 000 | 21.7 | 5.0 | 13.3 | 18.6 | 11.3 |
+| planks 10 000 † | 36.2 / 45.6 | 27.5 / 22.8 | 23.9 / 24.7 | 37.4 / 39.2 | 22.6 / 22.9 |
+| rain 10 000 | 19.4 | 5.6 | 15.7 | 16.3 | 14.3 |
+
+| locked | ours | ours, 8 threads | Rapier | Jolt | Box3D |
+|---|---|---|---|---|---|
+| spheres 1000 | 1.05 | 0.49 | 0.63 | 1.20 | 1.02 |
+| boxes 1000 | 1.83 | 0.56 | 0.89 | 1.13 | 1.04 |
+| spheres 10 000 | 12.8 | 3.4 | 12.2 | 17.3 | 13.4 |
+| boxes 10 000 † | 22.3 | 5.2 | 14.8 | 14.0 | 11.8 |
+| planks 10 000 | 16.5 | 4.5 | 11.0 | 13.4 | 9.4 |
+| rain 10 000 | 11.9 | 3.1 | 8.5 | 11.5 | 7.6 |
+
+Ours by stage on one thread, 10 000 turning, µs a step (broadphase /
+narrowphase / solver / copies in and out; outside the systems 491, 428
+and 499, the bench no longer printing the re-sorts apart): spheres 572 / 1306 / 16 043 / 875,
+boxes 502 / 2047 / 17 451 / 654, planks 730 / 4184 / 28 832 / 987. The
+broadphase is under half what it was before `Live` kept pairs, and the
+narrowphase half of boxes' before recycling (the log's "Against the
+others, turning": 1190 / 4120 / 23 141 / 678 for boxes, 2026-09-26).
+
+The measurements before these, scene by scene, 2D's included, are the
+log's "Against other engines", "Against other engines, bodies turning",
+"Against the others now", "Against the others, turning" and "How it
+scales".
 
 ## The games on it
 
@@ -760,3 +802,11 @@ row of its own and no section here keeps its old anchor on this page.
 [^games]: *(History, 2026-09-23.)* Porting the games added the conflict
     rule for queries apart by a table component, sensors that need one
     collider that can move, and queries and bundles of eight terms.
+
+[^cmp-threads]: *(History, 2026-10-03 to 2026-10-04.)* From `ed0b68d` until
+    get-emj.113 the 3D comparison timed ours on the process's shared pool
+    of eight threads (`Ours::new`), against references on one; every 3D
+    table in the log predates that, so is one thread's. 2D's timed row was
+    always one thread's, so the 2026-10-04 design review's W4 was wrong
+    for 2D. The quality tests and the baseline still run ours on the shared
+    pool (`ENGINE_THREADS`), which gives the same bits.

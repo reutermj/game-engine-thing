@@ -241,7 +241,7 @@ the copy.
 **Open question:** whether that's false sharing (eight bodies' velocities
 share a cache line, against two `Atom`s), which isn't measured.
 
-**The split-impulse solver** (`solver_layout`, the 10 000 columns scene it
+**The split-impulse solver** (`solver_layout`[^spike-code], the 10 000 columns scene it
 was built on, µs, the median of three runs of 31): the copy 592. In place
 over contiguous `Velocity` and `Body` blocks:
 

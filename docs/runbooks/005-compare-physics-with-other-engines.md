@@ -45,9 +45,19 @@ VARIANTS=arrays:split,arrays:soft/sub=4 ./bazel run --config=bench //engine/std/
 TURN=1 ./bazel run --config=bench //engine/std/physics2d/compare   # only bodies that turn
 TURN=1 SETTLE=1500 ENGINES=box2d,rapier,rot VARIANTS=arrays:rot,arrays:rot/warm=0 ./bazel run --config=bench //engine/std/physics2d/compare
 ./bazel run --config=bench //engine/std/physics2d/compare:solver_bench   # the 2D solver alone, each way of solving
-THREADS=1,8 taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench   # the mod's solve and step, by system
-taskset -c 0-7 ./bazel run --config=bench //engine/std/physics3d:step_bench   # the 3D mod's solve and step, on pile3d's scenes
+THREADS=1,8 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench   # the mod's solve and step, by system; the pool pins itself, so no taskset
+ENGINE_THREADS=8 ./bazel run --config=bench //engine/std/physics3d:step_bench   # the 3D mod's solve and step, on pile3d's scenes
+./bazel run --config=bench //engine/std/physics3d/compare:bench -- all 1000,10000 all --rotate [--threads=8]   # 3D timings, every engine
 ```
+
+The comparisons time every engine on one thread, ours included (2D:
+`Ecs::alone`; 3D: `Config::threads`, `Threads::One`). `VARIANTS=threads:<n>`
+(2D) and `--threads=<n>` (3D) add a separately named row of ours on its own
+pool of n threads, pinned to one CCD. The quality tests and the baseline
+run ours on the process's shared pool (`ENGINE_THREADS`); the results are
+the same bits. The two step benches still take different thread knobs
+(2D `THREADS`, 3D `ENGINE_THREADS`; the 2026-10-04 design review's I13,
+not aligned yet).
 
 Every case runs twice by default: with rotation locked (every engine), as
 the comparison was until rotation, and with bodies turning (`, turning`
