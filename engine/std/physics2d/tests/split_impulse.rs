@@ -1,11 +1,10 @@
 //! The solver as it was until 2026-09-26: sequential impulses with a split
 //! impulse for penetration, eight iterations of each. `solver.rs` replaced
 //! it with a soft step (docs/architecture/physics.md, "Settling"); it stays
-//! here, unchanged, for the experiments that measured it and whose findings
-//! are about its computation: `:parallel_solver`, `:solver_layout`, and the
-//! comparison's `VARIANTS=arrays:split`. `SolverBody::new` and
-//! `displacement` are `solver.rs`'s, so `tests/arrays.rs` builds over
-//! either.
+//! here, unchanged, for the comparison's `VARIANTS=arrays:split`, whose
+//! findings are about its computation. `SolverBody::new` and
+//! `displacement` have `solver.rs`'s signatures, from when `tests/arrays.rs`
+//! was built over either.
 //!
 //! Sequential impulses, with accumulated impulses clamped and warm started
 //! from the last step, and the restitution threshold, are Erin Catto's, as
@@ -31,7 +30,9 @@ pub struct SolverBody {
     pub pseudo: Vec2,
 }
 
-// For `tests/arrays.rs`; `:solver_layout` builds bodies itself.
+// `displacement` has had no caller since the experiments that built
+// `tests/arrays.rs` over this solver were deleted (get-emj.112); it stays
+// so the solver stays as it was measured.
 #[allow(dead_code)]
 impl SolverBody {
     /// Gravity was added to `v` already, and this solver leaves it there.
