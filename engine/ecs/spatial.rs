@@ -12,7 +12,7 @@
 
 use crate::component::{Component, Entity};
 use crate::erased::ErasedColumn;
-use crate::par::Workers;
+use crate::par::Split;
 use crate::world::{Entities, Location, TableId};
 
 /// Rows per page in a spatial table: a page is a neighborhood, so small
@@ -827,18 +827,18 @@ pub(crate) struct ResortParts<'a> {
     pub desc: SpatialDesc,
     pub entities: &'a Entities,
     pub now: u32,
-    pub workers: Workers,
+    pub split: Split,
 }
 
 fn resort_in<const D: usize>(pages: &mut SpatialPages<D>, parts: ResortParts<'_>) -> usize
 where
     Axes<D>: Dims<D>,
 {
-    let ResortParts { table, rows, columns, key, extents, desc, entities, now, workers } = parts;
+    let ResortParts { table, rows, columns, key, extents, desc, entities, now, split } = parts;
     // A key installed with glue of other dimensions than its tables' order
     // is refused at install (a restart changes it), so this always finds one.
     let glue = <Axes<D> as Dims<D>>::glue(desc.bounds).expect("a key keeps its dimensions");
-    Resort { table, rows, columns, pages, key, extents, desc, glue, entities, now, workers }.run()
+    Resort { table, rows, columns, pages, key, extents, desc, glue, entities, now, split }.run()
 }
 
 /// A spatial table's pages, locked for re-sorting: its rows and columns,
@@ -858,8 +858,9 @@ pub(crate) struct Resort<'a, const D: usize> {
     pub entities: &'a Entities,
     /// The world's tick as the re-sort starts: every write so far.
     pub now: u32,
-    /// The world's executor, for re-bounding pages in parallel.
-    pub workers: Workers,
+    /// The world's threads, for re-bounding pages in parallel: work inside
+    /// the apply node, so it declares no shape (get-znt.5).
+    pub split: Split,
 }
 
 /// The fewest rows a re-sort's re-bounding is split across threads for
@@ -980,11 +981,11 @@ impl<const D: usize> Resort<'_, D> {
         let pages = &mut *self.pages;
         let order = Rebound { now: self.now, desc: &self.desc, glue: self.glue, since, kind: &pages.kind, lo: &pages.lo, hi: &pages.hi };
         let n = self.rows.len();
-        if self.workers.threads() > 1 && n * SPATIAL_PAGE_ROWS / 2 >= PAR_REBOUND_ROWS {
+        if self.split.threads() > 1 && n * SPATIAL_PAGE_ROWS / 2 >= PAR_REBOUND_ROWS {
             // Pages are re-bounded independently: in ranges, a task each,
             // with a scratch buffer each. Moves, which cross pages, stay on
             // this thread.
-            let ranges = crate::par::even(n, self.workers.chunks(n, PAR_REBOUND_ROWS / SPATIAL_PAGE_ROWS));
+            let ranges = crate::par::even(n, self.split.chunks(n, PAR_REBOUND_ROWS / SPATIAL_PAGE_ROWS));
             let lens = ranges.iter().map(|r| r.len());
             let tasks: Vec<_> = ranges
                 .iter()
@@ -995,7 +996,7 @@ impl<const D: usize> Resort<'_, D> {
                 .zip(crate::par::carve(&mut pages.stale[..n], lens.clone()))
                 .zip(crate::par::carve(&mut pages.changed[..n], lens))
                 .collect();
-            let counts = self.workers.map_each(tasks, |_, (((((range, lanes), misplaced), bounds), stale), changed)| {
+            let counts = self.split.map_each(tasks, |_, (((((range, lanes), misplaced), bounds), stale), changed)| {
                 let mut scratch = [Bounds::EMPTY; SPATIAL_PAGE_ROWS];
                 let mut count = 0;
                 for (i, p) in range.enumerate() {

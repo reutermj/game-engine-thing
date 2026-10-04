@@ -10,7 +10,7 @@ use std::time::Instant;
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
 use std::sync::Arc;
 
-use engine_ecs::{Bounds, Build, Entity, Executor, Query, SpatialKey, Without, Workers, World, component};
+use engine_ecs::{Bounds, Build, Entity, Executor, ParMap, Query, SpatialKey, Without, World, component};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -74,7 +74,8 @@ const STAGES: [&str; 18] = [
 ];
 
 /// Claims four threads, and runs every task on the caller: a parallel
-/// walk's cost of its own, without another core's.
+/// walk's cost of its own, without another core's. The world's executor
+/// while `spatial` runs, so its `ParMap` splits across it.
 struct Inline;
 
 impl Executor for Inline {
@@ -115,7 +116,7 @@ fn record(stage: usize, since: Instant, n: usize) {
     out.1[stage] = n;
 }
 
-fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&At>) {
+fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&At>, map: ParMap) {
     let n = q.len();
     let source: Vec<(Mass, Vel)> = vec![(Mass::default(), Vel::default()); n];
 
@@ -173,10 +174,9 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     }
     record(6, s, pairs.len());
 
-    let workers = Workers::new(Some(Arc::new(Inline)));
     let s = Instant::now();
     let parts = q.par_for_each_page(
-        &workers,
+        &map,
         |r| Vec::with_capacity(r.len()),
         |out, page, (m, v, _)| out.extend(page.rows().map(|r| solver(&m[r], &v[r]))),
     );
@@ -187,7 +187,7 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     let s = Instant::now();
     let out = &out;
     q.par_for_each_page(
-        &workers,
+        &map,
         |r| r.start,
         |i, page, (_, mut v, _)| {
             for r in page.rows() {
@@ -199,7 +199,7 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     record(10, s, n);
 
     let s = Instant::now();
-    q.par_for_each_page(&workers, |_| (), |_, _, _| {});
+    q.par_for_each_page(&map, |_| (), |_, _, _| {});
     record(11, s, n);
 
     let s = Instant::now();
@@ -217,7 +217,7 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
 
     let s = Instant::now();
     q.par_for_each_page(
-        &workers,
+        &map,
         |_| (),
         |_, page, (m, mut v, _)| {
             for i in page.rows().filter(|&i| m[i].kind == 0) {
@@ -231,7 +231,7 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
 
     let s = Instant::now();
     q.par_for_each(
-        &workers,
+        &map,
         |_| (),
         |_, _, (m, mut v, _)| {
             if m.kind == 0 {
@@ -243,8 +243,23 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     record(15, s, n);
 
     let s = Instant::now();
+    q.for_each(|_, (m, mut v, _)| {
+        if m.kind == 0 {
+            v.x += m.a * 0.016;
+            v.y += m.b * 0.016;
+        }
+    });
+    record(17, s, n);
+    *SINK.lock().unwrap() += (sum % 7) as f32 + out.iter().map(|s| s.inv).sum::<f32>();
+}
+
+/// `par_for_each` where the world has no executor: one chunk, on the
+/// system's thread.
+fn on_no_executor(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, map: ParMap) {
+    let n = q.len();
+    let s = Instant::now();
     q.par_for_each(
-        &Workers::default(),
+        &map,
         |_| (),
         |_, _, (m, mut v, _)| {
             if m.kind == 0 {
@@ -254,16 +269,6 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
         },
     );
     record(16, s, n);
-
-    let s = Instant::now();
-    q.for_each(|_, (m, mut v, _)| {
-        if m.kind == 0 {
-            v.x += m.a * 0.016;
-            v.y += m.b * 0.016;
-        }
-    });
-    record(17, s, n);
-    *SINK.lock().unwrap() += (sum % 7) as f32 + out.iter().map(|s| s.inv).sum::<f32>();
 }
 
 fn plain(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &Size), Without<At>>) {
@@ -296,10 +301,14 @@ fn main() {
             }
         }
         let s = Schedule { systems: vec![spatial.system(&w, "spatial"), plain.system(&w, "plain")] };
+        let alone = Schedule { systems: vec![on_no_executor.system(&w, "on_no_executor")] };
         *OUT.lock().unwrap() = ([0; 18], [0; 18]);
         let frames = 200;
         for _ in 0..frames {
+            w.set_executor(Some(Arc::new(Inline)));
             s.run_sequential(&w);
+            w.set_executor(None);
+            alone.run_sequential(&w);
         }
         let (ns, per) = *OUT.lock().unwrap();
         println!("{n} rows, ns per row (per pair for lookups):");

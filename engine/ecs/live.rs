@@ -17,10 +17,9 @@ use std::marker::PhantomData;
 use std::sync::RwLockWriteGuard;
 
 use crate::component::{Component, Entity, Storage};
-use crate::par::Workers;
 use crate::query::{
     ChangeDecl, Declare, Filter, FilterDecl, FrameCx, NearSide, Param, ParamDecl, Query, QueryDecl, Side, SideTable, SweptPage, Unit,
-    meet_unit, meets, near_pairs_with, sweep,
+    meet_unit, meets, near_pairs, sweep,
 };
 use crate::spatial::{Axes, Bounds, Dims, SPATIAL_PAGE_ROWS, contains};
 use crate::world::{ComponentId, TableId, TakeGuard, World};
@@ -609,7 +608,7 @@ pub struct LivePairs {
 }
 
 impl LivePairs {
-    /// `near_pairs_with(workers, active, passive, grow)`, bit for bit, from
+    /// `near_pairs(active, passive, grow)`, bit for bit, from
     /// what changed since the last call, with fat boxes `margin` past each
     /// row's box grown. `now` is the world's tick while the sides hold their
     /// guards (`Query::now`); `most` is `MOST` but in benches. Sides that
@@ -619,18 +618,16 @@ impl LivePairs {
     pub fn near_pairs(
         &mut self,
         now: u32,
-        workers: &Workers,
         (active, passive): (&impl NearSide, &impl NearSide),
         how: (f32, f32, f32),
     ) -> &[(Entity, Entity)] {
-        self.near_pairs_of(now, workers, (active, passive), how, |_, _| {})
+        self.near_pairs_of(now, (active, passive), how, |_, _| {})
     }
 
     /// `near_pairs`, with `check` shown the sides' tables first.
     fn near_pairs_of(
         &mut self,
         now: u32,
-        workers: &Workers,
         (active, passive): (&impl NearSide, &impl NearSide),
         (grow, margin, most): (f32, f32, f32),
         check: impl FnOnce(&[SideTable<'_>], &[SideTable<'_>]),
@@ -642,7 +639,8 @@ impl LivePairs {
         let dims = act.iter().chain(&pas).map(|t| t.order.dims()).next().unwrap_or(2);
         assert!(act.iter().chain(&pas).all(|t| t.order.dims() == dims), "a broadphase is over tables of one dimension");
         self.dims = dims;
-        let mut afresh = || near_pairs_with(workers, active, passive, grow);
+        // Across the world's threads, as `near_pairs` is.
+        let mut afresh = || near_pairs(active, passive, grow);
         let how = (grow, margin, most);
         if dims == 3 {
             self.space.update(now, (&act, &pas), how, &mut afresh);
@@ -757,13 +755,9 @@ pub struct Live<'w, R: Proximity> {
 impl<R: Proximity> Live<'_, R> {
     /// Every pair of rows whose boxes, grown by `R::GROW`, meet, and at least
     /// one of which is active: `near_pairs(active, passive, R::GROW)`, bit
-    /// for bit, lesser entity first, sorted.
+    /// for bit, lesser entity first, sorted. Found afresh, it's found
+    /// across the world's threads, as `near_pairs` is.
     pub fn pairs(&mut self) -> &[(Entity, Entity)] {
-        self.pairs_with(&Workers::default())
-    }
-
-    /// `pairs`, finding afresh across `workers` when it does.
-    pub fn pairs_with(&mut self, workers: &Workers) -> &[(Entity, Entity)] {
         let Live { pairs, world, key, active, passive } = self;
         // A side's tables all hold the key, but one that holds two spatial
         // keys is in the order of the first, which may be another's.
@@ -776,7 +770,7 @@ impl<R: Proximity> Live<'_, R> {
             )
         };
         let sides = (&active.as_slice(), &passive.as_slice());
-        pairs.near_pairs_of(world.current_tick(), workers, sides, (R::GROW, R::MARGIN, MOST), check)
+        pairs.near_pairs_of(world.current_tick(), sides, (R::GROW, R::MARGIN, MOST), check)
     }
 
     /// What the last call did.

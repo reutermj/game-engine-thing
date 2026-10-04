@@ -11,11 +11,10 @@
 //!   generic.
 //!
 //! Each gives the same result on any number of threads, and on one. This
-//! module fixes what that result is. `Passes`, and `ParMap`'s
-//! `for_each_mut`, run across the world's executor where it has more than
-//! one thread, as a task graph (`dispatch`; docs/architecture/threads.md);
-//! `ParMap`'s `map_into` and `Reduce` run on the system's thread
-//! (threads.md, "ParMap and Reduce").
+//! module fixes what that result is. Each runs across the world's executor
+//! where it has more than one thread, as a task graph (`dispatch`;
+//! docs/architecture/threads.md): `Passes` a stage a color or pass,
+//! `ParMap` and `Reduce` one stage of blocks.
 
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -23,7 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::dispatch::{Plan, block_range, blocks_of, dispatch, first_block};
-use crate::par::Executor;
+use crate::par::{Executor, Split, one_stage};
 use crate::query::{Declare, FrameCx, Param, ParamDecl};
 use crate::world::World;
 
@@ -35,27 +34,10 @@ pub enum ShapeKind {
     Passes,
 }
 
-macro_rules! shape_param {
-    ($name:ident, $kind:ident) => {
-        impl Param for $name<'static> {
-            type Item<'w> = $name<'w>;
-
-            fn declare(_: &mut Declare<'_>) -> ParamDecl {
-                ParamDecl::Shape(ShapeKind::$kind)
-            }
-
-            fn fetch<'w>(_: &FrameCx<'w>, _: &'w ParamDecl) -> $name<'w> {
-                $name(PhantomData)
-            }
-        }
-    };
-}
-
 /// Maps a function over items. The lifetime is the frame's.
 #[derive(Clone)]
 pub struct ParMap<'w> {
-    /// The world's executor, where it has more than one thread.
-    across: Option<Arc<dyn Executor>>,
+    split: Split,
     _world: PhantomData<&'w World>,
 }
 
@@ -67,26 +49,52 @@ impl Param for ParMap<'static> {
     }
 
     fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> ParMap<'w> {
-        ParMap { across: cx.world.executor().filter(|e| e.threads() > 1), _world: PhantomData }
+        ParMap { split: Split::of(cx.world), _world: PhantomData }
     }
 }
 
 impl ParMap<'_> {
-    /// How many threads `for_each_mut` hands its items out across.
+    /// How many threads the map hands its items out across.
     pub fn threads(&self) -> usize {
-        self.across.as_ref().map_or(1, |e| e.threads())
+        self.split.threads()
+    }
+
+    /// The world's threads, for a query's walk across them
+    /// (`Query::par_for_each`).
+    pub(crate) fn split(&self) -> &Split {
+        &self.split
+    }
+
+    /// How many blocks of at least `min` items `n` items go in across the
+    /// threads: one on one thread.
+    fn blocks(&self, n: usize, min: usize) -> usize {
+        self.split.executor().map_or(1, |e| blocks_of(n, min.max(1), e.threads()))
     }
 
     /// Sets `out` to `f(i, item)` of each item, in the items' order,
-    /// keeping `out`'s allocation. `min` is the fewest items a task is
-    /// worth, for the scheduler's split. On the system's thread: across
-    /// threads it would need room for the results made before the run
-    /// (`R: Default`) or a vector a block, and nothing uses it yet to say
-    /// which (threads.md, "ParMap and Reduce").
+    /// keeping `out`'s allocation: in order on one thread; across the
+    /// world's threads in blocks of at least `min` consecutive items, at
+    /// most four a thread, each block's results into a list of its own made
+    /// here with room for them (memory a worker allocates is its thread's:
+    /// docs/lore/memory-a-task-allocates-is-its-threads.md), then moved
+    /// into `out` in block order. Every call has returned when this does,
+    /// and a call's panic is raised again here.
     pub fn map_into<T: Sync, R: Send>(&self, items: &[T], min: usize, out: &mut Vec<R>, f: impl Fn(usize, &T) -> R + Sync) {
-        let _ = min;
         out.clear();
-        out.extend(items.iter().enumerate().map(|(i, x)| f(i, x)));
+        let (n, count) = (items.len(), self.blocks(items.len(), min));
+        let exec = match self.split.executor() {
+            Some(exec) if count > 1 => exec,
+            _ => return out.extend(items.iter().enumerate().map(|(i, x)| f(i, x))),
+        };
+        let blocks: Vec<Mutex<Vec<R>>> = (0..count).map(|k| Mutex::new(Vec::with_capacity(block_range(n, k, count).len()))).collect();
+        one_stage(exec, count, &|b| {
+            let mut made = blocks[b].try_lock().expect("a block's taker alone has it");
+            made.extend(block_range(n, b, count).map(|i| f(i, &items[i])));
+        });
+        out.reserve(n);
+        for b in blocks {
+            out.append(&mut b.into_inner().expect("a finished block"));
+        }
     }
 
     /// `f(i, &mut item)` for each item, each item's call independent of the
@@ -98,11 +106,13 @@ impl ParMap<'_> {
     ///
     /// An item may be a part of the caller's own making, slices of several
     /// arrays cut alike (physics's write-back: each part its run of
-    /// contacts, their points and bodies), so that one run writes them all.
+    /// contacts, their points and bodies), or a chunk of work with the list
+    /// it fills, made by the caller (physics2d's broadphase and
+    /// narrowphase), so that one run writes them all.
     pub fn for_each_mut<T: Send>(&self, items: &mut [T], min: usize, f: impl Fn(usize, &mut T) + Sync) {
-        let count = self.across.as_ref().map_or(1, |e| blocks_of(items.len(), min.max(1), e.threads()));
-        match &self.across {
-            Some(exec) if count > 1 => map_across(&**exec, items, count, &f),
+        let count = self.blocks(items.len(), min);
+        match self.split.executor() {
+            Some(exec) if count > 1 => map_across(exec, items, count, &f),
             _ => items.iter_mut().enumerate().for_each(|(i, x)| f(i, x)),
         }
     }
@@ -121,11 +131,7 @@ fn map_across<T: Send>(exec: &dyn Executor, items: &mut [T], count: usize, f: &(
         rest = tail;
         blocks.push((r.start, Mutex::new(head)));
     }
-    let mut plan = Plan::default();
-    plan.chain();
-    let mark = plan.marks(count);
-    plan.stage(count, mark);
-    dispatch(exec, &plan, &|_, b| {
+    one_stage(exec, count, &|b| {
         let (at, items) = &blocks[b];
         let mut items = items.try_lock().expect("a block's taker alone has it");
         items.iter_mut().enumerate().for_each(|(i, x)| f(at + i, x));
@@ -133,14 +139,37 @@ fn map_across<T: Send>(exec: &dyn Executor, items: &mut [T], count: usize, f: &(
 }
 
 /// Folds items in an order fixed by the input.
-pub struct Reduce<'w>(PhantomData<&'w World>);
-shape_param!(Reduce, Reduce);
+#[derive(Clone)]
+pub struct Reduce<'w> {
+    split: Split,
+    _world: PhantomData<&'w World>,
+}
+
+impl Param for Reduce<'static> {
+    type Item<'w> = Reduce<'w>;
+
+    fn declare(_: &mut Declare<'_>) -> ParamDecl {
+        ParamDecl::Shape(ShapeKind::Reduce)
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Reduce<'w> {
+        Reduce { split: Split::of(cx.world), _world: PhantomData }
+    }
+}
 
 impl Reduce<'_> {
+    /// How many threads the chunks are mapped across.
+    pub fn threads(&self) -> usize {
+        self.split.threads()
+    }
+
     /// `map` of each chunk of `chunk` items (the last may be shorter),
     /// folded left to right in the items' order: chunks fixed by the input,
     /// not the threads, so a float sum is the same on any number. `None`
-    /// for no items.
+    /// for no items. Across the world's threads the chunks are mapped in
+    /// blocks of consecutive chunks, at most four a thread, and folded on
+    /// this thread after, in order. Every `map` has returned when this
+    /// does, and a panic in one is raised again here.
     pub fn reduce<T: Sync, A: Send>(
         &self,
         items: &[T],
@@ -148,7 +177,19 @@ impl Reduce<'_> {
         map: impl Fn(&[T]) -> A + Sync,
         fold: impl FnMut(A, A) -> A,
     ) -> Option<A> {
-        items.chunks(chunk.max(1)).map(map).reduce(fold)
+        let chunk = chunk.max(1);
+        let m = items.len().div_ceil(chunk);
+        let count = self.split.executor().map_or(1, |e| blocks_of(m, 1, e.threads()));
+        let exec = match self.split.executor() {
+            Some(exec) if count > 1 => exec,
+            _ => return items.chunks(chunk).map(map).reduce(fold),
+        };
+        let blocks: Vec<Mutex<Vec<A>>> = (0..count).map(|k| Mutex::new(Vec::with_capacity(block_range(m, k, count).len()))).collect();
+        one_stage(exec, count, &|b| {
+            let mut mapped = blocks[b].try_lock().expect("a block's taker alone has it");
+            mapped.extend(block_range(m, b, count).map(|c| map(&items[c * chunk..((c + 1) * chunk).min(items.len())])));
+        });
+        blocks.into_iter().flat_map(|b| b.into_inner().expect("a finished block")).reduce(fold)
     }
 }
 

@@ -1,6 +1,6 @@
 //! The scheduler's threads, as a resident mod: at load it makes a pool
 //! (pool.rs) on one CCD and installs it as the world's executor, which is
-//! how `Passes`, and `Workers` until get-znt.31, reach threads; at close it
+//! how declared shapes (`Passes`, `ParMap`, `Reduce`) reach threads; at close it
 //! takes it out and joins the threads, while this library is mapped. See
 //! docs/architecture/threads.md.
 //!

@@ -1187,7 +1187,7 @@ mod runner {
 }
 
 /// Host threads running physics's tasks: its solve's passes (`Passes`) and
-/// its broadphase and narrowphase (`Workers`), on the scheduler's threads,
+/// its gathers, broadphase and narrowphase (`ParMap`), on the scheduler's threads,
 /// which the game's `threads` mod installs (docs/architecture/threads.md).
 mod threads {
     use std::path::Path;

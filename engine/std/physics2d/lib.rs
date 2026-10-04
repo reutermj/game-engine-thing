@@ -18,8 +18,8 @@ mod solver;
 use std::time::Instant;
 
 use engine_api::{
-    Adds, AnyOf, Cx, Despawns, Dt, Entity, EventWriter, Live, Mod, OrderKey, Proximity, Query, Removes, Spawner, Systems, With, Without,
-    Workers, export_mod, field_struct, phase,
+    Adds, AnyOf, Cx, Despawns, Dt, Entity, EventWriter, Live, Mod, OrderKey, ParMap, Proximity, Query, Removes, Spawner, Systems, With,
+    Without, export_mod, field_struct, phase,
 };
 use physics_common::{FAT, Slots};
 use physics2d::{
@@ -119,6 +119,17 @@ engine_api::mod_state! {
     }
 }
 
+/// `0..n` in contiguous ranges of at least `min` (fewer, longer ones if
+/// `n` is short), four a thread, one on one thread: the broadphase's and
+/// the narrowphase's chunks, each a block of `ParMap::for_each_mut` with
+/// the lists it fills, made on the system's thread (memory a worker
+/// allocates is its thread's: docs/lore/memory-a-task-allocates-is-its-threads.md).
+/// Results are joined in chunk order, so any cut gives the same step.
+fn chunks(n: usize, min: usize, threads: usize) -> Vec<std::ops::Range<usize>> {
+    let k = if threads == 1 { 1 } else { (n / min).clamp(1, threads * 4) }.min(n.max(1));
+    (0..k).map(|i| n * i / k..n * (i + 1) / k).collect()
+}
+
 fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
@@ -207,7 +218,7 @@ impl Physics {
         &mut self,
         sleep: &mut Sleepers,
         _: &mut Cx,
-        (dt, workers): (Dt, Workers),
+        (dt, map): (Dt, ParMap),
         (mut gravity, mut spun): (Query<&Gravity>, SleepingTurns<'_, '_>),
         mut bodies: Query<(&Body, &mut Velocity), Without<Asleep>>,
         (mut config, mut sleeping, mut marks, mut resting): (
@@ -236,8 +247,8 @@ impl Physics {
             }
             self.move_woken(sleep, &mut sleeping, &mut records, &mut resting);
         }
-        if workers.threads() > 1 {
-            bodies.par_for_each(&workers, |_| (), |_, _, (body, v)| fall(g, dt, body, v));
+        if map.threads() > 1 {
+            bodies.par_for_each(&map, |_| (), |_, _, (body, v)| fall(g, dt, body, v));
         } else {
             bodies.for_each(|_, (body, v)| fall(g, dt, body, v));
         }
@@ -392,12 +403,12 @@ impl Physics {
         (triggers, mut turned): (EventWriter<Trigger>, Turned<'_, '_>),
         // Gravity, for bodies woken here: see `fall_woken`.
         (dt, mut gravity, mut falling, mut records): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>, Records<'_, '_>),
-        (workers, mut near): (Workers, Live<'_, Contacts>),
+        (map, mut near): (ParMap, Live<'_, Contacts>),
     ) {
         let start = Instant::now();
         // Split across threads only while nothing sleeps: waking looks
         // sleeping bodies up as their pairs are found, one at a time.
-        let par = workers.threads() > 1 && asleep.is_empty();
+        let par = map.threads() > 1 && asleep.is_empty();
         let mut items = Vec::with_capacity(moving.len() + held.len() + drifting.len() + statics.len());
         let v = |v: &Velocity| Vec2::new(v.x, v.y);
         if par {
@@ -409,19 +420,17 @@ impl Physics {
             // the gathers several times slower than one thread's.
             let room = |r: std::ops::Range<usize>| Vec::with_capacity(r.len());
             let join = |items: &mut Vec<Item>, parts: Vec<Vec<Item>>| parts.into_iter().for_each(|p| items.extend(p));
-            let parts = moving.par_for_each(&workers, room, |out, row, (p, c, b, u)| {
-                out.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false))
-            });
+            let parts = moving
+                .par_for_each(&map, room, |out, row, (p, c, b, u)| out.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
             join(&mut items, parts);
             let parts =
-                held.par_for_each(&workers, room, |out, row, (p, c, b)| out.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
+                held.par_for_each(&map, room, |out, row, (p, c, b)| out.push(item(row.entity(), p, c, *b, Vec2::ZERO, false, false)));
             join(&mut items, parts);
             let parts = drifting
-                .par_for_each(&workers, room, |out, row, (p, c, u)| out.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
+                .par_for_each(&map, room, |out, row, (p, c, u)| out.push(item(row.entity(), p, c, Body::fixed(), v(u), false, false)));
             join(&mut items, parts);
-            let parts = statics.par_for_each(&workers, room, |out, row, (p, c)| {
-                out.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true))
-            });
+            let parts = statics
+                .par_for_each(&map, room, |out, row, (p, c)| out.push(item(row.entity(), p, c, Body::fixed(), Vec2::ZERO, false, true)));
             join(&mut items, parts);
         } else {
             moving.for_each(|row, (p, c, b, u)| items.push(item(row.entity(), p, c, *b, v(u), b.kind != STATIC, false)));
@@ -451,18 +460,16 @@ impl Physics {
         let gathered = Instant::now();
         // Kept live between steps (`Contacts`): a pile at rest or creeping
         // inside its fat boxes finds its pairs without looking.
-        let near = near.pairs_with(&workers);
+        let near = near.pairs();
         let found_near = Instant::now();
         let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
         if par {
             let slots = &slots;
             let at = |e: Entity| slots.get(e).expect("an awake collider, gathered");
-            let parts = engine_api::engine_ecs::par::even(near.len(), workers.chunks(near.len(), 1024));
-            let parts = parts.into_iter().map(|r| (Vec::with_capacity(r.len()), r)).collect();
-            for part in workers.map_each(parts, |_, (mut out, r): (Vec<(u32, u32)>, _)| {
-                out.extend(near[r].iter().map(|&(a, b)| (at(a), at(b))));
-                out
-            }) {
+            let mut parts: Vec<(Vec<(u32, u32)>, _)> =
+                chunks(near.len(), 1024, map.threads()).into_iter().map(|r| (Vec::with_capacity(r.len()), r)).collect();
+            map.for_each_mut(&mut parts, 1, |_, (out, r)| out.extend(near[r.clone()].iter().map(|&(a, b)| (at(a), at(b)))));
+            for (part, _) in parts {
                 pairs.extend(part);
             }
         } else {
@@ -506,14 +513,15 @@ impl Physics {
         // solve (physics.md, "What the ECS costs").
         if par {
             // Room for a contact per pair, made here (see the gathering).
-            let parts = engine_api::engine_ecs::par::even(pairs.len(), workers.chunks(pairs.len(), 256));
-            let parts = parts.into_iter().map(|r| (Vec::with_capacity(r.len()), Vec::new(), Vec::new(), r)).collect();
-            let tested = workers.map_each(parts, |_, (mut found, mut overlapping, mut points, r)| {
-                pairs[r].iter().map(pair).for_each(|(a, b)| awake(a, b, &mut found, &mut overlapping, &mut points));
-                (found, overlapping, points)
+            let mut tested: Vec<_> = chunks(pairs.len(), 256, map.threads())
+                .into_iter()
+                .map(|r| (Vec::with_capacity(r.len()), Vec::new(), Vec::new(), r))
+                .collect();
+            map.for_each_mut(&mut tested, 1, |_, (found, overlapping, points, r)| {
+                pairs[r.clone()].iter().map(pair).for_each(|(a, b)| awake(a, b, found, overlapping, points));
             });
-            found.reserve_exact(tested.iter().map(|(f, _, _)| f.len()).sum());
-            for (f, o, p) in tested {
+            found.reserve_exact(tested.iter().map(|(f, ..)| f.len()).sum());
+            for (f, o, p, _) in tested {
                 // Each chunk's points after the chunks' before it.
                 let offset = points.len() as u32;
                 found.extend(f.into_iter().map(|f| if f.3 > 0 { (f.0, f.1, f.2, f.3 + offset) } else { f }));
@@ -583,7 +591,7 @@ impl Physics {
             // ids spawns reserve, a single walk's.
             let found = &found;
             let made = |r: std::ops::Range<usize>| Merged { made: Vec::with_capacity(r.len() / 4 + 8), ..Merged::default() };
-            let merged = contacts.par_for_each_ordered_page(&workers, made, |c, page, (pair, mut m, mut r, mut cp)| {
+            let merged = contacts.par_for_each_ordered_page(&map, made, |c, page, (pair, mut m, mut r, mut cp)| {
                 let (m, r) = (m.write_all(), r.write_all());
                 let from = *c.start.get_or_insert_with(|| found.partition_point(|f| key(&f.0) < key(&pair[0])));
                 c.next = c.next.max(from);

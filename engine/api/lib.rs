@@ -38,15 +38,15 @@ pub use engine_ecs::{
     Adds, AnyOf, Bounds, Bundle, ChildOf, Colored, Coloring, ColumnMut, Component, ComponentDesc, Crossing, DefaultFn, Despawns, DropFn,
     Dt, Entity, Event, EventReader, EventWriter, Executor, Extents, FieldDesc, FieldKind, FieldType, Flow, Live, Make, Mut, NearSide,
     OrderKey, Page, ParMap, Pass, Passes, Proximity, Query, Recycle, Reduce, Removes, Row, Scoped, See, Shareable, SpatialKey, Spawner,
-    Stage, States, Storage, Take, With, Without, Workers, World, WorldMut, children_of, component, entity_key, event, field_struct, flow,
-    near_pairs, near_pairs_with, pair_key, pairs_from,
+    Stage, States, Storage, Take, With, Without, World, WorldMut, children_of, component, entity_key, event, field_struct, flow,
+    near_pairs, pair_key, pairs_from,
 };
 #[doc(hidden)]
 pub use service::{__begin_call, __end_call, __serve};
 pub use service::{CallError, CallErrorKind, CallStatus, CallTarget, ErasedFn, MethodDesc, ServiceDesc};
 /// Bumped whenever any type crossing between the loader and a mod changes
 /// shape: this crate's and `engine_ecs`'s.
-pub const API_VERSION: u32 = 34;
+pub const API_VERSION: u32 = 35;
 
 pub const INFO_SYMBOL: &[u8] = b"engine_mod_info\0";
 pub const MAIN_SYMBOL: &[u8] = b"engine_mod_main\0";

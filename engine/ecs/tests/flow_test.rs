@@ -579,6 +579,88 @@ fn a_map_runs_across_the_worlds_threads_every_item_once() {
     }
 }
 
+/// `ParMap::map_into` and `Reduce::reduce` across the world's threads, as
+/// `for_each_mut` is tested: every item (and chunk) mapped once, results
+/// in the items' order and a fold in the chunks', the calling thread among
+/// the takers, on executors whose threads come at once, late, or one after
+/// another; and a call's panic reaches the system.
+#[test]
+fn a_map_into_and_a_reduction_run_across_the_worlds_threads() {
+    let mut executors: Vec<Option<Arc<dyn Executor>>> = vec![None];
+    for n in [1, 2, 3, 4, 8] {
+        executors.push(Some(Arc::new(Scoped(n))));
+        executors.push(Some(Arc::new(Late(n))));
+        executors.push(Some(Arc::new(OneByOne(n))));
+    }
+    // An item takes a while, so threads that come late find blocks taken,
+    // and the calling thread's share shows.
+    let work = || {
+        let t = std::time::Instant::now();
+        while t.elapsed() < std::time::Duration::from_micros(2) {
+            std::hint::spin_loop();
+        }
+    };
+    for executor in executors {
+        let threads = executor.as_ref().map_or(1, |e| e.threads());
+        let w = World::new();
+        w.set_executor(executor);
+        let s = schedule(vec![
+            (move |_: &mut Cx, map: ParMap, reduce: Reduce| {
+                assert_eq!((map.threads(), reduce.threads()), (threads, threads));
+                let me = std::thread::current().id();
+                let n = 1001;
+                let xs: Vec<u64> = (0..n).map(|i| i * 7).collect();
+                let calls: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+                let on = Mutex::new(Vec::new());
+                let mut out = Vec::with_capacity(2000);
+                let before = out.as_ptr();
+                map.map_into(&xs, 8, &mut out, |i, x| {
+                    calls[i].fetch_add(1, Ordering::Relaxed);
+                    on.lock().unwrap().push(std::thread::current().id());
+                    work();
+                    x * 3 + i as u64
+                });
+                assert!(calls.iter().all(|c| c.load(Ordering::Relaxed) == 1), "{threads} threads: every item once");
+                assert!(out.iter().enumerate().all(|(i, x)| *x == i as u64 * 22), "{threads} threads: results in the items' order");
+                assert_eq!(out.len(), n as usize);
+                assert_eq!(out.as_ptr(), before, "{threads} threads: the output's allocation kept");
+                assert!(on.into_inner().unwrap().contains(&me), "{threads} threads: the calling thread takes blocks");
+                let text = panic_text(|| map.map_into(&xs, 8, &mut Vec::new(), |i, _| assert!(i != 700, "item 700")));
+                assert_eq!(text, "item 700");
+
+                // Chunks of 7, the last of 0..1001 short: each mapped once,
+                // folded left to right, which a fold that isn't commutative
+                // shows (a list of each chunk's first item).
+                let mapped: Vec<AtomicU32> = (0..xs.len().div_ceil(7)).map(|_| AtomicU32::new(0)).collect();
+                let on = Mutex::new(Vec::new());
+                let got = reduce.reduce(
+                    &xs,
+                    7,
+                    |c| {
+                        mapped[(c[0] / 7 / 7) as usize].fetch_add(1, Ordering::Relaxed);
+                        on.lock().unwrap().push(std::thread::current().id());
+                        work();
+                        vec![(c[0], c.len())]
+                    },
+                    |mut a, b| {
+                        a.extend(b);
+                        a
+                    },
+                );
+                assert!(mapped.iter().all(|c| c.load(Ordering::Relaxed) == 1), "{threads} threads: every chunk once");
+                let want: Vec<(u64, usize)> = xs.chunks(7).map(|c| (c[0], c.len())).collect();
+                assert_eq!(got, Some(want), "{threads} threads: the chunks folded in order");
+                assert!(on.into_inner().unwrap().contains(&me), "{threads} threads: the calling thread maps chunks");
+                assert_eq!(reduce.reduce(&[] as &[u64], 7, |c| c.len(), |a, b| a + b), None);
+                let text = panic_text(|| assert!(reduce.reduce(&xs, 7, |c| assert!(c[0] != 700 * 7, "chunk 100"), |_, _| ()).is_some()));
+                assert_eq!(text, "chunk 100");
+            })
+            .system(&w, "map"),
+        ]);
+        s.run_sequential(&w);
+    }
+}
+
 /// Threads that start one at a time, each later than the last: a stage's
 /// blocks taken by whoever is there.
 struct Late(usize);

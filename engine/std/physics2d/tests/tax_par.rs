@@ -10,14 +10,18 @@
 //!
 //! The threads are the host's, as they'd be a resident scheduler's: an
 //! executor installed in the world between frames, which the physics mod
-//! reaches through its systems' `Workers`.
+//! reaches through its systems' declared shapes (`ParMap`, `Passes`). The
+//! arrays, which are no mod, split their stages over the same executor
+//! themselves (`Split`).
 
-use std::sync::Arc;
+use std::any::Any;
+use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use engine_ecs::par::{carve, even};
-use engine_ecs::{Executor, Scoped, Workers};
+use engine_ecs::{Executor, Scoped};
 
 use super::arrays::{Cached, DT};
 use super::solver::{Constraint, SolverBody};
@@ -46,6 +50,80 @@ impl Executor for Inline {
     }
 }
 
+/// The arrays' split of a stage over an executor: the ECS's own chunking
+/// (four chunks a thread, each at least `min`), each chunk a task of
+/// `Executor::run`, results in chunk order. The engine's split is
+/// crate-private and claims each thread's share first (`dispatch`); the
+/// arrays take tasks from a shared count, as the engine did before
+/// get-znt.31, which moves no result, only the arrays' time a little.
+#[derive(Clone, Default)]
+struct Split(Option<Arc<dyn Executor>>);
+
+impl Split {
+    fn new(executor: Option<Arc<dyn Executor>>) -> Split {
+        Split(executor)
+    }
+
+    fn threads(&self) -> usize {
+        self.0.as_ref().map_or(1, |e| e.threads())
+    }
+
+    /// `f(0..tasks)`, on the caller's thread in order when there's one task
+    /// or one thread; a task's panic caught on its thread and raised again
+    /// here (an executor is another library's std: threads.md, "Panics").
+    fn run(&self, tasks: usize, f: impl Fn(usize) + Sync) {
+        match &self.0 {
+            Some(e) if tasks > 1 && e.threads() > 1 => {
+                let caught: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
+                e.run(tasks, &|k| {
+                    if let Err(p) = catch_unwind(AssertUnwindSafe(|| f(k))) {
+                        caught.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(p);
+                    }
+                });
+                if let Some(p) = caught.into_inner().unwrap_or_else(PoisonError::into_inner) {
+                    resume_unwind(p);
+                }
+            }
+            _ => (0..tasks).for_each(f),
+        }
+    }
+
+    fn chunks(&self, units: usize, min: usize) -> usize {
+        let threads = self.threads();
+        if threads == 1 {
+            return 1;
+        }
+        (units / min.max(1)).clamp(1, threads * 4)
+    }
+
+    fn map_each<T: Send, R: Send>(&self, items: Vec<T>, f: impl Fn(usize, T) -> R + Sync) -> Vec<R> {
+        let cells: Vec<Mutex<(Option<T>, Option<R>)>> = items.into_iter().map(|t| Mutex::new((Some(t), None))).collect();
+        self.run(cells.len(), |k| {
+            let item = cells[k].lock().unwrap().0.take().expect("run once");
+            let out = f(k, item);
+            cells[k].lock().unwrap().1 = Some(out);
+        });
+        cells.into_iter().map(|c| c.into_inner().unwrap().1.expect("every task ran")).collect()
+    }
+}
+
+/// `0..n` in `chunks` contiguous ranges, as even as can be.
+fn even(n: usize, chunks: usize) -> Vec<Range<usize>> {
+    let chunks = chunks.clamp(1, n.max(1));
+    (0..chunks).map(|k| n * k / chunks..n * (k + 1) / chunks).collect()
+}
+
+/// `slice` cut into consecutive pieces of `lens`.
+fn carve<T>(mut slice: &mut [T], lens: impl IntoIterator<Item = usize>) -> Vec<&mut [T]> {
+    let mut out = Vec::new();
+    for n in lens {
+        let (head, tail) = std::mem::take(&mut slice).split_at_mut(n);
+        out.push(head);
+        slice = tail;
+    }
+    out
+}
+
 fn executor(kind: Kind, threads: usize) -> Arc<dyn Executor> {
     match kind {
         Kind::Pool => {
@@ -71,7 +149,7 @@ fn by_index<'a, T>(slice: &'a mut [T], idx: &[u32], ranges: &[std::ops::Range<us
 /// Pairs split by range of their lesser index, sorted, and joined: the
 /// sort `step` makes of them all, in parallel. Lists are made and freed on
 /// this thread, as everywhere here: see the physics mod's gathering.
-fn sort_pairs(w: &Workers, parts: Vec<Vec<Vec<(u32, u32)>>>) -> Vec<(u32, u32)> {
+fn sort_pairs(w: &Split, parts: Vec<Vec<Vec<(u32, u32)>>>) -> Vec<(u32, u32)> {
     let ranges = parts.first().map_or(0, Vec::len);
     let mut parts: Vec<Vec<Option<Vec<(u32, u32)>>>> = parts.into_iter().map(|p| p.into_iter().map(Some).collect()).collect();
     let by_range: Vec<_> = (0..ranges)
@@ -93,7 +171,7 @@ fn sort_pairs(w: &Workers, parts: Vec<Vec<Vec<(u32, u32)>>>) -> Vec<(u32, u32)> 
 /// with room for its range, joined in order. With `TASK_ALLOC` set, each
 /// task makes its own list instead (filled by one `extend`, so allocated
 /// once): docs/lore/memory-a-task-allocates-is-its-threads.md.
-fn fill<T: Send + Clone>(w: &Workers, n: usize, min: usize, f: impl Fn(std::ops::Range<usize>, &mut Vec<T>) + Sync) -> Vec<T> {
+fn fill<T: Send + Clone>(w: &Split, n: usize, min: usize, f: impl Fn(std::ops::Range<usize>, &mut Vec<T>) + Sync) -> Vec<T> {
     static TASK_ALLOC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let in_task = *TASK_ALLOC.get_or_init(|| std::env::var_os("TASK_ALLOC").is_some());
     let parts: Vec<_> =
@@ -109,7 +187,7 @@ impl Arrays {
     /// `step`, each stage split across `w` as the mod splits it, but for the
     /// insertion sort that keeps the sweep's order, which is one pass that
     /// depends on the one before it.
-    fn step_par(&mut self, t: &mut Stages, w: &Workers) {
+    fn step_par(&mut self, t: &mut Stages, w: &Split) {
         let start = Instant::now();
         let n = self.pos.len();
         let moving_ranges = even(self.moving.len(), w.chunks(self.moving.len(), 512));
@@ -413,7 +491,7 @@ fn measure(manifest: &engine_control::Manifest, (n, width, warmup): (u32, f32, u
     e.send("lockstep", &format!("step {warmup}")).unwrap();
 
     let exec = (threads > 1 || kind == Kind::Inline).then(|| executor(kind, threads));
-    let workers = Workers::new(exec.clone());
+    let workers = Split::new(exec.clone());
     let mut arrays = Arrays::snapshot(e.world());
     let mut t = Stages::default();
     let start = Instant::now();
@@ -495,7 +573,7 @@ fn dispatch(threads: &[usize]) {
     for &n in threads.iter().filter(|&&n| n > 1) {
         let mut cells = Vec::new();
         for kind in [Kind::Pool, Kind::Scoped] {
-            let w = Workers::new(Some(executor(kind, n)));
+            let w = Split::new(Some(executor(kind, n)));
             let runs = if kind == Kind::Pool { 2000 } else { 200 };
             for work in [false, true] {
                 let mut samples = Vec::new();

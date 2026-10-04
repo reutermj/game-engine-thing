@@ -1,30 +1,28 @@
-//! Data parallelism inside a system: work split into tasks that threads
-//! run, with results that don't depend on how many threads there are or
-//! when each finished. The threads belong to whoever made the `Executor`
-//! (the host: a resident scheduler, or a benchmark), never to a mod, so no
-//! mod code is on any worker's stack once the system returns
+//! The threads parallel work runs on, and the engine's own splits over
+//! them. The threads belong to whoever made the `Executor` (the host: the
+//! resident `threads` mod, or a benchmark), never to a mod, so no mod code
+//! is on any worker's stack once the system returns
 //! (docs/architecture/hot-reload.md, "code on the stack can't be swapped").
 //!
-//! A system reaches the executor through its `Workers` parameter, which
-//! declares nothing: tasks only divide what the system's own parameters
-//! already hold. Without an executor installed in the world, everything
-//! runs on the system's thread, in the same order.
+//! A system reaches them only through a declared shape (`ParMap`,
+//! `Reduce`, `Passes`: shape.rs), whose dispatch is `dispatch.rs`'s. The
+//! ECS's own work inside a declared node (a `Live`'s broadphase, a
+//! re-sort's re-bounding) splits through `Split`, crate-private, on the
+//! same dispatch. Without an executor installed in the world, everything
+//! runs on the calling thread, in the same order.
 
-use std::any::Any;
 use std::ops::Range;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-use crate::query::{Declare, FrameCx, Param, ParamDecl};
+use crate::dispatch::{Plan, dispatch};
+use crate::world::World;
 
 /// Runs tasks on threads. `run` returns once every task has, and a task's
-/// panic is re-raised by `run`. The engine's own callers (`Workers::run`,
-/// `Passes::run`) never let a task panic into it: they catch it on the
-/// task's thread and raise it again on theirs, since an executor is
-/// normally another library's code, with another copy of std, whose
-/// `catch_unwind` aborts on a panic from ours
-/// (docs/architecture/threads.md, "Panics").
+/// panic is re-raised by `run`. The engine's own callers (`dispatch`) never
+/// let a task panic into it: they catch it on the task's thread and raise
+/// it again on theirs, since an executor is normally another library's
+/// code, with another copy of std, whose `catch_unwind` aborts on a panic
+/// from ours (docs/architecture/threads.md, "Panics").
 pub trait Executor: Send + Sync {
     /// How many threads run tasks, the caller's included.
     fn threads(&self) -> usize;
@@ -44,10 +42,10 @@ impl Executor for Scoped {
     }
 
     fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
-        let next = AtomicUsize::new(0);
+        let next = std::sync::atomic::AtomicUsize::new(0);
         let work = || {
             loop {
-                let k = next.fetch_add(1, Ordering::Relaxed);
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if k >= tasks {
                     break;
                 }
@@ -68,33 +66,29 @@ impl Executor for Scoped {
     }
 }
 
-/// A system's way to its world's executor, if the world has one: see the
-/// module's docs. Declares nothing, as `Dt` doesn't.
+/// The world's executor where it has more than one thread, for the ECS's
+/// own splits and the shapes': what a node's work is cut into chunks for,
+/// and runs them on.
 #[derive(Clone, Default)]
-pub struct Workers(Option<Arc<dyn Executor>>);
+pub(crate) struct Split(Option<Arc<dyn Executor>>);
 
-impl Workers {
-    pub fn new(executor: Option<Arc<dyn Executor>>) -> Workers {
-        Workers(executor)
+impl Split {
+    pub(crate) fn of(world: &World) -> Split {
+        Split(world.executor().filter(|e| e.threads() > 1))
     }
 
-    pub fn threads(&self) -> usize {
+    pub(crate) fn executor(&self) -> Option<&dyn Executor> {
+        self.0.as_deref()
+    }
+
+    pub(crate) fn threads(&self) -> usize {
         self.0.as_ref().map_or(1, |e| e.threads())
-    }
-
-    /// Runs `f(0..tasks)`, on the caller's thread in order when there's
-    /// one task or one thread, so work too small to split pays no hand-off.
-    pub fn run(&self, tasks: usize, f: impl Fn(usize) + Sync) {
-        match &self.0 {
-            Some(e) if tasks > 1 && e.threads() > 1 => run_caught(&**e, tasks, &f),
-            _ => (0..tasks).for_each(f),
-        }
     }
 
     /// How many chunks to split `units` of work into, each at least `min`:
     /// a few per thread, so a thread that starts late (or a chunk that's
     /// slow) doesn't hold up the rest.
-    pub fn chunks(&self, units: usize, min: usize) -> usize {
+    pub(crate) fn chunks(&self, units: usize, min: usize) -> usize {
         let threads = self.threads();
         if threads == 1 {
             return 1;
@@ -102,39 +96,35 @@ impl Workers {
         (units / min.max(1)).clamp(1, threads * CHUNKS_PER_THREAD)
     }
 
-    /// `f` over contiguous ranges of `0..n`, of at least `min` each, in
-    /// parallel; the results in order of their ranges.
-    pub fn map_ranges<R: Send>(&self, n: usize, min: usize, f: impl Fn(Range<usize>) -> R + Sync) -> Vec<R> {
-        let ranges = even(n, self.chunks(n, min));
-        self.map_each(ranges, |_, r| f(r))
-    }
-
-    /// `f` over each item, in parallel, with the item's own `&mut`; the
-    /// results in the items' order.
-    pub fn map_each<T: Send, R: Send>(&self, items: Vec<T>, f: impl Fn(usize, T) -> R + Sync) -> Vec<R> {
+    /// `f` over each item, with the item's own `&mut`, the results in the
+    /// items' order: an item a block of one stage (`dispatch`), each thread
+    /// taking its own share first. On the caller's thread, in order, when
+    /// there's one item or one thread, so work too small to split pays no
+    /// hand-off.
+    pub(crate) fn map_each<T: Send, R: Send>(&self, items: Vec<T>, f: impl Fn(usize, T) -> R + Sync) -> Vec<R> {
+        let exec = match &self.0 {
+            Some(e) if items.len() > 1 => &**e,
+            _ => return items.into_iter().enumerate().map(|(k, t)| f(k, t)).collect(),
+        };
         let cells: Vec<Mutex<(Option<T>, Option<R>)>> = items.into_iter().map(|t| Mutex::new((Some(t), None))).collect();
-        self.run(cells.len(), |k| {
-            // Each cell is one task's: never contended.
-            let item = cells[k].lock().expect("a task's own cell").0.take().expect("run once");
-            let out = f(k, item);
-            cells[k].lock().expect("a task's own cell").1 = Some(out);
+        one_stage(exec, cells.len(), &|k| {
+            // A cell is its block's: a lock found taken is a dispatch bug.
+            let mut cell = cells[k].try_lock().expect("a block's taker alone has it");
+            let item = cell.0.take().expect("run once");
+            cell.1 = Some(f(k, item));
         });
         cells.into_iter().map(|c| c.into_inner().expect("a finished task").1.expect("every task ran")).collect()
     }
 }
 
-/// `executor.run(tasks, f)`, a task's panic caught on its thread and
-/// raised again on this one, the first if several did (see `Executor`).
-fn run_caught(executor: &dyn Executor, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
-    let caught: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
-    executor.run(tasks, &|k| {
-        if let Err(p) = catch_unwind(AssertUnwindSafe(|| f(k))) {
-            caught.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(p);
-        }
-    });
-    if let Some(p) = caught.into_inner().unwrap_or_else(PoisonError::into_inner) {
-        resume_unwind(p);
-    }
+/// `f(0)` to `f(blocks - 1)` across `exec`'s threads, each once: a plan of
+/// one stage, which is how the shapes' and the ECS's one-step splits run.
+pub(crate) fn one_stage(exec: &dyn Executor, blocks: usize, f: &(dyn Fn(usize) + Sync)) {
+    let mut plan = Plan::default();
+    plan.chain();
+    let mark = plan.marks(blocks);
+    plan.stage(blocks, mark);
+    dispatch(exec, &plan, &|_, b| f(b));
 }
 
 /// Four chunks a thread: at 10 000 bodies, a chunk of a physics walk is
@@ -142,14 +132,14 @@ fn run_caught(executor: &dyn Executor, tasks: usize, f: &(dyn Fn(usize) + Sync))
 const CHUNKS_PER_THREAD: usize = 4;
 
 /// `0..n` in `chunks` contiguous ranges, as even as can be.
-pub fn even(n: usize, chunks: usize) -> Vec<Range<usize>> {
+pub(crate) fn even(n: usize, chunks: usize) -> Vec<Range<usize>> {
     let chunks = chunks.clamp(1, n.max(1));
     (0..chunks).map(|k| n * k / chunks..n * (k + 1) / chunks).collect()
 }
 
 /// Items with weights in at most `chunks` contiguous ranges of about equal
 /// weight, none empty: pages of a query by their rows. No items, no ranges.
-pub fn balanced(weights: &[usize], chunks: usize) -> Vec<Range<usize>> {
+pub(crate) fn balanced(weights: &[usize], chunks: usize) -> Vec<Range<usize>> {
     if weights.is_empty() {
         return Vec::new();
     }
@@ -172,7 +162,7 @@ pub fn balanced(weights: &[usize], chunks: usize) -> Vec<Range<usize>> {
 
 /// `slice` cut into consecutive pieces of `lens`: outputs carved per chunk,
 /// so each task writes its own and nothing is copied together after.
-pub fn carve<T>(mut slice: &mut [T], lens: impl IntoIterator<Item = usize>) -> Vec<&mut [T]> {
+pub(crate) fn carve<T>(mut slice: &mut [T], lens: impl IntoIterator<Item = usize>) -> Vec<&mut [T]> {
     let mut out = Vec::new();
     for n in lens {
         let (head, tail) = std::mem::take(&mut slice).split_at_mut(n);
@@ -180,18 +170,6 @@ pub fn carve<T>(mut slice: &mut [T], lens: impl IntoIterator<Item = usize>) -> V
         slice = tail;
     }
     out
-}
-
-impl Param for Workers {
-    type Item<'w> = Workers;
-
-    fn declare(_: &mut Declare<'_>) -> ParamDecl {
-        ParamDecl::Dt
-    }
-
-    fn fetch<'w>(cx: &FrameCx<'w>, _: &'w ParamDecl) -> Workers {
-        Workers(cx.world.executor())
-    }
 }
 
 #[cfg(test)]
@@ -216,13 +194,19 @@ mod tests {
         }
     }
 
+    fn split(threads: usize) -> Split {
+        Split(Some(Arc::new(Scoped(threads)) as Arc<dyn Executor>).filter(|e| e.threads() > 1))
+    }
+
     #[test]
-    fn scoped_runs_every_task_once() {
+    fn a_split_maps_every_item_once_in_order() {
         for threads in [1, 2, 7] {
-            let w = Workers::new(Some(Arc::new(Scoped(threads))));
-            let out = w.map_ranges(1000, 10, |r| r.clone().sum::<usize>());
-            assert_eq!(out.iter().sum::<usize>(), (0..1000).sum::<usize>());
-            let each = w.map_each((0..50).collect(), |k, t: usize| (k, t * 2));
+            let s = split(threads);
+            let ranges = even(1000, s.chunks(1000, 10));
+            assert_eq!(ranges.len(), if threads == 1 { 1 } else { threads * CHUNKS_PER_THREAD });
+            let sums = s.map_each(ranges, |_, r| r.sum::<usize>());
+            assert_eq!(sums.iter().sum::<usize>(), (0..1000).sum::<usize>());
+            let each = s.map_each((0..50).collect(), |k, t: usize| (k, t * 2));
             assert_eq!(each, (0..50).map(|t| (t, t * 2)).collect::<Vec<_>>());
         }
     }
@@ -230,6 +214,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "task 3")]
     fn a_tasks_panic_reaches_the_caller() {
-        Workers::new(Some(Arc::new(Scoped(4)))).run(8, |k| assert!(k != 3, "task {k}"));
+        split(4).map_each((0..8).collect(), |k, _: usize| assert!(k != 3, "task {k}"));
     }
 }

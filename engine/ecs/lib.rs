@@ -36,10 +36,10 @@ pub use events::{Event, EventReader, EventWriter};
 pub use flows::{Flow, FlowAccess, Make, Pass, Recycle, See, Take};
 pub use live::{AnyOf, Live, Proximity, Tables};
 pub use ordered::{ChildOf, OrderKey, children_of, entity_key, pair_key, pairs_from};
-pub use par::{Executor, Scoped, Workers};
+pub use par::{Executor, Scoped};
 pub use query::{
     Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Data, Declare, Despawns, Dt, Filter, FilterDecl, FrameCx, Log, Mut, NearSide,
-    Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs, near_pairs_with,
+    Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs,
 };
 pub use shape::{Colored, Coloring, ParMap, Passes, Reduce, ShapeKind, Shareable, Stage, States};
 pub use spatial::{Bounds, Extents, SpatialKey};

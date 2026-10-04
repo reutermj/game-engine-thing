@@ -19,7 +19,8 @@ use crate::component::{Component, ComponentDesc, Entity, Storage};
 use crate::erased::ErasedColumn;
 use crate::events::{Event, EventQueue};
 use crate::ordered::OrderKey;
-use crate::par::{Workers, even};
+use crate::par::{Split, even};
+use crate::shape::ParMap;
 use crate::spatial::{Axes, Bounds, Dims, Lanes, PageKind, RUN, SpatialOrder, SpatialPages};
 use crate::world::{ColumnGuard, ComponentId, NewRow, SparseGuard, SparseSet, Structural, Table, TableId, TableRead, TakeGuard, World};
 
@@ -1433,9 +1434,10 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         }
     }
 
-    /// `for_each_page` split across `workers`: the pages, in walk order,
-    /// cut into chunks of about equal rows, each chunk a task that walks
-    /// its pages in order. `make` is called for each chunk, in order, with
+    /// `for_each_page` split across `map`'s threads, the system's declared
+    /// shape: the pages, in walk order, cut into chunks of about equal
+    /// rows, a few a thread, each chunk a block of the map that walks its
+    /// pages in order. `make` is called for each chunk, in order, with
     /// the rows it covers (indices into the walk, as `for_each` counts
     /// them) and makes what its task works on (outputs carved per chunk,
     /// an accumulator); those come back in chunk order. Rows' changes go
@@ -1444,7 +1446,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// With one thread, one chunk on the caller's thread.
     pub fn par_for_each_page<A: Send>(
         &mut self,
-        workers: &Workers,
+        map: &ParMap<'_>,
         make: impl FnMut(std::ops::Range<usize>) -> A,
         f: impl Fn(&mut A, Page<'_>, D::Slices<'_>) + Sync,
     ) -> Vec<A>
@@ -1453,16 +1455,16 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     {
         self.paged();
         let tables = (0..self.rows.len()).collect();
-        self.par_pages(workers, tables, make, f)
+        self.par_pages(map.split(), tables, make, f)
     }
 
-    /// `for_each_ordered_page` split across `workers`, as
+    /// `for_each_ordered_page` split across `map`'s threads, as
     /// `par_for_each_page`: for queries matching at most one ordered table,
     /// whose runs are its pages whole. Rows of one key in two tables would
     /// make runs within pages, and a page can't be two tasks'.
     pub fn par_for_each_ordered_page<A: Send>(
         &mut self,
-        workers: &Workers,
+        map: &ParMap<'_>,
         make: impl FnMut(std::ops::Range<usize>) -> A,
         f: impl Fn(&mut A, Page<'_>, D::Slices<'_>) + Sync,
     ) -> Vec<A>
@@ -1473,10 +1475,10 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         let ordered = |t: &usize| self.rows[*t].ordered.is_some();
         let tables: Vec<usize> = (0..self.rows.len()).filter(ordered).chain((0..self.rows.len()).filter(|t| !ordered(t))).collect();
         assert!(tables.iter().filter(|t| ordered(t)).count() <= 1, "a parallel walk in key order is over one ordered table");
-        self.par_pages(workers, tables, make, f)
+        self.par_pages(map.split(), tables, make, f)
     }
 
-    /// `for_each` split across `workers`, as `par_for_each_page` splits
+    /// `for_each` split across `map`'s threads, as `par_for_each_page` splits
     /// pages: rows in walk order, chunk by chunk, each row's items as
     /// `for_each` hands them. Table components only, and no sparse filters,
     /// as page walks. Where each row is its own work, this rather than a
@@ -1485,7 +1487,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// (`query_bench`, 2026-09-24), and this is `for_each`'s.
     pub fn par_for_each<A: Send>(
         &mut self,
-        workers: &Workers,
+        map: &ParMap<'_>,
         make: impl FnMut(std::ops::Range<usize>) -> A,
         f: impl Fn(&mut A, Row<'_>, D::Items<'_>) + Sync,
     ) -> Vec<A>
@@ -1494,7 +1496,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     {
         self.paged();
         let tables = (0..self.rows.len()).collect();
-        self.par_pages(workers, tables, make, |out, page, mut slices| {
+        self.par_pages(map.split(), tables, make, |out, page, mut slices| {
             let (world, changes, log) = (page.world, page.changes, page.log);
             for (r, &entity) in page.entities.iter().enumerate() {
                 f(out, Row { entity, world, changes, log }, D::items_of(&mut slices, r));
@@ -1506,7 +1508,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
     /// about equal rows, each chunk a run of pages per table it reaches.
     fn par_pages<A: Send>(
         &mut self,
-        workers: &Workers,
+        split: &Split,
         tables: Vec<usize>,
         mut make: impl FnMut(std::ops::Range<usize>) -> A,
         f: impl Fn(&mut A, Page<'_>, D::Slices<'_>) + Sync,
@@ -1522,7 +1524,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
             .flat_map(|&t| (0..rows[t].rows.len()).filter(move |&p| !rows[t].rows[p].is_empty()).map(move |p| (t, p)))
             .collect();
         let weights: Vec<usize> = walk.iter().map(|&(t, p)| rows[t].rows[p].len()).collect();
-        let chunks = crate::par::balanced(&weights, workers.chunks(weights.iter().sum(), PAR_ROWS));
+        let chunks = crate::par::balanced(&weights, split.chunks(weights.iter().sum(), PAR_ROWS));
         // Each table's pages cut where a chunk starts in it, so the runs
         // tile it: empty pages go with the chunk before them, and a table
         // no chunk reaches is one run no chunk takes.
@@ -1568,7 +1570,7 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
                 chunk
             })
             .collect();
-        let done = workers.map_each(tasks, |_, mut chunk| {
+        let done = split.map_each(tasks, |_, mut chunk| {
             for (pages, mut run) in chunk.runs.drain(..) {
                 for (i, entities) in pages.iter().enumerate().filter(|(_, e)| !e.is_empty()) {
                     let page = Page { entities, rows: 0..entities.len(), world, changes, log: &chunk.log };
@@ -1779,6 +1781,9 @@ pub struct SideTable<'a> {
     pub(crate) left: u32,
     /// The table's spatial key: a live relation is one key's.
     pub(crate) key: ComponentId,
+    /// The world the table is in, whose executor the broadphase splits
+    /// across.
+    pub(crate) world: &'a World,
 }
 
 /// A `SideTable` with its order in the broadphase's dimensions.
@@ -1809,7 +1814,8 @@ impl<D: Data, F, C> NearSide for Query<'_, D, F, C> {
             if let Some(order) = &table.spatial {
                 let left = table.table.left.load(std::sync::atomic::Ordering::Relaxed);
                 let key = table.table.spatial.as_ref().expect("a spatial table").key;
-                out.push(SideTable { id: self.table_ids[t], rows: &table.rows, order, filters: &self.filters, left, key });
+                let (id, world) = (self.table_ids[t], self.world);
+                out.push(SideTable { id, rows: &table.rows, order, filters: &self.filters, left, key, world });
             }
         }
     }
@@ -1861,8 +1867,28 @@ near_side_tuple!(A, B, C, D);
 /// pages are met with the active ones through their tables' runs, so a
 /// passive page no active one is near is never looked at. See
 /// docs/architecture/spatial-storage.md.
+///
+/// Across the sides' world's executor, where it has more than one thread:
+/// the sweep in ranges of active pages, the passive side in ranges of its
+/// units, each a task, with the keys each finds already split by range of
+/// lesser index, then each range sorted and turned into entities by a task
+/// of its own. Pairs are unique and sorted, so the result is the one
+/// thread's, bit for bit. Infrastructure inside the caller's node, so it
+/// declares no shape (get-znt.5 is the scheduler seeing it).
 pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) -> Vec<(Entity, Entity)> {
-    near_pairs_with(&Workers::default(), active, passive, grow)
+    let (mut act, mut pas) = (Vec::new(), Vec::new());
+    active.spatial_tables(&mut act);
+    passive.spatial_tables(&mut pas);
+    // Picked once a call: every page and row after is in one dimension's
+    // code. Tables of two dimensions meet nothing of each other's.
+    let dims = act.iter().chain(&pas).map(|t| t.order.dims()).next().unwrap_or(2);
+    assert!(act.iter().chain(&pas).all(|t| t.order.dims() == dims), "a broadphase is over tables of one dimension");
+    // No tables, no pairs, and no world to ask.
+    let split = act.iter().chain(&pas).next().map_or_else(Split::default, |t| Split::of(t.world));
+    match dims {
+        3 => pairs_in::<3>(&split, &act, &pas, grow),
+        _ => pairs_in::<2>(&split, &act, &pas, grow),
+    }
 }
 
 /// An active page as the broadphase sweeps it: its rows, which of them
@@ -2021,26 +2047,7 @@ pub(crate) fn meet_unit<const D: usize>(
     }
 }
 
-/// `near_pairs` split across `workers`: the sweep in ranges of active
-/// pages, the passive side in ranges of its units, each a task, with the
-/// keys each finds already split by range of lesser index, then each
-/// range sorted and turned into entities by a task of its own. Pairs are
-/// unique and sorted, so the result is the one thread's, bit for bit.
-pub fn near_pairs_with(workers: &Workers, active: &impl NearSide, passive: &impl NearSide, grow: f32) -> Vec<(Entity, Entity)> {
-    let (mut act, mut pas) = (Vec::new(), Vec::new());
-    active.spatial_tables(&mut act);
-    passive.spatial_tables(&mut pas);
-    // Picked once a call: every page and row after is in one dimension's
-    // code. Tables of two dimensions meet nothing of each other's.
-    let dims = act.iter().chain(&pas).map(|t| t.order.dims()).next().unwrap_or(2);
-    assert!(act.iter().chain(&pas).all(|t| t.order.dims() == dims), "a broadphase is over tables of one dimension");
-    match dims {
-        3 => pairs_in::<3>(workers, &act, &pas, grow),
-        _ => pairs_in::<2>(workers, &act, &pas, grow),
-    }
-}
-
-fn pairs_in<'a, const D: usize>(workers: &Workers, act: &[SideTable<'a>], pas: &[SideTable<'a>], grow: f32) -> Vec<(Entity, Entity)>
+fn pairs_in<'a, const D: usize>(split: &Split, act: &[SideTable<'a>], pas: &[SideTable<'a>], grow: f32) -> Vec<(Entity, Entity)>
 where
     Axes<D>: Dims<D>,
 {
@@ -2083,7 +2090,7 @@ where
     let units: Vec<(usize, Unit)> = pas.iter().enumerate().flat_map(|(t, table)| Unit::of(table).map(move |u| (t, u))).collect();
     let entity = |generation: &[u32], i: u64| Entity { index: i as u32, generation: generation[i as usize] };
 
-    if workers.threads() == 1 {
+    if split.threads() == 1 {
         let mut keys: Vec<u64> = Vec::new();
         for i in 0..pages.len() {
             sweep(&mut keys, &pages, i, grow);
@@ -2106,23 +2113,23 @@ where
     // Passive rows are noted as found, and a passive index may be past
     // every active one: the ranges cover every index a row has.
     let max = act.iter().chain(&pas).flat_map(|t| t.rows.iter().flatten()).map(|e| e.index as usize + 1).max().unwrap_or(0);
-    let shift = (max.div_ceil(workers.threads() * 2).max(1)).next_power_of_two().trailing_zeros();
+    let shift = (max.div_ceil(split.threads() * 2).max(1)).next_power_of_two().trailing_zeros();
     let ranges = (max >> shift) + 1;
     // Every list a task pushes to is made here, with room for about as
     // many pairs as the pile had rows (two and a half a row, settled): see
     // `SortScratch`. More only costs a task a reallocation.
     let buckets = |rows: usize| Buckets { lists: (0..ranges).map(|_| Vec::with_capacity(rows * 3 / ranges + 8)).collect(), shift, len: 0 };
     let rows_of = |r: &std::ops::Range<usize>| pages[r.clone()].iter().map(|p| p.1.count_ones() as usize).sum::<usize>();
-    let sweeps: Vec<_> = even(pages.len(), workers.chunks(pages.len(), 16)).into_iter().map(|r| (buckets(rows_of(&r)), r)).collect();
-    let swept = workers.map_each(sweeps, |_, (mut keys, r)| {
+    let sweeps: Vec<_> = even(pages.len(), split.chunks(pages.len(), 16)).into_iter().map(|r| (buckets(rows_of(&r)), r)).collect();
+    let swept = split.map_each(sweeps, |_, (mut keys, r)| {
         for i in r {
             sweep(&mut keys, &pages, i, grow);
         }
         keys.lists
     });
     let meets: Vec<_> =
-        even(units.len(), workers.chunks(units.len(), 4)).into_iter().map(|r| (buckets(r.len() * 4), Vec::with_capacity(64), r)).collect();
-    let met = workers.map_each(meets, |_, (mut keys, mut noted, r)| {
+        even(units.len(), split.chunks(units.len(), 4)).into_iter().map(|r| (buckets(r.len() * 4), Vec::with_capacity(64), r)).collect();
+    let met = split.map_each(meets, |_, (mut keys, mut noted, r)| {
         for &(t, unit) in &units[r] {
             meet_unit(&mut keys, &mut |e| noted.push(e), (&pages, widest, grow), &pas[t], unit);
         }
@@ -2145,7 +2152,7 @@ where
             (lists, Vec::with_capacity(n), SortScratch::with_capacity(1 << shift, n))
         })
         .collect();
-    let sorted = workers.map_each(by_range, |r, (lists, mut keys, mut scratch)| {
+    let sorted = split.map_each(by_range, |r, (lists, mut keys, mut scratch)| {
         lists.iter().for_each(|l| keys.extend_from_slice(l));
         let lo = r << shift;
         sort_pair_keys(&mut keys, lo, (lo + (1 << shift)).min(max), &mut scratch);
@@ -2161,7 +2168,7 @@ where
     let pieces: Vec<(&mut [(Entity, Entity)], Vec<u64>)> =
         crate::par::carve(&mut out, sorted.iter().map(Vec::len)).into_iter().zip(sorted).collect();
     let generation = &generation;
-    let freed = workers.map_each(pieces, |_, (piece, keys)| {
+    let freed = split.map_each(pieces, |_, (piece, keys)| {
         for (o, &k) in piece.iter_mut().zip(&keys) {
             *o = (entity(generation, k >> 32), entity(generation, k & 0xffff_ffff));
         }

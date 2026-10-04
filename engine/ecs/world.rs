@@ -454,8 +454,8 @@ pub struct World {
     /// Stamped on values when written: each query, and each write between
     /// frames, takes the next.
     change_tick: AtomicU32,
-    /// The threads systems (`Workers`) and apply nodes split work over:
-    /// the host's, set between frames, so no mod owns a thread.
+    /// The threads systems' declared shapes and the ECS's own work split
+    /// over: the host's, set between frames, so no mod owns a thread.
     executor: RwLock<Option<Arc<dyn Executor>>>,
 }
 
@@ -1300,7 +1300,7 @@ impl Drop for Structural<'_> {
                 desc,
                 entities: &world.entities,
                 now: world.current_tick(),
-                workers: crate::par::Workers::new(world.executor()),
+                split: crate::par::Split::of(world),
             });
         }
     }

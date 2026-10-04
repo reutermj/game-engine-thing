@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule, SystemDecl};
-use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Executor, Query, Scoped, SpatialKey, With, Without, Workers, World, component};
+use engine_ecs::{Bounds, Build, ComponentDesc, Entity, Executor, Query, Scoped, SpatialKey, With, Without, World, component};
 
 component! {
     /// A spatial key: its tables are kept in spatial order.
@@ -748,12 +748,8 @@ fn brute_pairs_of_any(w: &World, grow: f32, keep: impl Fn(Entity, Entity) -> boo
     brute_pairs(w, grow).into_iter().filter(|&(a, b)| keep(a, b)).collect()
 }
 
-fn scoped(n: usize) -> Workers {
-    Workers::new(Some(Arc::new(Scoped(n)) as Arc<dyn Executor>))
-}
-
-/// `near_pairs_with` split across threads finds exactly what one thread
-/// does, on the sides of `pairs_between_sides_agree_with_brute_force` (a
+/// `near_pairs` split across the world's threads finds exactly what one
+/// thread does, on the sides of `pairs_between_sides_agree_with_brute_force` (a
 /// table on both sides, sparse filters, reused indices) and a dense block,
 /// over enough rows that the sweep, the passive side and the sort all
 /// split; one thread's is checked against brute force.
@@ -787,28 +783,30 @@ fn pairs_split_across_threads_are_one_threads() {
         (unmarked, marked): (Query<&At, Without<Mark>>, Query<&At, With<Mark>>),
         (all, tagged_marked): (Query<&At>, Query<&At, (With<Tag>, With<Mark>)>),
     ) {
-        let cases = |w: &Workers| {
-            [
-                engine_ecs::near_pairs_with(w, &untagged, &tagged, 0.05),
-                engine_ecs::near_pairs_with(w, &unmarked, &marked, 0.05),
-                engine_ecs::near_pairs_with(w, &untagged, &tagged_marked, 0.05),
-                engine_ecs::near_pairs_with(w, &(&untagged, &tagged), &all, 0.05),
-                engine_ecs::near_pairs_with(w, &all, &(), 0.05),
-            ]
-        };
-        let one = cases(&Workers::default());
+        *CASES.lock().unwrap() = vec![
+            engine_ecs::near_pairs(&untagged, &tagged, 0.05),
+            engine_ecs::near_pairs(&unmarked, &marked, 0.05),
+            engine_ecs::near_pairs(&untagged, &tagged_marked, 0.05),
+            engine_ecs::near_pairs(&(&untagged, &tagged), &all, 0.05),
+            engine_ecs::near_pairs(&all, &(), 0.05),
+        ];
+    }
+    static CASES: Mutex<Vec<Vec<(Entity, Entity)>>> = Mutex::new(Vec::new());
+    let (moves, s) = (Schedule { systems: vec![mover.system(&w, "mover")] }, Schedule { systems: vec![sides.system(&w, "sides")] });
+    for _ in 0..4 {
+        w.set_executor(None);
+        moves.run_sequential(&w);
+        s.run_sequential(&w);
+        let one = std::mem::take(&mut *CASES.lock().unwrap());
         for n in [2, 3, 8, 16] {
-            let split = cases(&scoped(n));
+            w.set_executor(Some(Arc::new(Scoped(n))));
+            s.run_sequential(&w);
+            let split = std::mem::take(&mut *CASES.lock().unwrap());
             for (k, (got, want)) in split.iter().zip(&one).enumerate() {
                 assert!(got == want, "case {k} at {n} threads: {} pairs against {}", got.len(), want.len());
             }
         }
-        *PAIRS.lock().unwrap() = one[4].clone();
-    }
-    let s = Schedule { systems: vec![mover.system(&w, "mover"), sides.system(&w, "sides")] };
-    for _ in 0..4 {
-        s.run_sequential(&w);
-        let got = PAIRS.lock().unwrap().clone();
+        let got = one[4].clone();
         assert!(got.len() > 3000, "{} pairs", got.len());
         assert_eq!(got, brute_pairs(&w, 0.05));
     }

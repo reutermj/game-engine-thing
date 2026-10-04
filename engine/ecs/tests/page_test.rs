@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
 use engine_ecs::{
-    Bounds, Build, Despawns, Entity, Executor, OrderKey, Query, Scoped, SpatialKey, With, Without, Workers, World, WorldMut, component,
+    Bounds, Build, Despawns, Entity, Executor, OrderKey, ParMap, Query, Scoped, SpatialKey, With, Without, World, WorldMut, component,
 };
 
 component! {
@@ -461,21 +461,17 @@ fn rows_arriving_are_written_and_rows_leaving_are_seen_to_have_left() {
     assert_eq!(changed_now(), (want, [false; 4]), "all of it older than the `now`");
 }
 
-/// Executors for the parallel walks: one thread, then threads spawned per
-/// run, so tasks really run at once and finish in any order.
-fn executors() -> Vec<Workers> {
-    let mut all = vec![Workers::default()];
-    all.extend([2, 3, 8].map(|n| Workers::new(Some(Arc::new(Scoped(n)) as Arc<dyn Executor>))));
+/// The world's executors for the parallel walks, which reach them through
+/// the systems' `ParMap`: none, then threads spawned per run, so tasks
+/// really run at once and finish in any order.
+fn executors() -> Vec<Option<Arc<dyn Executor>>> {
+    let mut all = vec![None];
+    all.extend([2, 3, 8].map(|n| Some(Arc::new(Scoped(n)) as Arc<dyn Executor>)));
     all
 }
 
-static WORKERS: Mutex<Option<Workers>> = Mutex::new(None);
 type Chunks = Vec<(std::ops::Range<usize>, Vec<(Entity, u64)>)>;
 static CHUNKS: Mutex<Chunks> = Mutex::new(Vec::new());
-
-fn workers() -> Workers {
-    WORKERS.lock().unwrap().clone().expect("an executor")
-}
 
 /// `par_for_each_page` is `for_each_page` in chunks: each chunk's rows are
 /// the walk's next ones, in order, and the range `make` got says which;
@@ -493,9 +489,9 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
     for mut seed in [10, 20, 30] {
         populate(&w, &mut seed);
     }
-    fn split(_: &mut Cx, mut q: Query<&Val>) {
+    fn split(_: &mut Cx, mut q: Query<&Val>, map: ParMap) {
         let chunks = q.par_for_each_page(
-            &workers(),
+            &map,
             |r| (r, Vec::new()),
             |(_, seen), page, v| {
                 seen.extend(page.rows().map(|r| (page.entity(r), v[r].n)));
@@ -503,9 +499,9 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
         );
         *CHUNKS.lock().unwrap() = chunks;
     }
-    fn split_ordered(_: &mut Cx, mut q: Query<(&Val, &Rank), Without<Tag>>) {
+    fn split_ordered(_: &mut Cx, mut q: Query<(&Val, &Rank), Without<Tag>>, map: ParMap) {
         let chunks = q.par_for_each_ordered_page(
-            &workers(),
+            &map,
             |r| (r, Vec::new()),
             |(_, seen), page, (_, rank)| {
                 seen.extend(page.rows().map(|r| (page.entity(r), rank[r].n as u64)));
@@ -527,8 +523,9 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
     let ordered = take_seen();
     let ranked = w.tables().filter(|t| t.ordered.is_some() && !t.is_empty()).count();
     assert!(ranked >= 2 && ordered.len() < whole.len(), "tables ordered or not, and some the ordered walk leaves out");
-    for (i, workers) in executors().into_iter().enumerate() {
-        *WORKERS.lock().unwrap() = Some(workers.clone());
+    for (i, executor) in executors().into_iter().enumerate() {
+        let threads = executor.as_ref().map_or(1, |e| e.threads());
+        w.set_executor(executor);
         for (ordered_walk, want) in [(false, &whole), (true, &ordered)] {
             if ordered_walk {
                 run(&w, split_ordered, "split_ordered");
@@ -536,7 +533,7 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
                 run(&w, split, "split");
             }
             let chunks = std::mem::take(&mut *CHUNKS.lock().unwrap());
-            assert_eq!(chunks.len() > 1, i > 0, "{} chunks at {} threads", chunks.len(), workers.threads());
+            assert_eq!(chunks.len() > 1, i > 0, "{} chunks at {threads} threads", chunks.len());
             let mut at = 0;
             for (range, seen) in &chunks {
                 assert!(!seen.is_empty(), "no chunk is empty");
@@ -544,7 +541,7 @@ fn a_parallel_page_walk_is_the_page_walk_in_chunks() {
                 at = range.end;
             }
             let joined: Vec<(Entity, u64)> = chunks.into_iter().flat_map(|(_, seen)| seen).collect();
-            assert_eq!(joined, *want, "the walk's rows, in its order, at {} threads", workers.threads());
+            assert_eq!(joined, *want, "the walk's rows, in its order, at {threads} threads");
         }
     }
 }
@@ -560,9 +557,9 @@ fn a_parallel_walk_writes_and_changes_what_one_thread_does() {
     fn mark(_: &mut Cx, q: Query<&Val>) {
         *SINCE.lock().unwrap() = q.now();
     }
-    fn change(_: &mut Cx, mut q: Query<&mut Val, (), Despawns>) {
+    fn change(_: &mut Cx, mut q: Query<&mut Val, (), Despawns>, map: ParMap) {
         q.par_for_each_page(
-            &workers(),
+            &map,
             |_| (),
             |_, page, mut v| {
                 for r in page.rows() {
@@ -586,9 +583,9 @@ fn a_parallel_walk_writes_and_changes_what_one_thread_does() {
         q.for_each_written(since, |row, v| seen.push((row.entity(), v.n)));
     }
     let mut outcomes = Vec::new();
-    for workers in executors() {
-        *WORKERS.lock().unwrap() = Some(workers);
+    for executor in executors() {
         let w = World::new();
+        w.set_executor(executor);
         populate(&w, &mut 11);
         run(&w, mark, "mark");
         run(&w, change, "change");
@@ -614,9 +611,9 @@ fn a_parallel_walk_in_key_order_refuses_two_ordered_tables() {
     let _s = serial();
     let w = World::new();
     populate(&w, &mut 12);
-    *WORKERS.lock().unwrap() = Some(Workers::new(Some(Arc::new(Scoped(2)))));
-    fn walk(_: &mut Cx, mut q: Query<(&Val, &Rank)>) {
-        q.par_for_each_ordered_page(&workers(), |_| (), |_, _, _| {});
+    w.set_executor(Some(Arc::new(Scoped(2))));
+    fn walk(_: &mut Cx, mut q: Query<(&Val, &Rank)>, map: ParMap) {
+        q.par_for_each_ordered_page(&map, |_| (), |_, _, _| {});
     }
     run(&w, walk, "walk");
 }

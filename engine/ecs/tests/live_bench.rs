@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use engine_ecs::harness::{Cx, IntoSystem, Schedule};
 use engine_ecs::live::{LivePairs, LiveStats};
-use engine_ecs::{AnyOf, Bounds, Build, Live, Proximity, Query, SpatialKey, With, Workers, World, component, near_pairs};
+use engine_ecs::{AnyOf, Bounds, Build, Live, Proximity, Query, SpatialKey, With, World, component, near_pairs};
 
 component! {
     #[derive(Debug, Default, PartialEq, Copy)]
@@ -105,7 +105,7 @@ fn both<R: Proximity>(now: u32, q: &impl engine_ecs::NearSide, live: &mut Live<'
     let kept = kept.as_mut().expect("made before the frames");
     let t = Instant::now();
     let (margin, most) = *HOW.lock().unwrap();
-    let pairs = kept.near_pairs(now, &Workers::default(), (q, &()), (0.05, margin, most));
+    let pairs = kept.near_pairs(now, (q, &()), (0.05, margin, most));
     let k = t.elapsed().as_nanos();
     let n = pairs.len();
     // What handing the pairs out as a `Vec`, as `near_pairs` does, would add.
