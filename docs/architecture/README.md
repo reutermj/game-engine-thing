@@ -27,8 +27,8 @@ monolithic design doc.
   other: contacts, colliders and hierarchy, measured
 - [presentation.md](presentation.md) — rendering, input and AI
   playtesting as mods: games describe and presenters draw (window, CPU
-  pixels, text, data), input as actions, one agent interface, rendering
-  pipelined with the next frame (sketch)
+  pixels, text, data), input as declared actions, one agent interface,
+  every session recorded and reviewable, and the milestones (proposal)
 - [playtesting-research.md](playtesting-research.md) — decision models
   and AI playtesting, surveyed with sources: what LLM agents, search and
   per-game RL, and pixel-to-action game models need from a game, and what
