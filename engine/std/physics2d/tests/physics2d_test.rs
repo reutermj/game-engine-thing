@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use engine_loader::engine::Engine;
-use physics2d::{Asleep, Body, Collider, ContactPair, DYNAMIC, Overlap, Position, Resting, Slept, Still, Touching, Velocity};
+use physics2d::{Asleep, Body, Collider, Contact, ContactPair, DYNAMIC, Overlap, Position, Resting, Slept, Still, Touching, Velocity};
 use runfiles::Runfiles;
 
 fn path(var: &str) -> PathBuf {
@@ -190,7 +190,7 @@ mod pile {
 
     /// When each entity's `component` was last written, by entity: what
     /// change detection sees.
-    fn ticks(e: &Engine, component: &str) -> Vec<(u32, u32, u32)> {
+    pub(super) fn ticks(e: &Engine, component: &str) -> Vec<(u32, u32, u32)> {
         let w = e.world();
         let mut all = Vec::new();
         for t in w.tables() {
@@ -1350,7 +1350,7 @@ mod threads {
     /// checks the plain pile at 10 000 bodies, this in every test run.
     #[test]
     fn a_pile_on_four_threads_lands_where_it_does_on_one() {
-        on_four_threads_as_on_one("drop 600 staggered", "");
+        on_four_threads_as_on_one("drop 600 staggered", "", None);
     }
 
     /// The same with every body turning, on threads kept between steps (the
@@ -1360,10 +1360,29 @@ mod threads {
     /// across threads to the arrays' solve on one.
     #[test]
     fn a_turning_pile_on_four_threads_lands_where_it_does_on_one() {
-        on_four_threads_as_on_one("drop 600 staggered turning", "_turning");
+        on_four_threads_as_on_one("drop 600 staggered turning", "_turning", None);
     }
 
-    fn on_four_threads_as_on_one(drop: &str, name: &str) {
+    /// The same falling asleep: the links the write-back collects across
+    /// threads make the islands that sleep.
+    #[test]
+    fn a_turning_pile_on_four_threads_falls_asleep_as_on_one() {
+        on_four_threads_as_on_one("drop 600 staggered turning", "_asleep", Some(450));
+    }
+
+    /// What the step wrote, as change detection sees it: when each row of
+    /// each component the solve writes back was last written. A row
+    /// written that didn't change shows as a later tick.
+    fn written(e: &Engine) -> Vec<Vec<(u32, u32, u32)>> {
+        let names = ["Position", "Velocity", "Rotation", "Spin", "Manifold", "Impulse", "ContactPoints", "Touching"];
+        names.iter().map(|n| super::pile::ticks(e, &format!("physics2d::{n}"))).collect()
+    }
+
+    /// The pile on four threads, as on one: where every body is, the
+    /// contacts and overlaps, the sides touched, the ticks each row was
+    /// last written at, every step's `Contact` events in their order, and
+    /// with sleeping on (stepping `sleep` steps), the islands asleep.
+    fn on_four_threads_as_on_one(drop: &str, name: &str, sleep: Option<u32>) {
         let run = |executor: Option<Arc<dyn Executor>>, test: &str| {
             let e = game("PILE", &format!("{test}{name}"));
             e.world().set_executor(executor);
@@ -1371,8 +1390,22 @@ mod threads {
             send(&e, "pile", drop);
             send(&e, "pile", "sensing");
             send(&e, "pile", "touching");
-            step(&e, 200);
+            if sleep.is_some() {
+                send(&e, "pile", "sleep default");
+            }
+            let mut began = Vec::new();
+            let mut next = 0;
+            for _ in 0..sleep.unwrap_or(200) {
+                step(&e, 1);
+                let (events, _) = e.world().events_of::<Contact>().unwrap();
+                let new: Vec<_> = events.into_iter().filter(|(seq, ..)| *seq >= next).collect();
+                next = new.last().map_or(next, |(seq, ..)| seq + 1);
+                began.extend(new.into_iter().map(|(seq, _, c)| (seq, c.a, c.b, c.nx.to_bits(), c.ny.to_bits(), c.speed.to_bits())));
+            }
             let w = e.world();
+            let mut asleep: Vec<_> = w.values::<Slept>().unwrap().into_iter().map(|(en, s)| (en, s.island)).collect();
+            asleep.sort_unstable();
+            let ticks = written(&e);
             let mut all: Vec<_> = w.values::<Position>().unwrap().into_iter().map(|(en, p)| (en, p.x.to_bits(), p.y.to_bits())).collect();
             all.sort_unstable();
             let mut contacts: Vec<_> = w.values::<ContactPair>().unwrap().into_iter().map(|(en, p)| (en, p.a, p.b)).collect();
@@ -1382,15 +1415,24 @@ mod threads {
             let mut touching: Vec<_> =
                 w.values::<Touching>().unwrap().into_iter().map(|(en, t)| (en, [t.below, t.above, t.left, t.right])).collect();
             touching.sort_unstable();
-            (all, contacts, overlaps, touching)
+            ((all, contacts, overlaps, touching), (began, ticks, asleep))
         };
-        let one = run(None, "one_thread");
+        let (one, more) = run(None, "one_thread");
         assert!(one.1.len() > 700, "{} contacts: a pile", one.1.len());
         assert!(one.2.len() > 500 && one.3.iter().filter(|t| t.1[0]).count() > 400, "overlaps, and bodies standing on something");
+        assert!(more.0.len() > 700, "{} contacts began: the pile landing", more.0.len());
+        if sleep.is_some() {
+            assert!(more.2.len() > 300, "{} asleep: islands fell asleep", more.2.len());
+        }
         let kept: Arc<dyn Executor> = Arc::new(pool(4));
-        for (four, how) in [(run(Some(kept), "four_threads"), "kept"), (run(Some(Arc::new(Scoped(4))), "four_spawned"), "spawned")] {
+        for ((four, four_more), how) in
+            [(run(Some(kept), "four_threads"), "kept"), (run(Some(Arc::new(Scoped(4))), "four_spawned"), "spawned")]
+        {
             assert!(one.0 == four.0 && one.1 == four.1, "{how}: the same bodies where they were, and the same contacts, entities and all");
             assert!(one.2 == four.2 && one.3 == four.3, "{how}: the same overlaps, and sides touched");
+            assert!(more.0 == four_more.0, "{how}: the same contacts began, in the same order");
+            assert!(more.1 == four_more.1, "{how}: the same rows written, at the same ticks");
+            assert!(more.2 == four_more.2, "{how}: the same bodies asleep, in the same islands");
         }
     }
 }
