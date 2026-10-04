@@ -36,8 +36,9 @@ prior art from the fetched sources where we have them.
   recycling), 2D's locked path must stay bit for bit for the games'
   replays, and one interface built twice would put every 3D experiment
   into the build and reload of every 2D game. Revisit a generic kernel
-  once 3D solves in lanes too, when the two can be compared shape for
-  shape.
+  by comparing the two lanes kernels shape for shape: 3D solves in lanes
+  since get-emj.52, and that comparison hasn't been made ("Later: the
+  kernels").
 
 ## Parity, 2D against 3D
 
@@ -51,9 +52,9 @@ with this doc.
 | rotation | `Rotation` (cos, sin) and `Spin`; first order, normalized every substep; no cap on a step's turn | `Rotation` (quaternion) and `AngularVelocity`; first order, normalized every substep (variants: once, exact); at most π/4 (`MAX_ROTATION`) a step | same rule, 3D caps the turn | – |
 | inertia | a box's `m (w² + h²) / 12`, a disc's `m r² / 2`, a scalar | a diagonal about the body's axes, turned to a world `Mat3` once a step | per dimension | – |
 | statics | a collider without `Body` and `Velocity` (or `STATIC`) | a `Static` marker | no | – |
-| **broadphase** | `Live<Contacts>`, `FAT` 0.02, sides by `AnyOf` (awake with or without body or velocity, against statics and sleepers), pairs across workers | `Live<Contacts>`, `FAT` 0.02, moving against `Static`, one thread | same relation, 3D's sides simpler; `FAT` shared (`physics_common`) | – |
+| **broadphase** | `Live<Contacts>`, `FAT` 0.02, sides by `AnyOf` (awake with or without body or velocity, against statics and sleepers); pairs found afresh across the world's threads (`near_pairs`, the ECS's own split) | `Live<Contacts>`, `FAT` 0.02, moving against `Static`; found afresh across the world's threads, as 2D's | same relation and the same split, 3D's sides simpler; `FAT` shared (`physics_common`) | – |
 | bounds | `(Collider, Rotation)` extents | `(Collider, Rotation)` extents, the box as turned | same | – |
-| **narrowphase** | unturned pairs: the old tests, no points (the tile-seam rule is box against box by relative velocity); turned: SAT over both boxes' faces and clipping, up to 2 points, `u16` feature ids | SAT over 15 axes with the last step's axis tried first, clipping, reduced to 4 (Box3D's area rule), `u32` ids; GJK/EPA as a variant; across the scheduler's threads in chunks of pairs (`ParMap`), as 2D's, with the gathers and the merge (get-emj.101) | same family, per dimension; 3D caches its axis | – |
+| **narrowphase** | unturned pairs: the old tests, no points (the tile-seam rule is box against box by relative velocity); turned: SAT over both boxes' faces and clipping, up to 2 points, `u16` feature ids; across the world's threads in chunks of pairs (`ParMap`, `chunks`), with the colliders' gathers and the merge with the world | SAT over 15 axes with the last step's axis tried first, clipping, reduced to 4 (Box3D's area rule), `u32` ids; GJK/EPA as a variant; across the world's threads in chunks of pairs (`ParMap`), as 2D's, with the gathers and the merge (get-emj.101) | same family and the same split, per dimension; 3D caches its axis; each mod has its own `chunks` (get-emj.110) | – |
 | manifold storage | `Manifold` (normal, depth, pressed, was pressed) and `ContactPoints` apart, written only where there are points | points inline in `Manifold` (40 words), with the rotations and move for recycling | no, each measured | – |
 | contact recycling | none: every pair found every step | box pairs carried while they move under 0.03 (Box3D's), halving the narrowphase on piles | 3D only | get-emj.44 |
 | speculative contacts | within `MARGIN` 0.05, a gap may close in a substep and no more | the same | same, `MARGIN` shared (`physics_common`) | – |
@@ -62,9 +63,12 @@ with this doc.
 | friction | per point, in the relaxing passes only, clamped by the point's normal impulse | per contact at the points' centroid, clamped to a disc, and twist about the normal, relaxing passes only | no | – |
 | friction mixing | the smaller of the two | `sqrt(a b)` (Box2D's and Box3D's; Rapier averages) | **no, and not decided**; restitution the larger in both; neither in `physics_common` until get-emj.81 decides | get-emj.81 |
 | warm-start carry | turning points: normal from the last substep, tangent averaged (`Carry::Normal`, decided get-emj.61); a contact whose ends don't turn: the mean | the mean of both (`Carry::Mean`); `Last` and `Normal` (B, but for every contact, where 2D's keeps the mean where nothing turns) variants, measured in get-emj.90: B rests pyramids soonest and costs piles bounds | **no**: B as 2D has it not built in 3D | get-emj.82, get-emj.97 |
-| warm-start matching | by feature id (`ContactPoints::last`, in the interface) | by feature id (`lib.rs`, `warm`); nearest point within 1 cm a variant | same, not shared: 2D's is a method of an interface component, which can't use `physics_common` | get-emj.91 |
-| order, lanes, threads | turning: Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy` and `pack`, in the mod and the arrays alike since get-emj.86; `Passes` running the program), four lanes of `physics_common::lanes::F`, across the host's threads bit for bit (`solve_across`, the arrays' reference); by level a variant; locked: one contact at a time in pair order | Box2D's colors (`Coloring::greedy`, `Coloring::pack`, `Passes` running the program), the default since 2026-10-03 (get-emj.90, ahead of threads), four lanes of `physics_common::lanes::F`; by level (`physics_common::levels`, the sweep in pair order bit for bit, the default from get-emj.52 to get-emj.90) a variant (`order=levels`); every `Tuning` in lanes; one contact at a time where batches would be under half full, or a body that doesn't move carries a `-0.0`; `lanes=8,1,0` variants; one thread | the lane array, the levels, the coloring and the packing shared, the kernels not (2D's per point and two points, 3D's a disc, a twist and four); the default order the same now (colors), but for 2D's locked contacts | get-emj.96, get-emj.75, get-emj.74 |
+| warm-start matching | by feature id (`ContactPoints::last`, in the interface); by nearest point a variant of the arrays (`Warm::Nearest`, `Warm::Either`, `tests/arrays.rs`) | by feature id (`lib.rs`, `warm`); nearest point within 1 cm a variant (`warm=nearest`) | same, not shared: 2D's is a method of an interface component, which can't use `physics_common` | get-emj.91 |
+| order, lanes, threads | turning: Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy` and `pack`, in the mod and the arrays alike since get-emj.86), four lanes of `physics_common::lanes::F`, the passes a `Passes` program across the world's threads bit for bit (quality_test's `the_mod_across_threads_is_the_arrays_bit_for_bit`); on one thread (`Passes::serial`) where a body that doesn't move carries a `-0.0` (`staged::shareable`, get-znt.39); by level a variant; locked: one contact at a time in pair order, in `finish` | Box2D's colors (`Coloring::greedy`, `Coloring::pack`), the default since 2026-10-03 (get-emj.90), four lanes of `physics_common::lanes::F`, the passes a `Passes` program across the world's threads (get-znt.34); by level (`physics_common::levels`, the sweep in pair order bit for bit, the default from get-emj.52 to get-emj.90) a variant (`order=levels`); every `Tuning` in lanes; one contact at a time (`in_order`, in `finish`) where batches would be under half full, or a body that doesn't move carries a `-0.0`, an infinity or a NaN (3D's `shareable`); `lanes=8,1,0` variants | the lane array, the levels, the coloring, the packing and the dispatch shared, the kernels not (2D's per point and two points, 3D's a disc, a twist and four); the default order the same (colors), but for 2D's locked contacts; the rule for a step the lanes can't share differs (2D keeps the lanes on one thread and rejects only `-0.0`, 3D leaves the lanes) | get-emj.96, get-emj.74, get-emj.116 |
+| contacts with no moving body | set aside by the coloring (`UNSOLVED`), solved after every color, outside the batches | folded into group 0 with the rest | no, and not decided | get-emj.116 |
 | the solve's systems (since 2026-10-02) | a pipeline of nine systems over five [flows](flows.md) (`pipeline.rs`), the colored passes on `Passes` | a pipeline of eight systems over four flows (`pipeline.rs`), the passes on `Passes` since get-emj.90, by level or colored | same shape: settings, gathers, prepare, passes, finish, scatters; each its own `Step` (3D's has the refresh and the sums) | get-znt.33, get-znt.35, get-emj.90 |
+| the world walks around the solve | gravity (`integrate_velocities`), the gathers and both scatters walk the world as `ParMap` page walks, each chunk its own part of the output (the contacts' gather and both write-backs, get-emj.103 to get-emj.105; gravity's and the colliders' gathers' splits measured no gain, get-emj.106) | gravity, the gathers and the scatters walk it on one thread; the colliders' gather for the narrowphase is a `ParMap` walk (`find_contacts`) | no: 2D's split, 3D's not (threads.md, "The whole step, stage by stage") | get-emj.106 |
+| the write-back (`finish`) | lanes: a `ParMap` over parts, four a thread (`staged::parts`); locked: `solve_with`, on one thread | lanes: a `ParMap` over parts, four a thread (`solver::parts`), as 2D's; else `in_order` or `solve`, on one thread | same (get-znt.45) | – |
 | block solver | a variant (2x2 over a contact's two points) | none | 2D only, a variant | – |
 | **sleeping, islands** | islands by union-find over pressed contacts; `Asleep`, `Slept`, `Still`, `Resting` in the world; every wake a game can cause | none | 2D only | get-emj.77 (new) |
 | **sensors, layers, overlaps** | `layer`, `mask`, `senses`, `sensor`; `Overlap` entities | none: every pair collides | 2D only | get-emj.78 (new) |
@@ -74,8 +78,8 @@ with this doc.
 | **locking rotation** | by absence: no `Spin`, and no `Rotation`, takes the no-points path (a `Rotation` on every locked body cost 11-32%) | by zero inverse inertia; every body has a `Rotation` and pays for points (a locked 10 000 box pile 29 ms, where translation only took 4.9) | no | get-emj.80 (new) |
 | kinematic bodies | `KINEMATIC`: moved by velocity, never pushed, wakes what it pushes | none | 2D only | get-emj.79 (new) |
 | game surface | `Touching`, `gravity_scale`, `Spatial` queries (overlapping, any_at, cast) | none | 2D only | get-emj.79 (new) |
-| **reload coverage** | the games' replays (nothing turns), one v1 to v2 swap under a locked pile, the sleeping reload tests; nothing reloads the turning, colored, threaded path | a turning pile replayed bit for bit while physics3d, the scene and the scheduler reload every frame | 3D's is stronger | get-emj.83 (new) |
-| **tests** | 39 unit, 54 in the engine and on spatial queries, 36 quality and 51 behaviour against Box2D and Rapier, a baseline, equivalence of lanes, colors and threads bit for bit | 27 unit, 14 in the engine (reload included), 17 quality and 24 behaviour against Rapier, Jolt and Box3D, a baseline, an exact fingerprint, equivalence of the lanes bit for bit | same kinds; the harnesses share `physics_testkit` | – |
+| **reload coverage** | the games' replays (nothing turns), one v1 to v2 swap under a locked pile, the sleeping reload tests, and one v1 to v2 swap of a turning, colored 600-body pile under the pool at four threads, bit for bit the swap on one (`reloading_physics_under_the_pool_is_reloading_it_on_one_thread`); no replay reloads the turning path every frame | a turning pile replayed bit for bit while physics3d, the scene and the scheduler reload every frame | 3D's is stronger | get-emj.83 (the every-frame replay) |
+| **tests**[^tests] | 39 unit in the mod's sources and 7 in `core_test`, 50 in the engine and on spatial queries, 37 quality and 51 behaviour against Box2D and Rapier (the long suites included), a baseline, equivalence of lanes, colors and threads bit for bit | 28 unit, 16 in the engine (reload included), 8 exact, 22 quality and 24 behaviour against Rapier, Jolt and Box3D (the long suites included), a baseline, an exact fingerprint, equivalence of the lanes and of the shared states bit for bit, and of the narrowphase across threads | same kinds; the harnesses share `physics_testkit` | – |
 
 **Where the two differ on purpose, with a measurement behind it:** the
 stiffness, manifold storage, recycling (3D first; 2D open), the tile-seam
@@ -175,6 +179,32 @@ in six.
     blank nor start with `//`; the pieces by ranges of each file, so the
     "~" figures are to about ten lines.
 
+[^sed]: (History: 2026-10-04.) When this doc was written, a colors spike
+    also patched `solver.rs` with `sed` and failed its build if the line
+    moved, and option (ii) noted that the `sed` would move with `group`.
+    The spike was removed on 2026-10-02 (`41657a9`, its last build at
+    `c72e8b2`).
+
+[^spike-code]: (2026-10-04) physics2d's experiment binaries
+    `:parallel_solver`, `:solver_layout` and `:narrow_bench` were deleted
+    by get-emj.112, their questions answered; they last built at
+    `4018662`.
+
+[^tests]: Counted at `4018662` (2026-10-04) as `#[test]` attributes per
+    file. 2D: `shapes.rs`, `solver.rs`, `narrow.rs`, `components.rs` (39),
+    `tests/core_test.rs` (7), `tests/physics2d_test.rs` (43) and
+    `tests/spatial_test.rs` (7), `compare/quality_test.rs` (18) and
+    `quality_long.rs` (19), `compare/behaviour_test.rs` (31) and
+    `behaviour_long.rs` (20). 3D: `solver.rs`, `narrow.rs`,
+    `components.rs`, `math.rs` (28), `tests/physics3d_test.rs` (13) and
+    `tests/reload_test.rs` (3), `tests/exact_test.rs` (8),
+    `compare/quality_test.rs` (9) and `quality_long.rs` (13),
+    `compare/behaviour_test.rs` (15) and `behaviour_long.rs` (9). The
+    harnesses' own unit tests (2D's `quality.rs`, `settle.rs`; 3D's
+    `measure.rs`, `smoke_test.rs`) aren't counted. The counts before,
+    from the table's first version: 2D 39, 54, 36 and 51; 3D 27, 14, 17
+    and 24.
+
 ## Prior art
 
 Rapier, parry, Box2D, Box3D and Jolt were read in the copies the
@@ -248,9 +278,8 @@ What each costs us, in the terms this engine cares about:
   swapped with it; it may hold no statics (a new image's statics start
   over: physics.md, "A mod").
 - **Bit for bit.** 2D's arrays twin (`tests/arrays.rs`, `:tax`, the
-  comparison) compiles `solver.rs` and `narrow.rs` by path; the colors
-  spike patches `solver.rs` with `sed` and fails its build if the line
-  moves; the lanes are held to the one-contact loop, the colors to their
+  comparison) compiles `solver.rs` and `narrow.rs` by path;[^sed] the
+  lanes are held to the one-contact loop, the colors to their
   order, the threads to one thread, and pong's and the platformer's replays
   to the scalar locked path, all bit for bit. Rust neither reassociates
   nor contracts `f32` arithmetic, so moving code between crates keeps its
@@ -290,8 +319,7 @@ of an interface.
   so it stays optional.
 - Hot reload: unchanged (statically linked into each library, no statics).
 - Bit for bit: the twin gains a dep; the moves change no arithmetic, and
-  the equivalence tests and replays are how that's checked. The spike's
-  `sed` moves with `group`.
+  the equivalence tests and replays are how that's checked.
 - Build: one crate of a few hundred lines; a change to it rebuilds both
   mods, their twins and benches, about the 17 actions of a 3D change plus
   2D's implementation, and no game crate.
@@ -363,14 +391,22 @@ baselines and every equivalence test unchanged.
 
 ### Phase 0: the parity table (get-emj.84)
 
-This doc's table is the record. The rule, for the user to add to
-CLAUDE.md: a change to either physics mod that adds, removes or re-decides
-a row updates the table in the same commit, and a feature or decision
-bead for one dimension names the other's bead or says in the table why it
-doesn't apply. The decisions that split without anyone deciding go to
-beads now: friction mixing (get-emj.81), the carry and the bounce passes in
-3D (get-emj.82), 3D's rotation lock (get-emj.80), 2D's reload replay of the
-turning path (get-emj.83).
+This doc's table is the record. The rule, in CLAUDE.md since get-emj.84
+(the `physics_common` entry, "the parity table every physics change
+keeps current"): a change to either physics mod that adds, removes or
+re-decides a row updates the table in the same commit, and a feature or
+decision bead for one dimension names the other's bead or says in the
+table why it doesn't apply. The decisions that split without anyone
+deciding went to beads: friction mixing (get-emj.81), the carry and the
+bounce passes in 3D (get-emj.82), 3D's rotation lock (get-emj.80), 2D's
+reload replay of the turning path (get-emj.83).
+
+The rule has not held by itself: the 2026-10-04 design review found that
+three of the four physics changes before it had missed the table
+([its W6](../reviews/2026-10-04-design-review.md)), and the rows were
+brought up to date from the code at `4018662`. A check that would hold it (for
+example, a test that the table names every `Tuning` field of both mods)
+is get-emj.115's open question.
 
 ### Phase 1: `physics_common`, for what both have (get-emj.85)
 
@@ -384,7 +420,7 @@ and that nothing moves, before anything larger rides on it.
 **Built 2026-10-02, but for two items.** `//engine/std/physics_common` is
 a `rust_library` in the `deps` of both mods (their twins and 2D's `v2`
 included), and of everything that compiles their sources by path: 2D's
-`core_test`, `:tax`, `narrow_bench`, `parallel_solver` and the
+`core_test`, `:tax`, `narrow_bench`, `parallel_solver`[^spike-code] and the
 comparison's targets, 3D's `core_test`. In it: `Slots` (with its
 `Recycle`), `Softness`, `DAMPING_RATIO`, `MAX_PUSH`, `BOUNCE_THRESHOLD`,
 `MARGIN`, `FAT` and `Closing` with `speed`, each moved in a commit of
@@ -418,6 +454,8 @@ the staged run into `engine_ecs::par` as parallel-relations.md's phase 2
 already proposes (get-znt.21). About 300 lines of 2D's solver become
 common. Then 3D's lanes (get-emj.52) and threads (get-emj.75) are a port of
 its kernels only, and kept colors (get-emj.74) are built once for both.
+(Since built: 3D's lanes, get-emj.52, and its threads, get-emj.75, on
+`Passes` and the engine's dispatch; kept colors are still open.)
 
 **Rescoped by flows (2026-10-02, get-emj.86's note):** the coloring and
 placing now live in `engine_ecs::shape` (`Coloring::greedy`, asserted
@@ -473,10 +511,11 @@ with the table as its check.
 
 ### Later: the kernels
 
-Once 3D solves in lanes, compare the two kernels shape for shape: if what
-differs is the math (a vector, a rotation, a point count) and not the
-algorithm, a `Dim` trait for the lanes kernels is option (iii) at its
-cheapest. Until then, the kernels stay each mod's own, with their
+3D solves in lanes (since get-emj.52), so the two kernels can now be
+compared shape for shape: if what differs is the math (a vector, a
+rotation, a point count) and not the algorithm, a `Dim` trait for the
+lanes kernels is option (iii) at its cheapest. That comparison hasn't
+been made; until it is, the kernels stay each mod's own, with their
 decisions in the table.
 
 **Not recommended:** one source built twice (iv), which couples 3D's
@@ -502,5 +541,5 @@ into a shared test kit (`//engine/std/physics_testkit`) apart from this doc.
   to cross from 3D to 2D. Its bound on a pair's move is (b); whether its
   bookkeeping (carrying a manifold, the move since found) is common is for
   whoever builds it.
-- **Open question:** when both kernels are in lanes, is the difference
+- **Open question:** both kernels are in lanes now: is the difference
   math or algorithm? That decides (iii).

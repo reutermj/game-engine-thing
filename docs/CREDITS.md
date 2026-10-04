@@ -72,7 +72,8 @@ one would have to ship those files with it.
     that pushed (`b2ApplyRestitution`). Read in v3.1.1's `solver.c` and
     `contact_solver.c`, and described in Erin Catto's "Solver2D" (2024,
     <https://box2d.org/posts/2024/02/solver2d/>). Our stiffness (a quarter
-    of the substep rate, 60 Hz where Box2D has 30) and our two relaxing
+    of the substep rate, 75 Hz at 5 substeps of 1/60 s, where Box2D has
+    30) and our two relaxing
     passes (Box2D's one) are our own measurements (physics.md,
     "Settling");
   - a restitution threshold, the closing speed below which nothing
@@ -84,11 +85,12 @@ one would have to ship those files with it.
     get-emj.56, a variant in 2D and 3D (`physics_common::Closing::Before`;
     physics.md, "Bounces");
   - graph coloring for a parallel solve, with contacts on a static body
-    kept out of color 0, and SIMD batches of a color's contacts
-    (`engine/std/physics2d/tests/parallel_solver.rs`, measured only; Box2D
+    kept out of color 0, and SIMD batches of a color's contacts (Box2D
     v3's `constraint_graph.c`, which credits "High-Performance Physical
     Simulations on Next-Generation Architecture with Many Cores",
-    Intel Technology Journal).
+    Intel Technology Journal): measured first in an experiment
+    (`engine/std/physics2d/tests/parallel_solver.rs`[^spike-code]), now
+    both mods' default order (`shape::Coloring::greedy`, below).
   - rotation in the 2D step (2026-09-26, physics.md, "Rotation"), read
     in v3.1.1's `manifold.c`, `contact.c`, `contact_solver.c`, `solver.c`
     and `math_functions.h`:
@@ -158,10 +160,12 @@ one would have to ship those files with it.
     array (`physics_common::lanes::F`, Box2D's `b2FloatW`). Read in
     v3.1.1's `contact_solver.c`. Its points (up to four, a batch's
     points as many as its lanes' most), friction on a disc at the
-    centroid and twist are 3D's own kernel (Box3D's terms, below), and
-    its grouping is the levels of the sweep in pair order
-    (`physics_common::levels`, Anderson and Saad's level scheduling, as
-    above), not Box2D's colors.
+    centroid and twist are 3D's own kernel (Box3D's terms, below). Its
+    grouping is Box2D's colors (`engine_ecs::shape`'s `Coloring::greedy`,
+    as 2D's, below) by default since get-emj.90 (2026-10-03); the levels
+    of the sweep in pair order (`physics_common::levels`, Anderson and
+    Saad's level scheduling, as above), its first grouping, are the
+    variant `order=levels`.
   - the broadphase that keeps its pairs (2026-09-27,
     `engine/ecs/live.rs`): each shape's fat box, its box grown by a
     margin (`B2_AABB_MARGIN`, 0.05 m, the margin we measured best too),
@@ -196,8 +200,9 @@ one would have to ship those files with it.
   coloring rule (`b2AddContactToGraph`) as `flows::Coloring::greedy`.
 - **Adopted in `engine_ecs`** (docs/architecture/flows.md, 2026-10-02,
   get-znt.32): the coloring rule as `shape::Coloring::greedy`, and the
-  staged run's program as `shape::Passes`, run on one thread until the
-  scheduler runs its stages' blocks across threads (get-znt.34). Ideas
+  staged run's program as `shape::Passes`, its stages' blocks run across
+  the world's threads by `engine/ecs/dispatch.rs` since get-znt.34
+  (2026-10-03; on one thread before). Ideas
   only; no code is copied. Since get-emj.86 the arrays' solve colors by
   the same `Coloring::greedy` and packs by `Coloring::pack`
   (physics2d's `lanes::group`), so the mod and the arrays share one
@@ -256,7 +261,7 @@ one would have to ship those files with it.
   polygonal features the normal picks (`contact_manifold_pfm_pfm`, which
   parry uses for convex shapes without a dedicated routine; for boxes it
   uses SAT, `contact_manifold_cuboid_cuboid`), in
-  `//engine/std/physics2d:narrow_bench`.
+  `//engine/std/physics2d:narrow_bench`[^spike-code].
 - **Read, for the solve across threads** (2026-09-29, physics.md,
   "Solving across threads"): 0.36.0's staged island solver
   (`dynamics/solver/staged_island_solver/`): stages that advance on work
@@ -270,7 +275,8 @@ one would have to ship those files with it.
   aren't: relaxed atomics, measured against a raw-pointer spike like it.
 - **Rapier 3D:** `rapier3d` 0.36.0, the same authors and license, pinned in
   `engine/std/physics3d/compare/Cargo.toml`, the comparison engine in `//engine/std/physics3d/compare`
-  (single-threaded, rotations locked). Its license text is fetched pinned by
+  (single-threaded; bodies turn, as ours do, and the harness can lock
+  their rotation, `Config::rotate`). Its license text is fetched pinned by
   sha256 from the v0.36.0 tag (`@rapier_license`, MODULE.bazel) and put in
   that bench's runfiles. It brings parry3d, nalgebra, simba and approx
   (Apache-2.0, Dimforge), and glam, glamx, wide, arrayvec and others under
@@ -310,7 +316,8 @@ one would have to ship those files with it.
   `@jolt//:LICENSE`).
 - **What we use it for:** comparison only. `//engine/std/physics3d/compare` builds it from
   source (`engine/std/physics3d/compare/jolt.BUILD`) behind a small C shim and runs the
-  same scenes on `JobSystemSingleThreaded` with translation-only bodies.
+  same scenes on `JobSystemSingleThreaded`, its bodies turning (or
+  translation-only, `EAllowedDOFs`, when the harness locks rotation).
 - **Ideas our 3D code adopts:** none; it is the yardstick. (Read for the
   kept broadphase, 2026-09-27: Jolt finds its active bodies' pairs afresh
   each step, `BroadPhaseQuadTree::FindCollidingPairs`, as `near_pairs`
@@ -347,7 +354,8 @@ one would have to ship those files with it.
   `@box3d//:LICENSE`).
 - **What we use it for:** comparison only. `//engine/std/physics3d/compare` builds it from
   source (`engine/std/physics3d/compare/box3d.BUILD`) behind a small C shim and runs the
-  same scenes with one worker and all three angular motion locks.
+  same scenes with one worker, its bodies turning (or held by all three
+  angular motion locks when the harness locks rotation).
 - **Ideas our 3D code adopts** (read in the fetched v0.1.0 source, and
   named where our code has them):
   - the soft step with rotation (`solver.c`, `contact_solver.c`): each
@@ -629,3 +637,8 @@ one would have to ship those files with it.
 - **Linked with it:** `libc` 0.2.190 and `num_cpus` 1.17.0 (Sean
   McArthur), MIT or Apache-2.0; their MIT texts are kept beside the
   others in `engine/std/threads/licenses/`.
+
+[^spike-code]: (2026-10-04) physics2d's experiment binaries
+    `:parallel_solver` (`tests/parallel_solver.rs`), `:solver_layout` and
+    `:narrow_bench` were deleted by get-emj.112, their questions answered;
+    they last built at `4018662`.
