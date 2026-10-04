@@ -1,0 +1,65 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "POISON_ENV", "engine_game", "engine_mod")
+
+# Declares the Platform service (the window, its event loop, input
+# devices) and Redraw, presentation.md D6. Runs nothing; a provider is a
+# resident mod a game names in engine_game(platform = ...). Resident,
+# because the bootstraps that pump it are and depend on it.
+engine_mod(
+    name = "platform",
+    srcs = ["lib.rs"],
+    interface = ["platform.rs"],
+    resident = True,
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "platform_test",
+    crate = ":platform_interface",
+)
+
+# ---- engine_game(platform = ...), with a provider that isn't one ----
+
+# A provider with no window, for the tests. See tests/fake_platform.rs.
+engine_mod(
+    name = "fake_platform",
+    srcs = ["tests/fake_platform.rs"],
+    crate_root = "tests/fake_platform.rs",
+    mod_deps = [":platform"],
+    resident = True,
+)
+
+# Calls the platform on a message, as a bootstrap would once a frame.
+engine_mod(
+    name = "pumper",
+    srcs = ["tests/pumper.rs"],
+    crate_root = "tests/pumper.rs",
+    mod_deps = [":platform"],
+)
+
+[engine_game(
+    name = name,
+    bootstrap = "//engine/std/lockstep",
+    mods = [":pumper"],
+    platform = platform,
+) for name, platform in [
+    ("with_platform", ":fake_platform"),
+    ("without_platform", None),
+]]
+
+rust_test(
+    name = "provider_test",
+    srcs = ["tests/provider_test.rs"],
+    data = [
+        ":with_platform",
+        ":without_platform",
+    ],
+    env = {
+        "WITH_PLATFORM": "$(rlocationpath :with_platform)",
+        "WITHOUT_PLATFORM": "$(rlocationpath :without_platform)",
+    } | POISON_ENV,
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+    ],
+)

@@ -1,0 +1,30 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_mod")
+
+# How an agent asks to see a game and what it gets back (text, JSON,
+# vector, pixels, and the events since its last look), and the Observe
+# service an observer presenter provides, presentation.md D3 and D7. Runs
+# nothing. Resident, so a bootstrap that steps and observes in one call
+# can call it.
+engine_mod(
+    name = "observe",
+    srcs = ["lib.rs"],
+    interface = [
+        "observe.rs",
+        "json.rs",
+        "views.rs",
+    ],
+    mod_deps = ["//engine/std/play"],
+    resident = True,
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "observe_test",
+    srcs = ["tests/observe_test.rs"],
+    deps = [
+        ":observe_interface",
+        "//engine/api",
+        "//engine/std/play:play_interface",
+    ],
+)

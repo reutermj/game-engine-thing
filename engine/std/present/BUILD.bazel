@@ -1,0 +1,40 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//engine:defs.bzl", "engine_mod")
+
+# The presentation vocabulary (its interface: what a game attaches to be
+# shown, and the DrawList flow presenters read) and the extract (its
+# implementation), presentation.md D1 and D2. Reloadable: a game and its
+# presenters reload with it. Games name it in mod_deps.
+engine_mod(
+    name = "present",
+    srcs = [
+        "extract.rs",
+        "lib.rs",
+    ],
+    interface = [
+        "present.rs",
+        "draw_list.rs",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The draw list's own checks, in the interface crate.
+rust_test(
+    name = "draw_list_test",
+    crate = ":present_interface",
+)
+
+# The extract on worlds of its own, through the ECS harness.
+rust_test(
+    name = "extract_test",
+    srcs = [
+        "extract.rs",
+        "tests/extract_test.rs",
+    ],
+    crate_root = "tests/extract_test.rs",
+    deps = [
+        ":present_interface",
+        "//engine/api",
+        "//engine/ecs",
+    ],
+)

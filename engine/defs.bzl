@@ -322,12 +322,23 @@ def _engine_game_impl(ctx):
             fail("%s is %s's thread host, whose threads run its code between frames, so it must be resident: engine_mod(resident = True)" %
                  (_pretty(t.label), _pretty(ctx.label)))
 
+    # The platform owns the window and its event loop, whose X11 error
+    # handler points into its library for the rest of the process
+    # (presentation.md, D6), and the bootstrap calls it.
+    platform = [ctx.attr.platform] if ctx.attr.platform else []
+    for p in platform:
+        if not p[EngineModInfo].resident:
+            fail("%s is %s's platform, which owns the window and the event loop for the whole session, so it must be resident: engine_mod(resident = True)" %
+                 (_pretty(p.label), _pretty(ctx.label)))
+
     # Dependencies first, and each mod once, including dependencies the game
     # didn't list. The thread host first, so it is closed last, after every
-    # mod whose shapes ran on its threads.
+    # mod whose shapes ran on its threads. The platform before the
+    # bootstrap, so the first frame's pump finds it, and closed after every
+    # presenter drawing into its window.
     scheduler = [ctx.attr.scheduler] if ctx.attr.scheduler else []
     closure = depset(
-        transitive = [t[EngineModInfo].closure for t in threads] + [bootstrap.closure] +
+        transitive = [t[EngineModInfo].closure for t in threads + platform] + [bootstrap.closure] +
                      [m[EngineModInfo].closure for m in scheduler + ctx.attr.mods],
         order = "postorder",
     ).to_list()
@@ -339,7 +350,7 @@ def _engine_game_impl(ctx):
     ctx.actions.write(manifest, "\n".join(lines) + "\n")
 
     game_runfiles = ctx.runfiles(files = [manifest] + [m.library for m in closure])
-    for t in threads:
+    for t in threads + platform:
         # Its libraries' license texts, which travel with what links them
         # (docs/CREDITS.md).
         game_runfiles = game_runfiles.merge(t[DefaultInfo].default_runfiles)
@@ -362,6 +373,7 @@ _engine_game = rule(
     attrs = {
         "bootstrap": attr.label(mandatory = True, providers = [EngineModInfo]),
         "mods": attr.label_list(providers = [EngineModInfo]),
+        "platform": attr.label(providers = [EngineModInfo]),
         "scheduler": attr.label(providers = [EngineModInfo]),
         "threads": attr.label(providers = [EngineModInfo]),
         "reload_label": attr.string(mandatory = True),
@@ -402,6 +414,7 @@ def engine_game(
         bootstrap = "//engine/std/realtime",
         scheduler = "//engine/std/sequential",
         threads = "//engine/std/threads",
+        platform = None,
         tags = None,
         visibility = None):
     """The engine plus the mods loaded at startup, and a target to reload them.
@@ -422,6 +435,12 @@ def engine_game(
         on the frame's thread. A game wanting another count sets
         `ENGINE_THREADS`; another placement, its own mod over
         `//engine/std/threads:pool`.
+      platform: The resident mod providing `platform::Platform`, the window,
+        its event loop and input devices, which the bootstrap pumps once a
+        frame (docs/architecture/presentation.md, D6). `None`, the default
+        until there's a window to give, leaves the service unprovided: a
+        bootstrap that calls it is told `NotProvided` and runs without a
+        window.
       tags: Tags for both targets (`manual` to leave the game out of `//...`).
       visibility: Visibility of both targets.
 
@@ -438,6 +457,7 @@ def engine_game(
         mods = mods,
         scheduler = scheduler,
         threads = threads,
+        platform = platform,
         reload_label = "//%s:%s" % (native.package_name(), reload),
         tags = tags,
         visibility = visibility,
