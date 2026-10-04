@@ -118,14 +118,18 @@ Both players read the same text; the sides are named, never "you".
 As in AGENT.md: the ball bounces off the top and bottom walls; past a
 paddle to the goal line behind it (x below 0 on the left, above 40 on the
 right), it's a point to the other side, and the ball is served from the
-centre toward the side that lost it. A paddle hit speeds the ball up by 5%
-(up to 40 cells a second) and adds 3 cells a second of vertical speed per
-cell it struck off the paddle's centre: hit with an edge to send it
-steeply.
+centre toward the side that lost it. A hit on a paddle's face (within 2.25
+of its centre) bounces the ball back, speeds it up by 5% and adds 3 cells
+a second of vertical speed per cell it struck off the paddle's centre: hit
+near the edge of the face to send it steeply. Its speed is capped at 40
+cells a second, direction kept. A ball already past the face line that
+meets a paddle's top or bottom end only glances off it, as off a wall (no
+speed-up, no spin), and goes in.
 
 To meet the ball, predict where it reaches your face (x = 2 for left, 38
 for right): `t = (face - x) / vx` seconds away, at `y + vy * t`, folded
-back off the walls at y = 0.25 and y = 19.75. Your paddle covers 1.6
+back off the walls at y = 0 and y = 20 (the ball's centre turns there:
+the walls stand a radius outside the court). Your paddle covers 1.6
 cells a turn, so start moving early.
 
 ## A loop

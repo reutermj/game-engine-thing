@@ -1,13 +1,24 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//engine:defs.bzl", "engine_mod")
 
 # The court, the ball, the paddles and the rules. Paddles move by their
 # `intent`; which mod sets it (a player, an AI) is up to other mods.
 engine_mod(
     name = "core",
-    srcs = ["lib.rs"],
+    srcs = [
+        "lib.rs",
+        "rules.rs",
+    ],
     interface = ["components.rs"],
     mod_deps = ["//engine/std/physics2d"],
     mod_name = "pong",
     twin = True,
     visibility = ["//visibility:public"],
+)
+
+# What a paddle hit does to the ball, without an engine.
+rust_test(
+    name = "rules_test",
+    srcs = ["rules.rs"],
+    crate_root = "rules.rs",
 )
