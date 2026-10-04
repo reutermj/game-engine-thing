@@ -162,11 +162,22 @@ the dynamic linker resolves a library's calls once, when it loads, and can't
 repoint them at a provider's new build.) The lookup isn't cached yet; it's
 cheap next to the call, and worth measuring before optimizing.
 
-**What may cross.** Arguments passed by reference may be anything, `&dyn Fn`
-included: a borrow can't outlive the call, and both builds are mapped while it
-runs. Arguments and return values passed by value must be `Crossing` (every
-`FieldType`, every component), because the other side may keep them. A
-`Box<dyn Fn()>` argument is a compile error.
+**What may cross** is `Crossing<'call>`, checked at compile time:
+
+- **Owned types cross any call**: every `FieldType` and every component,
+  since the other side may keep them. A `Box<dyn Fn()>` argument is a
+  compile error.
+- **`&'call T` crosses only the call it's borrowed for**, and only if `T`
+  crosses; **`&'call mut T`** only if `T` is owned. `&str` crosses (a
+  marker impl); `&dyn Fn` and `&[T]` arguments don't.
+- **A service's return value must be owned.** A borrow returned by the
+  provider could outlive a reload of its library.
+- **`'static` references are refused**, even through a type alias: a
+  `&'static str` or `&'static dyn Fn` may point into the provider's image,
+  which a reload unmaps.
+
+The compile-fail cases are doctests in `//engine/api:crossing_test`
+(`engine/api/tests/crossing_cases.rs`).[^crossing]
 
 **A call doesn't reach the world.** Called from a system, the provider's
 `cx.world()` panics, as the system's own would: a service method works on
@@ -219,3 +230,10 @@ loaded live, like `hello`).
     the batch's builds declare as it commits (`engine/loader/engine.rs`);
     only a component a build reaches through `cx.world()` alone is
     installed on first use (ecs.md, "Layout changes").
+
+[^crossing]: *(History, 2026-10-04, get-y5t.9.)* Until then arguments passed
+    by reference could be anything, `&dyn Fn` included, on the grounds that
+    "a borrow can't outlive the call", and `Crossing` held for every `&T`.
+    `&'static T` met that bound too, so a service could return a pointer
+    into its own image that outlived a reload (the 2026-10-04 design
+    review, W3). `API_VERSION` 38.

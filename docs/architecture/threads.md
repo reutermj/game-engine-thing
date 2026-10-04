@@ -65,7 +65,8 @@ Three places could own the threads. What each has to satisfy:
    parked or spinning between dispatches is in rayon's code, in whichever
    library made the pool; unmapping that library under it is a crash.
 2. **Mods reach the pool only through the world's executor**
-   (`World::set_executor`, `Arc<dyn Executor>`), a trait object, so no
+   (installed by `WorldMut::install_executor`, an `Arc<dyn Executor>`), a
+   trait object, so no
    mod links the pool or depends on whoever made it. And the world hands
    it to no one: a system runs on it only through a declared shape, and
    `World::executor` is crate-private, so a mod holding the world (a
@@ -94,10 +95,15 @@ before `run_frame` does, so it can stay reloadable too.
 
 What being a mod needs, and has:
 
-- **Load and close.** `load` makes the pool and installs it
-  (`set_executor`, between frames). `close` takes it out of the world if
-  it is still there (`take_executor_if`: a test may have put its own in;
-  `threads_test` holds both), and its transient
+- **Load and close.** `load` makes the pool and installs it through
+  `WorldMut::install_executor`, between frames. `close` takes it out of
+  the world if it is still there (`WorldMut::take_executor_if`: a test
+  may have put its own in; `threads_test` holds both). The mod takes the
+  `Executor` trait from `engine_threads`, since `engine_api` no longer
+  exports it (nor `Scoped`): a reloadable mod has no executor to install
+  or run on, only shapes. As a resident mod it takes
+  `//engine:mod_lints_threads_allowed`, the one lint config that lets
+  code in a mod start threads. Its transient
   part, dropped after, joins the threads while the library is mapped: the
   pool spawns them itself (`spawn_handler`) to keep the handles, since a
   dropped rayon pool's threads leave on their own time.

@@ -122,6 +122,12 @@ between frames; [threads.md](threads.md)). Other mods reach them through
 the resident mod's services, holding plain handles, or, as with the pool,
 through what it installs in the world (the world's executor).
 
+That is also why resident mods are exempt from the thread lint: a
+reloadable mod's code may not start threads (`//engine:mod_lints`
+forbids the methods `//:clippy.toml` lists), since a thread running its
+code would keep its build mapped, while `engine_mod` gives a resident mod
+`//engine:mod_lints_threads_allowed` (no printing, threads allowed).
+
 A new build of a resident mod takes a restart:
 
 - **A per-mod reload** of a changed resident build is refused: "vault is

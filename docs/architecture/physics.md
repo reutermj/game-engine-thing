@@ -405,8 +405,9 @@ f)` visits hits nearest first until `f` returns `Some`. The filter does
 what layers would (`Spatial<(), With<Tile>>` sees only tiles); layers and
 masks are for what collides. `Spatial` lives in physics's interface, not
 `engine_ecs` (the ECS knows boxes, not shapes), so changing it is an
-interface change. It is two queries joined by `ParamDecl::Group`, a
-parameter made of others whose footprint is their union.[^spatial]
+interface change. It is a `Compose` of two queries, `engine_api`'s
+parameter built from others: its footprint is their union, and it only
+wraps what its declared parts fetched.[^spatial]
 
 ## Rotation
 
@@ -724,7 +725,9 @@ row of its own and no section here keeps its old anchor on this page.
 [^spatial]: *(History, 2026-09-23.)* Built in the spike, with
     `ParamDecl::Group` for it. Until 2026-09-24 spatial queries read a grid
     the step published, empty on the first frame, so a walker set off the
-    wrong way; they read the world's storage since.
+    wrong way; they read the world's storage since. Until 2026-10-04
+    `Spatial` was a hand-written `Param` over the group; it is a `Compose`
+    since `engine_api` stopped exporting `Param` (get-znt.51).
 
 [^rotation]: *(2026-09-26.)* Rotation was costed at "roughly doubling the
     solver" when it was an open question; a turning contact costs 5-7 times

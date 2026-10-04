@@ -433,7 +433,11 @@ far it is met today:
   **Nothing reads it yet**: footprints skip it (`graph.rs`), and the plan
   a scheduler mod is handed names its nodes and nothing more. Whether the
   scheduler comes to read it, with system parallelism, or the ECS is
-  simply said to run shapes, is get-znt.50;
+  simply said to run shapes, is get-znt.50. What the declaration does
+  guard: `ParMap`, `Reduce` and `Passes` refuse to fetch against any
+  declaration but their own shape's, so a system gets a shape only by
+  declaring it. That is a check at fetch, not the scheduler reading the
+  declaration, and leaves get-znt.50 open;
 - **the execution** is the shape's call, inside the node, onto the
   world's executor, the `threads` mod's pool; the scheduler mod only runs
   the node. `Passes::run` turns the program into (stage, block) tasks,
@@ -444,7 +448,9 @@ far it is met today:
   code is on a worker's stack once the node ends (get-znt.29's rule for
   hot reload);
 - **the system holds no pool.** Its parameters give it no way to start a
-  thread. (History: `Workers`, a parameter that declared nothing and
+  thread, `engine_api` exports no executor (`Executor`, `Scoped`), and
+  code in a reloadable mod can't call `std::thread::spawn` or `scope`
+  (`//engine:mod_lints`; CLAUDE.md, "`./bazel test` lints"). (History: `Workers`, a parameter that declared nothing and
   reached the executor, ran physics2d's broadphase, narrowphase and
   gathers until get-znt.31 moved them onto `ParMap` and deleted it,
   2026-10-03.)

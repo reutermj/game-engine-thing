@@ -118,9 +118,12 @@ page's range (splitting full pages at a boundary of a block of the
 order, big rows to big pages), then merges neighboring pages that fit in
 three quarters of one ([Upkeep, reworked](#upkeep-reworked),
 [Pages as blocks](#pages-as-blocks-of-the-order)).
-`Query::in_region` walks runs, pages, then rows; `Query::near_pairs` sweeps
-pages along x, then tests rows a page at a time, across the query's
+`Query::in_region` walks runs, pages, then rows; `near_pairs` sweeps
+pages along x, then tests rows a page at a time, across its sides'
 spatial tables ([Against sweep and prune](#against-sweep-and-prune)).
+`near_pairs` is a free function in `engine_ecs`, for tests and benches:
+a mod finds pairs through `Live` ([live.md](live.md)), which answers
+what it would.[^near-pairs-method]
 
 Tested against brute force (`//engine/ecs:spatial_test`: regions and
 pairs after random moves, spawns, table changes and a move of every row
@@ -884,3 +887,8 @@ ms against 31.5-32.3, most of it the solver; Rapier's 13.4 and Box3D's
     of what the collider and rotation already say, and a write the solver
     had to remember. Removed for the pair, at the same pairs and within a
     few percent of the step (physics.md, "Rotation in 3D", choice 5).
+
+[^near-pairs-method]: *(History, 2026-10-04, get-znt.51.)* `Query::near_pairs`,
+    a method a mod could call on its own query, was removed with
+    `engine_api`'s re-export of `engine_ecs`: a mod keeping pairs that way
+    would be the hidden cache live.md argues against.

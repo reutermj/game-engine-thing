@@ -64,6 +64,10 @@ what rewriting physics.md found), so a reader isn't misled by them:
 - **`./bazel run -c opt`**, and runtimes "(fastbuild)" in "Quality as a
   test" and "Quality beyond settling": every build is `-c opt` since, and
   timings take `--config=bench`.
+- **`Spatial` as a hand-written parameter over `ParamDecl::Group`**
+  ("Parameters made of parameters", "Spike results"): since 2026-10-04 it
+  is a `Compose`, `engine_api`'s parameter built from others, which only
+  wraps what its declared parts fetched; mods no longer see `Param`.
 - **`[^sleep-copy]`** is referenced nowhere: it is the history of
   `Sleepers`, the mod's copy of who's asleep, which "Where it's kept"
   replaced.
