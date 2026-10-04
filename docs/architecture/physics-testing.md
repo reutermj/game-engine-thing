@@ -677,6 +677,16 @@ Rapier with a bullet's sweep sank it 0.62 deep in one. Both references sweep a f
 on a kinematic paddle they are no reference: the wall is, where neither
 sinks past the slop.
 
+Since get-lye (swept contacts against statics, and for a bullet against
+moving bodies: physics.md, "Narrowphase") a third family, `bullet`, is the
+paddle's grid with the ball a bullet (`Spec::bullet`: Box2D's `isBullet`,
+Rapier's `ccd_enabled`). Ours: the wall 0.0014 deep at worst on both grids;
+the bullet 0.0000 on the short and 0.0014 on the long, every run holding a
+contact and none through; the paddle unflagged as before, as deep as the
+references (0.605, 0.74 long). Box2D and Rapier with the ball a bullet:
+0.19 on the short grid and 0.62 on the long, with 32 and 44 of the 72 short
+runs sinking past the slop.
+
 ### A time budget for the default suite
 
 - **Default suite:** each physics test target within about 30 s, and the

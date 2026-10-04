@@ -6,14 +6,14 @@
 #     ./bazel run //engine/std/physics2d/compare:baseline -- --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
-quality    piles 400-1200 41                 rest_median          190        steps 100 or 20%
-quality    piles 400-1200 41                 first_rest_median    190        steps 130 or 25%
-quality    piles 400-1200 41                 depth_end_median     0.009499   rel 0.45 or 1e-4
-quality    piles 400-1200 41                 depth_end_worst      0.0139     rel 0.45 or 1e-4
-quality    piles 400-1200 41                 depth_during_median  0.2759     rel 0.45 or 1e-4
-quality    piles 400-1200 41                 mean_during_worst    0.02792    rel 0.3 or 1e-4
-quality    piles 400-1200 41                 energy_end_median    1.163e-11  log 10 under 1e-8
-quality    piles 400-1200 41                 contacts_least       1.34       rel 0.03
+quality    piles 400-1200 41                 rest_median          220        steps 100 or 20%
+quality    piles 400-1200 41                 first_rest_median    220        steps 130 or 25%
+quality    piles 400-1200 41                 depth_end_median     0.011      rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_end_worst      0.01514    rel 0.45 or 1e-4
+quality    piles 400-1200 41                 depth_during_median  0.2837     rel 0.45 or 1e-4
+quality    piles 400-1200 41                 mean_during_worst    0.02856    rel 0.3 or 1e-4
+quality    piles 400-1200 41                 energy_end_median    1.451e-11  log 10 under 1e-8
+quality    piles 400-1200 41                 contacts_least       1.36       rel 0.03
 quality    piles 400-1200 41                 escaped              0          exact
 quality    pyramid 15                        rest                 10         steps 10
 quality    pyramid 15                        top_moved            0.006166   rel 0.02 or 1e-4
@@ -102,7 +102,7 @@ quality    pyramid 50 turning rot/colored=4  depth_end            0.002963   rel
 quality    pyramid 50 turning rot/colored=4  tilt                 0.1458     rel 0.1 or 0.01
 quality    pyramid 50 turning rot/colored=4  energy_tail          5.366e-7   log 3 under 1e-8
 quality    pyramid 50 turning rot/colored=4  escaped              0          exact
-quality    pile 1000 41 sleeping             asleep_at            260        steps 60
+quality    pile 1000 41 sleeping             asleep_at            250        steps 60
 quality    pile 1000 41 turning sleeping     asleep_at            290        steps 60
 behaviour  ramp 20 0.6 box                   crept                1.152e-4   rel 0.05 or 2e-5
 behaviour  ramp 30 0.2 box                   a                    6.536      rel 0.002
@@ -241,10 +241,17 @@ behaviour  meets paddle                      held                 36         exa
 behaviour  meets paddle                      through              0          exact
 behaviour  meets paddle                      least_rebound        1          rel 0.002
 behaviour  meets paddle                      most_rebound         1          rel 0.002
-behaviour  meets wall                        deepest              0.4717     rel 0.03 or 0.002
-behaviour  meets wall                        median_deepest       0.08333    rel 0.03 or 0.002
-behaviour  meets wall                        sank_past_slop       9          exact
-behaviour  meets wall                        held                 9          exact
+behaviour  meets wall                        deepest              0.00144    rel 0.03 or 0.002
+behaviour  meets wall                        median_deepest       -0         rel 0.03 or 0.002
+behaviour  meets wall                        sank_past_slop       0          exact
+behaviour  meets wall                        held                 18         exact
 behaviour  meets wall                        through              0          exact
 behaviour  meets wall                        least_rebound        1          rel 0.002
 behaviour  meets wall                        most_rebound         1          rel 0.002
+behaviour  meets bullet                      deepest              1.192e-7   rel 0.03 or 0.002
+behaviour  meets bullet                      median_deepest       5.96e-8    rel 0.03 or 0.002
+behaviour  meets bullet                      sank_past_slop       0          exact
+behaviour  meets bullet                      held                 72         exact
+behaviour  meets bullet                      through              0          exact
+behaviour  meets bullet                      least_rebound        1          rel 0.002
+behaviour  meets bullet                      most_rebound         1          rel 0.002

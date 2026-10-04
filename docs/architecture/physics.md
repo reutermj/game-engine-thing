@@ -162,8 +162,10 @@ half the margin in a step can meet what's further than the margin's
 reach, so the pairs a swept contact may need are added
 (`reach_further`), only those the narrowphase sweeps (against a static,
 or a bullet's): each such body looks round itself in the spatial order,
-or, once more than one in sixteen bodies does (a falling pile), every
-collider's box grown by its move is swept and pruned.
+or, once more than one in sixteen bodies does (a falling pile), the far
+bodies and the statics are swept and pruned against each other (every
+collider, where there are bullets). A pile of 10 000 falling steps in
+1.93 ms where it took 1.71 unswept (2026-10-04); at rest, nothing is far.
 
 ## Narrowphase
 
@@ -198,13 +200,14 @@ collider's box grown by its move is swept and pruned.
   with the speed (Rapier's soft CCD), so a ball passing a corner isn't
   stopped by it; a box flush across the face it would meet (a body
   running over a floor of tiles, or falling down a wall of them) is left
-  to the seam rule, as before. As Box2D and Rapier sweep, a pair is swept
-  only where one side is static, or a bullet (`Body::bullet`, off by
-  default; Box2D's `isBullet`, Rapier's `ccd_enabled`): pong's ball against
-  its kinematic paddles needs to be one. Swept against everything, piles'
-  landings moved past their baseline bands and two long-suite bounds broke
-  (get-lye's notes); against statics and bullets, none did
-  (physics-testing.md, "The meet families").
+  to the seam rule, as before. As Box2D v3.1.1 and Rapier 0.36 choose
+  which pairs to sweep (read in their source: `b2SolveContinuous` sweeps
+  a fast body against statics, and a `b2BodyDef::isBullet` one against
+  kinematic and dynamic bodies too; Rapier's automatic CCD against fixed
+  colliders, `ccd_enabled` against every body), a pair is swept where one
+  side is static, or a bullet (`Body::bullet`, off by default). Pong's
+  ball is one, against its kinematic paddles (physics-testing.md, "The
+  meet families").[^swept-all]
 
 Both mods' narrowphases run across the world's threads in chunks of
 pairs.[^narrow]
@@ -624,7 +627,8 @@ every test run.
   meeting it is an `Overlap`, which `walkers::meet`, a pre-solve hook,
   tells into a stomp or a touch.
 - **Pong**: the ball is a dynamic circle with restitution 1, friction 0
-  and no gravity; the paddles are kinematic boxes moved by velocity; the
+  and no gravity, a bullet (`Body::bullet`, so a paddle stops it at its
+  face); the paddles are kinematic boxes moved by velocity; the
   goal lines are sensors. Pong adds speed and spin on a paddle's
   `Contact` and scores on a goal line's `Trigger`.
 
@@ -837,3 +841,12 @@ row of its own and no section here keeps its old anchor on this page.
     always one thread's, so the 2026-10-04 design review's W4 was wrong
     for 2D. The quality tests and the baseline still run ours on the shared
     pool (`ENGINE_THREADS`), which gives the same bits.
+
+[^swept-all]: Swept against every pair (2026-10-04, get-lye, `bb3a31b`),
+    every pile's landing was caught too: its landing depths and mean
+    overlap fell past their baseline bands, a mixed pile's least contacts a
+    body moved past its band (1.447 to 1.394), and two long-suite bounds
+    broke (piles 41 wide resting from a median 220 against 212, a pile of
+    150 21 wide at 1.18 contacts a body against 1.2), and pong's ball and
+    the falling piles cost what a bullet's do. Against statics and bullets,
+    as the references choose, none of that moved past its band.

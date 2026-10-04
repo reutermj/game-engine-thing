@@ -39,7 +39,11 @@ impl Core {
             return;
         }
         let score = Score::default();
-        let ball = Body { restitution: 1.0, friction: 0.0, gravity_scale: 0.0, ..Body::default() };
+        // A bullet: swept against the kinematic paddles too, not only the
+        // walls, so a fast ball is stopped at a paddle's face in the step it
+        // meets it rather than found inside it a step later (get-lye;
+        // physics.md, "Narrowphase").
+        let ball = Body { restitution: 1.0, friction: 0.0, gravity_scale: 0.0, bullet: true, ..Body::default() };
         // The first serve goes to the player, on the left.
         let (at, v) = serve(&score, -1.0);
         world.spawn((Ball {}, at, v, ball, Collider::circle(BALL_RADIUS)));

@@ -75,10 +75,14 @@ fn the_ai_returns_the_ball_at_full_speed() {
     play(&e, "down", 24);
     play(&e, "stay", 46);
     play(&e, "up", 25);
-    // Off the bottom wall, about frame 105: coming down at 5.72, it leaves
-    // going up at 5.72.
+    // Off the bottom wall, about frame 105: coming down at 5.44, it leaves
+    // going up at 5.44. (5.72 until the ball was a bullet, get-lye: its
+    // contact with the player's paddle now begins in the frame it meets the
+    // face, a frame earlier than when it was found inside it, so `rebound`
+    // spins it from where the ball was a frame of its 5.6 down earlier,
+    // 0.093 higher: 3 x 0.093 = 0.28 less.)
     play(&e, "stay", 15);
-    assert!((ball(&e, "vy") + 5.72).abs() < 0.01, "{}", state(&e));
+    assert!((ball(&e, "vy") + 5.44).abs() < 0.01, "{}", state(&e));
     play(&e, "stay", 100);
     assert!(ball(&e, "vx") < -16.0, "the AI's return:\n{}", state(&e));
 }

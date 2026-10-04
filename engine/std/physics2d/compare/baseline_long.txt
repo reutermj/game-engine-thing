@@ -6,66 +6,66 @@
 #     ./bazel run //engine/std/physics2d/compare:baseline -- --long --write
 # never by hand: a change that moves a value writes it again in the same
 # commit. Columns: group, scene, measure, value, band.
-quality    piles 9000-11000 401            rest_median          270        steps 250 or 30%
-quality    piles 9000-11000 401            first_rest_median    270        steps 250 or 30%
-quality    piles 9000-11000 401            depth_end_median     0.01265    rel 0.45 or 1e-4
-quality    piles 9000-11000 401            depth_end_worst      0.01621    rel 0.45 or 1e-4
-quality    piles 9000-11000 401            depth_during_median  0.3105     rel 0.45 or 1e-4
-quality    piles 9000-11000 401            mean_during_worst    0.02643    rel 0.3 or 1e-4
-quality    piles 9000-11000 401            energy_end_median    7.476e-11  log 10 under 1e-8
-quality    piles 9000-11000 401            contacts_least       1.396      rel 0.03
+quality    piles 9000-11000 401            rest_median          240        steps 250 or 30%
+quality    piles 9000-11000 401            first_rest_median    230        steps 250 or 30%
+quality    piles 9000-11000 401            depth_end_median     0.01243    rel 0.45 or 1e-4
+quality    piles 9000-11000 401            depth_end_worst      0.01612    rel 0.45 or 1e-4
+quality    piles 9000-11000 401            depth_during_median  0.3157     rel 0.45 or 1e-4
+quality    piles 9000-11000 401            mean_during_worst    0.02632    rel 0.3 or 1e-4
+quality    piles 9000-11000 401            energy_end_median    1.424e-9   log 10 under 1e-8
+quality    piles 9000-11000 401            contacts_least       1.388      rel 0.03
 quality    piles 9000-11000 401            escaped              0          exact
-quality    piles 150-450 21                rest_median          210        steps 100 or 20%
-quality    piles 150-450 21                first_rest_median    160        steps 130 or 25%
-quality    piles 150-450 21                depth_end_median     0.00692    rel 0.45 or 1e-4
-quality    piles 150-450 21                depth_end_worst      0.01143    rel 0.45 or 1e-4
-quality    piles 150-450 21                depth_during_median  0.2432     rel 0.45 or 1e-4
-quality    piles 150-450 21                mean_during_worst    0.02771    rel 0.3 or 1e-4
-quality    piles 150-450 21                energy_end_median    4.702e-11  log 10 under 1e-8
-quality    piles 150-450 21                contacts_least       1.207      rel 0.03
+quality    piles 150-450 21                rest_median          200        steps 100 or 20%
+quality    piles 150-450 21                first_rest_median    200        steps 130 or 25%
+quality    piles 150-450 21                depth_end_median     0.006703   rel 0.45 or 1e-4
+quality    piles 150-450 21                depth_end_worst      0.01096    rel 0.45 or 1e-4
+quality    piles 150-450 21                depth_during_median  0.2437     rel 0.45 or 1e-4
+quality    piles 150-450 21                mean_during_worst    0.02773    rel 0.3 or 1e-4
+quality    piles 150-450 21                energy_end_median    8.14e-12   log 10 under 1e-8
+quality    piles 150-450 21                contacts_least       1.213      rel 0.03
 quality    piles 150-450 21                escaped              0          exact
-quality    piles 300-1200 41               rest_median          190        steps 100 or 20%
-quality    piles 300-1200 41               first_rest_median    190        steps 130 or 25%
-quality    piles 300-1200 41               depth_end_median     0.009499   rel 0.45 or 1e-4
-quality    piles 300-1200 41               depth_end_worst      0.0139     rel 0.45 or 1e-4
-quality    piles 300-1200 41               depth_during_median  0.2759     rel 0.45 or 1e-4
-quality    piles 300-1200 41               mean_during_worst    0.02792    rel 0.3 or 1e-4
-quality    piles 300-1200 41               energy_end_median    1.722e-11  log 10 under 1e-8
-quality    piles 300-1200 41               contacts_least       1.336      rel 0.03
+quality    piles 300-1200 41               rest_median          200        steps 100 or 20%
+quality    piles 300-1200 41               first_rest_median    200        steps 130 or 25%
+quality    piles 300-1200 41               depth_end_median     0.01037    rel 0.45 or 1e-4
+quality    piles 300-1200 41               depth_end_worst      0.01514    rel 0.45 or 1e-4
+quality    piles 300-1200 41               depth_during_median  0.2837     rel 0.45 or 1e-4
+quality    piles 300-1200 41               mean_during_worst    0.02856    rel 0.3 or 1e-4
+quality    piles 300-1200 41               energy_end_median    1.451e-11  log 10 under 1e-8
+quality    piles 300-1200 41               contacts_least       1.36       rel 0.03
 quality    piles 300-1200 41               escaped              0          exact
-quality    piles 800-2400 81               first_rest_median    200        steps 130 or 25%
-quality    piles 800-2400 81               depth_end_median     0.01337    rel 0.45 or 1e-4
-quality    piles 800-2400 81               depth_end_worst      0.02657    rel 0.45 or 1e-4
-quality    piles 800-2400 81               depth_during_median  0.2846     rel 0.45 or 1e-4
-quality    piles 800-2400 81               mean_during_worst    0.02592    rel 0.3 or 1e-4
-quality    piles 800-2400 81               contacts_least       1.361      rel 0.03
+quality    piles 800-2400 81               first_rest_median    240        steps 130 or 25%
+quality    piles 800-2400 81               depth_end_median     0.01182    rel 0.45 or 1e-4
+quality    piles 800-2400 81               depth_end_worst      0.02405    rel 0.45 or 1e-4
+quality    piles 800-2400 81               depth_during_median  0.2853     rel 0.45 or 1e-4
+quality    piles 800-2400 81               mean_during_worst    0.02596    rel 0.3 or 1e-4
+quality    piles 800-2400 81               contacts_least       1.355      rel 0.03
 quality    piles 800-2400 81               escaped              0          exact
-quality    piles 2000-4800 161             rest_median          230        steps 100 or 20%
-quality    piles 2000-4800 161             first_rest_median    230        steps 130 or 25%
-quality    piles 2000-4800 161             depth_end_median     0.01119    rel 0.45 or 1e-4
-quality    piles 2000-4800 161             depth_end_worst      0.0161     rel 0.45 or 1e-4
-quality    piles 2000-4800 161             depth_during_median  0.3088     rel 0.45 or 1e-4
-quality    piles 2000-4800 161             mean_during_worst    0.02644    rel 0.3 or 1e-4
-quality    piles 2000-4800 161             energy_end_median    4.171e-11  log 10 under 1e-8
-quality    piles 2000-4800 161             contacts_least       1.363      rel 0.03
+quality    piles 2000-4800 161             rest_median          210        steps 100 or 20%
+quality    piles 2000-4800 161             first_rest_median    210        steps 130 or 25%
+quality    piles 2000-4800 161             depth_end_median     0.01106    rel 0.45 or 1e-4
+quality    piles 2000-4800 161             depth_end_worst      0.01713    rel 0.45 or 1e-4
+quality    piles 2000-4800 161             depth_during_median  0.2846     rel 0.45 or 1e-4
+quality    piles 2000-4800 161             mean_during_worst    0.02649    rel 0.3 or 1e-4
+quality    piles 2000-4800 161             energy_end_median    3.92e-11   log 10 under 1e-8
+quality    piles 2000-4800 161             contacts_least       1.368      rel 0.03
 quality    piles 2000-4800 161             escaped              0          exact
 quality    piles 5000-12000 401            rest_median          240        steps 100 or 20%
-quality    piles 5000-12000 401            first_rest_median    240        steps 130 or 25%
-quality    piles 5000-12000 401            depth_end_median     0.01119    rel 0.45 or 1e-4
-quality    piles 5000-12000 401            depth_end_worst      0.01747    rel 0.45 or 1e-4
-quality    piles 5000-12000 401            depth_during_median  0.2861     rel 0.45 or 1e-4
-quality    piles 5000-12000 401            mean_during_worst    0.02643    rel 0.3 or 1e-4
-quality    piles 5000-12000 401            energy_end_median    8.544e-11  log 10 under 1e-8
-quality    piles 5000-12000 401            contacts_least       1.365      rel 0.03
+quality    piles 5000-12000 401            first_rest_median    230        steps 130 or 25%
+quality    piles 5000-12000 401            depth_end_median     0.01124    rel 0.45 or 1e-4
+quality    piles 5000-12000 401            depth_end_worst      0.0171     rel 0.45 or 1e-4
+quality    piles 5000-12000 401            depth_during_median  0.2845     rel 0.45 or 1e-4
+quality    piles 5000-12000 401            mean_during_worst    0.02632    rel 0.3 or 1e-4
+quality    piles 5000-12000 401            energy_end_median    9.987e-11  log 10 under 1e-8
+quality    piles 5000-12000 401            contacts_least       1.366      rel 0.03
 quality    piles 5000-12000 401            escaped              0          exact
 quality    mixed 400-1200 41               rest_median          200        steps 100 or 20%
 quality    mixed 400-1200 41               first_rest_median    200        steps 130 or 25%
-quality    mixed 400-1200 41               depth_end_median     0.01475    rel 0.45 or 1e-4
-quality    mixed 400-1200 41               depth_end_worst      0.02552    rel 0.45 or 1e-4
-quality    mixed 400-1200 41               depth_during_median  0.3522     rel 0.45 or 1e-4
-quality    mixed 400-1200 41               mean_during_worst    0.02251    rel 0.3 or 1e-4
-quality    mixed 400-1200 41               energy_end_median    1.442e-11  log 10 under 1e-8
-quality    mixed 400-1200 41               contacts_least       1.447      rel 0.03
+quality    mixed 400-1200 41               depth_end_median     0.01343    rel 0.45 or 1e-4
+quality    mixed 400-1200 41               depth_end_worst      0.02252    rel 0.45 or 1e-4
+quality    mixed 400-1200 41               depth_during_median  0.3427     rel 0.45 or 1e-4
+quality    mixed 400-1200 41               mean_during_worst    0.02406    rel 0.3 or 1e-4
+quality    mixed 400-1200 41               energy_end_median    1.525e-11  log 10 under 1e-8
+quality    mixed 400-1200 41               contacts_least       1.424      rel 0.03
 quality    mixed 400-1200 41               escaped              0          exact
 quality    pyramids 30-60                  rest_median          50         steps 10
 quality    pyramids 30-60                  rest_worst           80         steps 10
