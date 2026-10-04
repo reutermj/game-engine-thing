@@ -11,7 +11,7 @@ use physics_testkit::runs::Runs;
 use crate::behave::{self, Behaviour};
 use crate::measure::{self, Run};
 use crate::scenes::{self, Kind};
-use crate::{Config, Iters, make_backend};
+use crate::{Config, Iters, Threads, make_backend};
 
 static RUNS: Runs<Run> = Runs::new();
 static BEHAVED: Runs<Behaviour> = Runs::new();
@@ -33,7 +33,16 @@ pub fn tune() -> &'static str {
 }
 
 fn config(max_bodies: usize, rotate: bool) -> Config {
-    Config { iters: Iters::Default, sleep: false, max_bodies: max_bodies as u32, rotate, tune: tune(), gravity: scenes::EARTH, substeps: 0 }
+    Config {
+        iters: Iters::Default,
+        sleep: false,
+        max_bodies: max_bodies as u32,
+        rotate,
+        tune: tune(),
+        gravity: scenes::EARTH,
+        substeps: 0,
+        threads: Threads::Shared,
+    }
 }
 
 /// Ours on `kind` at `n`, bodies turning or locked.

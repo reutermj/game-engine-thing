@@ -1,5 +1,6 @@
 //! Our own step: the physics3d mod in the engine (on the lockstep
-//! bootstrap, one thread), on the scene mod pile3d, which builds each scene
+//! bootstrap, its systems on the threads `Config::threads` says: one where
+//! the bench times it), on the scene mod pile3d, which builds each scene
 //! from the same code (`scenes.rs`) the other engines are given theirs by:
 //! its statics at `build`, and each step's arrivals from a system in that
 //! step, where a game's spawns would be. So its step is the engine's frame,
@@ -16,7 +17,7 @@ use engine_loader::engine::Engine;
 use physics3d::{AngularVelocity, Manifold, Position, Rotation, Tuning, Velocity};
 
 use crate::scenes::Scene;
-use crate::{Backend, Config, Spec, State};
+use crate::{Backend, Config, Spec, State, Threads};
 
 pub struct Ours {
     engine: Box<Engine>,
@@ -48,7 +49,15 @@ impl Ours {
         // the host costs a TLS key (`engine_threads::shared`).
         let mods: Vec<_> = manifest.mods.iter().filter(|(name, _)| name != engine_threads::MOD_NAME).cloned().collect();
         engine.load_batch(&mods).expect("loading pile3d");
-        engine.world().set_executor(engine_threads::shared().map(|p| p as std::sync::Arc<dyn engine_ecs::Executor>));
+        let executor: Option<std::sync::Arc<dyn engine_ecs::Executor>> = match config.threads {
+            Threads::Shared => engine_threads::shared().map(|p| p as _),
+            Threads::One => None,
+            Threads::Pool(n) => Some(std::sync::Arc::new(engine_threads::Pool::new(
+                &engine_threads::OneCcd,
+                &engine_threads::Settings { threads: Some(n), ..Default::default() },
+            ))),
+        };
+        engine.world().set_executor(executor);
         // A bounce's substeps, as a game sets them: in the world's Tuning.
         let tune = match (config.tune, config.substeps) {
             (t, 0) => t.to_string(),
@@ -66,6 +75,12 @@ impl Ours {
             ours.send("pile3d", "lock");
         }
         ours
+    }
+
+    /// How many threads the world's executor has: `None` for no executor,
+    /// the calling thread alone.
+    pub fn threads(&self) -> Option<usize> {
+        self.engine.world().executor_threads()
     }
 
     fn send(&self, to: &str, message: &str) -> String {
@@ -91,7 +106,10 @@ impl Drop for Ours {
 
 impl Backend for Ours {
     fn name(&self) -> String {
-        "ours".into()
+        match self.config.threads {
+            Threads::Pool(n) => format!("ours, {n} threads"),
+            Threads::Shared | Threads::One => "ours".into(),
+        }
     }
 
     fn solver(&self) -> String {
