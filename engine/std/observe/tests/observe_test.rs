@@ -90,6 +90,9 @@ fn cells_follow_the_region_and_their_size_and_later_entities_cover_earlier() {
     // A region of no whole cells still has one.
     let t = TextView::draw([0.0, 0.0, 0.5, 0.5], [1.0, 1.0], vec![]);
     assert_eq!(t.rows, [" "]);
+    // Edges on centres: the low edge's cell is in, the high edge's out.
+    let t = TextView::draw([0.0, 0.0, 4.0, 1.0], [1.0, 1.0], vec![seen("bar", "", 1.5, 0.5, 2.0, 1.0)]);
+    assert_eq!(t.rows, ["bb  "]);
     let huge = TextView::draw([0.0, 0.0, 1e6, 3.0], [1.0, 1.0], vec![]);
     assert_eq!(huge.rows[0].len(), observe::MAX_CELLS);
 }

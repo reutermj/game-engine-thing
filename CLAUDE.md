@@ -162,8 +162,8 @@ changing the ABI, the reload sequence or the Bazel rules.
 - `engine/defs.bzl` — `engine_mod` (with its `interface`, `mod_deps`,
   `resident`, and `twin`: a testonly `<name>_twin`, the same mod as
   another library file, which a replay swaps in to reload for real) and
-  `engine_game` (with its `bootstrap`, `scheduler`, `threads` and reload
-  target). `engine_mod` refuses `//engine/ecs` in a mod's deps, and picks
+  `engine_game` (with its `bootstrap`, `scheduler`, `threads`, `platform`
+  and reload target). `engine_mod` refuses `//engine/ecs` in a mod's deps, and picks
   the mod's lint config by `resident`. If a mod needs a new build
   setting (a link flag, a runtime linkage), it goes here, so every mod gets
   it.
@@ -216,6 +216,20 @@ changing the ABI, the reload sequence or the Bazel rules.
   statics, no unsafe. What may go in it, and what's left out and why:
   [physics-sharing.md](docs/architecture/physics-sharing.md), with the
   parity table every physics change keeps current.
+  The presentation and playtesting contracts, the stable interfaces
+  games and presenters build on
+  ([presentation.md](docs/architecture/presentation.md#the-interfaces-as-built)):
+  `present`, the vocabulary a game attaches (`Place`, `Look`, shapes,
+  `Text`, `Label`, `Camera`) and the `DrawList` flow, whose
+  implementation is the extract, reloadable; and three resident
+  interface-only mods a bootstrap may use: `play`, what a game declares
+  to be playable (seats, actions with their default bindings and derived
+  choices, `GameEvent`s, goals and metrics) and `act`, which sources write
+  actions through; `platform`, the window, event loop and input as a
+  one-provider service, never a GPU device, its provider named in
+  `engine_game(platform = ...)`; and `observe`, view requests, the
+  observation's views and the `Observe` service. No wgpu type appears in
+  any of them.
 - `mods/` — demo mods: `counter` (per-mod state across reloads), `hello`
   (loaded live, not in the manifest), and the physics demo: `spawner`
   drops bodies into a box (all `ChildOf` it) and `reporter` prints what's

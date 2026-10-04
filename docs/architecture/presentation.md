@@ -1,8 +1,11 @@
 # Presentation, input and playtesting
 
-**Status: proposal** (2026-10-04, epic get-3hd). Nothing here is built
-outside the spike. This replaces the sketch of the same date[^sketch] with
-what three pieces of evidence showed:
+**Status: proposal; M1's interfaces built** (2026-10-04, epic get-3hd;
+interfaces get-3hd.3, phase 1). The contracts games and presenters build
+on, and the extract, are in the engine
+([below](#the-interfaces-as-built)); no backend, provider or game uses
+them yet. This replaces the sketch of the same date[^sketch] with what
+three pieces of evidence showed:
 
 - the spike, [presentation-spike.md](presentation-spike.md): wgpu, winit
   and tiny-skia under Bazel, the loop, what crosses mods, the extract and
@@ -227,10 +230,149 @@ time, so mods link only glibc. Each mod linking wgpu is about 8.5 MB and
 rebuilds in about half a second. Presenters carry their dependencies'
 licence texts, as the threads mod does (CREDITS.md).
 
+## The interfaces, as built
+
+M1's first phase (get-3hd.3): the contracts D1 to D7 describe, as four
+crates under `engine/std`, with the extract as the one implementation.
+Everything else (presenters, providers, the observer, the recorder, the
+agent interface) is built on them in later phases. Each is an
+`engine_mod` whose interface is the contract; three of them run nothing
+(`Inert`, like `clock`).
+
+| crate | decisions | resident | what it holds |
+|---|---|---|---|
+| `//engine/std/present` | D1, D2 | no | the vocabulary, the `DrawList` flow, and the extract |
+| `//engine/std/play` | D4, D7 | yes | what a game declares: seats, actions, events, goals, metrics |
+| `//engine/std/platform` | D6 | yes | the `Platform` and `Redraw` services, the control names |
+| `//engine/std/observe` | D3, D7 | yes | view requests, observations, the `Observe` service |
+
+**Why four.** A game depends on `present` and `play` and nothing else; a
+presenter on `present`; an agent's tools on `observe`. `present` reloads
+with the game, so its vocabulary can grow under a running session. The
+other three are resident because bootstraps use them, and a resident mod
+may only depend on resident ones (defs.bzl): the bootstrap maps device
+input to actions (`play`), pumps the platform, and in M2 steps and
+observes in one call (`observe`). `play` depends on `platform` for the
+control names it validates bindings against; `observe` on `play` for the
+declaration its views report.
+
+**`present`: the vocabulary and the draw list** (`present.rs`,
+`draw_list.rs`). An entity is drawn when it has a `Place` (centre and
+turn, world units, y down as in physics2d), a `Look` (an sRGB `Colour`, a
+`layer`, a `material` identity) and a shape: `Rect`, `Circle`, `Line` or
+`Text`. A `Label` (class `what`, optional `name`) makes it something an
+agent is told about; its id is its `Entity`, stable for its life and the
+same in a replay. A `Camera` is the world rectangle to show, so a
+presenter maps world units to its own without knowing what they mean.
+The extract (`lib.rs`, `extract.rs`), in the render phase, makes the
+`DrawList`: `items` (one 40-byte `repr(C)` item a shape, uploadable as
+it is) with their `entities`, sorted into `runs` by layer then material,
+stable within a run; `texts` by layer; `labels` with each entity's box
+over all its shapes and classes interned in `names`; and the `view`, the
+first camera's or, with none, the box around everything. Within a layer,
+items of different materials may draw in any order: that is what lets a
+GPU presenter draw a run as one instanced call (D2). `DrawList::check`
+states the list's promises, which the extract's tests hold it to.
+
+**A delta flow comes beside the list, never inside it.** `DrawList` stays
+complete: a later `DrawDelta` flow for large sets that rarely change
+would carry its own entities, opted in by a marker, and `DrawList`
+counts what it leaves out in `retained` (0 now), so a presenter that
+reads only the list can tell it's incomplete.
+
+**`play`: the declaration** (`play.rs`, `actions.rs`, `events.rs`,
+`goals.rs`). A game builds one `Playable` and puts it in the world with
+`declare`, which validates it whole (every problem, each named by
+where it is) and makes a `Seat` entity a player, carrying its
+`ActionState` (held values) and `Metrics`. Declaring again (a reload)
+keeps each seat's values by name. In it:
+
+- **Actions:** each a button (0 or 1) or an axis (-1 to 1), held until
+  changed or lasting the frame it's sent for, with its meaning, optional
+  names for an axis's -1, 0 and 1 ("up", "stay", "down"), and default
+  `keys` and `pad` bindings by control name. The discrete set is derived
+  (`choices`: `noop`, then each action's values, one action a choice) and
+  so is a per-action `options` list for RL's multi-discrete form.
+  `parse` reads a command of choices or `name=value`, all or nothing; any
+  error lists what would have been accepted. `act` writes between frames:
+  it checks every setting first, keeps held ones in the `ActionState`, and
+  sends each as an `Act` event with its `source` (keyboard, gamepad,
+  agent, replay, game), which is what the recorder logs. A game reads held
+  values from `ActionState` and per-frame ones from `Act` events, which
+  each reader sees once: so `step 6` repeats a held action six frames,
+  ALE's frame skip, and a jump once. `bound` says what a control drives,
+  for a device source; combining several sources is its business.
+- **Events:** one type for every game, `GameEvent`, whose `kind` is a
+  declared name and whose payload is the game's (`subject`, `other`,
+  `value`, named `data`, a `note`). `kind` suggests shared names (`point`,
+  `hit`, `death`).
+- **Goals and metrics:** a goal is a success or failure, `ends` the
+  session or not, and is worth a `reward` (signs checked). The game
+  reports reaching one as a `GameEvent` of its name for a seat, and keeps
+  `Metrics` current; reward, termination and "no progress for
+  `stall_frames`" truncation are derived from those in M2, so the engine
+  holds no game's reward and no condition language. `observed` declares
+  the vector view's slots.
+
+**`platform`: the window, never the GPU** (`platform.rs`). `Platform`
+has `pump` (what happened since the last: close, size, exposed, device
+inputs by W3C key code or gilrs pad name) and `window` (X11 handles as
+numbers). `Redraw` is declared here, provided by whichever presenter
+draws to the window, so the resident bootstrap can call it. A game names
+its provider in `engine_game(platform = ...)`, which must be resident and
+is loaded before the bootstrap; none leaves every call `NotProvided`,
+which a bootstrap takes as "no window". `WindowSpec` is the window a game
+asks for. Tested by `provider_test`, through a fake provider.
+
+**`observe`: what an agent asks and gets** (`observe.rs`, `views.rs`).
+`Request::parse` reads `text [cell w [h]] [region x y w h]`, `json`,
+`vector` or `pixels w h [overlay]`, then `as <seat>`, whose "since the
+last observation" the events count from. An `Observation` holds one view
+and the `Happened` events; it's a field struct, not a `Result`, since it
+crosses the `Observe` service. The text view's grid marks the cells whose
+centres an entity's box covers (a ball smaller than a cell marks its own),
+with a legend from the classes (`b` ball, `p` paddle), axis numbers, and
+the entity list below it with coordinates to two decimals. The JSON view
+carries entities, the view rectangle and each seat's actions and metrics.
+The vector view's schema is the seats' metrics, then each slot's
+`present, x, y, vx, vy, w, h`, scaled to the view and filled by name,
+then id. Velocities are the observer's to measure between frames:
+presentation carries places, not motion.
+
+**How the spike's pieces fit them,** in principle and unchanged in kind:
+`spike_draw`'s extract is `present`'s with the vocabulary widened, and
+`spike_present` and `spike_sink` read `DrawList` as they read the spike's
+(runs replace the spike's assumption that table order was material
+order); `spike_platform` is a `Platform` provider without `shared_gpu`,
+its winit key names mapped to `KEYS`, and `spike_windowed` pumps it as it
+does; `Redraw` is the spike's own; pong's `up`/`down`/`stay` are the
+choices of one held axis, so `pong_text` and `spike_turns` become `act`
+calls from an agent source; `spike_record`'s `Watch` gives way to
+`Act` events and `GameEvent`s, which the spike's session log already
+records in another form; `spike_capture` is an observer, which would
+answer `Observe` from the labels in the list it keeps.
+
+**Deferred, each an addition beside these, not a change to them:**
+sprites, images, fonts and every other asset (and so materials that
+describe anything); 3D (M7); several cameras; outlines, gradients and
+text beyond one upright line; the delta flow; combining one action from
+several sources, analog dead zones, sticky actions, rebinding and the
+mouse; per-seat gamepad layouts; the pixel view's presenter (M6); several
+providers of one service (the window plus a headless capture); and every
+implementation: the providers, the presenters, the observer, the
+recorder, the agent interface and its MCP server, which phase 2 and M2
+build.
+
 ## Open questions
 
-- **The vocabulary**, 2D first: shapes, text, sprites, camera, layers,
-  labels. 3D extends it later.
+- **The vocabulary**, 2D first: shapes, text, camera, layers, labels
+  are built ([above](#the-interfaces-as-built)); sprites wait for assets,
+  and 3D extends it later.
+- **How a game keeps `Place` current.** A game that moves things with
+  physics has them in `physics2d::Position` and must copy them into
+  `Place` each frame (a system, or a bridge mod per physics); the
+  alternative is a transform both share, which touches physics. The
+  user's to choose before pong adopts it (phase 3).
 - **Combining actions** from several sources at once, and analog axes.
 - **Change ticks** (get-7oo): pages marked only on a real write would make
   incremental extraction, and every system like it, pay. It touches the

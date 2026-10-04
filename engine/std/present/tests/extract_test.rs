@@ -129,6 +129,17 @@ fn a_turned_place_turns_its_rect_and_its_line() {
 }
 
 #[test]
+fn a_line_points_where_it_goes_not_where_its_place_faces() {
+    let _serial = lock(&SERIAL);
+    let w = World::new();
+    spawn(&w, (Place::at(0.0, 0.0), Line { dx: 0.0, dy: -3.0, width: 0.5 }, Look::default()));
+    let seen = frame(&w);
+    assert!(close(seen.items[0].rot, [0.0, -1.0]), "{:?}", seen.items[0]);
+    assert!(close(seen.items[0].pos, [0.0, -1.5]));
+    assert!(close(seen.items[0].size, [3.0, 0.5]));
+}
+
+#[test]
 fn a_line_of_no_length_keeps_its_places_turn() {
     let _serial = lock(&SERIAL);
     let w = World::new();
@@ -283,4 +294,34 @@ fn each_frame_is_rebuilt_whole() {
     w.between_frames(Default::default()).unwrap().insert(e, Place::at(5.0, 5.0));
     let seen = frame(&w);
     assert_eq!(seen.items[1].pos, [5.0, 5.0]);
+}
+
+/// Pong as presentation.md's example describes it: the 40 by 20 court in
+/// its own cells, a band above it for the score.
+#[test]
+fn pong_in_the_vocabulary() {
+    let _serial = lock(&SERIAL);
+    let w = World::new();
+    let grey = Look::colour(Colour::rgb(0x8c8c96));
+    spawn(&w, (Camera { x: -1.0, y: -4.0, w: 42.0, h: 25.0, clear: Colour::rgb(0x030306) },));
+    for y in [-0.25, 20.25] {
+        spawn(&w, (Place::at(20.0, y), Rect { w: 40.0, h: 0.5 }, grey, Label::what("wall")));
+    }
+    // The net: under everything else.
+    spawn(&w, (Place::at(20.0, 0.0), Line { dx: 0.0, dy: 20.0, width: 0.1 }, Look::colour(Colour::rgb(0x0e0f16)).layer(-1)));
+    let left =
+        spawn(&w, (Place::at(1.5, 10.0), Rect { w: 1.0, h: 4.0 }, Look::colour(Colour::rgb(0x3cd2f0)), Label::named("paddle", "left")));
+    spawn(&w, (Place::at(38.5, 10.0), Rect { w: 1.0, h: 4.0 }, Look::colour(Colour::rgb(0xfa9628)), Label::named("paddle", "right")));
+    let ball = spawn(&w, (Place::at(20.0, 10.0), Circle { radius: 0.25 }, Look::default(), Label::what("ball")));
+    let score = Text { text: "0 : 0".into(), size: 2.0, anchor: [0.5, 0.5] };
+    spawn(&w, (Place::at(20.0, -2.0), score, Look::default(), Label::what("score")));
+    let seen = frame(&w);
+    // The net its own run below; walls, paddles and ball one run.
+    assert_eq!(seen.runs, [Run { layer: -1, material: 0, start: 0, len: 1 }, Run { layer: 0, material: 0, start: 1, len: 5 }]);
+    assert_eq!(seen.names, ["wall", "paddle", "ball", "score"]);
+    let paddle = seen.labels.iter().find(|l| l.entity == left).unwrap();
+    assert_eq!((paddle.name.as_str(), paddle.pos, paddle.size), ("left", [1.5, 10.0], [1.0, 4.0]));
+    assert!(seen.labels.iter().any(|l| l.entity == ball && l.size == [0.5, 0.5]));
+    assert_eq!(seen.texts[0].text, "0 : 0");
+    assert_eq!(seen.view.map(|v| (v.w, v.h)), Some((42.0, 25.0)));
 }

@@ -728,6 +728,53 @@ one would have to ship those files with it.
   `bytemuck_derive` 1.12.1 (Lokathor; Zlib, Apache-2.0 or MIT), to upload
   the spike's draw items as bytes. Both in `//spikes/presentation` only.
 
+## Gymnasium
+
+- **Project:** Gymnasium, the reinforcement-learning environment API
+  (formerly OpenAI Gym). <https://github.com/Farama-Foundation/Gymnasium>,
+  <https://gymnasium.farama.org/api/env/>
+- **Authors and license:** the MIT License, "Copyright (c) 2016 OpenAI"
+  and "Copyright (c) 2022 Farama Foundation", as its `LICENSE` states
+  (read 2026-10-04). Not fetched by the build, not linked, no code copied.
+- **What for:** the shapes of `//engine/std/play` and
+  `//engine/std/observe` (presentation.md, "The interfaces, as built"): a
+  discrete set of choices and a per-action `options` list (its `Discrete`
+  and `MultiDiscrete` spaces), a fixed-length observation vector with a
+  schema (a `Box` space), and goals declared so that reward, `terminated`
+  and `truncated` can be derived, its `step` return, in M2.
+
+## The Arcade Learning Environment
+
+- **Project:** Machado et al., "Revisiting the Arcade Learning
+  Environment", JAIR 2018: <https://arxiv.org/abs/1709.06009>. A paper; no
+  code of it is used.
+- **What for:** frame skip as the meaning of a held action under
+  `step(n)` (`play`'s `ActionState`: held values repeat, per-frame ones
+  are sent once), and sticky actions, deferred.
+
+## gilrs and the W3C input specifications
+
+- **gilrs**, "Game Input Library for Rust", Apache-2.0 and MIT, as its
+  `README.md` states (read 2026-10-04,
+  <https://gitlab.com/gilrs-project/gilrs>). Not yet linked (D13 plans it
+  for the gamepad source). `platform::PAD_BUTTONS` and `PAD_AXES` use its
+  names for the standard layout, so a provider maps them one to one.
+- **W3C UI Events KeyboardEvent `code` values**
+  (<https://www.w3.org/TR/uievents-code/>) name `platform::KEYS`, as
+  winit's `KeyCode` does; the **W3C Gamepad** "standard" mapping
+  (<https://www.w3.org/TR/gamepad/>) is the layout gilrs's names follow.
+  Names only.
+
+## Playtesting harnesses read for the views
+
+Papers and write-ups, cited in playtesting-research.md with their
+links; nothing of them is code here. **TowerMind** and **EA SEED**'s
+automated game testing for the vector view with a schema
+(`observe::VectorSchema`); the **spatial reasoning in LLM game agents**
+study and TowerMind for the text view's grid with axis coordinates *and*
+an entity list; **Gemini Plays Pokémon**'s harness for the pixel view's
+label overlay (`View::Pixels { overlay }`).
+
 [^spike-code]: (2026-10-04) physics2d's experiment binaries
     `:parallel_solver` (`tests/parallel_solver.rs`), `:solver_layout` and
     `:narrow_bench` were deleted by get-emj.112, their questions answered;

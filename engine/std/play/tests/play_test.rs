@@ -88,6 +88,7 @@ fn a_bad_command_is_answered_with_what_would_do() {
     assert_eq!(err("paddle=1.5"), "`paddle` is an axis, from -1 to 1, not 1.5");
     assert_eq!(err("paddle=NaN"), "`paddle` is an axis, from -1 to 1, not NaN");
     assert_eq!(err("up down"), "`paddle` is set twice");
+    assert_eq!(err("up paddle=-1"), "`paddle` is set twice", "even to one value: a command says each thing once");
     assert_eq!(err(" , "), "no action given: send `noop` to change nothing");
     let jump = Playable::new("test").action(Action::button("jump", "jumps"));
     assert_eq!(jump.parse("jump=0.5").unwrap_err().to_string(), "`jump` is a button, 0 or 1, not 0.5");
