@@ -7,7 +7,7 @@
 //! gather_contacts  See<Bodies>, world -> Make<Contacts>
 //! prepare          See<Settings>, Pass<Bodies>, See<Contacts> -> Make<Graph>
 //! passes           See<Bodies>, See<Contacts>, Pass<Graph>, Passes
-//! finish           See<Settings>, Take<Graph> -> Pass<Bodies>, Pass<Contacts>
+//! finish           See<Settings>, Take<Graph>, ParMap -> Pass<Bodies>, Pass<Contacts>
 //! scatter_contacts Take<Contacts> -> world
 //! scatter_bodies   Take<Bodies> -> world
 //! ```
@@ -30,7 +30,7 @@
 
 use std::time::Instant;
 
-use engine_api::{Cx, Dt, Entity, Make, Pass, Passes, Query, Recycle, See, Stage, States, Take, flow};
+use engine_api::{Cx, Dt, Entity, Make, ParMap, Pass, Passes, Query, Recycle, See, Stage, States, Take, flow};
 
 use crate::solver::lanes::Shared;
 use crate::solver::{self, Constraint, ContactPoint, SolverBody, Staged, Step};
@@ -213,8 +213,9 @@ impl Physics3d {
         self.solver_time(start, |t, x| t.passes += x);
     }
 
-    /// The step's impulses and states back into the contacts and bodies;
-    /// or, where nothing went in lanes, the step solved whole.
+    /// The step's impulses and states back into the contacts and bodies,
+    /// a map over parts of them the scheduler runs; or, where nothing went
+    /// in lanes, the step solved whole.
     pub(crate) fn finish(
         &mut self,
         _: &mut (),
@@ -222,12 +223,17 @@ impl Physics3d {
         (dt, s): (Dt, See<Settings>),
         g: Take<Graph>,
         (mut b, mut c): (Pass<Bodies>, Pass<Contacts>),
+        map: ParMap,
     ) {
         let start = Instant::now();
         let how = s.how.expect("made by `solve`");
         let (bodies, contacts) = (&mut b.bodies[..], &mut c.constraints[..]);
         if g.lanes {
-            g.staged.finish(bodies, contacts);
+            // A part a block across threads (`ParMap`'s four a thread), one
+            // part of everything on one, as 2D's.
+            let threads = map.threads();
+            let mut parts = solver::parts(if threads > 1 { 4 * threads } else { 1 }, bodies, contacts);
+            map.for_each_mut(&mut parts, 1, |_, part| g.staged.finish(part));
         } else if how.lanes == LANES {
             // `prepare` found the lanes don't pay, and changed nothing.
             solver::in_order(bodies, contacts, *dt, &how);
