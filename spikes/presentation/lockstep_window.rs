@@ -7,8 +7,11 @@
 //!   `pump_loader` for up to a second. This waits at most `IDLE`, then
 //!   pumps the platform's window; when the pump saw events (an expose, a
 //!   resize), it asks the presenter to draw the last frame again
-//!   (`spike_platform::redraw`), since no frame will. The close button or
-//!   Escape quits, between steps or during one.
+//!   (`spike_platform::redraw`), since no frame will. With turns it also
+//!   redraws when the barrier's status changes and every `TICK` while a
+//!   turn is open, so the view's status band (who has submitted, a wait
+//!   timer) stays current. The close button or Escape quits, between steps
+//!   or during one.
 //! - **Pacing.** With a window and pacing on (the default), a step's frames
 //!   are spread out in real time, each `dt / speed` seconds apart, so a
 //!   spectator sees `step 30` played out rather than its last frame. It
@@ -46,6 +49,10 @@ const MAX_STEPS: u64 = 100_000;
 const IDLE: Duration = Duration::from_millis(16);
 /// A turn's frames when `SPIKE_TURNS` isn't a number: 0.1 s.
 const TURN_FRAMES: u32 = 6;
+/// How often an open turn is redrawn while it waits, so the view's wait
+/// timer (whole seconds) ticks: a quarter second keeps it at most that
+/// late without the bootstrap knowing when the view started counting.
+const TICK: Duration = Duration::from_millis(250);
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -81,6 +88,10 @@ engine_api::mod_state! {
 #[derive(Default)]
 pub struct Pace {
     last_frame: Option<Instant>,
+    /// The barrier's status (`Lockstep::shown`) at the last idle redraw,
+    /// and when that was.
+    shown: Option<(u64, [bool; 2], bool, bool, u32)>,
+    redrawn: Option<Instant>,
 }
 
 /// What a pump of the window found.
@@ -156,6 +167,12 @@ impl Lockstep {
         self.next_frames = frames;
         self.turn = TurnInfo { turn: 1, frames, ..TurnInfo::default() };
         self.publish_turn(cx);
+    }
+
+    /// What a spectator sees of the barrier: an idle redraw follows any
+    /// change to it.
+    fn shown(&self) -> (u64, [bool; 2], bool, bool, u32) {
+        (self.turn.turn, self.turn.submitted, self.turn.playing, self.over, self.turn.frames)
     }
 
     fn waiting_for(&self) -> String {
@@ -339,9 +356,19 @@ impl Bootstrap for Lockstep {
                 }
                 Window::Open { events } => {
                     window_open = true;
-                    if events > 0 && !self.turn.playing {
+                    // While a turn plays its frames draw; otherwise redraw on
+                    // an expose, a change to the barrier (a submit, the turn
+                    // ending, the game's end), and every `TICK` of an open
+                    // turn, for the view's wait timer. A redraw reads the
+                    // world and writes nothing, so none of this touches what
+                    // a frame computes.
+                    let now = Instant::now();
+                    let changed = pace.shown != Some(self.shown());
+                    let tick = self.turns && !self.over && pace.redrawn.is_none_or(|t| now >= t + TICK);
+                    if !self.turn.playing && (events > 0 || changed || tick) {
                         // Not loaded, or failed: the window just stays as it was.
                         let _ = spike_platform::redraw(cx);
+                        (pace.shown, pace.redrawn) = (Some(self.shown()), Some(now));
                     }
                 }
                 Window::None => window_open = false,

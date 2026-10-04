@@ -507,6 +507,26 @@ and when both have, the turn's frames run, paced, and the next opens.
 - **One `state` for both sides.** `pong_versus state` names `left` and
   `right` (never "you"), with a turn line: number, open or playing (frame
   k of N), who has submitted, the point limit, or the winner.
+- **The window shows the barrier.** Watching two agents, turns that
+  waited long on a slow thinker looked like a hang, so the score band
+  now shows it (AGENT_VERSUS.md, "The score band"): a lamp per side, lit
+  once it has submitted; a wait timer in whole seconds beside each side
+  still to; a play triangle while a turn runs, pause bars while it's
+  open; the turn number; the winner framed at game over. That band
+  changes while no frames run, which a redraw of the last frame's list
+  can't show, so a stage can now *restage* between frames: a
+  `spike_draw::Restage` service (provided by `spike_pong_view`, called by
+  the presenter's `Redraw`) returns items drawn over the last list,
+  starting with the band's own opaque background. Its provider reads the
+  world with `cx.world()`, which a redraw, outside any frame, allows. The
+  bootstrap redraws on a change to the barrier and every 250 ms while a
+  turn is open. Wall-clock time lives only in the view's transient (when
+  it first saw the barrier's status change), so it reaches pixels, never
+  the world: the same 150-turn script with three 1.3 s waits ended in the
+  same `state` paced (18.9 s) and unpaced (4.7 s). The general shape, a
+  view whose model changes between frames, is one a real presenter
+  will meet again (a pause menu, a loading screen): here, the stage that
+  draws something also answers for it between frames.
 - Measured, on the 4090 with the window up: with only `left` in, the frame
   stayed at 0 for 1 s; `right`'s submit replied in 1.2 ms, and the 6-frame
   turn played out in 85 ms with polls seeing frames 1 to 5 go by. Two

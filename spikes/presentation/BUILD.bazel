@@ -107,13 +107,15 @@ engine_game(
 # ---- Pong with a spectator window (the spike's finale) ----
 
 # Pong drawn in the spike's vocabulary: reads pong's components, adds rects
-# to the frame's draw list. Pong itself doesn't change.
+# to the frame's draw list, and the turn barrier's status (restaged between
+# frames). Pong itself doesn't change.
 engine_mod(
     name = "spike_pong_view",
     srcs = ["pong_view.rs"],
     crate_root = "pong_view.rs",
     mod_deps = [
         ":spike_draw",
+        ":spike_turns",
         "//engine/std/clock",
         "//engine/std/physics2d",
         "//pong/core",

@@ -12,7 +12,8 @@
 //! - `SPIKE_DRAW=per_item`: a draw call per item (default instanced).
 //!
 //! Between frames it draws the last list again when the bootstrap asks
-//! (`spike_platform::Redraw`), so an idle lockstep window stays drawn. A
+//! (`spike_platform::Redraw`), so an idle lockstep window stays drawn,
+//! with whatever a stage restages over it (`spike_draw::Restage`). A
 //! list with a canvas size (`DrawList::canvas_w`) is scaled to the window,
 //! letterboxed.
 //!
@@ -237,7 +238,14 @@ impl Present {
 
 impl spike_platform::Redraw for Present {
     fn redraw(&mut self, p: &mut Presenter, cx: &mut Cx) -> bool {
-        p.render(cx)
+        // Drawn over the last frame for this redraw only: the next frame's
+        // list has its own.
+        let over = spike_draw::restage(cx).unwrap_or_default();
+        let kept = p.last.len();
+        p.last.extend(over.iter().map(Item::from));
+        let drawn = p.render(cx);
+        p.last.truncate(kept);
+        drawn
     }
 }
 

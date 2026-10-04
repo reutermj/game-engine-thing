@@ -46,6 +46,46 @@ impl Item {
     }
 }
 
+engine_api::field_struct! {
+    /// An `Item` as a service call carries it: `Item` itself is `repr(C)`
+    /// for the presenter's upload, and isn't a `FieldType`, which a value
+    /// crossing a call must be (making it one would be new unsafe code).
+    #[derive(Debug, Default, Copy)]
+    pub struct Drawn {
+        pub pos: [f32; 2],
+        pub size: [f32; 2],
+        pub colour: u32,
+        pub shape: u32,
+    }
+}
+
+impl From<&Item> for Drawn {
+    fn from(i: &Item) -> Drawn {
+        Drawn { pos: i.pos, size: i.size, colour: i.colour, shape: i.shape }
+    }
+}
+
+impl From<&Drawn> for Item {
+    fn from(d: &Drawn) -> Item {
+        Item { pos: d.pos, size: d.size, colour: d.colour, shape: d.shape, material: 0, layer: 0.5 }
+    }
+}
+
+engine_api::service! {
+    /// What a stage draws again between frames, over the last frame's
+    /// list: the presenter calls it when the bootstrap asks for a redraw
+    /// (`spike_platform::Redraw`), so a view of something that changes
+    /// while no frames run (the turn barrier's status, a wait timer) stays
+    /// current. Called outside a frame, so the provider reads the world
+    /// with `cx.world()`. Its items are drawn last, in order, and should
+    /// cover what they replace (start with an opaque background). Provided
+    /// by `spike_pong_view`; `NotProvided` otherwise, and the presenter
+    /// draws the last frame alone.
+    pub trait Restage {
+        fn restage() -> Vec<Drawn>;
+    }
+}
+
 engine_api::flow! {
     /// The frame's draw list. `full`: `items` is every drawable, in a
     /// stable order (by material, then entity); otherwise `items` is

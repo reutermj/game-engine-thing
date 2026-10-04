@@ -24,6 +24,31 @@ players use it:
 The window is the same as AGENT.md's (1184x680, floats under i3). `left`
 is cyan, `right` orange. There is no AI: both paddles are yours.
 
+### The score band
+
+The strip above the court shows the turn barrier, so a spectator can
+tell a side that is thinking from a game that has hung. Mirrored about
+the centre line, from the centre out:
+
+    frame   [left timer] [left lamp]  [left score]  [marker]  [right score]  [right lamp] [right timer]   turn
+
+- **Scores**, large, either side of the centre.
+- **Lamps**, a square outside each score in the side's colour: dim while
+  that side has yet to submit for the open turn, lit once it has (both
+  lit while the turn plays).
+- **Wait timers**, beside each lamp that is still dim: whole seconds that
+  side has been waited on, counted from when the turn opened or, once the
+  other side is in, from that submit. They tick while nothing else moves.
+- **Marker**, between the scores: two dim pause bars while the turn is
+  open, a green play triangle while its frames run.
+- **Frame number** small at top left, **turn number** small at top right.
+- **Game over**: the winner's half of the band is framed in its colour
+  and its lamp lit; no marker, no timers.
+
+Before the first turn plays no frame has run, so the court is blank and
+only the band shows. The timers are the window's alone (wall-clock time
+never enters the game), and restart if the view mod is reloaded.
+
 ## The commands
 
 `SIDE` is `left` or `right`, whichever you were told you play.
