@@ -608,7 +608,10 @@ Each tier proves what the others can't (CLAUDE.md):
 
 **Built** (2026-10-02, get-znt.33). physics2d's solve, one system until
 then, is a pipeline (`engine/std/physics2d/pipeline.rs`; physics.md, "The
-step"):
+step"), as it was built; the current diagram, with the `ParMap`s the
+gathers, `finish` and the scatters have taken since (get-znt.45,
+get-emj.103 to .105), is the one in `pipeline.rs`'s header, its one
+home:
 
 ```text
 solve            world -> Make<Settings>
@@ -701,7 +704,10 @@ median of 7 runs, each a fresh engine stepped to the window and timed over
 
 **Built** (2026-10-02, get-znt.35). physics3d's solve, one system until
 then, is the same pipeline less what 3D lacks
-(`engine/std/physics3d/pipeline.rs`; physics.md, "A mod"):
+(`engine/std/physics3d/pipeline.rs`; physics.md, "A mod"), as it was
+built; since get-emj.90 its `solver` is three systems, `prepare`,
+`passes` and `finish`, and the current diagram is `pipeline.rs`'s
+header:
 
 ```text
 solve            world -> Make<Settings>
