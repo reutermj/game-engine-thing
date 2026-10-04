@@ -107,9 +107,10 @@ changing the ABI, the reload sequence or the Bazel rules.
     once `Workers` goes (get-znt.31): `ParMap`, `Reduce` and `Passes` (a
     program of stages over items in colors, its kernels handed the states
     plain on one thread and shared on several, `States`), parameters the
-    scheduler runs across threads (`Passes` does; `ParMap` and `Reduce`
-    stay on one until they have users). Both physics solves' passes are
-    `Passes` programs (each one's `pipeline.rs`).
+    scheduler runs across threads (`Passes` and `ParMap::for_each_mut` do;
+    `Reduce` and `ParMap::map_into` stay on one until they have users).
+    Both physics solves' passes are `Passes` programs, and their
+    write-backs a `ParMap` over parts (each one's `pipeline.rs`).
   - `dispatch.rs` — the task graph `Passes` runs across the world's
     executor: stages of blocks claimed from each thread's share, published
     by whoever completes the stage before, no main thread, a kernel's
