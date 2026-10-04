@@ -1,0 +1,187 @@
+# SPIKE (get-3hd.1): the presentation spike, wgpu, winit and tiny-skia
+# under Bazel, the loop, per-library statics, extract and draw costs.
+# Findings in docs/architecture/presentation-spike.md; delete this package
+# once presentation.md's decisions are made (CLAUDE.md, "Spikes are
+# throwaway"). Every target is manual: they need a GPU, a display or
+# minutes of wgpu compile that `./bazel test //...` shouldn't pay.
+
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("//engine:defs.bzl", "engine_game", "engine_mod")
+
+# ---- The mods ----
+
+# The extract, and the vocabulary (`Place`, `Look`, the `DrawList` flow).
+engine_mod(
+    name = "spike_draw",
+    srcs = ["draw.rs"],
+    crate_root = "draw.rs",
+    interface = ["draw_interface.rs"],
+    tags = ["manual"],
+)
+
+# The game: drawables that move. Two builds that move them differently,
+# under one mod name, so a reload shows:
+#   ./bazel run //spikes/presentation:spike_scene_b
+[engine_mod(
+    name = name,
+    srcs = ["scene.rs"],
+    crate_features = features,
+    crate_root = "scene.rs",
+    mod_deps = [":spike_draw"],
+    mod_name = "spike_scene",
+    tags = ["manual"],
+) for name, features in [
+    ("spike_scene", []),
+    ("spike_scene_b", ["b"]),
+]]
+
+# A presenter without a GPU: reads the draw list and copies it.
+engine_mod(
+    name = "spike_sink",
+    srcs = ["sink.rs"],
+    crate_root = "sink.rs",
+    mod_deps = [":spike_draw"],
+    tags = ["manual"],
+)
+
+# The platform: winit's event loop and the window, resident.
+engine_mod(
+    name = "spike_platform",
+    srcs = ["platform.rs"],
+    crate_root = "platform.rs",
+    interface = ["platform_interface.rs"],
+    resident = True,
+    tags = ["manual"],
+    deps = [
+        ":gfx",
+        "@crates//:winit",
+    ],
+)
+
+# The realtime bootstrap, pumping the platform's window once a frame.
+engine_mod(
+    name = "spike_windowed",
+    srcs = ["windowed.rs"],
+    crate_root = "windowed.rs",
+    mod_deps = [
+        ":spike_platform",
+        "//engine/std/clock",
+    ],
+    resident = True,
+    tags = ["manual"],
+)
+
+# The window presenter, reloadable.
+engine_mod(
+    name = "spike_present",
+    srcs = ["present.rs"],
+    crate_root = "present.rs",
+    mod_deps = [
+        ":spike_draw",
+        ":spike_platform",
+    ],
+    tags = ["manual"],
+    deps = [
+        ":gfx",
+        "@crates//:pollster",
+        "@crates//:wgpu",
+    ],
+)
+
+# A window showing the scene, which reloads under it:
+#   ./bazel run //spikes/presentation:window_game
+#   bazel-bin/engine/modctl/modctl send spike_scene spawn 10000
+#   ./bazel run //spikes/presentation:spike_scene_b     (or :spike_present)
+engine_game(
+    name = "window_game",
+    bootstrap = ":spike_windowed",
+    mods = [
+        ":spike_scene",
+        ":spike_draw",
+        ":spike_present",
+    ],
+    tags = ["manual"],
+)
+
+# The extract and the hand-off without a GPU, in lockstep, for the bench.
+engine_game(
+    name = "extract_game",
+    bootstrap = "//engine/std/lockstep",
+    mods = [
+        ":spike_scene",
+        ":spike_draw",
+        ":spike_sink",
+    ],
+    tags = ["manual"],
+)
+
+# The extract's cost, full against incremental against delta, at 1k, 10k
+# and 100k drawables with 1, 10 and 100% of them moving a frame:
+#   ./bazel run --config=bench //spikes/presentation:extract_bench
+rust_binary(
+    name = "extract_bench",
+    srcs = ["extract_bench.rs"],
+    data = [":extract_game"],
+    env = {"EXTRACT_GAME": "$(rlocationpath :extract_game)"},
+    tags = ["manual"],
+    deps = [
+        "//engine/control",
+        "//engine/loader",
+    ],
+)
+
+# ---- Standalone ----
+
+# The draw item and a wgpu renderer for it, shared by the draw bench and
+# the presenter mod.
+rust_library(
+    name = "gfx",
+    srcs = ["gfx.rs"],
+    crate_name = "presentation_gfx",
+    crate_root = "gfx.rs",
+    tags = ["manual"],
+    deps = [
+        "@crates//:bytemuck",
+        "@crates//:pollster",
+        "@crates//:wgpu",
+    ],
+)
+
+# Draw throughput, a draw per item against instanced by material:
+#   ./bazel run --config=bench //spikes/presentation:draw_bench
+#   SPIKE_ADAPTER=llvmpipe ./bazel run --config=bench //spikes/presentation:draw_bench
+rust_binary(
+    name = "draw_bench",
+    srcs = ["draw_bench.rs"],
+    tags = ["manual"],
+    deps = [
+        ":gfx",
+        "@crates//:pollster",
+        "@crates//:wgpu",
+    ],
+)
+
+# tiny-skia rasterising the same shapes on one thread:
+#   ./bazel run --config=bench //spikes/presentation:skia_bench
+rust_binary(
+    name = "skia_bench",
+    srcs = ["skia_bench.rs"],
+    tags = ["manual"],
+    deps = [
+        ":gfx",
+        "@crates//:tiny-skia",
+    ],
+)
+
+# Lists the Vulkan adapters and times device creation on each.
+#   ./bazel run //spikes/presentation:probe
+rust_binary(
+    name = "probe",
+    srcs = ["probe.rs"],
+    tags = ["manual"],
+    deps = [
+        "@crates//:pollster",
+        "@crates//:wgpu",
+    ],
+)

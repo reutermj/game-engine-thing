@@ -227,8 +227,10 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
                   "(and add there what a mod legitimately needs)") % name)
 
     # Every target this macro declares is part of the mod, so all of them
-    # share its testonly-ness.
+    # share its testonly-ness, and its tags (`manual`, so `//...` leaves a
+    # mod out, as the presentation spike's need a display and a GPU).
     testonly = kwargs.pop("testonly", False)
+    tags = kwargs.pop("tags", [])
 
     # A reloadable mod may not start threads; a resident one, never
     # unmapped, may own them. See //engine:mod_lints.
@@ -245,6 +247,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
             deps = interface_deps + ["//engine/api"],
             lint_config = lints,
             testonly = testonly,
+            tags = tags,
             visibility = visibility,
         )
     _mod_links(
@@ -253,6 +256,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         deps = [dep.same_package_label(dep.name + "_links") for dep in dep_labels],
         mod_name = mod_name,
         testonly = testonly,
+        tags = tags,
         visibility = visibility,
     )
     rust_shared_library(
@@ -278,6 +282,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
         lint_config = lints,
         testonly = testonly,
+        tags = tags,
         visibility = ["//visibility:private"],
         **kwargs
     )
@@ -288,6 +293,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         mod_name = mod_name,
         resident = resident,
         testonly = testonly,
+        tags = tags,
         visibility = visibility,
     )
 
@@ -396,6 +402,7 @@ def engine_game(
         bootstrap = "//engine/std/realtime",
         scheduler = "//engine/std/sequential",
         threads = "//engine/std/threads",
+        tags = None,
         visibility = None):
     """The engine plus the mods loaded at startup, and a target to reload them.
 
@@ -415,6 +422,7 @@ def engine_game(
         on the frame's thread. A game wanting another count sets
         `ENGINE_THREADS`; another placement, its own mod over
         `//engine/std/threads:pool`.
+      tags: Tags for both targets (`manual` to leave the game out of `//...`).
       visibility: Visibility of both targets.
 
     Also declares a reload target: `bazel run` on it sends every mod's current
@@ -431,10 +439,12 @@ def engine_game(
         scheduler = scheduler,
         threads = threads,
         reload_label = "//%s:%s" % (native.package_name(), reload),
+        tags = tags,
         visibility = visibility,
     )
     _engine_game_reload(
         name = reload,
         game = ":" + name,
+        tags = tags,
         visibility = visibility,
     )

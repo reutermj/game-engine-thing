@@ -33,6 +33,11 @@ monolithic design doc.
   and AI playtesting, surveyed with sources: what LLM agents, search and
   per-game RL, and pixel-to-action game models need from a game, and what
   that asks of presentation.md (research)
+- [presentation-spike.md](presentation-spike.md) — wgpu, winit and
+  tiny-skia under Bazel, a window pumped by the bootstrap through a
+  resident platform mod, what of wgpu can cross mods (and the crash when
+  it does), the extract full against incremental, draw throughput plain
+  against instanced, and the hand-off's cost, measured (spike results)
 - [parallel-relations.md](parallel-relations.md) — systems whose
   relation rows write the entities they name, across threads in colors:
   who wants it, what other engines keep in and out of the ECS, colors as

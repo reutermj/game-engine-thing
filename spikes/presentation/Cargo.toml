@@ -1,0 +1,23 @@
+# SPIKE (get-3hd.1): the presentation spike's crates.io dependencies, for
+# rules_rs only. Throwaway with the spike: see
+# docs/architecture/presentation-spike.md.
+[package]
+name = "presentation-spike"
+version = "0.0.0"
+edition = "2024"
+# Keep in step with the toolchain version in MODULE.bazel (see
+# engine/loader/Cargo.toml).
+rust-version = "1.98"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# Vulkan only, and WGSL: no GLES (EGL), no DX12/Metal/WebGPU.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+# X11 only: the machine has no Wayland session.
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
