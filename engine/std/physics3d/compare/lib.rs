@@ -1,5 +1,6 @@
 //! A comparison harness for 3D rigid bodies: the same scenes and the same
-//! quality measures over several engines, each single-threaded, with
+//! quality measures over several engines, each single-threaded (ours as
+//! [`Config::threads`] says: one thread where the bench times it), with
 //! rotations locked (as the translation-only step had them) or free, so a new
 //! solver can be judged against established ones on identical input.
 //!
@@ -72,6 +73,25 @@ pub struct Config {
     /// The substeps a bounce sets in every engine that has them (ours,
     /// Rapier's solver iterations, Box3D's), or 0 for each engine's own.
     pub substeps: u32,
+    /// The threads ours runs its systems on. The others run on the calling
+    /// thread, whatever this says.
+    pub threads: Threads,
+}
+
+/// Where ours runs: its results are the same bits on any of these, so only
+/// its timings differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Threads {
+    /// The process's one pool (`engine_threads::shared`, as `ENGINE_THREADS`
+    /// sizes it), as the tests and the baseline run, so they cover the
+    /// solve's passes across threads.
+    Shared,
+    /// The calling thread alone, as every other engine runs: what the
+    /// bench's tables time.
+    One,
+    /// A pool of its own of this many threads, pinned to one CCD as the
+    /// `threads` mod's is: the bench's `--threads=n`, named apart.
+    Pool(usize),
 }
 
 impl Config {
@@ -79,7 +99,16 @@ impl Config {
     /// and substeps, turning or not, and ours tuned as `tune` says.
     pub fn of(scene: &scenes::Scene, rotate: bool, tune: &'static str) -> Config {
         let max_bodies = (scene.spawn.iter().map(Vec::len).sum::<usize>() + scene.statics.len() + 16) as u32;
-        Config { iters: Iters::Default, sleep: false, max_bodies, rotate, tune, gravity: scene.gravity, substeps: scene.substeps }
+        Config {
+            iters: Iters::Default,
+            sleep: false,
+            max_bodies,
+            rotate,
+            tune,
+            gravity: scene.gravity,
+            substeps: scene.substeps,
+            threads: Threads::Shared,
+        }
     }
 }
 

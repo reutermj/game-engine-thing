@@ -7,7 +7,7 @@
 //! timings for its solve (gather, solver, write-back, its sides and
 //! sleeping included) and the frame's wall time. The median of the runs.
 //!
-//!     taskset -c 0-7 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench
+//!     THREADS=1,8 ./bazel run --config=bench //engine/std/physics2d/compare:step_bench
 //!
 //! `SHARED=1` hands the solver's kernels their states shared, as threads
 //! will, on one thread (`World::set_shapes_shared`): what sharing costs.

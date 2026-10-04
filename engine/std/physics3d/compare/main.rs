@@ -7,7 +7,11 @@
 //! turn (locked by default), --sleep lets bodies
 //! sleep, --runs N repeats each run and reports the median phase times
 //! (default 3 up to 2000 bodies, 1 above), --tune=... runs a variant of ours
-//! (physics3d::Tuning::parse). Prints markdown tables.
+//! (physics3d::Tuning::parse), --threads=N adds a row of ours on a pool of N
+//! threads of its own, pinned to one CCD, named apart. Prints markdown
+//! tables. Every engine is timed on the calling thread alone, ours too
+//! (`Threads::One`), but for that row: the others are single-threaded as
+//! the shims build them.
 //!
 //! --behave runs behaviour scenes instead (physics.md, "Quality beyond
 //! settling"), whose size is the scene's parameter: ramp_hold, ramp_slide
@@ -37,7 +41,7 @@
 
 use physics3d_compare::measure::{self, Run};
 use physics3d_compare::scenes::{self, Kind, Scene};
-use physics3d_compare::{BACKENDS, Config, Iters, behave, bounces, family, make_backend, runs};
+use physics3d_compare::{BACKENDS, Config, Iters, Threads, behave, bounces, family, make_backend, runs};
 
 fn list<'a>(arg: Option<&'a String>, all: &[&'a str]) -> Vec<&'a str> {
     match arg.map(String::as_str) {
@@ -57,6 +61,7 @@ fn main() {
     let mut behave = false;
     let (mut bounces, mut long, mut each) = (None, false, false);
     let mut families = None;
+    let mut pool = None;
     for f in flags {
         match f.as_str() {
             "--bounces" => bounces = Some("all".to_string()),
@@ -71,6 +76,7 @@ fn main() {
             "--behave" => behave = true,
             f if f.starts_with("--runs=") => runs = f["--runs=".len()..].parse().ok(),
             f if f.starts_with("--tune=") => tune = f["--tune=".len()..].to_string().leak(),
+            f if f.starts_with("--threads=") => pool = Some(f["--threads=".len()..].parse().expect("--threads=<n>")),
             f => panic!("unknown flag {f}"),
         }
     }
@@ -86,7 +92,13 @@ fn main() {
     }
     let scenes = list(positional.first().copied(), &["spheres", "boxes", "planks", "rain"]);
     let sizes: Vec<usize> = list(positional.get(1).copied(), &["1000", "10000"]).iter().map(|s| s.parse().expect("size")).collect();
-    let backends = list(positional.get(2).copied(), BACKENDS);
+    let backends: Vec<(&str, Threads)> = list(positional.get(2).copied(), BACKENDS)
+        .into_iter()
+        .flat_map(|b| {
+            let threaded = (b == "ours").then_some(pool).flatten().map(|n| (b, Threads::Pool(n)));
+            std::iter::once((b, Threads::One)).chain(threaded)
+        })
+        .collect();
 
     println!("iterations: {iters:?}, sleep: {sleep}, rotate: {rotate}, dt 1/60, single-threaded\n");
     for s in &scenes {
@@ -102,13 +114,15 @@ fn main() {
                 tune,
                 gravity: scene.gravity,
                 substeps: scene.substeps,
+                threads: Threads::One,
             };
             if behave {
                 behaviour(&scene, &config, &backends);
                 continue;
             }
             let mut results = Vec::new();
-            for b in &backends {
+            for &(b, threads) in &backends {
+                let config = Config { threads, ..config };
                 let mut all: Vec<Run> = (0..runs)
                     .map(|_| {
                         let mut backend = make_backend(b, &config).unwrap_or_else(|| panic!("unknown backend {b}"));
@@ -186,12 +200,13 @@ fn edge_families(names: &str, each: bool, backends: &[&str], tune: &'static str)
 }
 
 /// Each engine on one behaviour scene, a row each.
-fn behaviour(scene: &Scene, config: &Config, backends: &[&str]) {
+fn behaviour(scene: &Scene, config: &Config, backends: &[(&str, Threads)]) {
     println!("## {} {}, {} steps\n", scene.kind.name(), scene.n, scene.steps);
     let runs: Vec<_> = backends
         .iter()
-        .map(|b| {
-            physics3d_compare::behave::behave(scene, make_backend(b, config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut())
+        .map(|&(b, threads)| {
+            let config = Config { threads, ..*config };
+            physics3d_compare::behave::behave(scene, make_backend(b, &config).unwrap_or_else(|| panic!("unknown backend {b}")).as_mut())
         })
         .collect();
     let names: Vec<&str> = runs[0].values.iter().map(|(k, _)| *k).collect();

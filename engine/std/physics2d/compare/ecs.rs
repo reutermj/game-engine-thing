@@ -66,7 +66,9 @@ impl Ecs {
         let engine = Engine::new(manifest.bootstrap.clone(), dir.clone());
         // The scene game less its thread host, and the process's one pool in
         // its place: a harness makes thousands of engines, and each load of
-        // the host costs a TLS key (`engine_threads::shared`).
+        // the host costs a TLS key (`engine_threads::shared`). The tests and
+        // the baseline run on it; the comparison times ours `alone`, as the
+        // other engines run.
         let mods: Vec<_> = manifest.mods.iter().filter(|(name, _)| name != engine_threads::MOD_NAME).cloned().collect();
         engine.load_batch(&mods).expect("loading the scene");
         engine.world().set_executor(engine_threads::shared().map(|p| p as std::sync::Arc<dyn engine_ecs::Executor>));

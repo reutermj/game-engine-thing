@@ -201,67 +201,11 @@ rust_binary(
     ],
 )
 
-# The turned-box narrowphase by SAT and clipping (as it is) against GJK and
-# EPA, on the same pairs (see the source):
-#   ./bazel run --config=bench //engine/std/physics2d:narrow_bench
-rust_binary(
-    name = "narrow_bench",
-    srcs = [
-        "narrow.rs",
-        "tests/narrow_bench.rs",
-    ],
-    crate_root = "tests/narrow_bench.rs",
-    deps = [
-        ":physics2d_interface",
-        "//engine/std/physics_common",
-    ],
-)
-
-# Why `solve` copies bodies out of the world: the same solve over the same
-# pile's contacts with bodies kept each way (layout, pages, derived inverse
-# mass, order, in the world's own pages), each checked bit for bit:
-#   ./bazel run --config=bench //engine/std/physics2d:solver_layout
-rust_binary(
-    name = "solver_layout",
-    srcs = [
-        "tests/solver_layout.rs",
-        "tests/split_impulse.rs",
-    ],
-    crate_root = "tests/solver_layout.rs",
-    data = [":pile_game"],
-    env = {"PILE": "$(rlocationpath :pile_game)"},
-    deps = [
-        ":physics2d_interface",
-        "//engine/control",
-        "//engine/ecs",
-        "//engine/loader",
-    ],
-)
-
-# How far the solver parallelizes: sequential impulses over graph colors
-# and over islands, on 1 to 32 threads, against `solver::solve`, over a
-# 10 000 pile's contacts and a scene of separate stacks; checked bit for
-# bit across thread counts, and for how well the pile settles:
-#   ./bazel run --config=bench //engine/std/physics2d:parallel_solver
-rust_binary(
-    name = "parallel_solver",
-    srcs = [
-        "narrow.rs",
-        "tests/arrays.rs",
-        "tests/parallel_solver.rs",
-        "tests/split_impulse.rs",
-    ],
-    crate_root = "tests/parallel_solver.rs",
-    data = [":pile_game"],
-    env = {"PILE": "$(rlocationpath :pile_game)"},
-    deps = [
-        ":physics2d_interface",
-        "//engine/control",
-        "//engine/ecs",
-        "//engine/loader",
-        "//engine/std/physics_common",
-    ],
-)
+# (History: `:narrow_bench`, `:solver_layout` and `:parallel_solver`, the
+# experiments behind the SAT narrowphase, the solve's copy out of the world
+# and the colored solve, were deleted 2026-10-04, get-emj.112, their
+# findings written up in docs/architecture/physics.md and
+# contiguous-columns.md; they last built at 4018662.)
 
 # physics2d_test_asan; see docs/runbooks/004-run-the-loader-under-sanitizers.md.
 sanitized_tests(

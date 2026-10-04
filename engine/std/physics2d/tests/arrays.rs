@@ -1,7 +1,7 @@
 //! The physics step on plain arrays, as the mod takes it: bodies as
 //! indices in entity order, contacts in pair order, the same narrowphase and
 //! solver. Shared by `:tax`, which checks it against the mod bit for bit,
-//! and `:parallel_solver`, which swaps the solver under it.
+//! and the comparison in `compare/`, which swaps the solver under it.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -65,7 +65,6 @@ impl<F: FnMut(&mut [SolverBody], &mut [Constraint], f32)> Solve for F {
     }
 }
 
-#[allow(dead_code)] // `:parallel_solver`'s solvers have no points.
 pub struct WithPoints<F>(pub F);
 
 impl<F: FnMut(&mut [SolverBody], &mut [Spinning], &mut [Constraint], &mut [Points], f32)> Solve for WithPoints<F> {
@@ -214,7 +213,7 @@ impl Arrays {
     }
 
     /// A scene built by hand, with no contacts yet: entity `i` is index `i`.
-    /// `parallel_solver` builds its scenes this way; `tax`, which compiles
+    /// The comparison builds its scenes this way; `tax`, which compiles
     /// this file too, snapshots a running pile instead.
     #[allow(dead_code)]
     pub fn of(pos: Vec<Vec2>, collider: Vec<Collider>, body: Vec<Body>, moving: Vec<u32>, gravity: Vec2) -> Arrays {
