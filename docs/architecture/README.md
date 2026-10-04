@@ -29,6 +29,10 @@ monolithic design doc.
   playtesting as mods: games describe and presenters draw (window, CPU
   pixels, text, data), input as actions, one agent interface, rendering
   pipelined with the next frame (sketch)
+- [playtesting-research.md](playtesting-research.md) — decision models
+  and AI playtesting, surveyed with sources: what LLM agents, search and
+  per-game RL, and pixel-to-action game models need from a game, and what
+  that asks of presentation.md (research)
 - [parallel-relations.md](parallel-relations.md) — systems whose
   relation rows write the entities they name, across threads in colors:
   who wants it, what other engines keep in and out of the ECS, colors as
