@@ -169,16 +169,27 @@ impl FieldDesc {
 /// image (code, statics, string literals): values outlive the build that made
 /// them. Heap memory is fine, since every mod and the loader share one
 /// allocator.
-pub unsafe trait FieldType: Crossing + Clone + 'static {
+pub unsafe trait FieldType: for<'call> Crossing<'call> + Clone + 'static {
     const KIND: FieldKind;
     const FINGERPRINT: u64;
 }
 
-/// A type that may be passed by value to or returned from a call between mods
-/// (see `service!`): the other side may keep it, so it has to be safe to
-/// outlive the build it came from. Every [`FieldType`] and every component is;
-/// so is any reference, since a borrow can't outlive the call and both builds
-/// are mapped while it runs.
+/// A type that may be passed to or returned from a call between mods (see
+/// `service!`) whose borrows last `'call`. An owned value crosses any call,
+/// since the other side may keep it: every [`FieldType`] and component, which
+/// are safe to outlive the build they came from. A reference crosses only
+/// the call it is borrowed for, `&'call T` for exactly that `'call`: what
+/// keeps a `&'static` (a string literal, a static, a vtable in either
+/// build's image) from crossing, where the other side could keep it past a
+/// reload of the build it points into (get-y5t.9).
+///
+/// `service!` checks every argument against a `'call` its own, so a
+/// signature naming any lifetime but the call's fails to compile, written
+/// out or behind an alias, and every return as crossing every call, so a
+/// return is owned. What a `&'call T` points to must cross the call too, so
+/// a shared borrow can't hand over a `&'static` inside it; a `&'call mut T`
+/// must point to something owned, so the provider can't write a reference
+/// to its own image into the caller's slot.
 ///
 /// A supertrait of `FieldType` rather than a blanket impl over it, which would
 /// conflict with the impls for references.
@@ -186,12 +197,16 @@ pub unsafe trait FieldType: Crossing + Clone + 'static {
 /// # Safety
 ///
 /// As for [`FieldType`], if the type isn't a reference: it must hold nothing
-/// that points into a mod's image.
-pub unsafe trait Crossing {}
+/// that points into a mod's image. An impl must be for every `'call`.
+pub unsafe trait Crossing<'call> {}
 
-unsafe impl<T: ?Sized> Crossing for &T {}
-unsafe impl<T: ?Sized> Crossing for &mut T {}
-unsafe impl Crossing for () {}
+unsafe impl<'call, T: ?Sized + Crossing<'call>> Crossing<'call> for &'call T {}
+unsafe impl<'call, T: ?Sized + for<'any> Crossing<'any>> Crossing<'call> for &'call mut T {}
+unsafe impl Crossing<'_> for () {}
+// What a `&str` argument borrows: bytes, which point nowhere. The only
+// unsized type here: a `&[T]` argument would want `[T]` beside it, which no
+// service has needed.
+unsafe impl Crossing<'_> for str {}
 
 #[doc(hidden)]
 pub const fn __fnv(mut hash: u64, bytes: &[u8]) -> u64 {
@@ -260,7 +275,7 @@ macro_rules! scalar_field_types {
             const KIND: FieldKind = FieldKind::$kind;
             const FINGERPRINT: u64 = __fingerprint(stringify!($ty), &[]);
         }
-        unsafe impl Crossing for $ty {})*
+        unsafe impl Crossing<'_> for $ty {})*
     };
 }
 
@@ -274,49 +289,49 @@ scalar_field_types! {
 // sound because every mod and the loader come from one toolchain, which the
 // loader checks at load time.
 // Plain data: seconds and nanoseconds, no pointers.
-unsafe impl Crossing for std::time::Instant {}
+unsafe impl Crossing<'_> for std::time::Instant {}
 unsafe impl FieldType for std::time::Instant {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Instant", &[]);
 }
 
-unsafe impl Crossing for std::time::Duration {}
+unsafe impl Crossing<'_> for std::time::Duration {}
 unsafe impl FieldType for std::time::Duration {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Duration", &[]);
 }
 
-unsafe impl Crossing for String {}
+unsafe impl Crossing<'_> for String {}
 unsafe impl FieldType for String {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("String", &[]);
 }
 
-unsafe impl<T: FieldType> Crossing for Vec<T> {}
+unsafe impl<T: FieldType> Crossing<'_> for Vec<T> {}
 unsafe impl<T: FieldType> FieldType for Vec<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Vec", &[T::FINGERPRINT]);
 }
 
-unsafe impl<T: FieldType> Crossing for Option<T> {}
+unsafe impl<T: FieldType> Crossing<'_> for Option<T> {}
 unsafe impl<T: FieldType> FieldType for Option<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Option", &[T::FINGERPRINT]);
 }
 
-unsafe impl<T: FieldType> Crossing for Box<T> {}
+unsafe impl<T: FieldType> Crossing<'_> for Box<T> {}
 unsafe impl<T: FieldType> FieldType for Box<T> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Box", &[T::FINGERPRINT]);
 }
 
-unsafe impl<T: FieldType, const N: usize> Crossing for [T; N] {}
+unsafe impl<T: FieldType, const N: usize> Crossing<'_> for [T; N] {}
 unsafe impl<T: FieldType, const N: usize> FieldType for [T; N] {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("Array", &[T::FINGERPRINT, N as u64]);
 }
 
-unsafe impl<K: FieldType + Ord, V: FieldType> Crossing for std::collections::BTreeMap<K, V> {}
+unsafe impl<K: FieldType + Ord, V: FieldType> Crossing<'_> for std::collections::BTreeMap<K, V> {}
 unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BTreeMap<K, V> {
     const KIND: FieldKind = FieldKind::OPAQUE;
     const FINGERPRINT: u64 = __fingerprint("BTreeMap", &[K::FINGERPRINT, V::FINGERPRINT]);
@@ -324,7 +339,7 @@ unsafe impl<K: FieldType + Ord, V: FieldType> FieldType for std::collections::BT
 
 macro_rules! tuple_field_types {
     ($(($($t:ident),+)),* $(,)?) => {
-        $(unsafe impl<$($t: FieldType),+> Crossing for ($($t,)+) {}
+        $(unsafe impl<$($t: FieldType),+> Crossing<'_> for ($($t,)+) {}
         unsafe impl<$($t: FieldType),+> FieldType for ($($t,)+) {
             const KIND: FieldKind = FieldKind::OPAQUE;
             const FINGERPRINT: u64 = __fingerprint("Tuple", &[$($t::FINGERPRINT),+]);
@@ -380,7 +395,7 @@ macro_rules! component {
 
         // SAFETY: every field is a `FieldType`, which rules out pointers into
         // the mod, and `FIELDS` is generated from the struct itself.
-        unsafe impl $crate::Crossing for $name {}
+        unsafe impl $crate::Crossing<'_> for $name {}
         unsafe impl $crate::Component for $name {
             const NAME: &'static str = $id;
             $(const VERSION: u32 = $version;)?
@@ -416,7 +431,7 @@ macro_rules! field_struct {
 
         // SAFETY: every field is a `FieldType`, and the fingerprint covers
         // each one's name, offset and fingerprint.
-        unsafe impl $crate::Crossing for $name {}
+        unsafe impl $crate::Crossing<'_> for $name {}
         unsafe impl $crate::FieldType for $name {
             const KIND: $crate::FieldKind = $crate::FieldKind::OPAQUE;
             const FINGERPRINT: u64 = $crate::__fingerprint_struct(&[

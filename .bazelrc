@@ -42,6 +42,12 @@ common --@rules_rust//rust/settings:clippy_flag=-Aclippy::type_complexity
 common --@rules_rust//rust/settings:clippy_flag=-Aclippy::too_many_arguments
 # Storage and solver loops index several parallel arrays by one index.
 common --@rules_rust//rust/settings:clippy_flag=-Aclippy::needless_range_loop
+# clippy.toml names the thread spawns mods may not make; outside mods they're
+# fine (the loader's socket thread, tests, the threads mod's pool). Allowed
+# here, and forbidden in mods by //engine:mod_lints: a forbid from the
+# target's lint_config, which comes first, outlasts this later allow.
+common --@rules_rust//rust/settings:clippy_flag=-Aclippy::disallowed_methods
+common --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
 test --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 test --output_groups=+clippy_checks
 # And formatting, the same way: an unformatted file fails the test run.

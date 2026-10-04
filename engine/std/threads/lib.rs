@@ -23,8 +23,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine_api::{Cx, Executor, Mod, export_mod};
-use engine_threads::{OneCcd, Pool, Settings};
+use engine_api::{Cx, Mod, export_mod};
+use engine_threads::{Executor, OneCcd, Pool, Settings};
 
 engine_api::mod_state! {
     #[derive(Default)]
@@ -47,7 +47,7 @@ impl Host {
         cx.log(describe(&pool));
         if pool.threads() > 1 {
             let executor: Arc<dyn Executor> = pool.clone();
-            cx.world().world().set_executor(Some(executor));
+            cx.world().install_executor(executor);
             self.pool = Some(pool);
         }
     }
@@ -57,7 +57,7 @@ impl Host {
     fn stop(&mut self, cx: &mut Cx) {
         let Some(pool) = self.pool.take() else { return };
         let ours: Arc<dyn Executor> = pool;
-        cx.world().world().take_executor_if(&ours);
+        cx.world().take_executor_if(&ours);
     }
 }
 

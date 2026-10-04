@@ -5,8 +5,11 @@
 //! refuses there: that is what keeps a service called from a system out of
 //! the world.
 
+use std::sync::Arc;
+
 use crate::component::{Component, ComponentDesc, Entity};
 use crate::events::Event;
+use crate::par::Executor;
 use crate::query::{Bundle, Data, Declare, FilterDecl, Log, Query, QueryDecl};
 use crate::world::{Build, ComponentId, Structural, World};
 
@@ -36,8 +39,23 @@ impl World {
 }
 
 impl<'w> WorldMut<'w> {
-    pub fn world(&self) -> &'w World {
-        self.world
+    // No `world()`: the whole `World` would hand a mod what the loader keeps
+    // for itself (opening frames, the executor's slot, unchecked structural
+    // changes). What a mod needs of it is a method here. (History: it was
+    // `pub` until 2026-10-04, for the threads mod's executor alone.)
+
+    /// Installs `executor` as the threads declared shapes run across: how
+    /// the resident `threads` mod puts its pool in at load. No other mod
+    /// has one to give: the `Executor` trait isn't re-exported to mods,
+    /// and a mod can't start threads to make one (`//engine:mod_lints`).
+    pub fn install_executor(&self, executor: Arc<dyn Executor>) {
+        self.world.set_executor(Some(executor));
+    }
+
+    /// `World::take_executor_if`: takes `ours` out if it is the executor
+    /// installed, leaving one a test installed after it alone.
+    pub fn take_executor_if(&self, ours: &Arc<dyn Executor>) -> bool {
+        self.world.take_executor_if(ours)
     }
 
     /// Sends this world's reports to `log`.

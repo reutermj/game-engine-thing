@@ -1,2 +1,4 @@
-
-exports_files(["rustfmt.toml"])
+exports_files([
+    "clippy.toml",
+    "rustfmt.toml",
+])

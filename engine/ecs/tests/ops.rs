@@ -180,7 +180,7 @@ impl Default for Canary {
 }
 
 // SAFETY: a box of plain data, which holds nothing of the mod's image.
-unsafe impl Crossing for Canary {}
+unsafe impl Crossing<'_> for Canary {}
 // SAFETY: opaque, so it's only ever moved whole into a field of the same
 // fingerprint.
 unsafe impl FieldType for Canary {

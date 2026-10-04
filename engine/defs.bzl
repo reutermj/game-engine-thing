@@ -214,9 +214,25 @@ def engine_mod(
 def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visibility, kwargs):
     kwargs = dict(kwargs)
     mod_name = mod_name or name
+
+    # A mod sees the ECS through engine_api's curated re-exports, never the
+    # crate itself: engine_ecs's `pub` items include the frame machinery and
+    # the raw broadphase, which would let a mod fan out or fetch what its
+    # systems never declared (get-znt.51). rustc resolves a crate name only
+    # among direct deps, so this keeps it unnameable. A library in `deps`
+    # could still re-export it; none does.
+    for d in deps:
+        if native.package_relative_label(d) == Label("//engine/ecs"):
+            fail(("%s: a mod can't depend on //engine/ecs; use what //engine/api re-exports " +
+                  "(and add there what a mod legitimately needs)") % name)
+
     # Every target this macro declares is part of the mod, so all of them
     # share its testonly-ness.
     testonly = kwargs.pop("testonly", False)
+
+    # A reloadable mod may not start threads; a resident one, never
+    # unmapped, may own them. See //engine:mod_lints.
+    lints = "//engine:mod_lints_threads_allowed" if resident else "//engine:mod_lints"
     dep_labels = [native.package_relative_label(d) for d in mod_deps]
     interface_deps = [dep.same_package_label(dep.name + "_interface") for dep in dep_labels]
 
@@ -227,7 +243,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
             crate_root = interface[0],
             srcs = interface,
             deps = interface_deps + ["//engine/api"],
-            lint_config = "//engine:mod_lints",
+            lint_config = lints,
             testonly = testonly,
             visibility = visibility,
         )
@@ -260,7 +276,7 @@ def _declare_mod(name, srcs, interface, mod_deps, deps, mod_name, resident, visi
         # already links with -z now; pin it so the loader can rely on it. See
         # docs/lore/mods-are-linked-bind-now.md.
         rustc_flags = kwargs.pop("rustc_flags", []) + ["-Clink-arg=-Wl,-z,now"],
-        lint_config = "//engine:mod_lints",
+        lint_config = lints,
         testonly = testonly,
         visibility = ["//visibility:private"],
         **kwargs

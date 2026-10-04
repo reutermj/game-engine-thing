@@ -196,9 +196,12 @@ macro_rules! __service_ret {
 /// - for the provider, a trait to implement on its `Mod`, whose methods also
 ///   take `&mut self`, the transient part and the provider's `Cx` first.
 ///
-/// Arguments and return values passed by value must be [`Crossing`](crate::Crossing)
-/// (a `FieldType`, a component), because the other side may keep them;
-/// references may be anything, since they can't outlive the call.
+/// Arguments must be [`Crossing`](crate::Crossing) for the call: owned (a
+/// `FieldType`, a component), since the other side may keep them, or a
+/// borrow with its lifetime left out (`&str`, `&mut Vec<u32>`), which the
+/// provider sees as lasting only the call. Return values must be owned.
+/// A `'static` anywhere in a signature fails to compile: the other side
+/// could keep it past a reload of the image it points into.
 #[macro_export]
 macro_rules! service {
     (
@@ -244,12 +247,21 @@ macro_rules! service {
             );
         }
 
-        // What crosses by value must be safe to outlive the build it came from.
+        // Every argument crosses the call it's passed to: owned, or borrowed
+        // for `'call`, which is generic here, so no other lifetime (a
+        // `'static`, written or behind an alias) can stand for it. Every
+        // return crosses every call: owned, since a borrow for the call
+        // would end before the caller saw it. A `ty` fragment can't be taken
+        // apart to put `'call` into the signatures themselves; this checks
+        // them as written, which is what both sides compile (get-y5t.9).
         const _: () = {
-            fn crossing<T: $crate::Crossing + ?Sized>() {}
+            // Unused, and `'call` too, in a service whose methods take nothing.
             #[allow(dead_code)]
-            fn check() {
-                $($(crossing::<$ty>();)* crossing::<$crate::__service_ret!($($ret)?)>();)*
+            fn argument<'call, T: $crate::Crossing<'call> + ?Sized>() {}
+            fn returned<T: for<'call> $crate::Crossing<'call>>() {}
+            #[allow(dead_code, clippy::extra_unused_lifetimes)]
+            fn check<'call>() {
+                $($(argument::<'call, $ty>();)* returned::<$crate::__service_ret!($($ret)?)>();)*
             }
         };
 

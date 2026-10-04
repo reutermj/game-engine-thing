@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use engine_api::engine_ecs::flows::{PlanStep, check_plan};
 use engine_api::{PhaseDesc, SystemDesc, phase};
+use engine_ecs::flows::{PlanStep, check_plan};
 
 /// One mod's declarations, in load order.
 pub struct ModDecls<'a> {
@@ -216,8 +216,8 @@ fn topological<K: Ord>(n: usize, edges: &[(usize, usize)], rank: impl Fn(usize) 
 
 #[cfg(test)]
 mod tests {
-    use engine_api::engine_ecs::{FlowAccess, FrameCx, ParamDecl};
     use engine_api::{ModContext, Status};
+    use engine_ecs::{FlowAccess, FrameCx, ParamDecl};
 
     use super::*;
 

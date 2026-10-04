@@ -2,16 +2,39 @@ load("@rules_rust//rust:defs.bzl", "rust_lint_config")
 
 exports_files(["defs.bzl"])
 
-# Lints for code that runs inside a mod: every crate engine_mod makes, and
-# the crates linked into every mod (//engine/ecs, //engine/api,
-# //engine/tests:probe). Only clippy reads these; rustc ignores clippy:: levels.
+# Lints for code that runs inside a reloadable mod: every crate engine_mod
+# makes for one, and the libraries only mods link (//engine/api,
+# //engine/tests:probe, //engine/std/physics_common). Only clippy reads
+# these; rustc ignores clippy:: levels.
 #
 # No printing: println! in a mod writes through the statically linked std of
 # that mod, whose stdout buffer leaks when the mod unloads (see
 # docs/lore/a-mods-own-std-leaks-its-stdout-buffer-when-unloaded.md). The
 # loader, tests, benches and modctl do not take this config, so they may print.
+#
+# No threads: std::thread::spawn, scope and Builder (the list is
+# //:clippy.toml). A mod's code on a thread it started keeps its build
+# mapped and takes a TLS key every load (docs/lore/a-mod-that-spawns-*), and
+# parallel work belongs to the scheduler, which a system asks through a
+# declared shape (get-znt.28). Forbid rather than deny: .bazelrc allows the
+# lint for every other target, after this, and only a forbid outlasts it.
 rust_lint_config(
     name = "mod_lints",
+    clippy = dict(
+        disallowed_methods = "forbid",
+        print_stderr = "deny",
+        print_stdout = "deny",
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# No printing, but threads allowed, for code inside mods that may own
+# threads: resident mods, which are never unmapped and may own windows,
+# devices and threads (hot-reload.md, "Resident mods"), and //engine/ecs,
+# whose `Scoped` executor and harness are the host's and tests' (a mod
+# can't name the crate, so it can't reach them).
+rust_lint_config(
+    name = "mod_lints_threads_allowed",
     clippy = dict(
         print_stderr = "deny",
         print_stdout = "deny",

@@ -353,7 +353,7 @@ impl Physics {
     /// step. Rare, so walking every resting contact is fine. Generic over
     /// the queries, since each system that wakes bodies declares its own.
     /// `woken` is as `resolve` leaves it: once each.
-    fn move_woken<D: engine_api::engine_ecs::Data, F, C, G, H>(
+    fn move_woken<D: engine_api::Data, F, C, G, H>(
         &mut self,
         sleep: &mut Sleepers,
         sleeping: &mut Query<'_, D, F, C>,

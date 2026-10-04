@@ -22,10 +22,9 @@ PHYSICS_INTERFACE = [
 ]
 
 # The implementation's deps, never the interface's: see
-# //engine/std/physics_common. The ECS's own for the solver's coloring
-# (engine_ecs::shape), which the arrays' solve shares with the mod's.
+# //engine/std/physics_common. Not //engine/ecs, which engine_mod refuses:
+# the solver's coloring is engine_api::shape.
 PHYSICS_DEPS = [
-    "//engine/ecs",
     "//engine/std/physics_common",
 ]
 
@@ -193,6 +192,7 @@ rust_binary(
     env = {"PILE": "$(rlocationpath :pile_game)"},
     deps = [
         ":physics2d_interface",
+        "//engine/api",
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",

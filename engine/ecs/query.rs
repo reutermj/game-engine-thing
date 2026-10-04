@@ -75,15 +75,26 @@ impl<'w> Declare<'w> {
     }
 }
 
-/// What a running system's parameters are fetched with.
+/// What a running system's parameters are fetched with. Its fields are
+/// this crate's, and the one way to make it is [`frame_cx`], which
+/// `engine_api` doesn't re-export: a mod holding one could fetch any
+/// parameter against the world (get-znt.48).
 pub struct FrameCx<'w> {
-    pub world: &'w World,
-    pub log: &'w Log,
+    pub(crate) world: &'w World,
+    pub(crate) log: &'w Log,
     /// `mod::system`: whose event cursors a reader advances.
-    pub system: &'w str,
+    pub(crate) system: &'w str,
     /// Seconds this run covers: its phase's step if fixed-rate, else the
     /// frame's time. What `Dt` hands out.
-    pub dt: f32,
+    pub(crate) dt: f32,
+}
+
+/// The context a node's parameters are fetched with: for whoever runs
+/// systems (the loader, a test's executor), never a mod. A free function
+/// rather than `FrameCx::new`, so it isn't reachable through the type,
+/// which `engine_api`'s signatures name.
+pub fn frame_cx<'w>(world: &'w World, log: &'w Log, system: &'w str, dt: f32) -> FrameCx<'w> {
+    FrameCx { world, log, system, dt }
 }
 
 /// Components named by type, one or a tuple: `Adds<Burning>`, `With<(A, B)>`.
@@ -1697,13 +1708,6 @@ impl<'w, D: Data, F, C> Query<'w, D, F, C> {
         }
     }
 
-    /// Every pair of entities the query matches in its spatial tables whose
-    /// boxes, grown by `grow`, meet: a broadphase. Each pair once, the
-    /// lesser entity first, sorted. `near_pairs` with no passive side.
-    pub fn near_pairs(&mut self, grow: f32) -> Vec<(Entity, Entity)> {
-        near_pairs(&*self, &(), grow)
-    }
-
     /// The row of `e`, if the query matches it: how a system changes an
     /// entity it didn't iterate to (one kept in state, or named by an event).
     pub fn get(&mut self, e: Entity) -> Option<Row<'_>> {
@@ -1875,6 +1879,12 @@ near_side_tuple!(A, B, C, D);
 /// of its own. Pairs are unique and sorted, so the result is the one
 /// thread's, bit for bit. Infrastructure inside the caller's node, so it
 /// declares no shape (get-znt.5 is the scheduler seeing it).
+///
+/// So it isn't a mod's to call: `engine_api` doesn't re-export it, and a
+/// mod's broadphase is a declared `Live` (live.rs), which runs it. Tests
+/// and benches call it against the live answer. *(History: `Query` had a
+/// `near_pairs(grow)` method too, removed 2026-10-04, since an inherent
+/// method goes wherever `Query` does, mods included.)*
 pub fn near_pairs(active: &impl NearSide, passive: &impl NearSide, grow: f32) -> Vec<(Entity, Entity)> {
     let (mut act, mut pas) = (Vec::new(), Vec::new());
     active.spatial_tables(&mut act);
@@ -2225,10 +2235,47 @@ impl<B: Bundle> Spawner<'_, B> {
 }
 
 /// Something a system can take as a parameter.
+///
+/// Not re-exported to mods (`engine_api`), so a mod can neither call
+/// `fetch` nor write a parameter of its own that does: a parameter built
+/// from others is a [`Compose`], which only ever gets what its parts
+/// declared. `fetch` is how the frame machinery hands a node what it
+/// declared; a mod calling it could take a shape, or any guard, its node
+/// never declared (get-znt.48).
 pub trait Param: 'static {
     type Item<'w>;
     fn declare(d: &mut Declare<'_>) -> ParamDecl;
     fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> Self::Item<'w>;
+}
+
+/// What a parameter's parts are fetched as: `Compose::compose`'s argument.
+pub type Fetched<'w, P> = <P as Param>::Item<'w>;
+
+/// A parameter made of others, as a crate builds its own (physics2d's
+/// `Spatial`, a query with the shapes it searches): `Parts`, a parameter
+/// or a tuple of them, is declared and fetched as usual, and `compose`
+/// wraps what they fetched. Its footprint is its parts', so the overlap
+/// rules never see it.
+///
+/// The only way outside this crate to make a parameter: `Param` itself
+/// isn't re-exported to mods, so nothing a mod writes runs between the
+/// declaration and the fetch.
+pub trait Compose: 'static {
+    type Parts: Param;
+    type Item<'w>;
+    fn compose<'w>(parts: Fetched<'w, Self::Parts>) -> Self::Item<'w>;
+}
+
+impl<T: Compose> Param for T {
+    type Item<'w> = T::Item<'w>;
+
+    fn declare(d: &mut Declare<'_>) -> ParamDecl {
+        T::Parts::declare(d)
+    }
+
+    fn fetch<'w>(cx: &FrameCx<'w>, decl: &'w ParamDecl) -> T::Item<'w> {
+        T::compose(T::Parts::fetch(cx, decl))
+    }
 }
 
 impl<D: Data + 'static, F: Filter, C: Changes> Param for Query<'static, D, F, C> {
@@ -2268,9 +2315,8 @@ impl<B: Bundle> Param for Spawner<'static, B> {
     }
 }
 
-/// A tuple of parameters is a parameter: how a crate builds its own from
-/// existing ones (declare the tuple, fetch it, wrap the items), without
-/// touching the footprint rules, which see the members.
+/// A tuple of parameters is a parameter, as a `Compose`'s parts usually
+/// are: declared as a group, so the footprint rules see its members.
 macro_rules! param_tuple {
     ($($p:ident),+) => {
         impl<$($p: Param),+> Param for ($($p,)+) {

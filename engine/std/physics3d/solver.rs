@@ -717,7 +717,7 @@ pub mod lanes {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use engine_ecs::shape::{Colored, Coloring, EMPTY, Shareable, Stage, UNSOLVED};
+    use engine_api::shape::{Colored, Coloring, EMPTY, Shareable, Stage, UNSOLVED};
     use physics_common::lanes::F;
 
     /// `Vec3`, lane by lane: each operation spelled as `Vec3`'s is, so

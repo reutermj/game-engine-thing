@@ -26,7 +26,8 @@ rust_library(
         "//engine/std/physics2d:__subpackages__",
         "//engine/std/physics3d:__subpackages__",
     ],
-    deps = ["//engine/ecs"],
+    # engine_api, not the ECS: it is mod code, and sees what mods see.
+    deps = ["//engine/api"],
 )
 
 rust_test(

@@ -116,7 +116,7 @@ fn record(stage: usize, since: Instant, n: usize) {
     out.1[stage] = n;
 }
 
-fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&At>, map: ParMap) {
+fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, shapes: Query<&At>, map: ParMap) {
     let n = q.len();
     let source: Vec<(Mass, Vel)> = vec![(Mass::default(), Vel::default()); n];
 
@@ -163,7 +163,7 @@ fn spatial(_: &mut Cx, mut q: Query<(&Mass, &mut Vel, &At)>, mut shapes: Query<&
     });
     record(5, s, n);
 
-    let pairs = shapes.near_pairs(0.05);
+    let pairs = engine_ecs::near_pairs(&shapes, &(), 0.05);
     let s = Instant::now();
     let mut entities = Vec::with_capacity(n);
     q.for_each_page(|page, _| entities.extend_from_slice(page.entities()));

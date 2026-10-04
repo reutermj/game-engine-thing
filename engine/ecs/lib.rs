@@ -10,6 +10,15 @@
 //! (columns) and `schema` (migrating values as bytes), with the drop and
 //! default glue `component!` generates in `component`, and `world` calling
 //! them to migrate. None of it depends on concurrency.
+//!
+//! Mods don't depend on this crate: they see what `engine_api` re-exports,
+//! and `engine_mod` refuses it in a mod's deps. So `pub` here means public
+//! to the loader, the scheduler's thread host and tests; what a mod may
+//! reach is `engine_api`'s list. That is how the frame machinery
+//! (`FrameCx`, `frame_cx`, `Param::fetch`, `harness`) and the raw
+//! broadphase (`near_pairs`) stay out of mods' hands while the loader and
+//! tests share them: a system gets a shape, or anything else, only by
+//! declaring it (get-znt.51, get-znt.48).
 
 pub mod between;
 pub mod component;
@@ -21,7 +30,7 @@ pub mod graph;
 pub mod harness;
 pub mod live;
 pub mod ordered;
-pub mod par;
+mod par;
 pub mod query;
 pub mod schema;
 pub mod shape;
@@ -38,8 +47,8 @@ pub use live::{AnyOf, Live, Proximity, Tables};
 pub use ordered::{ChildOf, OrderKey, children_of, entity_key, pair_key, pairs_from};
 pub use par::{Executor, Scoped};
 pub use query::{
-    Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Data, Declare, Despawns, Dt, Filter, FilterDecl, FrameCx, Log, Mut, NearSide,
-    Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, near_pairs,
+    Adds, Bundle, Change, ChangeDecl, Changes, ColumnMut, Compose, Data, Declare, Despawns, Dt, Fetched, Filter, FilterDecl, FrameCx, Log,
+    Mut, NearSide, Page, Param, ParamDecl, Query, QueryDecl, Removes, Row, Spawner, With, Without, frame_cx, near_pairs,
 };
 pub use shape::{Colored, Coloring, ParMap, Passes, Reduce, ShapeKind, Shareable, Stage, States};
 pub use spatial::{Bounds, Extents, SpatialKey};

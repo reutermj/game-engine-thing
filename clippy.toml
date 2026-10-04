@@ -1,0 +1,12 @@
+# Read by clippy for every Rust target (--@rules_rust//rust/settings:clippy.toml
+# in .bazelrc). The list only says what the lint names: .bazelrc allows
+# `disallowed_methods` everywhere, and //engine:mod_lints forbids it in
+# reloadable mods, so this is a ban on mods alone. Forbid, because a later
+# `-A` on the command line can't lower it and an `#[allow]` in a mod is an
+# error. See engine/BUILD.bazel.
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "a mod doesn't own threads: its code on a thread's stack keeps the build mapped, and every load takes a TLS key. Declare a shape (ParMap, Reduce, Passes), or make the mod resident" },
+    { path = "std::thread::scope", reason = "a mod doesn't own threads: declare a shape (ParMap, Reduce, Passes), which runs on the scheduler's" },
+    { path = "std::thread::Builder::spawn", reason = "a mod doesn't own threads: declare a shape (ParMap, Reduce, Passes), or make the mod resident" },
+    { path = "std::thread::Builder::spawn_scoped", reason = "a mod doesn't own threads: declare a shape (ParMap, Reduce, Passes), which runs on the scheduler's" },
+]

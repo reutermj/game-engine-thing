@@ -48,7 +48,7 @@ static OUT: Mutex<(u128, u128, usize)> = Mutex::new((0, 0, 0));
 
 fn probe(_: &mut Cx, mut q: Query<&At>) {
     let t = Instant::now();
-    let pairs = q.near_pairs(0.05);
+    let pairs = engine_ecs::near_pairs(&q, &(), 0.05);
     let near = t.elapsed().as_nanos();
     let t = Instant::now();
     let mut hits = 0;
@@ -144,13 +144,13 @@ static SIDES: Mutex<[(u128, usize); 3]> = Mutex::new([(0, 0); 3]);
 #[allow(clippy::type_complexity)]
 fn sides(
     _: &mut Cx,
-    mut all: Query<&At>,
+    all: Query<&At>,
     (moving, walls): (Query<&At, Without<(Wall, Still)>>, Query<&At, With<Wall>>),
     still: Query<&At, With<Still>>,
 ) {
     let mut out = SIDES.lock().unwrap();
     let t = Instant::now();
-    let n = all.near_pairs(0.05).len();
+    let n = engine_ecs::near_pairs(&all, &(), 0.05).len();
     out[0] = (out[0].0 + t.elapsed().as_nanos(), n);
     let t = Instant::now();
     let n = near_pairs(&(&moving, &still), &walls, 0.05).len();

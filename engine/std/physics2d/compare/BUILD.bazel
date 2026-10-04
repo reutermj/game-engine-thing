@@ -70,6 +70,7 @@ rust_binary(
     env = {"SCENE_GAME": "$(rlocationpath :scene_game)"},
     deps = [
         ":box2d_shim",
+        "//engine/api",
         "//engine/control",
         "//engine/ecs",
         "//engine/loader",
@@ -111,6 +112,7 @@ BASELINES = [
 QUALITY_SRCS = MEASURE_SRCS + ["quality_test.rs"]
 
 QUALITY_DEPS = [
+    "//engine/api",
     "//engine/control",
     "//engine/ecs",
     "//engine/loader",

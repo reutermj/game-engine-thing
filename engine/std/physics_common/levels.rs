@@ -4,7 +4,7 @@
 //! for bit. Both mods' lanes take it: 2D's as a variant (`Wide::Levels`),
 //! 3D's as its default order.
 
-use engine_ecs::shape::{Coloring, UNSOLVED};
+use engine_api::shape::{Coloring, UNSOLVED};
 
 /// Each of `n` contacts' level, `ends(i)` its two bodies' indices into
 /// `moves`: one past the latest level of the contacts before it that
