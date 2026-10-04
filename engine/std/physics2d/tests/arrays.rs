@@ -281,12 +281,14 @@ impl Arrays {
         let gravity = Instant::now();
 
         // Sweep and prune along x over boxes grown by the margin, as
-        // `near_pairs` grows them.
+        // `near_pairs` grows them, and a body moving far by its move: every
+        // pair the mod's broadphase and its `reach_further` find, and more,
+        // which the narrowphase turns away as it does there.
         self.sort_by_x();
         let boxes: Vec<physics2d::Aabb> = (0..self.pos.len())
             .map(|i| {
                 let b = self.placed(i).aabb();
-                let m = Vec2::new(narrow::MARGIN, narrow::MARGIN);
+                let m = Vec2::new(narrow::MARGIN, narrow::MARGIN) + reach(&self.placed(i), self.vel[i], self.dt);
                 physics2d::Aabb { min: b.min - m, max: b.max + m }
             })
             .collect();
@@ -319,7 +321,7 @@ impl Arrays {
             // As the mod's `meet`: points if either is turned.
             let (pa, pb) = (self.placed(a), self.placed(b));
             let (m, points) = if pa.rot.is_none() && pb.rot.is_none() {
-                let Some(m) = narrow::collide(&pa, &pb, self.vel[b] - self.vel[a]) else { continue };
+                let Some(m) = narrow::collide_moving(&pa, &pb, self.vel[b] - self.vel[a], self.dt) else { continue };
                 (m, 0)
             } else {
                 let Some(mut g) = narrow::collide_turned(&pa, &pb) else { continue };
@@ -498,6 +500,14 @@ impl Arrays {
 }
 
 /// The narrowphase's points, as the world's `ContactPoints` has them.
+/// How much further than the margin the broadphase looks around a shape
+/// moving at `v`: its move, where that's far and it isn't turned (what
+/// `narrow::collide_moving` sweeps).
+pub fn reach(p: &Placed, v: Vec2, dt: f32) -> Vec2 {
+    let travel = v.len() * dt;
+    if p.rot.is_none() && narrow::far(travel) { Vec2::new(travel, travel) } else { Vec2::ZERO }
+}
+
 fn points_of(g: &narrow::Turned) -> ContactPoints {
     let mut cp = ContactPoints::default();
     for (i, p) in g.points[..g.count as usize].iter().enumerate() {

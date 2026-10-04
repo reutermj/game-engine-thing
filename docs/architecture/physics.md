@@ -157,7 +157,14 @@ no index to build: a static body's pages never change. 2D's sides are
 the awake bodies that can move, against statics and sleeping bodies;
 3D's, moving bodies against `Static`. Found afresh, the pairs are found
 across the world's threads ([Solving across
-threads](#solving-across-threads)).[^grid]
+threads](#solving-across-threads)).[^grid] In 2D, a body moving more than
+half the margin in a step can meet what's further than the margin's
+reach, so the pairs a swept contact may need are added
+(`reach_further`): each such body looks round itself in the spatial
+order, or, once more than one in sixteen bodies does (a falling pile),
+every collider's box grown by its move is swept and pruned. A pile of
+10 000 falling costs 2.30 ms a step where it cost 1.68, at rest the
+same (2026-10-04).
 
 ## Narrowphase
 
@@ -180,6 +187,21 @@ threads](#solving-across-threads)).[^grid]
 - **Speculative contacts**: pairs within `MARGIN` (0.05) are contacts
   before they touch, and the solver lets a gap close in a substep and no
   more, so a body stops at the surface instead of after sinking in.
+- **Swept contacts** (2D, shapes that aren't turned; get-lye): a pair
+  further apart than the margin that meets within the step, moving as
+  their velocities (a kinematic body's included) take them, is a
+  speculative contact too, its normal and gap where they meet
+  (`narrow::collide_moving`): the time of impact of a box against a box,
+  a circle against a circle, or a circle against a box grown by its
+  radius, round at the corners. So pong's ball is stopped at a paddle's
+  face in the step it meets it, where it was found half a cell inside a
+  step later. A contact only for a pair that meets, not a margin grown
+  with the speed (Rapier's soft CCD), so a ball passing a corner isn't
+  stopped by it; a box flush across the face it would meet (a body
+  running over a floor of tiles, or falling down a wall of them) is left
+  to the seam rule, as before. Box2D and Rapier sweep a fast body against
+  statics only (unless it's a bullet), so on a kinematic paddle they sink
+  as deep as ours did (physics-testing.md, "The meet families").
 
 Both mods' narrowphases run across the world's threads in chunks of
 pairs.[^narrow]
@@ -609,10 +631,12 @@ it".[^games]
 
 ## Open questions
 
-- **Continuous collision** (get-emj.59): a ball is stopped for certain
-  while a step is at most the margin, its radius and half the wall (0.8
-  for pong's paddle, 48 a second, against pong's fastest 40), and pinned
-  by a test at that limit; Box2D sweeps fast bodies against statics.
+- **Continuous collision** (get-emj.59): for shapes that aren't turned
+  a contact is swept over the step ([Narrowphase](#narrowphase)), but a
+  body that turns is stopped for certain only while a step is at most the
+  margin, its radius and half the wall (0.8 for pong's paddle, 48 a
+  second), pinned by a test at that limit; Box2D sweeps fast bodies
+  against statics.
 - **Kinematic characters**: the platformer's player is a dynamic body
   with no friction; a character controller (slopes, steps, one-way
   platforms) waits for a game that needs it.

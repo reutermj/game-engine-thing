@@ -211,7 +211,7 @@ impl Arrays {
         let boxes: Vec<physics2d::Aabb> = fill(w, n, 1024, |r, out| {
             out.extend(r.map(|i| {
                 let b = this.placed(i).aabb();
-                let m = Vec2::new(narrow::MARGIN, narrow::MARGIN);
+                let m = Vec2::new(narrow::MARGIN, narrow::MARGIN) + super::arrays::reach(&this.placed(i), this.vel[i], this.dt);
                 physics2d::Aabb { min: b.min - m, max: b.max + m }
             }))
         });
@@ -251,7 +251,9 @@ impl Arrays {
                 if !meets || ca.sensor || cb.sensor || (ba.kind != DYNAMIC && bb.kind != DYNAMIC) {
                     continue;
                 }
-                let Some(m) = narrow::collide(&this.placed(a), &this.placed(b), this.vel[b] - this.vel[a]) else { continue };
+                let Some(m) = narrow::collide_moving(&this.placed(a), &this.placed(b), this.vel[b] - this.vel[a], this.dt) else {
+                    continue;
+                };
                 found.push(Cached {
                     a: i,
                     b: j,

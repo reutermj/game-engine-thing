@@ -63,6 +63,13 @@ one would have to ship those files with it.
   - speculative contacts, pairs found and solved a margin before they
     touch (`narrow.rs`, the margin `physics_common::MARGIN`; Box2D's
     `B2_SPECULATIVE_DISTANCE`);
+  - weighed for 2D's swept contacts (get-lye, `narrow::collide_moving`;
+    physics.md, "Narrowphase"), not taken: its continuous collision
+    (`b2SolveContinuous` in v3.1.1's `solver.c`), which moves a fast
+    body back to its time of impact against statics only, and against
+    kinematic and dynamic bodies too where the body is a bullet, and
+    which marks a body fast by its move against half its smallest
+    extent;
   - the soft step, since 2026-09-26 the 2D solver (`solver.rs`): the step
     in substeps, each gravity, warm starting, one pass of soft contacts
     (`b2MakeSoft`'s constants, `physics_common::Softness` since
@@ -249,6 +256,17 @@ one would have to ship those files with it.
   pumps stacks until they topple). Read in the fetched 0.36.0 source.
   What else it does differently is in physics.md, "Against other engines"
   and "Settling".
+- **Speculative contacts over a step's motion** (2026-10-04, get-lye):
+  0.36.0's soft CCD (`RigidBody::set_soft_ccd_prediction`; in
+  `geometry/narrow_phase/pair_update.rs` a pair is a contact within
+  `max(prediction, dt |v1 - v2|)`, its velocities clamped to each body's
+  prediction, and the broadphase box grown to the predicted pose) is the
+  idea 2D's swept contacts take (`narrow::collide_moving`): a contact for
+  what the step's relative motion closes. Ours finds it by a time of
+  impact instead of a grown distance, so a pair that would pass doesn't
+  get one. Its automatic CCD sweeps fast bodies against fixed colliders
+  only, and `ccd_enabled` (a bullet) against every body, which the meet
+  families measure (physics-testing.md, "The meet families").
 - **The broadphase that keeps its pairs** (2026-09-27,
   `engine/ecs/live.rs`) takes from 0.36.0's `broad_phase_bvh` that a pair
   can only change if one of its ends changed, so only pairs beside
@@ -413,6 +431,18 @@ one would have to ship those files with it.
   best by 5%, `b3ReduceManifoldPoints`); and warm starting from the last
   substep's impulses (`mp->normalImpulse = cp->normalImpulse`), which
   Box2D and Rapier do too (physics3d's `Carry::Last`).
+
+## Real-Time Collision Detection
+
+- **Project:** the book *Real-Time Collision Detection* (Morgan Kaufmann,
+  2005).
+- **Author:** Christer Ericson.
+- **License:** a book; no code of it is copied.
+- **What for:** not built or fetched; an idea source only.
+- **Ideas our physics takes from it:** a moving sphere against a box as a
+  ray against the box grown by the radius, its corners round (chapter 5,
+  on intersecting moving objects), which 2D's swept contacts use for a
+  circle against a box (`narrow::swept_box_circle`, get-lye).
 
 ## Bullet Physics
 

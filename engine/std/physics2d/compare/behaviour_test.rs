@@ -434,7 +434,9 @@ fn bullets(thick: f32, speeds: &[f32]) -> Vec<Scene> {
     speeds.iter().flat_map(|&speed| behave::BULLET_PHASES.map(|phase| Scene::Bullet { speed, radius: 0.25, thick, phase })).collect()
 }
 
-/// Ours has no continuous collision (physics.md, "Open questions"): a ball
+/// Ours has no continuous collision for a body that turns, as these do
+/// (physics.md, "Open questions"; one that doesn't is swept, the meet
+/// families below): a ball
 /// is stopped only if some step leaves it within the speculative margin
 /// (`narrow::MARGIN`, 0.05) of the wall or short of its middle, so it
 /// bounces for certain while a step is at most the margin, its radius and
@@ -501,18 +503,18 @@ fn meet_family(name: &str) -> (Vec<Scene>, Vec<Behaviour>, Stats) {
 /// at 0-45° and two phases (72 runs), and into a static wall of its size
 /// (18): stopped at the face in the step it meets it, never found inside,
 /// and returned at the speed it came. The playtest loop found the ball
-/// half a cell into a paddle with no contact yet (get-lye). Ours: 0.605
+/// half a cell into a paddle with no contact yet (get-lye). Ours was 0.605
 /// deep on the paddle (the median run 0.18) and 0.47 on the wall, and of
 /// the runs that sank past `meets::SLOP` (36 and 9) none with a contact
-/// held. Box2D and Rapier at their defaults sweep a fast body against
-/// statics only: on the wall the deepest of any run is 0.0092 in both, and
-/// none past the slop; on the kinematic paddle 0.605 in both (the median
-/// 0.18), as deep as ours. Rapier with `ccd_enabled`, a bullet's sweep
-/// against every body: 0.19 on the paddle (all 2026-10-04, `MEETS=all` in
-/// the comparison). The bounds: no run past the slop on either, every run
-/// held, and the rebound within 1%.
+/// held; since a contact is swept over the step (`narrow::collide_moving`),
+/// 0.0000 and 0.0014, every run held. Box2D and Rapier at their defaults
+/// sweep a fast body against statics only: on the wall the deepest of any
+/// run is 0.0092 in both, and none past the slop; on the kinematic paddle
+/// 0.605 in both (the median 0.18). Rapier with `ccd_enabled`, a bullet's
+/// sweep against every body: 0.19 on the paddle (all 2026-10-04,
+/// `MEETS=all` in the comparison). The bounds: no run past the slop on
+/// either, every run held, and the rebound within 1%.
 #[test]
-#[ignore = "get-lye: a fast ball sinks into a paddle or a wall by up to a step's travel before a contact is found"]
 fn a_fast_ball_is_stopped_at_a_moving_paddle_or_a_wall_in_the_step_it_meets_it() {
     let mut broken = Broken::default();
     for name in ["paddle", "wall"] {

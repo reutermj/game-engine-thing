@@ -138,6 +138,11 @@ fn chunks(n: usize, min: usize, threads: usize) -> Vec<std::ops::Range<usize>> {
     (0..k).map(|i| n * i / k..n * (i + 1) / k).collect()
 }
 
+/// `reach_further` sweeps and prunes every collider once more than one in
+/// this many moves far: a lookup costs about 0.4 µs and the sweep about
+/// 0.03 µs a collider (a falling pile of 10 000, 2026-10-04).
+const SWEEP_FROM: usize = 16;
+
 fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
@@ -411,7 +416,7 @@ impl Physics {
         (triggers, mut turned): (EventWriter<Trigger>, Turned<'_, '_>),
         // Gravity, for bodies woken here: see `fall_woken`.
         (dt, mut gravity, mut falling, mut records): (Dt, Query<&Gravity>, SleepingVelocities<'_, '_>, Records<'_, '_>),
-        (map, mut near): (ParMap, Live<'_, Contacts>),
+        (map, mut near, mut located): (ParMap, Live<'_, Contacts>, Query<&Position, With<Collider>>),
     ) {
         let start = Instant::now();
         // Split across threads only while nothing sleeps: waking looks
@@ -469,6 +474,9 @@ impl Physics {
         // Kept live between steps (`Contacts`): a pile at rest or creeping
         // inside its fat boxes finds its pairs without looking.
         let near = near.pairs();
+        let sleeping = !asleep.is_empty();
+        let reached = reach_further(&items, &slots, *dt, &mut located, (|e| asleep.get(e).is_some(), sleeping), near);
+        let near = reached.as_deref().unwrap_or(near);
         let found_near = Instant::now();
         let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(near.len());
         if par {
@@ -526,7 +534,7 @@ impl Physics {
                 .map(|r| (Vec::with_capacity(r.len()), Vec::new(), Vec::new(), r))
                 .collect();
             map.for_each_mut(&mut tested, 1, |_, (found, overlapping, points, r)| {
-                pairs[r.clone()].iter().map(pair).for_each(|(a, b)| awake(a, b, found, overlapping, points));
+                pairs[r.clone()].iter().map(pair).for_each(|(a, b)| awake(a, b, found, overlapping, points, *dt));
             });
             found.reserve_exact(tested.iter().map(|(f, ..)| f.len()).sum());
             for (f, o, p, _) in tested {
@@ -544,7 +552,7 @@ impl Physics {
                 if !sense && (!collide || rest) {
                     return;
                 }
-                let Some(f) = meet(a, b, &mut points) else { return };
+                let Some(f) = meet(a, b, &mut points, *dt) else { return };
                 let sensor = collide && (a.collider.sensor || b.collider.sensor);
                 if (sensor || sense) && f.1.depth >= 0.0 {
                     overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));
@@ -567,7 +575,7 @@ impl Physics {
             };
             pairs.iter().map(pair).for_each(|(a, b)| test(a, b));
         } else {
-            pairs.iter().map(pair).for_each(|(a, b)| awake(a, b, &mut found, &mut overlapping, &mut points));
+            pairs.iter().map(pair).for_each(|(a, b)| awake(a, b, &mut found, &mut overlapping, &mut points, *dt));
         }
 
         let narrowed = Instant::now();
@@ -958,14 +966,118 @@ fn any_way(p: &Position, c: &Collider) -> engine_api::Bounds {
     engine_api::Bounds::around([p.x, p.y], [c.reach(), c.reach()])
 }
 
+/// The pairs the broadphase's margin leaves out that may meet within the
+/// step (`narrow::swept`), joined into `near`'s, in its order; `None` if
+/// there are none. Only a pair one of whose bodies moves more than half the
+/// margin (`narrow::far`) can: a pair of two slower is within the margin's
+/// reach already. Shapes that are turned aren't swept, so aren't looked
+/// for. Which pairs are found beyond those that meet changes nothing (the
+/// narrowphase turns them away), so the two ways of finding them, chosen by
+/// cost, give the same step:
+/// - a few far bodies each look for every collider within twice its move,
+///   in the spatial order (of a pair that meets, the faster moves at least
+///   as far as the other); a collider is taken where the step has it, or
+///   it sleeps, as the broadphase's sides take them;
+/// - many (a pile falling, every body: 10 000 lookups took 4.2 ms a step)
+///   sweep and prune every gathered collider's box grown by half the margin
+///   and its move, along x, as the arrays do; only while nothing sleeps,
+///   since sleeping colliders aren't gathered.
+fn reach_further(
+    items: &[Item],
+    slots: &Slots,
+    dt: f32,
+    located: &mut Query<&Position, With<Collider>>,
+    (mut asleep, sleeping): (impl FnMut(Entity) -> bool, bool),
+    near: &[(Entity, Entity)],
+) -> Option<Vec<(Entity, Entity)>> {
+    let travel = |it: &Item| if it.placed.rot.is_none() { it.v.len() * dt } else { 0.0 };
+    // A pair closing by no more than the margin isn't swept: bodies falling
+    // together, a pile's at first, aren't pairs to look at. A hair under the
+    // sweep's own test, so rounding never drops a pair it would take.
+    let apart = |a: Vec2, b: Vec2| (b - a).len() * dt > 0.99 * narrow::MARGIN;
+    let far = items.iter().filter(|it| narrow::far(travel(it))).count();
+    if far == 0 {
+        return None;
+    }
+    let mut more = Vec::new();
+    if !sleeping && far * SWEEP_FROM > items.len() {
+        let mut boxes: Vec<(physics2d::Aabb, bool, &Item)> = items
+            .iter()
+            .filter(|it| it.placed.rot.is_none())
+            .map(|it| {
+                let (b, t) = (it.placed.aabb(), travel(it));
+                let g = Vec2::new(0.5 * narrow::MARGIN + t, 0.5 * narrow::MARGIN + t);
+                (physics2d::Aabb { min: b.min - g, max: b.max + g }, narrow::far(t), it)
+            })
+            .collect();
+        boxes.sort_unstable_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x));
+        for (k, (a, fa, ia)) in boxes.iter().enumerate() {
+            for (b, fb, ib) in &boxes[k + 1..] {
+                if b.min.x > a.max.x {
+                    break;
+                }
+                if (*fa || *fb) && a.min.y <= b.max.y && b.min.y <= a.max.y && apart(ia.v, ib.v) {
+                    more.push((ia.entity.min(ib.entity), ia.entity.max(ib.entity)));
+                }
+            }
+        }
+    } else {
+        for it in items.iter().filter(|it| narrow::far(travel(it))) {
+            let b = it.placed.aabb();
+            let grow = 2.0 * travel(it) + narrow::MARGIN;
+            let region = engine_api::Bounds::new([b.min.x - grow, b.min.y - grow], [b.max.x + grow, b.max.y + grow]);
+            located.in_region(region, |row, _| {
+                let e = row.entity();
+                let v = match slots.get(e) {
+                    Some(k) => Some(items[k as usize].v),
+                    None => asleep(e).then_some(Vec2::ZERO),
+                };
+                if e != it.entity && v.is_some_and(|v| apart(it.v, v)) {
+                    more.push((it.entity.min(e), it.entity.max(e)));
+                }
+            });
+        }
+    }
+    if more.is_empty() {
+        return None;
+    }
+    more.sort_unstable();
+    more.dedup();
+    let mut joined = Vec::with_capacity(near.len() + more.len());
+    let (mut i, mut j) = (0, 0);
+    while i < near.len() || j < more.len() {
+        let next = match (near.get(i), more.get(j)) {
+            (Some(&a), Some(&b)) if a == b => {
+                (i, j) = (i + 1, j + 1);
+                a
+            }
+            (Some(&a), Some(&b)) if a < b => {
+                i += 1;
+                a
+            }
+            (Some(&a), None) => {
+                i += 1;
+                a
+            }
+            (_, Some(&b)) => {
+                j += 1;
+                b
+            }
+            (None, None) => unreachable!(),
+        };
+        joined.push(next);
+    }
+    Some(joined)
+}
+
 /// The narrowphase for a pair: its contact as the world keeps it, if
 /// they're within the margin. Shapes that aren't turned meet as they always
 /// did, with no points; a turned one (and so any body that turns, which
 /// has a rotation) has its points found, and put in `points`.
 #[inline(always)]
-fn meet(a: &Item, b: &Item, points: &mut Vec<ContactPoints>) -> Option<Found> {
+fn meet(a: &Item, b: &Item, points: &mut Vec<ContactPoints>, dt: f32) -> Option<Found> {
     if a.placed.rot.is_none() && b.placed.rot.is_none() {
-        let m = narrow::collide(&a.placed, &b.placed, b.v - a.v)?;
+        let m = narrow::collide_moving(&a.placed, &b.placed, b.v - a.v, dt)?;
         return Some(contact(a, b, Manifold { nx: m.normal.x, ny: m.normal.y, depth: m.depth, ..Manifold::default() }, 0));
     }
     let m = narrow::collide_turned(&a.placed, &b.placed)?;
@@ -997,12 +1109,12 @@ fn contact(a: &Item, b: &Item, manifold: Manifold, points: u32) -> Found {
 /// rests or wakes: a function of the pair alone, which is what lets pairs
 /// be tested on any thread.
 #[inline(always)]
-fn awake(a: &Item, b: &Item, found: &mut Vec<Found>, overlapping: &mut Vec<(Overlap, bool)>, points: &mut Vec<ContactPoints>) {
+fn awake(a: &Item, b: &Item, found: &mut Vec<Found>, overlapping: &mut Vec<(Overlap, bool)>, points: &mut Vec<ContactPoints>, dt: f32) {
     let (collide, sense) = (collides(a, b), senses(a, b));
     if !sense && !collide {
         return;
     }
-    let Some(f) = meet(a, b, points) else { return };
+    let Some(f) = meet(a, b, points, dt) else { return };
     let sensor = collide && (a.collider.sensor || b.collider.sensor);
     if (sensor || sense) && f.1.depth >= 0.0 {
         overlapping.push((Overlap { a: a.entity, b: b.entity }, sensor));

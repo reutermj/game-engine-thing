@@ -9,7 +9,9 @@
 //! speculative contact, which lets the solver stop a body at the surface
 //! instead of after it has sunk in, and keeps resting contacts from
 //! flickering in and out between steps. Speculative contacts are as Box2D
-//! has them, Erin Catto's (docs/CREDITS.md).
+//! has them, Erin Catto's (docs/CREDITS.md). Shapes that aren't turned and
+//! meet within the step from further apart get one too, where they meet
+//! (`collide_moving`).
 //!
 //! Turned boxes meet by Box2D's `b2CollidePolygons`: the separating axis
 //! of least overlap among both boxes' faces, the other box's edge most
@@ -67,6 +69,146 @@ pub fn collide(a: &Placed, b: &Placed, rel: Vec2) -> Option<Manifold> {
         (Shape::Box(h), Shape::Circle(r)) => box_circle(a.at, h, b.at, r).map(|(n, d)| m(n, d)),
         (Shape::Circle(r), Shape::Box(h)) => box_circle(b.at, h, a.at, r).map(|(n, d)| m(-n, d)),
     }
+}
+
+/// `collide`, and for a pair further apart than `MARGIN` whose shapes meet
+/// within the step, moving at `rel` (`b`'s velocity relative to `a`'s,
+/// a kinematic body's included) for `dt`, a speculative contact where they
+/// meet (`swept`). So a contact covers the step's whole relative motion, and
+/// a fast ball is stopped at a paddle's face rather than found inside it a
+/// step later (get-lye). Only for shapes that aren't turned: a turned shape's
+/// sweep turns too, which this leaves to continuous collision (get-emj.59).
+pub fn collide_moving(a: &Placed, b: &Placed, rel: Vec2, dt: f32) -> Option<Manifold> {
+    collide(a, b, rel).or_else(|| swept(a, b, rel * dt))
+}
+
+/// Whether a body moving `travel` in a step can meet, within it, what the
+/// margin leaves out: `swept` finds nothing for a pair closing by less, and
+/// the broadphase looks further only around a body moving more than half of
+/// it (the mod's `reach_further`).
+pub fn far(travel: f32) -> bool {
+    travel > 0.5 * MARGIN
+}
+
+/// Where two shapes that aren't turned first meet as `b` moves `d` from
+/// `a` (relative to it, in a straight line), if within the move: the face or
+/// corner they meet at, as `collide` gives a normal from `a` to `b`, and their
+/// separation along it now as the (negative) depth. That is a speculative
+/// contact as the margin's are, one the solver closes by the separation and
+/// no more, so the bodies stop where they meet. Found by a time of impact
+/// rather than by growing the margin with the speed, as Rapier 0.36's soft
+/// CCD does (`soft_ccd_prediction`: a pair is a contact within
+/// `max(prediction, dt |v1 - v2|)`, `pair_update.rs`): a contact only for a
+/// pair that meets, so a ball passing a corner it would miss isn't stopped
+/// by it. The moving circle against a
+/// box is the ray against the box grown by the radius, round at its corners
+/// (Ericson's, Real-Time Collision Detection, chapter 5).
+fn swept(a: &Placed, b: &Placed, d: Vec2) -> Option<Manifold> {
+    if d.len() <= MARGIN {
+        return None;
+    }
+    let m = |normal, depth| Manifold { normal, depth };
+    match (a.shape, b.shape) {
+        (Shape::Box(ha), Shape::Box(hb)) => swept_boxes(a.at, ha, b.at, hb, d).map(|(n, s)| m(n, -s)),
+        (Shape::Circle(ra), Shape::Circle(rb)) => swept_circles(b.at - a.at, ra + rb, d).map(|(n, s)| m(n, -s)),
+        (Shape::Box(h), Shape::Circle(r)) => swept_box_circle(b.at - a.at, h, r, d).map(|(n, s)| m(n, -s)),
+        (Shape::Circle(r), Shape::Box(h)) => swept_box_circle(a.at - b.at, h, r, -d).map(|(n, s)| m(-n, -s)),
+    }
+}
+
+/// When a point from `p` moving `d` enters the box of half extents `h`
+/// about the origin, and through which axis (0 for x, 1 for y): the slab
+/// test, `None` if it misses within the move or starts inside.
+fn entering(p: Vec2, d: Vec2, h: Vec2) -> Option<(f32, usize)> {
+    let (mut enter, mut exit, mut axis) = (f32::NEG_INFINITY, f32::INFINITY, 2);
+    for (k, (p, d, h)) in [(p.x, d.x, h.x), (p.y, d.y, h.y)].into_iter().enumerate() {
+        if d == 0.0 {
+            if p.abs() > h {
+                return None;
+            }
+            continue;
+        }
+        let (t1, t2) = ((-h - p) / d, (h - p) / d);
+        let (near, far) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+        if near > enter {
+            (enter, axis) = (near, k);
+        }
+        exit = exit.min(far);
+    }
+    (axis < 2 && enter <= exit && (0.0..=1.0).contains(&enter)).then_some((enter, axis))
+}
+
+/// The unit vector along `axis`, signed as `v` is on it.
+fn along(axis: usize, v: Vec2) -> Vec2 {
+    if axis == 0 { Vec2::new(sign(v.x), 0.0) } else { Vec2::new(0.0, sign(v.y)) }
+}
+
+fn get(v: Vec2, axis: usize) -> f32 {
+    if axis == 0 { v.x } else { v.y }
+}
+
+/// Two boxes: `b`'s centre against `a`'s box grown by `b`'s (their
+/// Minkowski sum), the face it enters through the normal. A box flush with
+/// the other across that face now (within `FLUSH` either way), or that
+/// would overlap it across the face by no more than `FLUSH` when they meet,
+/// only grazes its corner, and is left to `box_box`'s seam rule once they
+/// touch: a body running along a floor of tiles, or falling flush along a
+/// wall of them, would otherwise stop on the next tile's corner. Flush now
+/// as well as when they meet, since a body resting on a floor moves into it
+/// by the step's gravity, which the floor's contact takes back out: across
+/// a seam it would meet the next tile 0.016 deep at gravity 40.
+fn swept_boxes(pa: Vec2, ha: Vec2, pb: Vec2, hb: Vec2, d: Vec2) -> Option<(Vec2, f32)> {
+    let (h, p) = (ha + hb, pb - pa);
+    let (t, axis) = entering(p, d, h)?;
+    let other = 1 - axis;
+    let (now, met) = (get(h, other) - get(p, other).abs(), get(h, other) - get(p + d * t, other).abs());
+    if now.abs() <= FLUSH || met <= FLUSH {
+        return None;
+    }
+    Some((along(axis, p), get(p, axis).abs() - get(h, axis)))
+}
+
+/// Two circles: `p` (the second's centre from the first's) against a
+/// circle of radius `r` (theirs summed).
+fn swept_circles(p: Vec2, r: f32, d: Vec2) -> Option<(Vec2, f32)> {
+    let t = ray_circle(p, d, r)?;
+    let n = (p + d * t) * (1.0 / r);
+    Some((n, p.dot(n) - r))
+}
+
+/// When a point from `p` moving `d` first comes within `r` of the origin,
+/// within the move.
+fn ray_circle(p: Vec2, d: Vec2, r: f32) -> Option<f32> {
+    let (a, b, c) = (d.dot(d), p.dot(d), p.dot(p) - r * r);
+    let disc = b * b - a * c;
+    if disc < 0.0 || b >= 0.0 {
+        return None;
+    }
+    let t = (-b - disc.sqrt()) / a;
+    (0.0..=1.0).contains(&t).then_some(t)
+}
+
+/// A circle of radius `r` at `p` from a box's centre (half extents `h`),
+/// moving `d`: the ray against the box grown by `r`, then, where it enters
+/// past a corner, against the circle of radius `r` about the corner. The
+/// normal is from the box toward the circle.
+fn swept_box_circle(p: Vec2, h: Vec2, r: f32, d: Vec2) -> Option<(Vec2, f32)> {
+    let grown = h + Vec2::new(r, r);
+    // Starting inside the grown box is starting in a corner's square, past
+    // its round, which only the corner's circle can meet.
+    let (t, axis) = match entering(p, d, grown) {
+        Some(hit) => hit,
+        None if p.x.abs() <= grown.x && p.y.abs() <= grown.y => (0.0, 2),
+        None => return None,
+    };
+    let at = p + d * t;
+    if axis < 2 && (at.x.abs() <= h.x || at.y.abs() <= h.y) {
+        return Some((along(axis, p), get(p, axis).abs() - get(grown, axis)));
+    }
+    let corner = Vec2::new(sign(at.x) * h.x, sign(at.y) * h.y);
+    let t = ray_circle(p - corner, d, r)?;
+    let n = (p - corner + d * t) * (1.0 / r);
+    Some((n, (p - corner).dot(n) - r))
 }
 
 /// +1 for zero, so coincident centers still get a normal.
@@ -447,5 +589,100 @@ mod tests {
         let (m, plain) = (collide_turned(&a, &b).unwrap(), collide(&a, &b, Vec2::ZERO).unwrap());
         assert_eq!(m.count, 2);
         assert!(close(m.normal.y, plain.normal.y) && close(m.depth, plain.depth), "{m:?} {plain:?}");
+    }
+
+    const DT: f32 = 1.0 / 60.0;
+
+    /// Pong's paddle, its face at x = 0 toward -x.
+    fn paddle() -> Placed {
+        rect(Vec2::new(0.5, 0.0), Vec2::new(0.5, 2.25))
+    }
+
+    #[test]
+    fn a_fast_ball_that_meets_a_face_within_the_step_is_a_contact_at_its_gap() {
+        // 0.35 short of the face, closing at 40 (0.67 a step): the margin
+        // alone finds nothing, the sweep a contact on the face.
+        let ball = circle(Vec2::new(-0.6, 0.3), 0.25);
+        assert!(collide(&paddle(), &ball, Vec2::ZERO).is_none());
+        let m = collide_moving(&paddle(), &ball, Vec2::new(40.0, 0.0), DT).unwrap();
+        assert_eq!(m.normal, Vec2::new(-1.0, 0.0));
+        assert!(close(m.depth, -0.35), "{m:?}");
+        // Seen from the ball, the same contact.
+        let w = collide_moving(&ball, &paddle(), Vec2::new(-40.0, 0.0), DT).unwrap();
+        assert_eq!(w.normal, Vec2::new(1.0, 0.0));
+        assert!(close(w.depth, -0.35), "{w:?}");
+    }
+
+    #[test]
+    fn a_ball_short_of_a_face_by_more_than_its_step_or_leaving_it_is_none() {
+        let ball = circle(Vec2::new(-1.0, 0.0), 0.25);
+        // 0.75 away and 0.67 a step.
+        assert!(collide_moving(&paddle(), &ball, Vec2::new(40.0, 0.0), DT).is_none());
+        let near = circle(Vec2::new(-0.6, 0.0), 0.25);
+        assert!(collide_moving(&paddle(), &near, Vec2::new(-40.0, 0.0), DT).is_none(), "leaving");
+        assert!(collide_moving(&paddle(), &near, Vec2::new(0.0, 40.0), DT).is_none(), "along the face");
+    }
+
+    #[test]
+    fn a_paddle_coming_at_a_ball_closes_the_gap_as_the_ball_coming_at_it_does() {
+        // The ball at 20, the paddle at 16 toward it: 0.6 a step together,
+        // where either alone is short of the 0.35.
+        let ball = circle(Vec2::new(-0.6, 0.0), 0.25);
+        assert!(collide_moving(&paddle(), &ball, Vec2::new(20.0, 0.0), DT / 2.0).is_none());
+        let m = collide_moving(&paddle(), &ball, Vec2::new(20.0 - -16.0, 0.0), DT).unwrap();
+        assert!(close(m.depth, -0.35), "{m:?}");
+    }
+
+    /// What the broadphase's look further rests on (`far`): two bodies
+    /// neither of which is far close by at most the margin in a step, which
+    /// the sweep never finds, and a pair the margin's broadphase finds
+    /// (within twice it) covers.
+    #[test]
+    fn a_pair_closing_by_no_more_than_the_margin_in_a_step_is_never_swept() {
+        let half = 0.5 * MARGIN;
+        assert!(!far(half) && far(half * 1.01));
+        let ball = circle(Vec2::new(-0.25 - 1.5 * MARGIN, 0.0), 0.25);
+        let closing = Vec2::new(2.0 * half / DT, 0.0);
+        assert!(collide_moving(&paddle(), &ball, closing, DT).is_none());
+        assert!(collide_moving(&paddle(), &ball, closing * 1.6, DT).is_some());
+    }
+
+    #[test]
+    fn a_ball_passing_a_corner_is_no_contact_and_one_meeting_it_has_the_corners_normal() {
+        // Moving up past the paddle's top end (y = -2.25), 0.1 to its left.
+        let passing = circle(Vec2::new(-0.35, -1.9), 0.25);
+        assert!(collide_moving(&paddle(), &passing, Vec2::new(0.0, -40.0), DT).is_none());
+        // Moving right at the corner from above-left: it meets the corner.
+        let meeting = circle(Vec2::new(-0.4, -2.45), 0.25);
+        let m = collide_moving(&paddle(), &meeting, Vec2::new(40.0, 0.0), DT).unwrap();
+        assert!(m.normal.x < 0.0 && m.normal.y < 0.0, "out of the corner, up and left: {m:?}");
+        assert!(close(m.normal.len(), 1.0) && m.depth < -MARGIN, "{m:?}");
+    }
+
+    #[test]
+    fn boxes_meet_on_the_face_they_cross_and_not_on_a_corner_they_slide_past_flush() {
+        let tile = rect(Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5));
+        // Falling onto it from 0.3 above at 30 (0.5 a step).
+        let over = rect(Vec2::new(0.3, -0.8), Vec2::new(0.4, 0.5));
+        let m = collide_moving(&tile, &over, Vec2::new(0.0, 30.0), DT).unwrap();
+        assert_eq!(m.normal, Vec2::new(0.0, -1.0));
+        assert!(close(m.depth, -0.3), "{m:?}");
+        // Falling flush past its side, a hair over it: the seam rule's.
+        let flush = rect(Vec2::new(-0.395, -0.8), Vec2::new(0.4, 0.5));
+        assert!(collide_moving(&tile, &flush, Vec2::new(0.0, 30.0), DT).is_none());
+        // Running at 7 on the floor the tile is part of, sunk 0.005 into
+        // it, with a step of gravity 40 in its velocity: 0.06 short of the
+        // tile's side, it would meet it 0.016 deep but for being flush now.
+        let running = rect(Vec2::new(-0.46, -0.495), Vec2::new(0.4, 0.5));
+        assert!(collide(&tile, &running, Vec2::new(7.0, 0.0)).is_none());
+        assert!(collide_moving(&tile, &running, Vec2::new(7.0, 40.0 * DT), DT).is_none());
+    }
+
+    #[test]
+    fn two_balls_closing_fast_meet_along_the_line_between_them_when_they_touch() {
+        let (a, b) = (circle(Vec2::ZERO, 0.5), circle(Vec2::new(1.4, 0.0), 0.25));
+        let m = collide_moving(&a, &b, Vec2::new(-45.0, 0.0), DT).unwrap();
+        assert!(close(m.normal.x, 1.0) && close(m.depth, -0.65), "{m:?}");
+        assert!(collide_moving(&a, &b, Vec2::new(-45.0, 0.0), DT / 2.0).is_none(), "0.375 a step, 0.65 short");
     }
 }
