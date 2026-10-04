@@ -1,6 +1,6 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load("//engine:defs.bzl", "engine_mod")
+load("//engine:defs.bzl", "POISON_ENV", "engine_mod")
 
 # The license texts of rayon, core_affinity and the crates they link (all
 # MIT or Apache-2.0, the MIT text kept), which travel with whatever links
@@ -42,4 +42,22 @@ engine_mod(
     resident = True,
     visibility = ["//visibility:public"],
     deps = [":pool"],
+)
+
+# The mod in a real engine: its pool installed, swapped and taken out, and
+# an executor installed after it left alone.
+rust_test(
+    name = "threads_test",
+    srcs = ["tests/threads_test.rs"],
+    data = [":threads"],
+    env = {
+        "THREADS": "$(rlocationpath :threads)",
+        "ENGINE_THREADS": "3",
+        "ENGINE_PIN": "0",
+    } | POISON_ENV,
+    deps = [
+        "//engine/ecs",
+        "//engine/loader",
+        "@rules_rust//rust/runfiles",
+    ],
 )
