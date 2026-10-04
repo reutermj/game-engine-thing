@@ -71,7 +71,10 @@ Then, live:
   pattern is easy but always the same: a command buffer would absorb it.
   *(Addressed 2026-09-23 for the systems: coins and stomped walkers are
   despawned through `cx.commands()`. The level's rebuild runs in `load`,
-  where the world can change directly.)*
+  where the world can change directly.)* *(Correction, 2026-10-04:
+  `cx.commands()` was removed the same day, when the ECS landed (5507a6f).
+  Coins and stomped walkers are despawned through their queries' rows
+  (`Despawns`; `platformer/core/lib.rs`, `platformer/walkers/lib.rs`).)*
 - **Order matters, and is implicit.** `walkers` runs after the rules, so a
   hurt player respawns a frame later, and the stomp bounce lands after the
   rules' physics has already moved the player. It works because of load
