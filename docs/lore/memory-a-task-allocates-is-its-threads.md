@@ -33,6 +33,10 @@ fault in on every step.
 A task's outputs are made by the thread that makes the task: `make` in
 `Query::par_for_each_page` and `par_for_each` is called on the calling
 thread for that reason, with the chunk's rows so it can give the room, and
-`near_pairs_with` makes its buckets and sort buffers there too
-(`SortScratch`). Freeing them back on the calling thread, after the join, is
-part of the same rule.
+`near_pairs` (`engine/ecs/query.rs`) makes its buckets and sort buffers
+there too (`SortScratch`). Freeing them back on the calling thread, after
+the join, is part of the same rule.
+
+*(History: 2026-10-04: this named `near_pairs_with`, the split version
+taking `Workers`, folded into `near_pairs` when `Workers` was deleted
+(9bbf045, get-znt.31). The bench is now `//engine/std/physics2d:tax`.)*

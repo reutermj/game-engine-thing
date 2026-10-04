@@ -8,7 +8,7 @@ worker thread that wakes up for one short job does the job at the idle
 clock. The main thread, busy all along, doesn't: so a parallel run looks
 like the extra threads barely help.
 
-Measured in `:parallel_solver` (2026-09-24), the colored solve of a 10 000
+Measured in `:parallel_solver`[^spike-code] (2026-09-24), the colored solve of a 10 000
 pile, 41 runs back to back, each after a 2 ms spin on all its threads:
 
 | threads | first 16 to 20 runs, µs | the rest, µs |
@@ -40,8 +40,15 @@ look slower than 2.
   [dispatch-spike.md](../architecture/dispatch-spike.md)): with 16 ms of
   sleep before each solve, the 2D settled pile's passes at 8 kept threads
   took 1163 µs against 650 warm (+79%), pinned or not, and on one thread
-  5591 against 3586, since the calling thread slept too.
+  5591 against 3586, since the calling thread slept too. The workers
+  exist now: the resident `threads` mod keeps them spinning for `warm`
+  (1 ms by default) after each dispatch, and
+  [threads.md, "Warmth"](../architecture/threads.md#warmth) has what that
+  bought within a step. A whole frame loop's idle is still unmeasured.
 
 Check the governor with
 `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`, and a core's
 clock with `scaling_cur_freq` next to it.
+
+[^spike-code]: (2026-10-04) `//engine/std/physics2d:parallel_solver`
+    deleted by get-emj.112; last built at 4018662.

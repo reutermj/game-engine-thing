@@ -29,3 +29,11 @@ leave it to the scheduler, and that takes `sched_setaffinity`: an FFI
 call, or a crate that wraps one. The benchmarks here get it from
 `taskset` instead (docs/architecture/physics.md, "Solving across threads";
 get-znt.5).
+
+*(History: 2026-10-04: the conclusion landed. The resident `threads` mod
+(`engine/std/threads`) places its pool on one CCD by default
+(`Placement::OneCcd`, pinned with `core_affinity`), and
+[threads.md, "Placement"](../architecture/threads.md#placement) is where
+that design and its later measurements live. `solver::solve_across`,
+`solver_bench`'s `THREADS` and the kept pool `tests/pool.rs` measured
+here were removed on 2026-10-03 (ed0b68d, get-emj.93).)*
