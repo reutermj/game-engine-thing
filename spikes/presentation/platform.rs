@@ -17,6 +17,7 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
+use winit::platform::x11::{WindowAttributesExtX11, WindowType};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
 
@@ -25,6 +26,19 @@ engine_api::mod_state! {
     struct Platform {
         pumps: u64,
     }
+}
+
+/// `SPIKE_WINDOW=<w>x<h>`, the game's resolution in pixels, else 1280x720
+/// (the scene's).
+fn window_size() -> (u32, u32) {
+    std::env::var("SPIKE_WINDOW")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or((1280, 720))
 }
 
 #[derive(Default)]
@@ -38,8 +52,22 @@ struct App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attributes =
-                Window::default_attributes().with_title("presentation spike").with_inner_size(winit::dpi::PhysicalSize::new(1280, 720));
+            // The game's resolution, fixed: a tiling window manager (i3)
+            // floats a window whose min and max size agree, and one typed a
+            // dialog, rather than tiling it. WM_CLASS's class is
+            // `game-engine-thing` (its instance the game's name), for a rule
+            // like i3's `for_window [class="game-engine-thing"] floating enable`.
+            let (width, height) = window_size();
+            let size = winit::dpi::PhysicalSize::new(width, height);
+            let game = std::env::var("SPIKE_WINDOW_NAME").unwrap_or_else(|_| "presentation-spike".into());
+            let attributes = Window::default_attributes()
+                .with_title(format!("{game} (presentation spike)"))
+                .with_inner_size(size)
+                .with_min_inner_size(size)
+                .with_max_inner_size(size)
+                .with_resizable(false)
+                .with_name("game-engine-thing", game)
+                .with_x11_window_type(vec![WindowType::Dialog]);
             self.window = event_loop.create_window(attributes).ok();
         }
     }

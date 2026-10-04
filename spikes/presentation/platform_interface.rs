@@ -45,3 +45,16 @@ engine_api::service! {
         fn shared_gpu(adapter: String) -> u64;
     }
 }
+
+engine_api::service! {
+    /// Draws the last frame again, between frames: what a bootstrap that
+    /// idles (lockstep) calls when the window was exposed or resized, so a
+    /// spectator window doesn't go stale while no frames run. Declared here,
+    /// not in the presenter's interface, because the bootstrap is resident
+    /// and so may only depend on resident mods; the call resolves by name
+    /// to whichever presenter build is loaded, if any (`NotProvided`
+    /// otherwise). Returns whether anything was drawn.
+    pub trait Redraw {
+        fn redraw() -> bool;
+    }
+}

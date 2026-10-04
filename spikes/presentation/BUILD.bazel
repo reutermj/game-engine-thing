@@ -104,6 +104,71 @@ engine_game(
     tags = ["manual"],
 )
 
+# ---- Pong with a spectator window (the spike's finale) ----
+
+# Pong drawn in the spike's vocabulary: reads pong's components, adds rects
+# to the frame's draw list. Pong itself doesn't change.
+engine_mod(
+    name = "spike_pong_view",
+    srcs = ["pong_view.rs"],
+    crate_root = "pong_view.rs",
+    mod_deps = [
+        ":spike_draw",
+        "//engine/std/clock",
+        "//engine/std/physics2d",
+        "//pong/core",
+    ],
+    tags = ["manual"],
+)
+
+# Lockstep (mod name `lockstep`, so agents drive it the same way) with the
+# window pumped while idle and a step's frames paced in real time.
+engine_mod(
+    name = "spike_lockstep_window",
+    srcs = ["lockstep_window.rs"],
+    crate_root = "lockstep_window.rs",
+    mod_deps = [
+        ":spike_platform",
+        "//engine/std/clock",
+    ],
+    mod_name = "lockstep",
+    resident = True,
+    tags = ["manual"],
+)
+
+# Pong in lockstep, shown in a window: what an agent plays and a person
+# watches. Start it with :pong_window_launch, which sets the socket.
+engine_game(
+    name = "pong_window",
+    bootstrap = ":spike_lockstep_window",
+    mods = [
+        "//pong/ai",
+        "//pong/text",
+        ":spike_draw",
+        ":spike_pong_view",
+        ":spike_present",
+    ],
+    tags = ["manual"],
+)
+
+# The launcher: `./bazel run //spikes/presentation:pong_window_launch`
+# starts :pong_window on /run/user/1000/pong-window/control.sock and prints
+# an agent's commands (AGENT.md).
+rust_binary(
+    name = "pong_window_launch",
+    srcs = ["pong_launch.rs"],
+    data = [
+        ":pong_window",
+        "//engine/loader:engine",
+        "//engine/modctl",
+    ],
+    env = {
+        "PONG_ENGINE": "$(rlocationpath //engine/loader:engine)",
+        "PONG_MANIFEST": "$(rlocationpath :pong_window)",
+    },
+    tags = ["manual"],
+)
+
 # The extract and the hand-off without a GPU, in lockstep, for the bench.
 engine_game(
     name = "extract_game",

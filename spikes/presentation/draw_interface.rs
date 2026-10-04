@@ -59,5 +59,11 @@ engine_api::flow! {
         pub changed: Vec<(u32, Item)>,
         /// Which `spike_draw` build and mode made it, for the presenter's log.
         pub made_by: String,
+        /// The size of the canvas the items are placed on, in their pixels:
+        /// the presenter scales it to fit the window, letterboxed. 0 means
+        /// the window's own pixels (the scene's way). Set by a stage that
+        /// draws a fixed-size view, such as `spike_pong_view`.
+        pub canvas_w: f32,
+        pub canvas_h: f32,
     }
 }

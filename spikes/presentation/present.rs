@@ -11,6 +11,11 @@
 //!   so a reload keeps the device;
 //! - `SPIKE_DRAW=per_item`: a draw call per item (default instanced).
 //!
+//! Between frames it draws the last list again when the bootstrap asks
+//! (`spike_platform::Redraw`), so an idle lockstep window stays drawn. A
+//! list with a canvas size (`DrawList::canvas_w`) is scaled to the window,
+//! letterboxed.
+//!
 //! Messages: `stats`; `hazard on` (shared mode: register a work-done
 //! closure on every submit, which the platform's device keeps, so a
 //! reload without a wait leaves it pointing into this build); `provoke`
@@ -53,6 +58,9 @@ pub struct Presenter {
     hazard: bool,
     /// The kept copy a delta list is applied to.
     kept: Vec<Item>,
+    /// The latest frame's items and canvas, for a redraw between frames.
+    last: Vec<Item>,
+    canvas: (f32, f32),
     frames: u64,
     first_frame_ms: f64,
     frame_us: f64,
@@ -132,10 +140,12 @@ impl Presenter {
     }
 }
 
-impl Present {
-    fn present(&mut self, p: &mut Presenter, cx: &mut Cx, list: See<DrawList>) {
+impl Presenter {
+    /// Draws `last` (the latest list) to the window, following its size:
+    /// the frame's work, and all of a redraw between frames.
+    fn render(&mut self, cx: &mut Cx) -> bool {
         let t = Instant::now();
-        let Some(gpu) = &mut p.gpu else { return };
+        let Some(gpu) = &mut self.gpu else { return false };
         if let Ok(h) = spike_platform::window(cx)
             && h.width > 0
             && (h.width, h.height) != (gpu.config.width, gpu.config.height)
@@ -143,30 +153,25 @@ impl Present {
             (gpu.config.width, gpu.config.height) = (h.width, h.height);
             gpu.surface.configure(&gpu.device, &gpu.config);
         }
-        if !list.full {
-            p.kept.resize(list.len as usize, Item::default());
-            for &(slot, item) in &list.changed {
-                p.kept[slot as usize] = item;
-            }
-        }
-        let items: &[Item] = if list.full { &list.items } else { &p.kept };
         // SAFETY (spike only): `Item` and `DrawItem` are both `repr(C)`,
         // eight 4-byte fields in the same order, no padding.
-        let items: &[DrawItem] = unsafe { std::slice::from_raw_parts(items.as_ptr() as *const DrawItem, items.len()) };
-        if p.made_by != list.made_by {
-            p.made_by.clone_from(&list.made_by);
-            cx.log(format!("drawing {} items from a {} extract", list.len, list.made_by));
-        }
+        let items: &[DrawItem] = unsafe { std::slice::from_raw_parts(self.last.as_ptr() as *const DrawItem, self.last.len()) };
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 gpu.surface.configure(&gpu.device, &gpu.config);
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         };
         let view = frame.texture.create_view(&Default::default());
-        gpu.renderer.upload(&gpu.device, &gpu.queue, (gpu.config.width, gpu.config.height), items);
+        // A list on a canvas of its own is scaled to fit the window and
+        // centred (letterboxed); otherwise its pixels are the window's.
+        let (w, h) = (gpu.config.width as f32, gpu.config.height as f32);
+        let canvas = if self.canvas.0 > 0.0 && self.canvas.1 > 0.0 { self.canvas } else { (w, h) };
+        let scale = (w / canvas.0).min(h / canvas.1);
+        let (vw, vh) = (canvas.0 * scale, canvas.1 * scale);
+        gpu.renderer.upload(&gpu.device, &gpu.queue, (canvas.0 as u32, canvas.1 as u32), items);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -185,20 +190,54 @@ impl Present {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            gpu.renderer.draw(&mut pass, items, p.mode.unwrap_or(Mode::Instanced));
+            if vw >= 1.0 && vh >= 1.0 {
+                pass.set_viewport((w - vw) / 2.0, (h - vh) / 2.0, vw, vh, 0.0, 1.0);
+                gpu.renderer.draw(&mut pass, items, self.mode.unwrap_or(Mode::Instanced));
+            }
         }
         gpu.queue.submit([encoder.finish()]);
-        if p.hazard {
+        if self.hazard {
             gpu.queue.on_submitted_work_done(|| {});
         }
         gpu.queue.present(frame);
         let took = t.elapsed().as_secs_f64();
-        if p.frames == 0 {
-            p.first_frame_ms = took * 1e3;
+        if self.frames == 0 {
+            self.first_frame_ms = took * 1e3;
         } else {
-            p.frame_us += took * 1e6;
+            self.frame_us += took * 1e6;
         }
-        p.frames += 1;
+        self.frames += 1;
+        true
+    }
+}
+
+impl Present {
+    fn present(&mut self, p: &mut Presenter, cx: &mut Cx, list: See<DrawList>) {
+        if p.gpu.is_none() {
+            return;
+        }
+        if !list.full {
+            p.kept.resize(list.len as usize, Item::default());
+            for &(slot, item) in &list.changed {
+                p.kept[slot as usize] = item;
+            }
+        }
+        let items: &[Item] = if list.full { &list.items } else { &p.kept };
+        // Kept for a redraw between frames (`spike_platform::Redraw`).
+        p.last.clear();
+        p.last.extend_from_slice(items);
+        p.canvas = (list.canvas_w, list.canvas_h);
+        if p.made_by != list.made_by {
+            p.made_by.clone_from(&list.made_by);
+            cx.log(format!("drawing {} items from a {} extract", list.len, list.made_by));
+        }
+        p.render(cx);
+    }
+}
+
+impl spike_platform::Redraw for Present {
+    fn redraw(&mut self, p: &mut Presenter, cx: &mut Cx) -> bool {
+        p.render(cx)
     }
 }
 
@@ -264,4 +303,4 @@ impl Mod for Present {
     }
 }
 
-export_mod!(Present);
+export_mod!(Present, provides = [spike_platform::Redraw]);

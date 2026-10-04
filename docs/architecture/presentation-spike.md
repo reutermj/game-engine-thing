@@ -21,7 +21,11 @@ are made (CLAUDE.md, "Spikes are throwaway"):[^spike-code]
   `spike_present` is the wgpu presenter;
 - `spike_sink`: a presenter without a GPU, which reads and copies the list;
 - `:window_game`: the windowed game. `:extract_game` and `:extract_bench`
-  cover the extract and the hand-off in the engine, in lockstep.
+  cover the extract and the hand-off in the engine, in lockstep;
+- `:pong_window` and its launcher `:pong_window_launch`: pong in lockstep
+  in a spectator window, for an agent to play
+  ([section 7](#7-pong-in-a-spectator-window)), with `spike_pong_view` and
+  `spike_lockstep_window`.
 
 Machine: an RTX 4090 (NVIDIA 590.48.01) and lavapipe (Mesa 22.3.6,
 LLVM 15), on X11 (`DISPLAY=:0`), Debian 12, Vulkan loader 1.3.239. The AMD
@@ -417,6 +421,58 @@ dispatch and the flow's one use. Nothing else appears:
 A service would be no cheaper. `&[Item]` doesn't cross a call
 (`Crossing`), and a `Vec<Item>` argument moves without a copy but takes
 the list from its maker, so it serves one reader.
+
+## 7. Pong in a spectator window
+
+The spike's last question: can a person watch an agent play a real game,
+in lockstep, in a window, with nothing in the game changed? `:pong_window`
+is pong's mods (`//pong/ai`, `//pong/text`, unchanged) on a lockstep
+bootstrap with a window, plus `spike_draw`, `spike_pong_view` and
+`spike_present`. An agent plays it over modctl as pong_test does
+(`spikes/presentation/AGENT.md`).
+
+- **The adapter is a stage, not an extract.** `spike_pong_view` reads
+  pong's components (`Ball`, `Paddle`, `Goal`, the walls as colliders,
+  `Score`, and the `Clock`) and adds 40 to 50 rects to the frame's list
+  with `Pass<DrawList>`, after `spike_draw`'s extract, which makes an
+  empty list in a world without `Place`s. A flow has one maker, so a
+  second producer is a `Pass`, as flows.md says. It draws on a fixed
+  canvas (1184x680: the 40x20 court at 28 px a cell, a score band
+  above); the list now carries its canvas size, and the presenter
+  letterboxes it into the window.
+- **Lockstep needs two things the realtime bootstrap doesn't.** The
+  variant (`lockstep_window.rs`, mod name `lockstep`, so agents' commands
+  don't change) waits in `pump_loader` for at most 16 ms rather than 1 s,
+  then pumps the window. And when that pump saw events (an expose), it
+  asks the presenter to draw the last frame again, since no frame runs
+  while idle. The bootstrap is resident and so may depend only on resident
+  mods (defs.bzl), so it can't name the presenter: the `Redraw` service is
+  declared in the platform's interface and *provided* by the presenter,
+  and the call resolves by name to whichever presenter build is loaded.
+  A service whose interface lives with a resident mod but whose provider
+  reloads is the shape a presenter-agnostic bootstrap needs. Measured: two
+  exposes sent while idle (`XClearArea`) gave one redraw.
+- **Pacing is the bootstrap's.** With a window and pacing on (the
+  default; `lockstep pace on|off|<speed>`), each frame of a step starts a
+  frame after the last one, the previous step's included, so `step 6`
+  sent ten times a second paces like `step 60`. Every frame's `dt` is the
+  same either way, so pacing changes when frames run, not what they
+  compute. Measured: 1200 frames of an agent's commands (`step 6` at a
+  time) took 20.16 s paced and 0.54 s unpaced, from fresh engines, and
+  ended in the same `state` to the last digit. 600 paced frames took
+  10.07 s (59.6 fps).
+- **The window stays live.** Closing it while idle quits at once; closing
+  it during `step 600` stopped the step after 283 frames, replied
+  `frame 283 (the window was closed after 283 of 600 frames: quitting)`
+  and shut the engine down with exit 0. `bazel run` of `spike_pong_view`
+  (a ball recoloured) and of `spike_present` mid-game reloaded each,
+  twice, under the running game. A reloaded presenter has no last frame
+  until the next step, so an expose in between shows the clear colour.
+- **Tiling window managers.** The platform's window is now fixed-size
+  (min = max = the game's resolution, `SPIKE_WINDOW`), typed a dialog,
+  with `WM_CLASS` `"pong", "game-engine-thing"`, which i3 floats. A real
+  platform would take the resolution from the game, not from the
+  environment.
 
 ## What it means for presentation.md
 
