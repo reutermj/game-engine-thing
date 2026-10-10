@@ -1,58 +1,195 @@
 # Flows
 
-**Status: stage 1 built** (2026-10-02; designed in get-znt.25, built in
-get-znt.32): the mechanism and the shapes in `engine_ecs`
-(`engine/ecs/flows.rs`, `engine/ecs/shape.rs`), the shapes run on one
-thread, and the plan check in the loader's `schedule.rs`. **Stage 2
-built** (2026-10-02, get-znt.33): physics2d's solve is a pipeline of nine
-systems over five flows, its passes on `Passes`, bit for bit the solve it
-replaced ([below](#physicss-adoption-stage-2)); since get-znt.26 its
-kernels get plain memory on one thread ([On one thread](#on-one-thread)).
-physics3d's solve followed (2026-10-02, get-znt.35): six systems over
-three flows, its solve whole in one system and no shape, bit for bit;
-since get-emj.90 (2026-10-03) eight systems over four flows, its passes
-on `Passes` and, since get-znt.45, its write-back a `ParMap`
-([below](#physics3d)). **Stage 3 built** (2026-10-03, get-znt.34): the
-threads, a resident mod's pool (the `threads` mod's, not the
-scheduler's: threads.md, "Where the pool lives"), and the shapes run
-across them, `Passes` as a task graph, both physics solves among them,
-bit for bit ([threads.md](threads.md)).
-The spike behind every choice here, with its measurements, is
-[flows-spike.md](flows-spike.md); this doc cites its numbers rather than
-restating them.
+**Status:** built. Both physics mods' solvers are written with flows.
 
-**In short:**
+A flow is a value that one system makes, later systems read or change,
+and a last system turns into a result: written back into the world's
+components, as physics writes back velocities and positions, or turned
+into an effect, as a renderer turns a draw list into a frame on screen.
+The value itself is gone by the end of the frame; what it produced
+lasts.
 
-- **A flow is a typed value that lives one frame** (one step, in a
-  fixed-rate group) and passes from system to system: a source makes it
-  from the world, stages see, edit or take it, and a sink writes what it
-  carries back. Systems take it as parameters, `Make<T>`, `See<T>`,
-  `Pass<T>` and `Take<T>`, so every use is a declaration.
-- **It's for systems that already copy.** In the spike, physics's solve
-  as eight systems passing four flows was bit for bit the solve as built
-  and cost the same at 8 threads (as built, 2D's is nine over five and
-  3D's eight over four). Transform propagation as flows cost 1.5 to 4.7
-  times the idiom it would replace. A flow is a copy, and it pays only
-  where the work is many times the copy.
-- **Order comes from the plan, as now.** Flows add a check at load that
-  refuses a plan whose flows are out of turn, and its errors name the
-  fix: "`See<Graph>` in `debug::view` runs before `Make<Graph>` in
-  `physics2d::prepare`; add `.after("physics2d::prepare")` to
-  `debug::view`".
-- **Edges are the graph's own.** A flow's uses order like an event
-  queue's: `See`s together, anything else one at a time, with no apply
-  node.
-- **Values live in the world, by name**, out of sight of everything but
-  the systems that declare them, and empty between frames. Each flow keeps
-  one value for its allocations, a recycling bin, dropped whenever a build
-  that uses the flow is installed.
-- **Parallel work is a declared shape**: `ParMap`, `Reduce` and `Passes`
-  are parameters, and the kernels a system hands them are the only code
-  that may run across threads. Stage 1 fixed their results on the
-  system's own thread; since stage 3 they reproduce them across the
-  `threads` mod's pool, at any count (`Passes` with stage 3, `ParMap` and
-  `Reduce` since get-znt.45 and get-znt.31). A system has no other way
-  to fan out.
+Flows let one large computation that works on a copy of the world be
+split into several systems, while the engine still knows which system
+hands what to which.
+
+This doc assumes you know what an ECS is: entities, components, systems
+and queries. It doesn't assume you know this engine.
+
+## The problem
+
+Most systems work on the world directly. A query walks the entities that
+have some components, and the system reads or writes them in place. Some
+work doesn't fit this shape. For example, a physics solver:
+
+1. **gathers** the moving bodies and their contacts out of the world into
+   plain arrays, numbered so that a contact finds its two bodies by index;
+2. **iterates** over those arrays many times (about 20 passes a step),
+   adjusting velocities until the contacts stop pushing into each other;
+3. **scatters** the results, new velocities and positions, back into the
+   bodies' components.
+
+Why copy at all? Because there are two layouts for the same bodies, each
+optimized for a different job:
+
+- **The world's layout is optimized for finding bodies near each
+  other.** Bodies are stored by where they are
+  ([spatial-storage.md](spatial-storage.md)), which is what makes finding
+  contacts fast, and the ray casts and overlap tests a game makes.
+- **The solver's layout is optimized for walking contacts.** Each pass
+  goes contact by contact, reading and writing the two bodies each one
+  joins. With the moving bodies packed in an array, a contact reaches its
+  bodies by index instead of looking up where each entity lives in the
+  world.
+
+So the gather and the scatter convert between the two layouts, and the
+solver's layout only needs to exist for the length of the step. Whatever
+holds that layout has three more things to deal with:
+
+- **Others want to read the data in between.** A debug view wants to
+  draw the contacts the solver is working on. A second computation may
+  want the same copy of the bodies rather than gathering its own.
+- **Pipelines change.** A game may need a step between two stages, to
+  adjust what the solver is handed. A mod may want to feed the same
+  passes from a different gather.
+- **The data is only valid for part of the frame.** It exists between
+  the gather and the write-back. A system that reads it before the
+  gather finds nothing, or last frame's, and nothing about the data
+  itself says which.
+
+## The idea
+
+Split the stages into systems, and give the value they hand along a kind
+of its own, which the engine understands: a **flow**. A flow:
+
+- **lives one frame.** It is made fresh each frame, and nothing it holds
+  survives to the next. State that has to last belongs in components.
+- **has exactly one system that makes it.**
+- **is declared at every use.** Each system says how it uses the flow,
+  as a parameter, the same way it declares a query. So the engine knows,
+  before anything runs, who makes the flow, who reads it, who changes it
+  and who finishes with it, and can check that they run in that order.
+
+Here is a small example: a mod that pushes overlapping circles apart. It
+is the solver's shape in miniature, a copy, many passes over the copy,
+and a write-back. (In this engine, game code lives in **mods**, libraries
+the engine loads and can reload while the game runs. Here that only
+matters because a flow can be shared between them.)
+
+First the flow, declared like a component:
+
+```rust
+engine_api::flow! {
+    /// Every circle, copied out of the world into plain arrays.
+    pub struct Circles: "crowd::flow::Circles" {
+        pub entities: Vec<Entity>,
+        pub centers: Vec<Vec2>,
+        pub radii: Vec<f32>,
+    }
+}
+```
+
+Then three systems that use it. Every system's first three parameters
+are the mod, its scratch space and a context; ignore them here. The rest
+are what the system declares.
+
+```rust
+impl Crowd {
+    /// Copy the circles out of the world.
+    fn gather(&mut self, _: &mut (), _: &mut Cx, mut q: Query<(&Position, &Radius)>, mut out: Make<Circles>) {
+        q.for_each(|row, (p, r)| {
+            out.entities.push(row.entity());
+            out.centers.push(p.center);
+            out.radii.push(r.radius);
+        });
+    }
+
+    /// Push overlapping circles apart, ten passes over the copy.
+    fn separate(&mut self, _: &mut (), _: &mut Cx, mut circles: Pass<Circles>) {
+        for _ in 0..10 {
+            // Compare pairs by index and move their centers apart.
+        }
+    }
+
+    /// Write the new centers back to the world. The flow ends here.
+    fn write_back(&mut self, _: &mut (), _: &mut Cx, mut q: Query<&mut Position>, circles: Take<Circles>) {
+        for (&e, &c) in circles.entities.iter().zip(&circles.centers) {
+            q.with(e, |_, mut p| p.center = c);
+        }
+    }
+}
+
+impl Mod for Crowd {
+    type Transient = ();
+
+    fn systems(s: &mut Systems<Self>) {
+        s.add("gather", Self::gather);
+        s.add("separate", Self::separate).after("crowd::gather");
+        s.add("write_back", Self::write_back).after("crowd::separate");
+    }
+}
+```
+
+A different mod can now look at the circles after they're separated,
+without knowing anything about how `crowd` works inside:
+
+```rust
+fn draw_overlaps(&mut self, _: &mut (), _: &mut Cx, circles: See<Circles>) {
+    // Draw any pair still overlapping.
+}
+
+s.add("draw_overlaps", Self::draw_overlaps).after("crowd::separate").before("crowd::write_back");
+```
+
+One frame, as the engine sees it:
+
+```text
+world ─▶ gather ──Circles──▶ separate ──Circles──▶ write_back ─▶ world
+         (Make)              (Pass)        │        (Take)
+                                           └──▶ draw_overlaps
+                                                (See)
+```
+
+Each stage is a system the engine schedules, and each hand-off is a
+declaration it can check. If `draw_overlaps` were ordered before
+`gather`, the engine would refuse to load it, with an error saying which
+`.after` to add ([The plan check](#the-plan-check)).
+
+A stage like `separate` can also spread its passes across threads, by
+declaring the parallel work it does ([Parallel shapes](#parallel-shapes)).
+
+## Four ways to use a flow
+
+A system takes a flow `T` as one of four parameters. Together they
+describe the flow's life within a frame: made, then seen or changed,
+then taken.
+
+| parameter | the system gets | how many systems a frame |
+|---|---|---|
+| `Make<T>` | an empty `T` to fill. When the system returns, that is the frame's value | one |
+| `See<T>` | `&T`, to read | any number, running at the same time |
+| `Pass<T>` | `&mut T`, to change in place and hand on | any number, one at a time |
+| `Take<T>` | the value itself. When the system is done with it, the flow is over for the frame | at most one |
+
+In the example, `gather` makes, `separate` passes, `draw_overlaps` sees
+and `write_back` takes.
+
+A few things follow from that, each covered in more detail below:
+
+- **The order is the order in the table.** Every use comes after the
+  `Make`, and nothing comes after the `Take`. The engine checks this when
+  a mod loads, not when the frame runs.
+- **Nothing has to take a flow.** If no system takes it, the engine
+  clears it at the end of the frame. So a flow can be made for whoever
+  wants it, and an optional reader like `draw_overlaps` costs the maker
+  nothing.
+- **The memory is kept.** "Empty" in `Make` means last frame's value with
+  its vectors cleared but their memory kept, so a flow that is the same
+  size every frame doesn't allocate every frame
+  ([The store](#the-store)).
+- **A flow that changes is passed, not remade.** A stage that changes the
+  circles takes `Pass<Circles>`. A second system that makes the same
+  flow is refused, because two makers of one value is ambiguous.
 
 ## What a flow is, and isn't
 
@@ -822,6 +959,29 @@ the refresh under `Inertia::Substep` and the impulse sums, which 2D's
   weren't made would contain it.
 - **Open question:** why the settled pile's `prepare` was 5 to 7% slower
   on recycled allocations than on fresh ones in the spike (get-znt.27).
+
+## Alternatives considered
+
+- **One system for the whole computation.** The gather, the passes and
+  the write-back as function calls inside one system, which is how
+  physics was first written. It works, but the solver's layout is then
+  private to that system: nothing else can read it, and adding or
+  replacing a stage means editing the solver.
+- **Solving in place, on the world's own storage.** We tried laying out
+  world storage as well as we could for the solver. Solving in place on
+  it was still 3 to 6% slower on one thread and 17 to 40% slower on
+  eight than solving on a copy
+  ([contiguous-columns.md](contiguous-columns.md)). The copy stays, and
+  flows make its stages visible.
+- **A resource holding the arrays.** The usual answer in other ECSs is
+  to put the arrays in a resource (a world-wide singleton) and split the
+  stages into systems that read and write it. The scheduler then knows
+  those systems touch the resource, but not what it means: that it is
+  only valid between the gather and the write-back of this frame. A
+  system ordered before the gather reads last frame's arrays, and
+  nothing notices. Unity's documentation says this of its own job
+  system: it "doesn't track the dependencies that a job might have on
+  data passed through a NativeArray".
 
 [^stand-in]: *(History, 2026-10-02.)* The spike built flows on the ECS's
     public API without changing it: each flow declared a marker event, its

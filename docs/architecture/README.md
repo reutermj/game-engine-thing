@@ -88,10 +88,13 @@ monolithic design doc.
 
 ## Conventions
 
+- **How to write one:** [writing.md](writing.md), the order a doc goes
+  in, who it's for, and what stays out of the explanation.
 - These are living design docs, not a decision log. If a design changes,
   update the doc in place rather than appending "UPDATE:" notes. An
-  abandoned approach worth remembering goes in a dated footnote, or in
-  [docs/lore/](../lore/) if the reason it failed is the valuable part.
+  abandoned approach worth remembering goes in the doc's "Alternatives
+  considered" (writing.md), or in [docs/lore/](../lore/) if the reason
+  it failed is the valuable part.
 - Mark undecided design questions as `**Open question:**` so they're easy
   to grep for. Much of the design is deliberately deferred until hot reload
   is proven; the open questions are the list of what was deferred.
